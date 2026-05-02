@@ -361,12 +361,17 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
     ];
 
     for browser_tool in browser_tool_names() {
+        let projection_policy = if *browser_tool == "palyra.browser.session.create" {
+            ToolResultProjectionPolicy::InlineUnlessLarge
+        } else {
+            ToolResultProjectionPolicy::RedactedPreviewAndArtifact
+        };
         entries.push(entry(
             browser_tool,
             browser_tool_description(browser_tool),
             browser_tool_schema(browser_tool),
             ToolParallelismPolicy::Exclusive,
-            ToolResultProjectionPolicy::RedactedPreviewAndArtifact,
+            projection_policy,
         ));
     }
 

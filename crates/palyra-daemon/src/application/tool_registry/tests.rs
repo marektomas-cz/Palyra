@@ -1,8 +1,9 @@
 use super::types::ToolCallRejectionKind;
 use super::{
-    build_model_visible_tool_catalog_snapshot, provider_tools_from_catalog_snapshot,
-    snapshot_to_provider_request_value, validate_tool_call_against_catalog_snapshot,
-    ToolCatalogBuildRequest, ToolExposureSurface, ToolSchemaDialect,
+    build_model_visible_tool_catalog_snapshot, projection_policy_for_tool,
+    provider_tools_from_catalog_snapshot, snapshot_to_provider_request_value,
+    validate_tool_call_against_catalog_snapshot, ToolCatalogBuildRequest, ToolExposureSurface,
+    ToolResultProjectionPolicy, ToolSchemaDialect,
 };
 use crate::{
     sandbox_runner::{EgressEnforcementMode, SandboxProcessRunnerPolicy, SandboxProcessRunnerTier},
@@ -135,6 +136,18 @@ fn anthropic_catalog_exposes_http_fetch_with_boolean_additional_properties() {
     assert_eq!(
         tools[0]["input_schema"]["properties"]["headers"]["additionalProperties"],
         serde_json::Value::Bool(true)
+    );
+}
+
+#[test]
+fn browser_session_create_returns_model_visible_handle() {
+    assert_eq!(
+        projection_policy_for_tool("palyra.browser.session.create"),
+        ToolResultProjectionPolicy::InlineUnlessLarge
+    );
+    assert_eq!(
+        projection_policy_for_tool("palyra.browser.observe"),
+        ToolResultProjectionPolicy::RedactedPreviewAndArtifact
     );
 }
 
