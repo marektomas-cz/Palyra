@@ -594,9 +594,7 @@ async fn run_browser_start(
     json: bool,
 ) -> Result<()> {
     let resolved = resolve_browser_config(endpoint, health_url, token)?;
-    ensure_browser_service_enabled(&resolved.policy, "start", resolved.config_path.as_deref())?;
-    ensure_browser_start_auth_token_configured(&resolved)?;
-    ensure_browser_start_token_alignment(&resolved)?;
+    ensure_browser_start_preflight(&resolved)?;
     let browserd_state_encryption_key = resolve_browserd_state_encryption_key_for_start(&resolved)?;
     let mut lifecycle_warnings =
         browser_profile_prerequisite_warnings(&resolved.policy, resolved.config_path.as_deref());
@@ -2584,28 +2582,67 @@ fn resolve_browser_config(
     })
 }
 
-fn ensure_browser_start_token_alignment(resolved: &BrowserResolvedConfig) -> Result<()> {
-    if resolved.token_conflicts_with_gateway_config {
-        anyhow::bail!(
-            "browser start --token differs from the browser service token already configured for the gateway; use the configured token, update `tool_call.browser_service.auth_token`, or restart the gateway with matching PALYRA_BROWSER_SERVICE_AUTH_TOKEN before starting browserd"
-        );
-    }
-    Ok(())
-}
+fn ensure_browser_start_preflight(resolved: &BrowserResolvedConfig) -> Result<()> {
+    let config_path = resolved.config_path.as_deref();
+    let mut blockers = Vec::new();
+    let mut advisories = Vec::new();
 
-fn ensure_browser_start_auth_token_configured(resolved: &BrowserResolvedConfig) -> Result<()> {
-    if resolved.connection.auth_token.is_some() && !resolved.token_from_cli_only {
+    if !resolved.policy.configured_enabled {
+        let enable_command = browser_service_enable_command(config_path);
+        blockers.push(format!(
+            "`tool_call.browser_service.enabled` is false. Enable the gateway browser service with `{enable_command}`."
+        ));
+    }
+
+    let configure_token_command = browser_service_auth_token_command(config_path);
+    if resolved.token_conflicts_with_gateway_config {
+        blockers.push(
+            "the supplied `--token` differs from the browser service token already configured for the gateway. Use the configured token, update `tool_call.browser_service.auth_token`, or restart the gateway with matching `PALYRA_BROWSER_SERVICE_AUTH_TOKEN`."
+                .to_owned(),
+        );
+    } else if resolved.token_from_cli_only {
+        blockers.push(format!(
+            "`--token` only configures browserd for this launch; gateway-mediated browser commands require the same token in `tool_call.browser_service.auth_token`. Configure it with `{configure_token_command}`."
+        ));
+    } else if resolved.connection.auth_token.is_none() {
+        blockers.push(format!(
+            "`tool_call.browser_service.auth_token` is missing. Configure it with `{configure_token_command}`."
+        ));
+    }
+
+    if !resolved.policy.browser_tools_allowlisted {
+        advisories.push(format!(
+            "`tool_call.allowed_tools` is missing gateway browser tools ({}). Add the missing `palyra.browser.*` tools before expecting agents to use browser actions.",
+            browser_missing_tools_summary(resolved.policy.missing_browser_tools.as_slice())
+        ));
+    }
+
+    if !browser_profile_state_key_configured(&resolved.policy) {
+        advisories.push(browser_profile_state_key_guidance(config_path));
+    }
+
+    if blockers.is_empty() {
         return Ok(());
     }
-    let configure_command = browser_service_auth_token_command(resolved.config_path.as_deref());
-    if resolved.token_from_cli_only {
-        anyhow::bail!(
-            "browser start --token only configures browserd for this launch, but gateway-mediated browser commands require the same token in `tool_call.browser_service.auth_token`. Configure it with `{configure_command}`, restart the gateway with `palyra gateway run` or restart the running gateway service, then rerun `palyra browser start` without --token or with the matching configured token"
-        );
+
+    let mut message =
+        "browser start cannot launch until gateway browser prerequisites are configured:"
+            .to_owned();
+    for (index, blocker) in blockers.iter().enumerate() {
+        message.push_str(format!("\n{}. {blocker}", index + 1).as_str());
     }
-    anyhow::bail!(
-        "browser start requires `tool_call.browser_service.auth_token` before launching browserd. Configure it with `{configure_command}`, restart the gateway with `palyra gateway run` or restart the running gateway service, then rerun `palyra browser start`"
+    if !advisories.is_empty() {
+        message.push_str("\n\nAdditional readiness checks:");
+        for advisory in advisories {
+            message.push_str("\n- ");
+            message.push_str(advisory.as_str());
+        }
+    }
+    message.push_str(
+        "\n\nAfter applying config changes, restart the gateway with `palyra gateway run` or restart the running gateway service, then rerun `palyra browser start`.",
     );
+
+    Err(anyhow::anyhow!(message))
 }
 
 fn browser_start_auth_token_warnings(resolved: &BrowserResolvedConfig) -> Vec<String> {
@@ -3760,11 +3797,10 @@ mod tests {
         browser_snapshot_emits_json_to_stdout, browser_start_auth_token_warnings,
         browser_status_warnings, ensure_browser_command_success,
         ensure_browser_gateway_auth_token_alignment, ensure_browser_service_enabled,
-        ensure_browser_start_auth_token_configured, ensure_browser_start_token_alignment,
-        format_browser_session_summary_text, normalize_session_scoped_output,
-        redact_browser_output_value, session_summary_value, BrowserControlPlaneSnapshot,
-        BrowserOutputMode, BrowserPolicySnapshot, BrowserResolvedConfig, BrowserServiceConnection,
-        BrowserServiceMetadata,
+        ensure_browser_start_preflight, format_browser_session_summary_text,
+        normalize_session_scoped_output, redact_browser_output_value, session_summary_value,
+        BrowserControlPlaneSnapshot, BrowserOutputMode, BrowserPolicySnapshot,
+        BrowserResolvedConfig, BrowserServiceConnection, BrowserServiceMetadata,
     };
     use crate::{args::BrowserCommand, browser_v1, common_v1};
     use serde_json::{json, Value};
@@ -3954,7 +3990,7 @@ mod tests {
         resolved.connection.auth_token = None;
         resolved.policy.auth_token_configured = false;
 
-        let error = ensure_browser_start_auth_token_configured(&resolved)
+        let error = ensure_browser_start_preflight(&resolved)
             .expect_err("browser start should fail closed without a gateway token");
 
         assert!(
@@ -3976,11 +4012,12 @@ mod tests {
         resolved.policy.auth_token_configured = true;
         resolved.connection.auth_token = Some("token-from-cli".to_owned());
 
-        let error = ensure_browser_start_auth_token_configured(&resolved)
+        let error = ensure_browser_start_preflight(&resolved)
             .expect_err("CLI-only token should not satisfy gateway auth-token setup");
 
         assert!(
-            error.to_string().contains("--token only configures browserd"),
+            error.to_string().contains("--token")
+                && error.to_string().contains("tool_call.browser_service.auth_token"),
             "CLI-only token error should explain why config is still required: {error}"
         );
     }
@@ -3989,8 +4026,53 @@ mod tests {
     fn browser_start_accepts_configured_gateway_auth_token() {
         let resolved = resolved_browser_config_for_test();
 
-        ensure_browser_start_auth_token_configured(&resolved)
+        ensure_browser_start_preflight(&resolved)
             .expect("configured gateway browser token should satisfy browser start preflight");
+    }
+
+    #[test]
+    fn browser_start_preflight_reports_all_missing_prerequisites() {
+        let mut resolved = resolved_browser_config_for_test();
+        resolved.connection.auth_token = None;
+        resolved.policy.configured_enabled = false;
+        resolved.policy.auth_token_configured = false;
+        resolved.policy.browser_tools_allowlisted = false;
+        resolved.policy.missing_browser_tools =
+            super::BROWSER_GATEWAY_TOOL_NAMES.iter().map(|tool| (*tool).to_owned()).collect();
+
+        let error = ensure_browser_start_preflight(&resolved)
+            .expect_err("browser start should report every missing setup requirement at once");
+        let message = error.to_string();
+
+        assert!(
+            message.contains("tool_call.browser_service.enabled"),
+            "preflight should mention the disabled browser service gate: {message}"
+        );
+        assert!(
+            message.contains("tool_call.browser_service.auth_token"),
+            "preflight should mention the missing gateway auth token: {message}"
+        );
+        assert!(
+            message.contains("tool_call.allowed_tools"),
+            "preflight should include the browser tool allowlist readiness check: {message}"
+        );
+        assert!(
+            message.contains("PALYRA_BROWSERD_STATE_ENCRYPTION_KEY")
+                && message.contains("palyra secrets configure browser-state-key"),
+            "preflight should surface profile encryption setup before a second run: {message}"
+        );
+        assert!(
+            message.contains("palyra gateway run") && message.contains("palyra browser start"),
+            "preflight should include the gateway restart and retry workflow: {message}"
+        );
+    }
+
+    #[test]
+    fn browser_start_preflight_allows_non_profile_start_when_core_setup_is_ready() {
+        let resolved = resolved_browser_config_for_test();
+
+        ensure_browser_start_preflight(&resolved)
+            .expect("profile state-key readiness should warn later, not block browserd startup");
     }
 
     #[test]
@@ -4272,7 +4354,7 @@ mod tests {
         let mut resolved = resolved_browser_config_for_test();
         resolved.token_conflicts_with_gateway_config = true;
 
-        let error = ensure_browser_start_token_alignment(&resolved)
+        let error = ensure_browser_start_preflight(&resolved)
             .expect_err("conflicting browser start token should be rejected");
 
         assert!(
