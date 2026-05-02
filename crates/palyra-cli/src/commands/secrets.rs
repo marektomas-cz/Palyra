@@ -266,7 +266,10 @@ pub(crate) fn build_secrets_audit_payload(
 ) -> Result<SecretAuditPayload> {
     let vault = open_cli_vault().context("failed to initialize vault runtime")?;
     let (path, document) = load_config_document_for_audit(path)?;
-    let inline_api_key = get_string_value_at_path(&document, "model_provider.openai_api_key")?;
+    let openai_inline_api_key =
+        get_string_value_at_path(&document, "model_provider.openai_api_key")?;
+    let anthropic_inline_api_key =
+        get_string_value_at_path(&document, "model_provider.anthropic_api_key")?;
     let configured_auth_profile =
         get_string_value_at_path(&document, "model_provider.auth_profile_id")?.or_else(|| {
             get_string_value_at_path(&document, "model_provider.auth_profile_ref").ok().flatten()
@@ -304,7 +307,7 @@ pub(crate) fn build_secrets_audit_payload(
         });
     }
 
-    if inline_api_key.is_some() {
+    if openai_inline_api_key.is_some() {
         findings.push(SecretAuditFinding {
             severity: "warning".to_owned(),
             code: "inline_secret_configured".to_owned(),
@@ -312,6 +315,16 @@ pub(crate) fn build_secrets_audit_payload(
             reference: None,
             message: "model_provider.openai_api_key is set inline instead of using a vault reference or auth profile.".to_owned(),
             remediation: "Prefer `palyra auth openai api-key` or `palyra secrets configure openai-api-key` so the OpenAI credential stays vault-backed.".to_owned(),
+        });
+    }
+    if anthropic_inline_api_key.is_some() {
+        findings.push(SecretAuditFinding {
+            severity: "warning".to_owned(),
+            code: "inline_secret_configured".to_owned(),
+            component: "model_provider".to_owned(),
+            reference: None,
+            message: "model_provider.anthropic_api_key is set inline instead of using a vault reference or auth profile.".to_owned(),
+            remediation: "Store the credential with `palyra secrets set` and reference it through model_provider.anthropic_api_key_vault_ref, or use a provider auth profile.".to_owned(),
         });
     }
 

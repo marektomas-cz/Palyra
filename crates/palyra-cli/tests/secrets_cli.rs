@@ -330,6 +330,49 @@ fn secrets_configure_openai_api_key_updates_config_and_audit() -> Result<()> {
 }
 
 #[test]
+fn secrets_audit_flags_anthropic_inline_model_key() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+    let config_path = workdir.path().join("palyra.toml");
+    fs::write(
+        &config_path,
+        r#"
+version = 1
+
+[model_provider]
+kind = "anthropic"
+auth_provider_kind = "minimax"
+anthropic_model = "MiniMax-M2.7"
+anthropic_api_key = "sk-test-anthropic-inline"
+"#,
+    )
+    .context("failed to write test config")?;
+    let config_arg = config_path.to_string_lossy().into_owned();
+
+    let audit_output = run_cli(
+        &workdir,
+        &["secrets", "audit", "--path", config_arg.as_str(), "--offline", "--json"],
+    )?;
+    assert!(
+        audit_output.status.success(),
+        "secrets audit should succeed: {}",
+        String::from_utf8_lossy(&audit_output.stderr)
+    );
+    let audit_stdout = String::from_utf8(audit_output.stdout).context("stdout was not UTF-8")?;
+    let payload: serde_json::Value =
+        serde_json::from_str(&audit_stdout).context("secrets audit stdout was not JSON")?;
+    assert_eq!(
+        payload.pointer("/summary/warning_findings").and_then(serde_json::Value::as_u64),
+        Some(1),
+        "audit should summarize the inline Anthropic-compatible key warning: {payload}"
+    );
+    assert!(
+        !audit_stdout.contains("sk-test-anthropic-inline"),
+        "audit output must not echo inline secret material: {audit_stdout}"
+    );
+    Ok(())
+}
+
+#[test]
 fn secrets_configure_browser_state_key_updates_config() -> Result<()> {
     let workdir = TempDir::new().context("failed to create temporary workdir")?;
     let config_path = bootstrap_local_config(&workdir)?;
