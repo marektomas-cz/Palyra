@@ -132,3 +132,33 @@ workspace_root = "workspace"
     );
     Ok(())
 }
+
+#[test]
+fn patch_apply_accepts_windows_pipeline_control_line_whitespace() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+    let workspace_arg = workdir.path().to_string_lossy().into_owned();
+    let output = run_cli_with_stdin(
+        &workdir,
+        &["patch", "apply", "--workspace-root", workspace_arg.as_str(), "--stdin", "--json"],
+        b"*** Begin Patch \r\n*** Add File: cli-patch-e2e.txt \r\n+palyra cli patch ok\r\n*** End Patch \r\n",
+    )?;
+
+    assert!(
+        output.status.success(),
+        "Windows-style piped patch should succeed; stdout={}; stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: Value =
+        serde_json::from_slice(&output.stdout).context("patch success stdout was not JSON")?;
+    assert_eq!(
+        payload.pointer("/files_touched/0/path").and_then(Value::as_str),
+        Some("cli-patch-e2e.txt")
+    );
+    assert_eq!(
+        std::fs::read_to_string(workdir.path().join("cli-patch-e2e.txt"))
+            .context("created file should read")?,
+        "palyra cli patch ok\n"
+    );
+    Ok(())
+}

@@ -582,7 +582,7 @@ fn render_palyra_update_file(path: &str, hunks: &[Vec<String>]) -> String {
 fn parse_patch_document(patch: &str) -> Result<Vec<PatchOperation>, WorkspacePatchError> {
     let normalized = patch.replace("\r\n", "\n").replace('\r', "\n");
     let lines = normalized.split('\n').collect::<Vec<_>>();
-    if lines.is_empty() || lines[0] != "*** Begin Patch" {
+    if lines.is_empty() || patch_control_line(lines[0]) != "*** Begin Patch" {
         return Err(parse_error(1, 1, "expected '*** Begin Patch'"));
     }
 
@@ -592,17 +592,18 @@ fn parse_patch_document(patch: &str) -> Result<Vec<PatchOperation>, WorkspacePat
 
     while index < lines.len() {
         let line = lines[index];
-        if line == "*** End Patch" {
+        let control_line = patch_control_line(line);
+        if control_line == "*** End Patch" {
             ended = true;
             index = index.saturating_add(1);
             break;
         }
-        if line.is_empty() {
+        if control_line.is_empty() {
             index = index.saturating_add(1);
             continue;
         }
 
-        if let Some(path) = line.strip_prefix("*** Add File: ") {
+        if let Some(path) = control_line.strip_prefix("*** Add File: ") {
             index = index.saturating_add(1);
             let mut add_lines = Vec::new();
             while index < lines.len() {
@@ -624,17 +625,18 @@ fn parse_patch_document(patch: &str) -> Result<Vec<PatchOperation>, WorkspacePat
             continue;
         }
 
-        if let Some(path) = line.strip_prefix("*** Delete File: ") {
+        if let Some(path) = control_line.strip_prefix("*** Delete File: ") {
             operations.push(PatchOperation::Delete { path: path.to_owned() });
             index = index.saturating_add(1);
             continue;
         }
 
-        if let Some(path) = line.strip_prefix("*** Update File: ") {
+        if let Some(path) = control_line.strip_prefix("*** Update File: ") {
             index = index.saturating_add(1);
             let mut move_to = None;
             if index < lines.len() {
-                if let Some(target) = lines[index].strip_prefix("*** Move to: ") {
+                if let Some(target) = patch_control_line(lines[index]).strip_prefix("*** Move to: ")
+                {
                     move_to = Some(target.to_owned());
                     index = index.saturating_add(1);
                 }
@@ -643,17 +645,20 @@ fn parse_patch_document(patch: &str) -> Result<Vec<PatchOperation>, WorkspacePat
             let mut hunks = Vec::new();
             while index < lines.len() {
                 let hunk_line = lines[index];
+                let hunk_control_line = patch_control_line(hunk_line);
                 if is_patch_header_or_end(hunk_line) {
                     break;
                 }
-                if !hunk_line.starts_with("@@") {
+                if !hunk_control_line.starts_with("@@") {
                     return Err(parse_error(index + 1, 1, "update-file hunk must start with '@@'"));
                 }
                 index = index.saturating_add(1);
                 let mut lines_in_hunk = Vec::new();
                 while index < lines.len() {
                     let candidate = lines[index];
-                    if candidate.starts_with("@@") || is_patch_header_or_end(candidate) {
+                    let candidate_control_line = patch_control_line(candidate);
+                    if candidate_control_line.starts_with("@@") || is_patch_header_or_end(candidate)
+                    {
                         break;
                     }
                     let mut chars = candidate.chars();
@@ -710,7 +715,7 @@ fn parse_patch_document(patch: &str) -> Result<Vec<PatchOperation>, WorkspacePat
     }
 
     while index < lines.len() {
-        if !lines[index].is_empty() {
+        if !patch_control_line(lines[index]).is_empty() {
             return Err(parse_error(index + 1, 1, "unexpected content after '*** End Patch'"));
         }
         index = index.saturating_add(1);
@@ -724,7 +729,12 @@ fn parse_patch_document(patch: &str) -> Result<Vec<PatchOperation>, WorkspacePat
 }
 
 fn is_patch_header_or_end(line: &str) -> bool {
-    line == "*** End Patch" || line.starts_with("*** ")
+    let control_line = patch_control_line(line);
+    control_line == "*** End Patch" || control_line.starts_with("*** ")
+}
+
+fn patch_control_line(line: &str) -> &str {
+    line.trim_end_matches([' ', '\t'])
 }
 
 fn parse_error(line: usize, column: usize, message: &str) -> WorkspacePatchError {
@@ -1661,6 +1671,33 @@ mod tests {
             fs::read_to_string(workspace.join("notes.txt")).expect("seed file should read"),
             "palyra patch e2e ok\n",
             "failed ambiguous patch must leave file unchanged"
+        );
+    }
+
+    #[test]
+    fn apply_workspace_patch_accepts_windows_pipeline_control_line_whitespace() {
+        let temp = tempdir().expect("tempdir should be created");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace should exist");
+
+        let patch =
+            "*** Begin Patch \r\n*** Add File: cli-patch-e2e.txt \r\n+palyra cli patch ok\r\n*** End Patch \r\n";
+        let outcome = apply_workspace_patch(
+            std::slice::from_ref(&workspace),
+            &default_request(patch, false),
+            &default_limits(),
+        )
+        .expect("Windows pipeline patch should apply");
+
+        assert_eq!(
+            attestation_by_path(&outcome, "cli-patch-e2e.txt").operation,
+            "create",
+            "patch should create the expected file"
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.join("cli-patch-e2e.txt"))
+                .expect("created file should read"),
+            "palyra cli patch ok\n"
         );
     }
 
