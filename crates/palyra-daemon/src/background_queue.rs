@@ -11,7 +11,7 @@ use palyra_common::{
     },
 };
 use serde_json::{json, Value};
-use tokio::time::MissedTickBehavior;
+use tokio::time::{Instant, MissedTickBehavior};
 use tokio_stream::StreamExt;
 use tonic::{Code, Request, Status};
 use tracing::warn;
@@ -56,6 +56,8 @@ const DEFAULT_BACKGROUND_CHANNEL: &str = "console:background";
 const CHILD_PROGRESS_MIN_INTERVAL_MS: i64 = 2_000;
 const CHILD_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 const CHILD_PROGRESS_HISTORY_LIMIT: usize = 64;
+const CHILD_RUN_ATTACH_TIMEOUT: Duration = Duration::from_secs(5);
+const CHILD_RUN_ATTACH_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 pub(crate) fn spawn_background_queue_loop(
     runtime: Arc<GatewayRuntimeState>,
@@ -377,16 +379,10 @@ async fn dispatch_background_task(
 
     let run_id = Ulid::new().to_string();
     runtime
-        .update_orchestrator_background_task(OrchestratorBackgroundTaskUpdateRequest {
-            task_id: task.task_id.clone(),
-            state: Some(AuxiliaryTaskState::Running.as_str().to_owned()),
-            target_run_id: Some(Some(run_id.clone())),
-            increment_attempt_count: true,
-            last_error: Some(None),
-            result_json: Some(None),
-            started_at_unix_ms: Some(Some(started_at_unix_ms)),
-            completed_at_unix_ms: Some(None),
-        })
+        .update_orchestrator_background_task(build_background_task_running_update(
+            task.task_id.as_str(),
+            started_at_unix_ms,
+        ))
         .await?;
     let runtime = Arc::clone(runtime);
     let auth = auth.clone();
@@ -994,8 +990,7 @@ async fn run_background_task_stream(
         .map_err(|error| Status::internal(format!("background RunStream failed: {error}")))?
         .into_inner();
 
-    append_parent_spawned_event(runtime, task, run_id).await?;
-    create_delegated_child_binding(runtime, task, run_id).await?;
+    attach_background_task_child_run(runtime, task, run_id).await?;
 
     let delivery_policy = resolve_delivery_policy(
         &runtime.config.delivery_arbitration,
@@ -1134,6 +1129,67 @@ async fn run_background_task_stream(
     }
 
     Err(Status::internal(format!("background run {run_id} finished without a persisted snapshot")))
+}
+
+fn build_background_task_running_update(
+    task_id: &str,
+    started_at_unix_ms: i64,
+) -> OrchestratorBackgroundTaskUpdateRequest {
+    OrchestratorBackgroundTaskUpdateRequest {
+        task_id: task_id.to_owned(),
+        state: Some(AuxiliaryTaskState::Running.as_str().to_owned()),
+        target_run_id: Some(None),
+        increment_attempt_count: true,
+        last_error: Some(None),
+        result_json: Some(None),
+        started_at_unix_ms: Some(Some(started_at_unix_ms)),
+        completed_at_unix_ms: Some(None),
+    }
+}
+
+fn build_background_task_child_run_attach_update(
+    task_id: &str,
+    run_id: &str,
+) -> OrchestratorBackgroundTaskUpdateRequest {
+    OrchestratorBackgroundTaskUpdateRequest {
+        task_id: task_id.to_owned(),
+        target_run_id: Some(Some(run_id.to_owned())),
+        ..Default::default()
+    }
+}
+
+async fn attach_background_task_child_run(
+    runtime: &Arc<GatewayRuntimeState>,
+    task: &OrchestratorBackgroundTaskRecord,
+    run_id: &str,
+) -> Result<(), Status> {
+    wait_for_background_child_run(runtime, run_id).await?;
+    runtime
+        .update_orchestrator_background_task(build_background_task_child_run_attach_update(
+            task.task_id.as_str(),
+            run_id,
+        ))
+        .await?;
+    append_parent_spawned_event(runtime, task, run_id).await?;
+    create_delegated_child_binding(runtime, task, run_id).await
+}
+
+async fn wait_for_background_child_run(
+    runtime: &Arc<GatewayRuntimeState>,
+    run_id: &str,
+) -> Result<(), Status> {
+    let deadline = Instant::now() + CHILD_RUN_ATTACH_TIMEOUT;
+    loop {
+        if runtime.orchestrator_run_status_snapshot(run_id.to_owned()).await?.is_some() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(Status::internal(format!(
+                "background child run {run_id} was not persisted before target attachment"
+            )));
+        }
+        tokio::time::sleep(CHILD_RUN_ATTACH_POLL_INTERVAL).await;
+    }
 }
 
 async fn create_delegated_child_binding(
@@ -2504,8 +2560,10 @@ fn is_terminal_run_state(state: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_artifact_references, categorize_child_failure, delegated_child_timeout_message,
-        evaluate_delegation_scheduler_limits, DelegationSchedulerDecision,
+        append_artifact_references, build_background_task_child_run_attach_update,
+        build_background_task_running_update, categorize_child_failure,
+        delegated_child_timeout_message, evaluate_delegation_scheduler_limits,
+        DelegationSchedulerDecision,
     };
     use crate::{
         delegation::{
@@ -2772,6 +2830,30 @@ mod tests {
         assert!(delegated_child_timeout_message(&task, 125)
             .expect("task should time out at the limit")
             .contains("limit 25 ms"));
+    }
+
+    #[test]
+    fn running_update_does_not_attach_child_run_before_it_exists() {
+        let update = build_background_task_running_update("task-1", 1234);
+
+        assert_eq!(update.task_id, "task-1");
+        assert_eq!(update.state.as_deref(), Some(AuxiliaryTaskState::Running.as_str()));
+        assert_eq!(update.target_run_id, Some(None));
+        assert!(update.increment_attempt_count);
+        assert_eq!(update.result_json, Some(None));
+        assert_eq!(update.started_at_unix_ms, Some(Some(1234)));
+        assert_eq!(update.completed_at_unix_ms, Some(None));
+    }
+
+    #[test]
+    fn child_run_attach_update_sets_target_after_run_exists() {
+        let update = build_background_task_child_run_attach_update("task-1", "run-1");
+
+        assert_eq!(update.task_id, "task-1");
+        assert_eq!(update.state, None);
+        assert_eq!(update.target_run_id, Some(Some("run-1".to_owned())));
+        assert!(!update.increment_attempt_count);
+        assert_eq!(update.result_json, None);
     }
 
     fn sample_run(state: &str, last_error: Option<&str>) -> OrchestratorRunStatusSnapshot {

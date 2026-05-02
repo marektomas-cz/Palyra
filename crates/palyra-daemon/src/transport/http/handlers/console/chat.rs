@@ -2457,6 +2457,11 @@ pub(crate) async fn console_chat_background_task_cancel_handler(
                     journal::OrchestratorBackgroundTaskUpdateRequest {
                         task_id: task.task_id.clone(),
                         state: Some(AuxiliaryTaskState::CancelRequested.as_str().to_owned()),
+                        result_json: Some(Some(
+                            build_background_task_cancel_requested_result_json(
+                                task.task_id.as_str(),
+                            ),
+                        )),
                         ..Default::default()
                     },
                 )
@@ -2475,6 +2480,9 @@ pub(crate) async fn console_chat_background_task_cancel_handler(
                 state: Some(AuxiliaryTaskState::Cancelled.as_str().to_owned()),
                 completed_at_unix_ms: Some(Some(crate::gateway::current_unix_ms())),
                 last_error: Some(Some("cancelled_by_operator".to_owned())),
+                result_json: Some(Some(build_background_task_cancelled_result_json(
+                    task.task_id.as_str(),
+                ))),
                 ..Default::default()
             })
             .await
@@ -2495,6 +2503,24 @@ pub(crate) async fn console_chat_background_task_cancel_handler(
         "action": "cancel",
         "contract": contract_descriptor(),
     })))
+}
+
+fn build_background_task_cancel_requested_result_json(task_id: &str) -> String {
+    json!({
+        "status": "cancel_requested",
+        "task_id": task_id,
+        "reason": "cancelled_by_operator",
+    })
+    .to_string()
+}
+
+fn build_background_task_cancelled_result_json(task_id: &str) -> String {
+    json!({
+        "status": "cancelled",
+        "task_id": task_id,
+        "reason": "cancelled_by_operator",
+    })
+    .to_string()
 }
 
 pub(crate) async fn console_chat_queue_handler(
@@ -5686,8 +5712,10 @@ fn build_console_run_lineage_payload(
 #[cfg(test)]
 mod tests {
     use super::{
-        console_attachment_workspace_path, derive_canvas_transcript_reference,
-        extract_canvas_id_from_frame_reference, run_matches_console_context,
+        build_background_task_cancel_requested_result_json,
+        build_background_task_cancelled_result_json, console_attachment_workspace_path,
+        derive_canvas_transcript_reference, extract_canvas_id_from_frame_reference,
+        run_matches_console_context,
     };
     use crate::{domain::workspace::normalize_workspace_path, gateway, journal};
 
@@ -5799,6 +5827,36 @@ mod tests {
         assert_eq!(reference.origin_kind.as_deref(), Some("retry"));
         assert_eq!(reference.origin_run_id.as_deref(), Some("01ARZ3NDEKTSV4RRFFQ69G5FA2"));
         assert_eq!(reference.last_referenced_at_unix_ms, Some(20));
+    }
+
+    #[test]
+    fn background_task_cancel_result_payloads_are_consistent_terminal_states() {
+        let cancel_requested: serde_json::Value = serde_json::from_str(
+            build_background_task_cancel_requested_result_json("task-1").as_str(),
+        )
+        .expect("cancel_requested result JSON should parse");
+        assert_eq!(
+            cancel_requested.get("status").and_then(serde_json::Value::as_str),
+            Some("cancel_requested")
+        );
+        assert_eq!(
+            cancel_requested.get("task_id").and_then(serde_json::Value::as_str),
+            Some("task-1")
+        );
+        assert_eq!(
+            cancel_requested.get("reason").and_then(serde_json::Value::as_str),
+            Some("cancelled_by_operator")
+        );
+
+        let cancelled: serde_json::Value =
+            serde_json::from_str(build_background_task_cancelled_result_json("task-1").as_str())
+                .expect("cancelled result JSON should parse");
+        assert_eq!(cancelled.get("status").and_then(serde_json::Value::as_str), Some("cancelled"));
+        assert_eq!(cancelled.get("task_id").and_then(serde_json::Value::as_str), Some("task-1"));
+        assert_eq!(
+            cancelled.get("reason").and_then(serde_json::Value::as_str),
+            Some("cancelled_by_operator")
+        );
     }
 
     fn sample_run_status() -> journal::OrchestratorRunStatusSnapshot {
