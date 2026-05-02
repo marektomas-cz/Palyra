@@ -923,10 +923,7 @@ async fn run_browser_session_command(command: BrowserSessionCommand) -> Result<(
             let value = session_detail_value(&detail);
             let text = format!(
                 "browser.session.show session_id={} tabs={} private_targets={} downloads={} profile_id={}",
-                redacted_browser_identifier_text(
-                    value.pointer("/summary/session_id").and_then(Value::as_str),
-                    "session"
-                ),
+                browser_session_handle_text(value.pointer("/summary/session_id").and_then(Value::as_str)),
                 value.pointer("/summary/tab_count").and_then(Value::as_u64).unwrap_or(0),
                 value.pointer("/summary/allow_private_targets").and_then(Value::as_bool).unwrap_or(false),
                 value.pointer("/summary/downloads_enabled").and_then(Value::as_bool).unwrap_or(false),
@@ -1015,7 +1012,7 @@ async fn run_browser_session_command(command: BrowserSessionCommand) -> Result<(
                 &value,
                 format!(
                     "browser.session.close session_id={} closed={} reason={}",
-                    browser_session_handle_text(Some(envelope.session_id.as_str())),
+                    browser_session_handle_text(Some(session_id.as_str())),
                     envelope.closed,
                     empty_as_dash(envelope.reason.as_str()),
                 ),
@@ -3448,7 +3445,11 @@ fn browser_identifier_json_value(value: Option<&str>) -> Value {
 }
 
 fn browser_session_handle_text(value: Option<&str>) -> String {
-    redacted_browser_identifier_text(value, "session")
+    value
+        .map(str::trim)
+        .filter(|candidate| !candidate.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| "-".to_owned())
 }
 
 fn normalize_session_scoped_output(value: &mut Value, requested_session_id: &str) {
@@ -4096,7 +4097,7 @@ mod tests {
     }
 
     #[test]
-    fn browser_session_list_text_redacts_session_id() {
+    fn browser_session_list_text_preserves_reusable_session_id() {
         let session_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
         let line = format_browser_session_summary_text(&browser_v1::BrowserSessionSummary {
             session_id: Some(common_v1::CanonicalId { ulid: session_id.to_owned() }),
@@ -4107,9 +4108,8 @@ mod tests {
         });
 
         assert!(
-            line.contains("session_id=session-")
-                && !line.contains("session_id=01ARZ3NDEKTSV4RRFFQ69G5FAV"),
-            "session list text should redact the canonical reusable session handle: {line}"
+            line.contains("session_id=01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+            "session list text should preserve the canonical reusable session handle: {line}"
         );
     }
 
@@ -4143,15 +4143,14 @@ mod tests {
     }
 
     #[test]
-    fn session_scoped_text_redacts_requested_session_id() {
+    fn session_scoped_text_preserves_requested_session_id() {
         let requested = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
         let text = format!(
             "browser.screenshot session_id={}",
             browser_session_handle_text(Some(requested))
         );
 
-        assert!(text.contains("session_id=session-"), "{text}");
-        assert!(!text.contains("session_id=01ARZ3NDEKTSV4RRFFQ69G5FAV"), "{text}");
+        assert!(text.contains("session_id=01ARZ3NDEKTSV4RRFFQ69G5FAV"), "{text}");
         assert!(!text.contains("runtime_session_id="), "{text}");
     }
 
