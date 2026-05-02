@@ -529,9 +529,7 @@ fn collect_unified_update_hunks(
                 index = index.saturating_add(1);
                 continue;
             }
-            let Some(prefix) = candidate.chars().next() else {
-                return None;
-            };
+            let prefix = candidate.chars().next()?;
             if matches!(prefix, ' ' | '+' | '-') {
                 hunk_lines.push(candidate.to_owned());
                 index = index.saturating_add(1);
