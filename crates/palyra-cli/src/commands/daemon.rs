@@ -99,7 +99,9 @@ pub(crate) fn run_daemon(command: DaemonCommand) -> Result<()> {
             device_id,
             channel,
         } => run_gateway_call(method, params, url, grpc_url, token, principal, device_id, channel),
-        DaemonCommand::UsageCost { db_path, days } => run_gateway_usage_cost(db_path, days),
+        DaemonCommand::UsageCost { db_path, days, json } => {
+            run_gateway_usage_cost(db_path, days, json)
+        }
         DaemonCommand::Install { service_name, bin_path, log_dir, start } => {
             run_gateway_install(service_name, bin_path, log_dir, start)
         }
@@ -107,8 +109,8 @@ pub(crate) fn run_daemon(command: DaemonCommand) -> Result<()> {
         DaemonCommand::Stop => run_gateway_service_action("stop"),
         DaemonCommand::Restart => run_gateway_service_action("restart"),
         DaemonCommand::Uninstall => run_gateway_service_action("uninstall"),
-        DaemonCommand::Logs { db_path, lines, follow, poll_interval_ms } => {
-            super::logs::run_logs(db_path, lines, follow, poll_interval_ms)
+        DaemonCommand::Logs { db_path, lines, follow, poll_interval_ms, json } => {
+            super::logs::run_logs(db_path, lines, follow, poll_interval_ms, json)
         }
         DaemonCommand::Status { url, json } => run_gateway_status(url, json),
         DaemonCommand::DashboardUrl { path, verify_remote, identity_store_dir, open, json } => {
@@ -1547,16 +1549,16 @@ fn build_gateway_usage_cost_value(db_path: Option<String>, days: u32) -> Result<
     }))
 }
 
-fn run_gateway_usage_cost(db_path: Option<String>, days: u32) -> Result<()> {
+fn run_gateway_usage_cost(db_path: Option<String>, days: u32, json: bool) -> Result<()> {
     let payload = build_gateway_usage_cost_value(db_path, days)?;
     let context = root_context()?;
-    if context.prefers_json() {
+    if json || context.prefers_json() {
         return output::print_json_pretty(
             &payload,
             "failed to encode gateway usage-cost output as JSON",
         );
     }
-    if context.prefers_ndjson() {
+    if output::preferred_ndjson(json, false) {
         return output::print_json_line(
             &payload,
             "failed to encode gateway usage-cost output as NDJSON",

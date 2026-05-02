@@ -2,6 +2,7 @@ use std::fs;
 use std::process::{Command, Output};
 
 use anyhow::{Context, Result};
+use rusqlite::Connection;
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -150,6 +151,28 @@ fn global_output_format_json_is_honored_for_core_cli_surfaces() -> Result<()> {
     assert_eq!(config_get.get("value").and_then(Value::as_i64), Some(7444));
     assert_eq!(config_get.get("source").and_then(Value::as_str), Some(config_path.as_str()));
 
+    let local_config_set = parse_stdout_json(
+        run_cli(
+            &workdir,
+            &[
+                "config",
+                "set",
+                "--path",
+                config_path.as_str(),
+                "--key",
+                "daemon.port",
+                "--value",
+                "7445",
+                "--json",
+            ],
+        )?,
+        "config set --json",
+    )?;
+    assert_eq!(local_config_set.get("key").and_then(Value::as_str), Some("daemon.port"));
+    assert_eq!(local_config_set.get("source").and_then(Value::as_str), Some(config_path.as_str()));
+    assert_eq!(local_config_set.get("backups").and_then(Value::as_u64), Some(5));
+    assert!(local_config_set.get("migrated").and_then(Value::as_bool).is_some());
+
     let docs_search = parse_stdout_json(
         run_cli(&workdir, &["--output-format", "json", "docs", "search", "gateway"])?,
         "docs search --output-format json",
@@ -211,5 +234,64 @@ fn global_output_format_json_is_honored_for_core_cli_surfaces() -> Result<()> {
     );
     assert!(support_bundle_path.is_file(), "support bundle artifact should be written");
 
+    let journal_path = workdir.path().join("usage-cost.sqlite3");
+    create_usage_cost_fixture(journal_path.as_path())?;
+    let journal_path_string = journal_path.display().to_string();
+    let usage_cost = parse_stdout_json(
+        run_cli(
+            &workdir,
+            &[
+                "gateway",
+                "usage-cost",
+                "--db-path",
+                journal_path_string.as_str(),
+                "--days",
+                "7",
+                "--json",
+            ],
+        )?,
+        "gateway usage-cost --json",
+    )?;
+    assert_eq!(usage_cost.get("days").and_then(Value::as_u64), Some(7));
+    assert_eq!(
+        usage_cost.get("db_path").and_then(Value::as_str),
+        Some(journal_path_string.as_str())
+    );
+    assert_eq!(usage_cost.pointer("/totals/runs").and_then(Value::as_i64), Some(0));
+
+    Ok(())
+}
+
+fn create_usage_cost_fixture(path: &std::path::Path) -> Result<()> {
+    let connection =
+        Connection::open(path).with_context(|| format!("failed to create {}", path.display()))?;
+    connection.execute_batch(
+        r#"
+        CREATE TABLE usage_pricing_catalog (
+            model_id TEXT NOT NULL,
+            input_cost_per_million_usd REAL,
+            output_cost_per_million_usd REAL,
+            effective_from_unix_ms INTEGER NOT NULL
+        );
+        CREATE TABLE usage_routing_decisions (
+            run_ulid TEXT NOT NULL,
+            mode TEXT NOT NULL,
+            default_model_id TEXT NOT NULL,
+            actual_model_id TEXT NOT NULL,
+            created_at_unix_ms INTEGER NOT NULL
+        );
+        CREATE TABLE usage_alerts (
+            resolved_at_unix_ms INTEGER,
+            last_observed_at_unix_ms INTEGER NOT NULL
+        );
+        CREATE TABLE orchestrator_runs (
+            run_ulid TEXT NOT NULL,
+            started_at_unix_ms INTEGER NOT NULL,
+            prompt_tokens INTEGER NOT NULL,
+            completion_tokens INTEGER NOT NULL,
+            total_tokens INTEGER NOT NULL
+        );
+        "#,
+    )?;
     Ok(())
 }

@@ -70,6 +70,8 @@ pub enum DaemonCommand {
         db_path: Option<String>,
         #[arg(long, default_value_t = 30)]
         days: u32,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     Install {
         #[arg(long)]
@@ -94,6 +96,8 @@ pub enum DaemonCommand {
         follow: bool,
         #[arg(long, default_value_t = 1000)]
         poll_interval_ms: u64,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     Status {
         #[arg(long)]

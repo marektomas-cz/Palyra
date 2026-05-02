@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use serde_json::Value;
 
 mod support;
 
@@ -31,6 +32,39 @@ fn logs_commands_report_missing_journal_as_notice() -> Result<()> {
         assert!(
             stdout.contains("palyra gateway run"),
             "{} should point users to foreground startup logs: {stdout}",
+            args.join(" ")
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn logs_commands_accept_local_json_flag() -> Result<()> {
+    let workdir = temp_workdir()?;
+    for args in [
+        &["logs", "--lines", "50", "--json"][..],
+        &["gateway", "logs", "--lines", "50", "--json"][..],
+    ] {
+        let output = run_cli(workdir.path(), args, &[])?;
+        assert!(
+            output.status.success(),
+            "{} should succeed without an existing journal\nstdout:\n{}\nstderr:\n{}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let payload: Value = serde_json::from_slice(&output.stdout)
+            .with_context(|| format!("{} stdout should be valid JSON", args.join(" ")))?;
+        let records = payload.as_array().context("logs JSON output should be an array")?;
+        assert_eq!(records.len(), 1, "{} should emit one diagnostic record", args.join(" "));
+        assert_eq!(records[0].get("source").and_then(Value::as_str), Some("diagnostic"));
+        assert!(
+            records[0]
+                .get("message")
+                .and_then(Value::as_str)
+                .is_some_and(|message| message.contains("no journal or service logs exist yet")),
+            "{} should explain that no logs exist yet: {payload}",
             args.join(" ")
         );
     }

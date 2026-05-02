@@ -50,15 +50,16 @@ pub(crate) fn run_logs(
     lines: usize,
     follow: bool,
     poll_interval_ms: u64,
+    json: bool,
 ) -> Result<()> {
     let runtime = build_runtime()?;
-    if let Ok(()) = runtime.block_on(run_console_logs(lines, follow, poll_interval_ms)) {
+    if let Ok(()) = runtime.block_on(run_console_logs(lines, follow, poll_interval_ms, json)) {
         return Ok(());
     }
 
     let root_context = app::current_root_context()
         .ok_or_else(|| anyhow!("CLI root context is unavailable for logs command"))?;
-    if root_context.prefers_json() && follow {
+    if (json || root_context.prefers_json()) && follow {
         anyhow::bail!("`palyra logs --follow --json` is not supported; use NDJSON output instead");
     }
 
@@ -66,25 +67,30 @@ pub(crate) fn run_logs(
     let input = resolve_log_input(db_path.clone())?;
     match input {
         LogInput::Journal { db_path } => {
-            run_journal_logs(db_path.as_path(), lines, follow, poll_interval_ms)
+            run_journal_logs(db_path.as_path(), lines, follow, poll_interval_ms, json)
         }
         LogInput::File { source, path } => {
-            run_file_logs(source.as_str(), path.as_path(), lines, follow, poll_interval_ms)
+            run_file_logs(source.as_str(), path.as_path(), lines, follow, poll_interval_ms, json)
         }
         LogInput::Unavailable { message } => {
-            run_unavailable_logs(db_path, lines, follow, poll_interval_ms, message)
+            run_unavailable_logs(db_path, lines, follow, poll_interval_ms, message, json)
         }
     }
 }
 
-async fn run_console_logs(lines: usize, follow: bool, poll_interval_ms: u64) -> Result<()> {
+async fn run_console_logs(
+    lines: usize,
+    follow: bool,
+    poll_interval_ms: u64,
+    json: bool,
+) -> Result<()> {
     let context =
         client::control_plane::connect_admin_console(app::ConnectionOverrides::default()).await?;
     let mut query =
         control_plane::LogListQuery { limit: Some(lines.clamp(1, 500)), ..Default::default() };
     let initial = context.client.list_logs(&query).await?;
     let records = initial.records.into_iter().map(CliLogRecord::from).collect::<Vec<_>>();
-    emit_log_records(records.as_slice())?;
+    emit_log_records(records.as_slice(), json)?;
     if !follow {
         return Ok(());
     }
@@ -101,7 +107,7 @@ async fn run_console_logs(lines: usize, follow: bool, poll_interval_ms: u64) -> 
         }
         cursor = response.newest_cursor.clone().or(cursor);
         let records = response.records.into_iter().map(CliLogRecord::from).collect::<Vec<_>>();
-        emit_log_records(records.as_slice())?;
+        emit_log_records(records.as_slice(), json)?;
     }
 }
 
@@ -142,6 +148,7 @@ fn run_unavailable_logs(
     follow: bool,
     poll_interval_ms: u64,
     message: String,
+    json: bool,
 ) -> Result<()> {
     let notice = CliLogRecord {
         source: "diagnostic".to_owned(),
@@ -152,7 +159,7 @@ fn run_unavailable_logs(
         line_number: None,
         message: Some(message),
     };
-    emit_log_records(&[notice])?;
+    emit_log_records(&[notice], json)?;
     if !follow {
         return Ok(());
     }
@@ -163,7 +170,7 @@ fn run_unavailable_logs(
         match resolve_log_input(db_path.clone())? {
             LogInput::Unavailable { .. } => continue,
             LogInput::Journal { db_path } => {
-                return run_journal_logs(db_path.as_path(), lines, true, poll_interval_ms);
+                return run_journal_logs(db_path.as_path(), lines, true, poll_interval_ms, json);
             }
             LogInput::File { source, path } => {
                 return run_file_logs(
@@ -172,6 +179,7 @@ fn run_unavailable_logs(
                     lines,
                     true,
                     poll_interval_ms,
+                    json,
                 );
             }
         }
@@ -183,9 +191,10 @@ fn run_journal_logs(
     lines: usize,
     follow: bool,
     poll_interval_ms: u64,
+    json: bool,
 ) -> Result<()> {
     let records = collect_recent_journal_records(db_path, lines)?;
-    emit_log_records(records.as_slice())?;
+    emit_log_records(records.as_slice(), json)?;
     if !follow {
         return Ok(());
     }
@@ -198,7 +207,7 @@ fn run_journal_logs(
         if let Some(value) = follow_records.last().and_then(|record| record.seq) {
             last_seq = value;
         }
-        emit_log_records(follow_records.as_slice())?;
+        emit_log_records(follow_records.as_slice(), json)?;
     }
 }
 
@@ -256,9 +265,10 @@ fn run_file_logs(
     lines: usize,
     follow: bool,
     poll_interval_ms: u64,
+    json: bool,
 ) -> Result<()> {
     let records = collect_recent_file_records(source, path, lines)?;
-    emit_log_records(records.as_slice())?;
+    emit_log_records(records.as_slice(), json)?;
     if !follow {
         return Ok(());
     }
@@ -271,7 +281,7 @@ fn run_file_logs(
         if let Some(value) = follow_records.last().and_then(|record| record.line_number) {
             last_line_number = value;
         }
-        emit_log_records(follow_records.as_slice())?;
+        emit_log_records(follow_records.as_slice(), json)?;
     }
 }
 
@@ -330,14 +340,14 @@ fn collect_follow_file_records(
     Ok(records)
 }
 
-fn emit_log_records(records: &[CliLogRecord]) -> Result<()> {
+fn emit_log_records(records: &[CliLogRecord], json: bool) -> Result<()> {
     if records.is_empty() {
         return Ok(());
     }
 
     let root_context = app::current_root_context()
         .ok_or_else(|| anyhow!("CLI root context is unavailable for logs command"))?;
-    if root_context.prefers_json() {
+    if json || root_context.prefers_json() {
         return output::print_json_pretty(&records, "failed to encode logs output as JSON");
     }
     for record in records {

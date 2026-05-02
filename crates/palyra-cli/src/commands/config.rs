@@ -158,7 +158,7 @@ pub(crate) fn run_config(command: Option<ConfigCommand>) -> Result<()> {
             );
             std::io::stdout().flush().context("stdout flush failed")
         }
-        ConfigCommand::Set { path, key, value, backups } => {
+        ConfigCommand::Set { path, key, value, backups, json } => {
             let path = resolve_config_path(path, false)?;
             let path_ref = Path::new(&path);
             let (mut document, migration) = load_document_for_mutation(path_ref)
@@ -178,7 +178,7 @@ pub(crate) fn run_config(command: Option<ConfigCommand>) -> Result<()> {
                 "backups": backups,
                 "migrated": migration.migrated,
             });
-            let json = output::preferred_json(false);
+            let json = output::preferred_json(json);
             if json {
                 output::print_json_pretty(&payload, "failed to encode config set as JSON")
             } else if output::preferred_ndjson(json, false) {

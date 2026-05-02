@@ -535,6 +535,8 @@ pub enum Command {
         follow: bool,
         #[arg(long, default_value_t = 1000)]
         poll_interval_ms: u64,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     #[command(about = "Show transport and admin status across HTTP/gRPC surfaces")]
     Status {

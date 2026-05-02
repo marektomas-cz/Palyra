@@ -265,6 +265,22 @@ fn parse_logs_with_follow() {
             lines: 100,
             follow: true,
             poll_interval_ms: 2500,
+            json: false,
+        }
+    );
+}
+
+#[test]
+fn parse_logs_with_local_json_flag() {
+    let parsed = Cli::parse_from(["palyra", "logs", "--json"]);
+    assert_eq!(
+        parsed.command,
+        Command::Logs {
+            db_path: None,
+            lines: 50,
+            follow: false,
+            poll_interval_ms: 1000,
+            json: true,
         }
     );
 }
@@ -4141,6 +4157,7 @@ fn parse_daemon_logs_with_follow() {
                 lines: 75,
                 follow: true,
                 poll_interval_ms: 2000,
+                json: false,
             }
         }
     );
@@ -4234,7 +4251,19 @@ fn parse_daemon_usage_cost_with_days() {
             command: DaemonCommand::UsageCost {
                 db_path: Some("data/journal.sqlite3".to_owned()),
                 days: 7,
+                json: false,
             }
+        }
+    );
+}
+
+#[test]
+fn parse_daemon_usage_cost_with_local_json_flag() {
+    let parsed = Cli::parse_from(["palyra", "daemon", "usage-cost", "--json"]);
+    assert_eq!(
+        parsed.command,
+        Command::Gateway {
+            command: DaemonCommand::UsageCost { db_path: None, days: 30, json: true }
         }
     );
 }
@@ -4825,6 +4854,35 @@ fn parse_config_set_with_backups() {
                 key: "daemon.port".to_owned(),
                 value: "7443".to_owned(),
                 backups: 7,
+                json: false,
+            })
+        }
+    );
+}
+
+#[test]
+fn parse_config_set_with_local_json_flag() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "config",
+        "set",
+        "--path",
+        "custom.toml",
+        "--key",
+        "daemon.port",
+        "--value",
+        "7443",
+        "--json",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Config {
+            command: Some(ConfigCommand::Set {
+                path: Some("custom.toml".to_owned()),
+                key: "daemon.port".to_owned(),
+                value: "7443".to_owned(),
+                backups: 5,
+                json: true,
             })
         }
     );

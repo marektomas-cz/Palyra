@@ -13,6 +13,8 @@ Options:
       --poll-interval-ms <POLL_INTERVAL_MS>
           [default: 1000]
 
+      --json
+
   -h, --help
           Print help (see a summary with '-h')
 

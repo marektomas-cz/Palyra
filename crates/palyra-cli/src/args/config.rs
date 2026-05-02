@@ -52,6 +52,8 @@ pub enum ConfigCommand {
         value: String,
         #[arg(long, default_value_t = 5)]
         backups: usize,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     Unset {
         #[arg(long)]

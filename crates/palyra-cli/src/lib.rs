@@ -277,8 +277,8 @@ fn run_cli() -> Result<()> {
         CliCommand::Health { url, grpc_url, json } => {
             commands::health::run_health(url, grpc_url, json)
         }
-        CliCommand::Logs { db_path, lines, follow, poll_interval_ms } => {
-            commands::logs::run_logs(db_path, lines, follow, poll_interval_ms)
+        CliCommand::Logs { db_path, lines, follow, poll_interval_ms, json } => {
+            commands::logs::run_logs(db_path, lines, follow, poll_interval_ms, json)
         }
         CliCommand::Status { url, grpc_url, admin, token, principal, device_id, channel, json } => {
             commands::status::run_status(commands::status::StatusCommandArgs {
