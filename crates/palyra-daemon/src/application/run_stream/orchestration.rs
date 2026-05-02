@@ -76,6 +76,10 @@ pub(crate) enum RunStreamProviderResponseOutcome {
         provider_trace_ref: Option<String>,
         final_reply_text: Option<String>,
     },
+    Failed {
+        message: String,
+        provider_trace_ref: Option<String>,
+    },
     Cancelled,
 }
 
@@ -886,6 +890,21 @@ pub(crate) async fn process_run_stream_message(
                 )
                 .await?;
             }
+            RunStreamProviderResponseOutcome::Failed { message, provider_trace_ref } => {
+                terminate_run_stream_with_agent_loop_reason(
+                    sender,
+                    runtime_state,
+                    run_state,
+                    run_id.as_str(),
+                    tape_seq,
+                    &loop_state,
+                    AgentLoopTerminationReason::ApprovalDenied,
+                    message.as_str(),
+                    provider_trace_ref,
+                )
+                .await?;
+                return Ok(RunStreamMessageProcessingOutcome::Terminate);
+            }
             RunStreamProviderResponseOutcome::Cancelled => {
                 return Ok(RunStreamMessageProcessingOutcome::Terminate);
             }
@@ -950,8 +969,12 @@ async fn process_run_stream_provider_response(
     };
     persist_run_stream_provider_turn_output(runtime_state, run_id, tape_seq, &provider_output)
         .await?;
-    let tool_result_messages =
-        tool_results.iter().map(tool_result_to_provider_message).collect::<Result<Vec<_>, _>>()?;
+    let terminal_tool_failure = tool_results.iter().find_map(terminal_tool_authorization_failure);
+    let tool_result_messages = if terminal_tool_failure.is_some() {
+        Vec::new()
+    } else {
+        tool_results.iter().map(tool_result_to_provider_message).collect::<Result<Vec<_>, _>>()?
+    };
     let has_pending_tool_results = !tool_result_messages.is_empty();
     let reply_text = if provider_output.full_text.trim().is_empty() {
         summary_tokens.concat()
@@ -967,6 +990,13 @@ async fn process_run_stream_provider_response(
                 completion_tokens_delta: provider_response.completion_tokens,
             })
             .await?;
+    }
+
+    if let Some(message) = terminal_tool_failure {
+        return Ok(RunStreamProviderResponseOutcome::Failed {
+            message,
+            provider_trace_ref: provider_output.raw_provider_refs.provider_trace_ref.clone(),
+        });
     }
 
     if !has_pending_tool_results {
@@ -1044,6 +1074,39 @@ fn tool_result_to_provider_message(
     Ok(ProviderMessage::tool_result(result.proposal_id.clone(), redacted))
 }
 
+fn terminal_tool_authorization_failure(result: &RunStreamToolResultForModel) -> Option<String> {
+    let error = result.outcome.error.trim();
+    if result.outcome.success || error.is_empty() || !is_terminal_tool_authorization_error(error) {
+        return None;
+    }
+
+    Some(format!(
+        "tool execution blocked by approval or policy: tool={} proposal_id={} error={}",
+        result.tool_name,
+        result.proposal_id,
+        truncate_with_ellipsis(error.to_owned(), 512)
+    ))
+}
+
+fn is_terminal_tool_authorization_error(error: &str) -> bool {
+    let normalized = error.to_ascii_lowercase();
+    TERMINAL_TOOL_AUTHORIZATION_ERROR_MARKERS.iter().any(|marker| normalized.contains(marker))
+}
+
+const TERMINAL_TOOL_AUTHORIZATION_ERROR_MARKERS: &[&str] = &[
+    "approval_response_error",
+    "approval_response_timeout",
+    "approval required",
+    "approval denied",
+    "explicit client approval",
+    "approval.denied",
+    "approval.required",
+    "policy denied",
+    "denied by policy",
+    "not allowed by policy",
+    "blocked by policy",
+];
+
 #[allow(clippy::result_large_err)]
 async fn persist_run_stream_reply_text(
     runtime_state: &Arc<GatewayRuntimeState>,
@@ -1108,4 +1171,53 @@ async fn persist_run_stream_provider_turn_output(
         .await?;
     *tape_seq += 1;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{terminal_tool_authorization_failure, RunStreamToolResultForModel};
+
+    #[test]
+    fn terminal_tool_authorization_failure_detects_approval_errors() {
+        let result = RunStreamToolResultForModel {
+            proposal_id: "toolu_approval_01".to_owned(),
+            tool_name: "palyra.process.run".to_owned(),
+            outcome: crate::tool_protocol::denied_execution_outcome(
+                "toolu_approval_01",
+                "palyra.process.run",
+                br#"{"command":"cmd","args":["/C","whoami"]}"#,
+                "approval_response_error: tool_approval_response.proposal_id is required",
+            ),
+        };
+
+        let message = terminal_tool_authorization_failure(&result)
+            .expect("approval protocol failures must terminate the run");
+        assert!(message.contains("palyra.process.run"));
+        assert!(message.contains("toolu_approval_01"));
+        assert!(message.contains("approval_response_error"));
+    }
+
+    #[test]
+    fn terminal_tool_authorization_failure_ignores_regular_tool_errors() {
+        let result = RunStreamToolResultForModel {
+            proposal_id: "toolu_regular_error_01".to_owned(),
+            tool_name: "palyra.process.run".to_owned(),
+            outcome: crate::tool_protocol::build_tool_execution_outcome(
+                "toolu_regular_error_01",
+                "palyra.process.run",
+                br#"{"command":"cmd","args":["/C","exit","1"]}"#,
+                false,
+                b"{}".to_vec(),
+                "process exited with status 1".to_owned(),
+                false,
+                "builtin".to_owned(),
+                "none".to_owned(),
+            ),
+        };
+
+        assert!(
+            terminal_tool_authorization_failure(&result).is_none(),
+            "ordinary runtime errors can still be re-fed to the model"
+        );
+    }
 }
