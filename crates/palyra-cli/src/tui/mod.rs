@@ -3631,6 +3631,9 @@ async fn handle_chat_key(app: &mut App, key: KeyEvent) -> Result<()> {
         {
             app.composer.select_all();
         }
+        KeyCode::Char('q') if key.modifiers.is_empty() && app.composer.is_empty() => {
+            app.status_line = "__exit__".to_owned();
+        }
         KeyCode::Char(ch)
             if matches!(app.focus, Focus::Input) && is_text_input_modifier(key.modifiers) =>
         {
@@ -3686,7 +3689,6 @@ async fn handle_chat_key(app: &mut App, key: KeyEvent) -> Result<()> {
         }
         KeyCode::PageUp => app.scroll_offset = app.scroll_offset.saturating_add(8),
         KeyCode::PageDown => app.scroll_offset = app.scroll_offset.saturating_sub(8),
-        KeyCode::Char('q') if app.composer.is_empty() => app.status_line = "__exit__".to_owned(),
         _ => {}
     }
     Ok(())
@@ -4067,6 +4069,34 @@ mod tests {
         assert!(!handle_key(&mut app, backslash).await.expect("AltGr text should be accepted"));
 
         assert_eq!(app.composer.text(), "\\");
+    }
+
+    #[tokio::test]
+    async fn q_exits_when_composer_is_empty() {
+        let mut app = test_app();
+
+        let q =
+            KeyEvent::new_with_kind(KeyCode::Char('q'), KeyModifiers::empty(), KeyEventKind::Press);
+
+        assert!(!handle_key(&mut app, q).await.expect("q should be handled by the TUI"));
+
+        assert!(app.should_exit(), "empty-composer q should request TUI exit");
+        assert_eq!(app.composer.text(), "");
+    }
+
+    #[tokio::test]
+    async fn q_stays_text_when_composer_has_draft() {
+        let mut app = test_app();
+        app.composer.set_text("draft".to_owned());
+        app.sync_composer_after_edit();
+
+        let q =
+            KeyEvent::new_with_kind(KeyCode::Char('q'), KeyModifiers::empty(), KeyEventKind::Press);
+
+        assert!(!handle_key(&mut app, q).await.expect("q should be handled by the TUI"));
+
+        assert!(!app.should_exit(), "draft composer q should not request exit");
+        assert_eq!(app.composer.text(), "draftq");
     }
 
     #[tokio::test]
