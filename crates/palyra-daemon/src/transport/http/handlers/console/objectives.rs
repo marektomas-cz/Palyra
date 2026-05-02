@@ -650,6 +650,8 @@ async fn build_objective_view(
     let routine = load_objective_routine(state, &objective).await?;
     let latest_run = latest_objective_run(state, &objective).await?;
     let health = compute_objective_health(&objective, routine.as_ref(), latest_run.as_ref());
+    let (last_attempt, attempt_history) =
+        objective_attempts_for_view(&objective, latest_run.as_ref());
     Ok(json!({
         "objective_id": objective.objective_id,
         "kind": objective.kind.as_str(),
@@ -692,8 +694,8 @@ async fn build_objective_view(
         },
         "linked_run_ids": objective.linked_run_ids,
         "linked_artifact_paths": objective.linked_artifact_paths,
-        "last_attempt": objective.last_attempt,
-        "attempt_history": objective.attempt_history,
+        "last_attempt": last_attempt,
+        "attempt_history": attempt_history,
         "approach_history": objective.approach_history,
         "lifecycle_history": objective.lifecycle_history,
         "linked_routine": routine,
@@ -703,6 +705,60 @@ async fn build_objective_view(
         "updated_at_unix_ms": objective.updated_at_unix_ms,
         "archived_at_unix_ms": objective.archived_at_unix_ms,
     }))
+}
+
+fn objective_attempts_for_view(
+    objective: &ObjectiveRecord,
+    latest_run: Option<&Value>,
+) -> (Option<ObjectiveAttemptRecord>, Vec<ObjectiveAttemptRecord>) {
+    let mut last_attempt = objective.last_attempt.clone();
+    let mut attempt_history = objective.attempt_history.clone();
+    let Some(run) = latest_run else {
+        return (last_attempt, attempt_history);
+    };
+    let Some(run_id) = run.get("run_id").and_then(Value::as_str) else {
+        return (last_attempt, attempt_history);
+    };
+
+    if let Some(attempt) =
+        last_attempt.as_mut().filter(|attempt| attempt.run_id.as_deref() == Some(run_id))
+    {
+        reconcile_attempt_with_run(attempt, run);
+    }
+    if let Some(attempt) =
+        attempt_history.iter_mut().find(|attempt| attempt.run_id.as_deref() == Some(run_id))
+    {
+        reconcile_attempt_with_run(attempt, run);
+    }
+    (last_attempt, attempt_history)
+}
+
+fn reconcile_attempt_with_run(attempt: &mut ObjectiveAttemptRecord, run: &Value) {
+    if let Some(status) =
+        run.get("status").and_then(Value::as_str).filter(|value| !value.is_empty())
+    {
+        attempt.status = status.to_owned();
+    }
+    if let Some(outcome_kind) =
+        run.get("outcome_kind").and_then(Value::as_str).filter(|value| !value.is_empty())
+    {
+        attempt.outcome_kind = Some(outcome_kind.to_owned());
+    }
+    if let Some(message) =
+        run.get("outcome_message").and_then(Value::as_str).filter(|value| !value.is_empty())
+    {
+        attempt.summary = message.to_owned();
+    }
+    if attempt.session_id.is_none() {
+        attempt.session_id = run
+            .get("session_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
+    }
+    if attempt.completed_at_unix_ms.is_none() {
+        attempt.completed_at_unix_ms = run.get("finished_at_unix_ms").and_then(Value::as_i64);
+    }
 }
 
 async fn load_objective_routine(
@@ -1880,16 +1936,16 @@ fn internal_console_error(error: anyhow::Error) -> Response {
 mod tests {
     use super::{
         apply_lifecycle_workspace_projection, compute_objective_health, managed_entry,
-        normalize_budget, normalize_lifecycle_reason, objective_record_block,
-        owner_objective_block_updates, parse_objective_kind, parse_objective_priority,
-        render_objective_summary_markdown, ConsoleObjectiveBudgetPayload,
+        normalize_budget, normalize_lifecycle_reason, objective_attempts_for_view,
+        objective_record_block, owner_objective_block_updates, parse_objective_kind,
+        parse_objective_priority, render_objective_summary_markdown, ConsoleObjectiveBudgetPayload,
     };
     use crate::domain::workspace::{
         sync_workspace_managed_block, WorkspaceManagedBlockError, WorkspaceManagedBlockUpdate,
     };
     use crate::objectives::{
-        ObjectiveAutomationBinding, ObjectiveBudget, ObjectiveKind, ObjectivePriority,
-        ObjectiveRecord, ObjectiveState, ObjectiveWorkspaceBinding,
+        ObjectiveAttemptRecord, ObjectiveAutomationBinding, ObjectiveBudget, ObjectiveKind,
+        ObjectivePriority, ObjectiveRecord, ObjectiveState, ObjectiveWorkspaceBinding,
     };
     use crate::routines::{
         shadow_manual_schedule_payload_json, RoutineApprovalPolicy, RoutineDeliveryConfig,
@@ -2002,6 +2058,45 @@ mod tests {
             Some(&json!({ "status": "failed" })),
         );
         assert_eq!(health.get("state").and_then(serde_json::Value::as_str), Some("attention"));
+    }
+
+    #[test]
+    fn objective_view_reconciles_running_attempt_with_terminal_run() {
+        let mut objective = sample_objective();
+        let run_id = Ulid::new().to_string();
+        let attempt = ObjectiveAttemptRecord {
+            attempt_id: Ulid::new().to_string(),
+            run_id: Some(run_id.clone()),
+            session_id: None,
+            status: "running".to_owned(),
+            outcome_kind: Some("success_with_output".to_owned()),
+            summary: "objective dispatched".to_owned(),
+            learned: None,
+            recommended_next_step: None,
+            created_at_unix_ms: 1,
+            completed_at_unix_ms: None,
+        };
+        objective.last_attempt = Some(attempt.clone());
+        objective.attempt_history = vec![attempt];
+
+        let (last_attempt, attempt_history) = objective_attempts_for_view(
+            &objective,
+            Some(&json!({
+                "run_id": run_id,
+                "status": "succeeded",
+                "outcome_kind": "success_with_output",
+                "outcome_message": "heartbeat finished",
+                "session_id": "session-1",
+                "finished_at_unix_ms": 42
+            })),
+        );
+
+        let last_attempt = last_attempt.expect("last attempt should be present");
+        assert_eq!(last_attempt.status, "succeeded");
+        assert_eq!(last_attempt.summary, "heartbeat finished");
+        assert_eq!(last_attempt.session_id.as_deref(), Some("session-1"));
+        assert_eq!(last_attempt.completed_at_unix_ms, Some(42));
+        assert_eq!(attempt_history[0].status, "succeeded");
     }
 
     #[test]
