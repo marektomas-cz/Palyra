@@ -47,6 +47,11 @@ pub(crate) async fn console_memory_status_handler(
     let retrieval_config = state.runtime.retrieval_config_snapshot();
     let retrieval_backend =
         state.runtime.retrieval_backend_snapshot().map_err(runtime_status_response)?;
+    let retrieval_diagnostics = super::memory_external_index::build_memory_retrieval_diagnostics(
+        &retrieval_backend,
+        None,
+        None,
+    );
     let learning_config = state.runtime.learning_config_snapshot();
     let counters = state.runtime.counters.snapshot();
     let workspace_preview = state
@@ -82,6 +87,7 @@ pub(crate) async fn console_memory_status_handler(
         "retrieval": {
             "backend": retrieval_backend,
             "external_index": retrieval_backend.external_index.clone(),
+            "diagnostics": retrieval_diagnostics,
             "scoring": retrieval_config.scoring,
         },
         "providers": provider_statuses,

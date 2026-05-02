@@ -10,8 +10,14 @@ pub(crate) async fn console_memory_index_drift_handler(
         state.runtime.external_retrieval_drift_report().await.map_err(runtime_status_response)?;
     let retrieval_backend =
         state.runtime.retrieval_backend_snapshot().map_err(runtime_status_response)?;
+    let diagnostics = build_memory_retrieval_diagnostics(
+        &retrieval_backend,
+        Some(drift.drift_count),
+        Some(drift.reconciliation_required),
+    );
     Ok(Json(json!({
         "drift": drift,
+        "diagnostics": diagnostics,
         "external_index": retrieval_backend.external_index.clone(),
         "retrieval": {
             "backend": retrieval_backend,
@@ -34,6 +40,11 @@ pub(crate) async fn console_memory_index_reconcile_handler(
         .map_err(runtime_status_response)?;
     let retrieval_backend =
         state.runtime.retrieval_backend_snapshot().map_err(runtime_status_response)?;
+    let diagnostics = build_memory_retrieval_diagnostics(
+        &retrieval_backend,
+        Some(reconciliation.drift_after.drift_count),
+        Some(reconciliation.drift_after.reconciliation_required),
+    );
     let event_details = json!({
         "batch_size": batch_size,
         "reconciliation": reconciliation.clone(),
@@ -47,10 +58,138 @@ pub(crate) async fn console_memory_index_reconcile_handler(
     }
     Ok(Json(json!({
         "reconciliation": reconciliation,
+        "diagnostics": diagnostics,
         "external_index": retrieval_backend.external_index.clone(),
         "retrieval": {
             "backend": retrieval_backend,
         },
         "contract": contract_descriptor(),
     })))
+}
+
+pub(crate) fn build_memory_retrieval_diagnostics(
+    retrieval_backend: &crate::retrieval::RetrievalBackendSnapshot,
+    drift_count: Option<u64>,
+    reconciliation_required: Option<bool>,
+) -> Value {
+    let fallback_available = retrieval_backend.capabilities.journal_fallback;
+    let external_index = retrieval_backend.external_index.as_ref();
+    let drift_count =
+        drift_count.or_else(|| external_index.map(|snapshot| snapshot.drift_count)).unwrap_or(0);
+    let reconciliation_required = reconciliation_required.unwrap_or(drift_count > 0);
+    let external_state = external_index
+        .map(|snapshot| match snapshot.state {
+            crate::retrieval::RetrievalBackendState::Ready => "ready",
+            crate::retrieval::RetrievalBackendState::Degraded => "degraded",
+        })
+        .unwrap_or("not_configured");
+    let retrieval_mode = if reconciliation_required && fallback_available {
+        "degraded_journal_fallback"
+    } else if reconciliation_required {
+        "stale_external_index"
+    } else if external_state == "ready" {
+        "external_index_ready"
+    } else if fallback_available {
+        "journal_fallback"
+    } else {
+        "journal_source_of_truth"
+    };
+    let operator_note = if reconciliation_required && fallback_available {
+        "Search and recall can still return results from the journal fallback while the external derived index is stale; run `palyra memory index-reconcile --json` to clear drift."
+    } else if reconciliation_required {
+        "The external derived index is stale and should be reconciled with `palyra memory index-reconcile --json` before trusting index freshness."
+    } else if fallback_available && external_state == "degraded" {
+        "The external derived index is degraded; search remains queryable through journal fallback, but external-index freshness is not current."
+    } else {
+        "Retrieval index diagnostics do not currently require reconciliation."
+    };
+    json!({
+        "retrieval_mode": retrieval_mode,
+        "external_index_state": external_state,
+        "fallback_available": fallback_available,
+        "search_surface": if fallback_available { "queryable_with_journal_fallback" } else { "primary_index_only" },
+        "drift_count": drift_count,
+        "reconciliation_required": reconciliation_required,
+        "recommended_command": if reconciliation_required { Some("palyra memory index-reconcile --json") } else { None },
+        "operator_note": operator_note,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_memory_retrieval_diagnostics;
+    use crate::retrieval::{
+        retrieval_externalization_policy, ExternalRetrievalIndexSnapshot,
+        ExternalRetrievalScaleSloSnapshot, RetrievalBackendCapabilities, RetrievalBackendKind,
+        RetrievalBackendSnapshot, RetrievalBackendState,
+    };
+
+    fn retrieval_backend_with_fallback() -> RetrievalBackendSnapshot {
+        RetrievalBackendSnapshot {
+            kind: RetrievalBackendKind::ExternalDerivedPreview,
+            state: RetrievalBackendState::Ready,
+            reason: "external index with journal fallback".to_owned(),
+            capabilities: RetrievalBackendCapabilities {
+                lexical_search: true,
+                vector_search: true,
+                lexical_candidate_generation: true,
+                vector_candidate_generation: true,
+                hybrid_fusion: true,
+                source_aware_fusion: true,
+                branch_diagnostics: true,
+                transcript_fusion: true,
+                checkpoint_fusion: true,
+                compaction_fusion: true,
+                lazy_reindex: true,
+                batch_backfill: true,
+                external_derived_index: true,
+                journal_source_of_truth: true,
+                journal_fallback: true,
+                drift_detection: true,
+                async_indexer: true,
+                scale_slos: true,
+            },
+            externalization: retrieval_externalization_policy(),
+            external_index: Some(ExternalRetrievalIndexSnapshot {
+                provider: "local".to_owned(),
+                state: RetrievalBackendState::Ready,
+                reason: "ready".to_owned(),
+                indexed_memory_items: 0,
+                indexed_workspace_chunks: 0,
+                last_indexed_at_unix_ms: None,
+                journal_watermark_unix_ms: None,
+                freshness_lag_ms: None,
+                drift_count: 21,
+                pending_reconciliation_count: 21,
+                scale_slos: ExternalRetrievalScaleSloSnapshot::default(),
+                last_error: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn drift_diagnostics_explain_journal_fallback_mode() {
+        let diagnostics = build_memory_retrieval_diagnostics(
+            &retrieval_backend_with_fallback(),
+            Some(21),
+            Some(true),
+        );
+
+        assert_eq!(
+            diagnostics.get("retrieval_mode").and_then(serde_json::Value::as_str),
+            Some("degraded_journal_fallback")
+        );
+        assert_eq!(
+            diagnostics.get("fallback_available").and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert!(
+            diagnostics
+                .get("operator_note")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|note| note.contains("journal fallback")
+                    && note.contains("memory index-reconcile")),
+            "drift diagnostics should explain why search can work while reconciliation is required: {diagnostics}"
+        );
+    }
 }

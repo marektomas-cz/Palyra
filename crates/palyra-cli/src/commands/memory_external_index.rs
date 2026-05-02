@@ -15,6 +15,9 @@ pub(crate) fn emit_memory_index_drift(payload: &Value, json_output: bool) -> Res
     if let Some(external_index) = memory_external_index_payload(payload) {
         print_external_index_line("memory.external_index", external_index);
     }
+    if let Some(diagnostics) = payload.get("diagnostics").filter(|value| !value.is_null()) {
+        print_external_index_diagnostics_line("memory.external_index.diagnostics", diagnostics);
+    }
     std::io::stdout().flush().context("stdout flush failed")
 }
 
@@ -42,6 +45,9 @@ pub(crate) fn emit_memory_index_reconcile(payload: &Value, json_output: bool) ->
     );
     if let Some(external_index) = memory_external_index_payload(payload) {
         print_external_index_line("memory.external_index", external_index);
+    }
+    if let Some(diagnostics) = payload.get("diagnostics").filter(|value| !value.is_null()) {
+        print_external_index_diagnostics_line("memory.external_index.diagnostics", diagnostics);
     }
     std::io::stdout().flush().context("stdout flush failed")
 }
@@ -102,5 +108,25 @@ pub(crate) fn print_external_drift_line(label: &str, drift: &Value) {
         workspace_chunk_drift,
         freshness_lag_ms,
         reconciliation_required
+    );
+}
+
+pub(crate) fn print_external_index_diagnostics_line(label: &str, diagnostics: &Value) {
+    let retrieval_mode =
+        diagnostics.get("retrieval_mode").and_then(Value::as_str).unwrap_or("unknown");
+    let fallback_available =
+        diagnostics.get("fallback_available").and_then(Value::as_bool).unwrap_or(false);
+    let search_surface =
+        diagnostics.get("search_surface").and_then(Value::as_str).unwrap_or("unknown");
+    let recommended_command =
+        diagnostics.get("recommended_command").and_then(Value::as_str).unwrap_or("none");
+    let operator_note = diagnostics.get("operator_note").and_then(Value::as_str).unwrap_or("none");
+    println!(
+        "{label} retrieval_mode={} fallback_available={} search_surface={} recommended_command={} note=\"{}\"",
+        retrieval_mode,
+        fallback_available,
+        search_surface,
+        recommended_command,
+        operator_note.replace('"', "'")
     );
 }

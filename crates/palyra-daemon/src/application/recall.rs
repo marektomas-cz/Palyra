@@ -1740,18 +1740,7 @@ fn build_structured_output(
             score: candidate.score.clone(),
         })
         .collect::<Vec<_>>();
-    let facts = evidence
-        .iter()
-        .take(4)
-        .map(|evidence| RecallFact {
-            statement: format!(
-                "{}: {}",
-                evidence.source_kind.as_str(),
-                summarize_fact(evidence.snippet.as_str()),
-            ),
-            evidence_ids: vec![evidence.evidence_id.clone()],
-        })
-        .collect::<Vec<_>>();
+    let facts = evidence.iter().filter_map(recall_fact_from_evidence).take(4).collect::<Vec<_>>();
     let summary = build_evidence_backed_summary(evidence.as_slice(), query);
     let unresolved = build_unresolved_recall_items(evidence.as_slice(), query);
     let contradictions = detect_recall_contradictions(evidence.as_slice());
@@ -1929,6 +1918,68 @@ fn summarize_fact(snippet: &str) -> String {
         .map(str::trim)
         .unwrap_or(normalized.as_str());
     truncate_console_text(sentence, 140)
+}
+
+fn recall_fact_from_evidence(evidence: &RecallEvidenceRecord) -> Option<RecallFact> {
+    let summary = summarize_fact(evidence.snippet.as_str());
+    if recall_fact_summary_is_low_quality(summary.as_str()) {
+        return None;
+    }
+    Some(RecallFact {
+        statement: format!("{}: {summary}", evidence.source_kind.as_str()),
+        evidence_ids: vec![evidence.evidence_id.clone()],
+    })
+}
+
+fn recall_fact_summary_is_low_quality(summary: &str) -> bool {
+    let trimmed = summary.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    const TOOL_OUTPUT_PREFIXES: &[&str] = &[
+        "working directory:",
+        "command:",
+        "exit code:",
+        "stdout",
+        "stderr",
+        "tool result:",
+        "artifact:",
+        "request:",
+        "response:",
+    ];
+    if TOOL_OUTPUT_PREFIXES.iter().any(|prefix| lower.starts_with(prefix)) {
+        return true;
+    }
+    if looks_like_serialized_fragment(trimmed) {
+        return true;
+    }
+    let alpha_count = trimmed.chars().filter(|character| character.is_alphabetic()).count();
+    if alpha_count < 8 {
+        return true;
+    }
+    let punctuation_count = trimmed
+        .chars()
+        .filter(|character| {
+            !character.is_alphanumeric() && !character.is_whitespace() && *character != '-'
+        })
+        .count();
+    punctuation_count > alpha_count
+}
+
+fn looks_like_serialized_fragment(value: &str) -> bool {
+    let trimmed = value.trim();
+    if trimmed
+        .chars()
+        .next()
+        .is_some_and(|character| matches!(character, '{' | '[' | '}' | ']' | ',' | ':'))
+    {
+        return true;
+    }
+    if trimmed.contains("\",\"") || trimmed.contains("\\\"") || trimmed.contains("\":") {
+        return true;
+    }
+    trimmed.matches('"').count() % 2 == 1
 }
 
 fn plan_source_selected(sources: &[RecallPlanSource], kind: RecallSourceKind) -> bool {
@@ -2353,6 +2404,43 @@ mod tests {
         assert_eq!(structured.facts.len(), 2);
         assert_eq!(structured.facts[0].evidence_ids, vec!["evidence-1".to_owned()]);
         assert_eq!(structured.evidence[1].source_ref, "checkpoint-1");
+    }
+
+    #[test]
+    fn structured_output_keeps_tool_fragments_as_evidence_not_facts() {
+        let mut tool_fragment =
+            candidate("transcript-1", RecallSourceKind::Transcript, 0.91, 0.92, 10);
+        tool_fragment.snippet = r"Working Directory: \".to_owned();
+        let mut json_fragment =
+            candidate("checkpoint-1", RecallSourceKind::Checkpoint, 0.89, 0.91, 9);
+        json_fragment.snippet = r#"ifact","summary":"truncated tool artifact"}"#.to_owned();
+        let mut durable_fact = candidate("memory-1", RecallSourceKind::Memory, 0.84, 0.90, 8);
+        durable_fact.snippet =
+            "Manual durable fact for E2E: PALYRA_MEMORY_OK likes structured CLI evidence."
+                .to_owned();
+
+        let structured = build_structured_output(
+            &[tool_fragment, json_fragment, durable_fact],
+            "PALYRA_MEMORY_OK",
+        );
+
+        assert_eq!(
+            structured.evidence.len(),
+            3,
+            "raw evidence should remain available for exact inspection"
+        );
+        assert_eq!(structured.facts.len(), 1);
+        assert!(
+            structured.facts[0].statement.contains("PALYRA_MEMORY_OK"),
+            "valid durable fact should remain in structured facts: {:?}",
+            structured.facts
+        );
+        assert!(
+            structured.facts.iter().all(|fact| !fact.statement.contains("Working Directory")
+                && !fact.statement.contains("ifact")),
+            "tool and JSON fragments should not be presented as inferred facts: {:?}",
+            structured.facts
+        );
     }
 
     #[test]
