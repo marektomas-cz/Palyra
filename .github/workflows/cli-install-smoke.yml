@@ -32,7 +32,7 @@ jobs:
       - name: Install Rust toolchain
         uses: ./.github/actions/setup-rust-toolchain
         with:
-          toolchain: 1.91.0
+          toolchain: 1.92.0
 
       - name: Setup Vite+
         uses: ./.github/actions/setup-vp-safe
@@ -47,7 +47,7 @@ jobs:
 
       - name: Upload CLI install smoke report
         if: always()
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: cli-install-smoke-report-${{ matrix.os }}
           path: target/release-artifacts/cli-install-smoke/report
@@ -55,7 +55,7 @@ jobs:
 
       - name: Upload CLI install smoke artifacts on failure
         if: failure()
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: cli-install-smoke-${{ matrix.os }}
           path: target/release-artifacts/cli-install-smoke

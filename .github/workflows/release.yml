@@ -132,7 +132,7 @@ jobs:
       - name: Install Rust toolchain
         uses: ./.github/actions/setup-rust-toolchain
         with:
-          toolchain: 1.91.0
+          toolchain: 1.92.0
 
       - name: Setup Vite+
         uses: ./.github/actions/setup-vp-safe
@@ -205,7 +205,7 @@ jobs:
           "provenance_path=$provenancePath" >> $env:GITHUB_OUTPUT
 
       - name: Upload desktop release assets
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: desktop-release-${{ matrix.os }}-${{ needs.prepare-release.outputs.version }}
           path: |
@@ -250,7 +250,7 @@ jobs:
       - name: Install Rust toolchain
         uses: ./.github/actions/setup-rust-toolchain
         with:
-          toolchain: 1.91.0
+          toolchain: 1.92.0
 
       - name: Setup Vite+
         uses: ./.github/actions/setup-vp-safe
@@ -305,7 +305,7 @@ jobs:
           "provenance_path=$provenancePath" >> $env:GITHUB_OUTPUT
 
       - name: Upload headless release assets
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: headless-release-${{ needs.prepare-release.outputs.version }}
           path: |

@@ -32,7 +32,7 @@ jobs:
       - name: Install Rust toolchain
         uses: ./.github/actions/setup-rust-toolchain
         with:
-          toolchain: 1.91.0
+          toolchain: 1.92.0
           components: rustfmt, clippy
 
       - name: Setup Vite+
@@ -66,7 +66,7 @@ jobs:
       - name: Install Rust toolchain
         uses: ./.github/actions/setup-rust-toolchain
         with:
-          toolchain: 1.91.0
+          toolchain: 1.92.0
 
       - name: Setup Vite+
         uses: ./.github/actions/setup-vp-safe
@@ -104,7 +104,7 @@ jobs:
       - name: Install Rust toolchain
         uses: ./.github/actions/setup-rust-toolchain
         with:
-          toolchain: 1.91.0
+          toolchain: 1.92.0
 
       - name: Setup Vite+
         uses: ./.github/actions/setup-vp-safe
@@ -138,7 +138,7 @@ jobs:
       - name: Install Rust toolchain
         uses: ./.github/actions/setup-rust-toolchain
         with:
-          toolchain: 1.91.0
+          toolchain: 1.92.0
 
       - name: Run critical attack scenarios
         run: bash scripts/test/run-critical-attack-scenarios.sh
@@ -155,14 +155,14 @@ jobs:
       - name: Install Rust toolchain
         uses: ./.github/actions/setup-rust-toolchain
         with:
-          toolchain: 1.91.0
+          toolchain: 1.92.0
 
       - name: Run workflow regression matrix
         run: bash scripts/test/run-workflow-regression.sh
 
       - name: Upload workflow regression artifact
         if: ${{ always() }}
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: workflow-regression-fast
           path: target/release-artifacts/workflow-regression
@@ -178,7 +178,7 @@ jobs:
       - name: Install Rust toolchain
         uses: ./.github/actions/setup-rust-toolchain
         with:
-          toolchain: 1.91.0
+          toolchain: 1.92.0
 
       - name: Setup Vite+
         uses: ./.github/actions/setup-vp-safe
@@ -232,7 +232,7 @@ jobs:
       - name: Install Rust toolchain
         uses: ./.github/actions/setup-rust-toolchain
         with:
-          toolchain: 1.91.0
+          toolchain: 1.92.0
           components: rustfmt, clippy
 
       - name: Setup Vite+
@@ -261,7 +261,7 @@ jobs:
       - name: Install Rust toolchain
         uses: ./.github/actions/setup-rust-toolchain
         with:
-          toolchain: 1.91.0
+          toolchain: 1.92.0
 
       - name: Generate CLI parity report
         run: cargo run -p palyra-cli --example render_cli_parity_report --locked -- crates/palyra-cli/tests/cli_parity_matrix.toml artifacts/cli-parity-acceptance-matrix.md
@@ -271,7 +271,7 @@ jobs:
 
       - name: Upload CLI parity artifact
         if: ${{ always() }}
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: cli-parity-acceptance-matrix
           path: artifacts/cli-parity-acceptance-matrix.md
@@ -286,7 +286,7 @@ jobs:
       - name: Install Rust toolchain
         uses: ./.github/actions/setup-rust-toolchain
         with:
-          toolchain: 1.91.0
+          toolchain: 1.92.0
 
       - name: Install protocol tooling
         run: |
@@ -354,7 +354,7 @@ jobs:
       - name: Install Rust toolchain
         uses: ./.github/actions/setup-rust-toolchain
         with:
-          toolchain: 1.91.0
+          toolchain: 1.92.0
 
       - name: Install protobuf compiler
         run: ./scripts/protocol/install-protoc-windows.ps1
