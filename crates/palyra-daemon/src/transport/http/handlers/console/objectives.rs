@@ -331,23 +331,25 @@ pub(crate) async fn console_objective_upsert_handler(
     let mut lifecycle_history =
         existing.as_ref().map(|entry| entry.lifecycle_history.clone()).unwrap_or_default();
     if existing.is_none() {
+        let initial_state = initial_objective_state(existing.as_ref(), payload.enabled);
         lifecycle_history.push(ObjectiveLifecycleRecord {
             event_id: Ulid::new().to_string(),
             action: "created".to_owned(),
             from_state: None,
-            to_state: ObjectiveState::Draft,
+            to_state: initial_state,
             reason: Some(format!("kind={}", kind.as_str())),
             run_id: None,
             occurred_at_unix_ms: now_unix_ms,
         });
     }
+    let initial_state = initial_objective_state(existing.as_ref(), payload.enabled);
     let objective = state
         .objectives
         .upsert_objective(ObjectiveUpsert {
             record: ObjectiveRecord {
                 objective_id: objective_id.clone(),
                 kind,
-                state: existing.as_ref().map(|entry| entry.state).unwrap_or(ObjectiveState::Draft),
+                state: initial_state,
                 name: payload.name,
                 prompt: payload.prompt,
                 owner_principal: owner_principal.clone(),
@@ -649,6 +651,7 @@ async fn build_objective_view(
 ) -> Result<Value, Response> {
     let routine = load_objective_routine(state, &objective).await?;
     let latest_run = latest_objective_run(state, &objective).await?;
+    let latest_run = latest_run.or_else(|| preserved_run_from_objective_attempt(&objective));
     let health = compute_objective_health(&objective, routine.as_ref(), latest_run.as_ref());
     let (last_attempt, attempt_history) =
         objective_attempts_for_view(&objective, latest_run.as_ref());
@@ -707,6 +710,19 @@ async fn build_objective_view(
     }))
 }
 
+fn initial_objective_state(
+    existing: Option<&ObjectiveRecord>,
+    requested_enabled: Option<bool>,
+) -> ObjectiveState {
+    existing.map(|entry| entry.state).unwrap_or_else(|| {
+        if requested_enabled == Some(true) {
+            ObjectiveState::Active
+        } else {
+            ObjectiveState::Draft
+        }
+    })
+}
+
 fn objective_attempts_for_view(
     objective: &ObjectiveRecord,
     latest_run: Option<&Value>,
@@ -731,6 +747,35 @@ fn objective_attempts_for_view(
         reconcile_attempt_with_run(attempt, run);
     }
     (last_attempt, attempt_history)
+}
+
+fn reconcile_objective_attempts_with_latest_run(
+    objective: &mut ObjectiveRecord,
+    latest_run: Option<&Value>,
+) {
+    let (last_attempt, attempt_history) = objective_attempts_for_view(objective, latest_run);
+    objective.last_attempt = last_attempt;
+    objective.attempt_history = attempt_history;
+}
+
+fn preserved_run_from_objective_attempt(objective: &ObjectiveRecord) -> Option<Value> {
+    let attempt = objective.last_attempt.as_ref()?;
+    let run_id = attempt.run_id.as_deref()?.trim();
+    if run_id.is_empty() {
+        return None;
+    }
+    Some(json!({
+        "routine_id": objective.automation.routine_id.clone(),
+        "run_id": run_id,
+        "status": attempt.status.clone(),
+        "outcome_kind": attempt.outcome_kind.clone(),
+        "outcome_message": attempt.summary.clone(),
+        "session_id": attempt.session_id.clone(),
+        "orchestrator_run_id": Value::Null,
+        "started_at_unix_ms": attempt.created_at_unix_ms,
+        "finished_at_unix_ms": attempt.completed_at_unix_ms,
+        "source": "objective_attempt_history",
+    }))
 }
 
 fn reconcile_attempt_with_run(attempt: &mut ObjectiveAttemptRecord, run: &Value) {
@@ -1145,8 +1190,12 @@ async fn apply_archive_action(
     reason: Option<String>,
 ) -> Result<(), Response> {
     let from_state = objective.state;
+    let latest_run = latest_objective_run(state, objective).await?;
+    reconcile_objective_attempts_with_latest_run(objective, latest_run.as_ref());
+    let now_unix_ms = unix_ms_now().map_err(internal_console_error)?;
     objective.state = ObjectiveState::Archived;
     objective.automation.enabled = false;
+    objective.archived_at_unix_ms = Some(now_unix_ms);
     delete_objective_job(state, objective).await?;
     objective.lifecycle_history.push(ObjectiveLifecycleRecord {
         event_id: Ulid::new().to_string(),
@@ -1154,8 +1203,8 @@ async fn apply_archive_action(
         from_state: Some(from_state),
         to_state: ObjectiveState::Archived,
         reason,
-        run_id: None,
-        occurred_at_unix_ms: unix_ms_now().map_err(internal_console_error)?,
+        run_id: objective.last_attempt.as_ref().and_then(|attempt| attempt.run_id.clone()),
+        occurred_at_unix_ms: now_unix_ms,
     });
     Ok(())
 }
@@ -1935,10 +1984,12 @@ fn internal_console_error(error: anyhow::Error) -> Response {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_lifecycle_workspace_projection, compute_objective_health, managed_entry,
-        normalize_budget, normalize_lifecycle_reason, objective_attempts_for_view,
+        apply_lifecycle_workspace_projection, compute_objective_health, initial_objective_state,
+        managed_entry, normalize_budget, normalize_lifecycle_reason, objective_attempts_for_view,
         objective_record_block, owner_objective_block_updates, parse_objective_kind,
-        parse_objective_priority, render_objective_summary_markdown, ConsoleObjectiveBudgetPayload,
+        parse_objective_priority, preserved_run_from_objective_attempt,
+        reconcile_objective_attempts_with_latest_run, render_objective_summary_markdown,
+        ConsoleObjectiveBudgetPayload,
     };
     use crate::domain::workspace::{
         sync_workspace_managed_block, WorkspaceManagedBlockError, WorkspaceManagedBlockUpdate,
@@ -2061,6 +2112,16 @@ mod tests {
     }
 
     #[test]
+    fn enabled_objectives_start_active_when_requested() {
+        assert_eq!(initial_objective_state(None, Some(true)), ObjectiveState::Active);
+        assert_eq!(initial_objective_state(None, Some(false)), ObjectiveState::Draft);
+
+        let mut existing = sample_objective();
+        existing.state = ObjectiveState::Paused;
+        assert_eq!(initial_objective_state(Some(&existing), Some(true)), ObjectiveState::Paused);
+    }
+
+    #[test]
     fn objective_view_reconciles_running_attempt_with_terminal_run() {
         let mut objective = sample_objective();
         let run_id = Ulid::new().to_string();
@@ -2097,6 +2158,52 @@ mod tests {
         assert_eq!(last_attempt.session_id.as_deref(), Some("session-1"));
         assert_eq!(last_attempt.completed_at_unix_ms, Some(42));
         assert_eq!(attempt_history[0].status, "succeeded");
+    }
+
+    #[test]
+    fn archive_snapshot_preserves_terminal_attempt_as_last_run() {
+        let mut objective = sample_objective();
+        let run_id = Ulid::new().to_string();
+        let attempt = ObjectiveAttemptRecord {
+            attempt_id: Ulid::new().to_string(),
+            run_id: Some(run_id.clone()),
+            session_id: None,
+            status: "running".to_owned(),
+            outcome_kind: Some("running".to_owned()),
+            summary: "objective dispatched".to_owned(),
+            learned: None,
+            recommended_next_step: None,
+            created_at_unix_ms: 1,
+            completed_at_unix_ms: None,
+        };
+        objective.last_attempt = Some(attempt.clone());
+        objective.attempt_history = vec![attempt];
+
+        reconcile_objective_attempts_with_latest_run(
+            &mut objective,
+            Some(&json!({
+                "run_id": run_id,
+                "status": "succeeded",
+                "outcome_kind": "success_with_output",
+                "outcome_message": "PALYRA_HEARTBEAT_OK",
+                "session_id": "session-1",
+                "finished_at_unix_ms": 42
+            })),
+        );
+        objective.state = ObjectiveState::Archived;
+
+        let preserved =
+            preserved_run_from_objective_attempt(&objective).expect("last run should be preserved");
+        assert_eq!(preserved.get("status").and_then(serde_json::Value::as_str), Some("succeeded"));
+        assert_eq!(
+            preserved.get("outcome_message").and_then(serde_json::Value::as_str),
+            Some("PALYRA_HEARTBEAT_OK")
+        );
+        let health = compute_objective_health(&objective, None, Some(&preserved));
+        assert_eq!(
+            health.get("last_run_status").and_then(serde_json::Value::as_str),
+            Some("succeeded")
+        );
     }
 
     #[test]
