@@ -5170,6 +5170,15 @@ fn resolve_config_relative_path(config_path: &Path, raw_path: &str) -> PathBuf {
     if path.is_absolute() {
         return path;
     }
+    if let Some(context) = app::current_root_context() {
+        return context.state_root().join(path);
+    }
+    if let Ok(state_root) = env::var("PALYRA_STATE_ROOT") {
+        let trimmed = state_root.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed).join(path);
+        }
+    }
     config_path.parent().map(|parent| parent.join(path.clone())).unwrap_or(path)
 }
 
@@ -10784,11 +10793,46 @@ mod journal_path_tests {
     }
 
     #[test]
-    fn relative_configured_journal_path_resolves_against_config_directory() -> Result<()> {
+    fn relative_configured_journal_path_prefers_active_state_root() -> Result<()> {
+        let _guard = crate::app::test_env_lock_for_tests().lock().expect("env lock");
+        crate::app::clear_root_context_for_tests();
+        let tempdir = tempdir()?;
+        let state_root = tempdir.path().join("state-root");
+        let config_dir = tempdir.path().join("config");
+        let config_path = config_dir.join("palyra.toml");
+        let config_home = tempdir.path().join("xdg-config");
+        let home = tempdir.path().join("home");
+        let local_app_data = tempdir.path().join("localappdata");
+        let app_data = tempdir.path().join("appdata");
+        fs::create_dir_all(config_dir.as_path())?;
+        let _xdg_config_home = ScopedEnvVar::set("XDG_CONFIG_HOME", config_home.as_path());
+        let _home = ScopedEnvVar::set("HOME", home.as_path());
+        let _local_app_data = ScopedEnvVar::set("LOCALAPPDATA", local_app_data.as_path());
+        let _app_data = ScopedEnvVar::set("APPDATA", app_data.as_path());
+        let _palyra_config = ScopedEnvVar::unset("PALYRA_CONFIG");
+        let _journal_env = ScopedEnvVar::unset("PALYRA_JOURNAL_DB_PATH");
+        crate::app::install_root_context(crate::args::RootOptions {
+            state_root: Some(state_root.display().to_string()),
+            ..crate::args::RootOptions::default()
+        })?;
+
+        let resolved = resolve_config_relative_path(config_path.as_path(), "data/journal.sqlite3");
+
+        assert_eq!(resolved, state_root.join("data").join("journal.sqlite3"));
+        crate::app::clear_root_context_for_tests();
+        Ok(())
+    }
+
+    #[test]
+    fn relative_configured_journal_path_falls_back_to_config_directory() -> Result<()> {
+        let _guard = crate::app::test_env_lock_for_tests().lock().expect("env lock");
+        crate::app::clear_root_context_for_tests();
         let tempdir = tempdir()?;
         let config_dir = tempdir.path().join("config");
         let config_path = config_dir.join("palyra.toml");
         fs::create_dir_all(config_dir.as_path())?;
+        let _state_root_env = ScopedEnvVar::unset("PALYRA_STATE_ROOT");
+
         let resolved = resolve_config_relative_path(config_path.as_path(), "data/journal.sqlite3");
 
         assert_eq!(resolved, config_dir.join("data").join("journal.sqlite3"));

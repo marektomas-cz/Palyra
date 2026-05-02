@@ -1,7 +1,7 @@
 use std::{
     collections::HashSet,
     env, fs,
-    path::{Component, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use anyhow::{Context, Result};
@@ -12,7 +12,7 @@ use palyra_common::{
     daemon_config_schema::{
         FileMemoryRetrievalConfig, FileRetrievalSourceScoringProfile, RootFileConfig,
     },
-    default_config_search_paths,
+    default_config_search_paths, default_state_root,
     feature_rollouts::{
         parse_boolish_feature_rollout, FeatureRolloutSetting, AUXILIARY_EXECUTOR_ROLLOUT_ENV,
         CONTEXT_ENGINE_ROLLOUT_ENV, DELIVERY_ARBITRATION_ROLLOUT_ENV,
@@ -2001,6 +2001,18 @@ pub fn load_config() -> Result<LoadedConfig> {
         &replay_capture,
         &networked_workers,
     )?;
+    let runtime_state_root =
+        resolve_runtime_state_root_for_config(gateway.identity_store_dir.as_deref())?;
+    storage.journal_db_path = resolve_state_relative_path(
+        runtime_state_root.as_path(),
+        storage.journal_db_path.as_path(),
+    );
+    storage.vault_dir =
+        resolve_state_relative_path(runtime_state_root.as_path(), storage.vault_dir.as_path());
+    if let Some(state_dir) = tool_call.browser_service.state_dir.as_deref() {
+        tool_call.browser_service.state_dir =
+            Some(resolve_state_relative_path(runtime_state_root.as_path(), state_dir));
+    }
     validate_secret_source_conflicts(&model_provider, &tool_call.browser_service, &admin)?;
     if !deployment_profile_explicit {
         let derived = palyra_common::deployment_profiles::derive_deployment_profile(
@@ -2201,6 +2213,37 @@ fn find_config_path() -> Result<Option<PathBuf>> {
     }
 
     Ok(None)
+}
+
+fn resolve_runtime_state_root_for_config(identity_store_dir: Option<&Path>) -> Result<PathBuf> {
+    if let Ok(raw) = env::var("PALYRA_STATE_ROOT") {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            anyhow::bail!("PALYRA_STATE_ROOT cannot be empty");
+        }
+        if trimmed.contains('\0') {
+            anyhow::bail!("PALYRA_STATE_ROOT cannot contain embedded NUL byte");
+        }
+        return Ok(PathBuf::from(trimmed));
+    }
+
+    if let Some(identity_store_dir) = identity_store_dir {
+        if let Some(parent) =
+            identity_store_dir.parent().filter(|path| !path.as_os_str().is_empty())
+        {
+            return Ok(parent.to_path_buf());
+        }
+    }
+
+    default_state_root().context("failed to resolve default state root")
+}
+
+fn resolve_state_relative_path(state_root: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        state_root.join(path)
+    }
 }
 
 fn parse_journal_db_path(raw: &str) -> Result<PathBuf> {
@@ -3550,7 +3593,7 @@ mod tests {
     };
 
     use super::{
-        apply_feature_rollout_env_override, parse_broadcast_strategy,
+        apply_feature_rollout_env_override, load_config, parse_broadcast_strategy,
         parse_browser_service_endpoint, parse_canvas_host_public_base_url,
         parse_content_type_allowlist, parse_cron_timezone_mode, parse_default_memory_ttl_ms,
         parse_direct_message_policy, parse_dns_suffix_allowlist, parse_host_allowlist,
@@ -4583,6 +4626,43 @@ state_key_vault_ref = "global/browser_state_key"
             config.vault_dir.ends_with("vault"),
             "default vault directory should be rooted under state/vault"
         );
+    }
+
+    #[test]
+    fn load_config_resolves_relative_storage_paths_against_state_root() -> anyhow::Result<()> {
+        let _guard = env_lock().lock().expect("env lock");
+        let tempdir = tempfile::tempdir()?;
+        let state_root = tempdir.path().join("state");
+        let config_path = state_root.join("config").join("palyra.toml");
+        std::fs::create_dir_all(config_path.parent().expect("config parent should exist"))?;
+        std::fs::write(
+            config_path.as_path(),
+            r#"
+[storage]
+journal_db_path = "data/journal.sqlite3"
+vault_dir = "vault"
+
+[tool_call.browser_service]
+state_dir = "browserd-state"
+"#,
+        )?;
+        let state_root_text = state_root.to_string_lossy();
+        let config_path_text = config_path.to_string_lossy();
+        let _config = ScopedEnvVar::set("PALYRA_CONFIG", config_path_text.as_ref());
+        let _state_root = ScopedEnvVar::set("PALYRA_STATE_ROOT", state_root_text.as_ref());
+        let _journal_env = ScopedEnvVar::unset("PALYRA_JOURNAL_DB_PATH");
+        let _vault_env = ScopedEnvVar::unset("PALYRA_VAULT_DIR");
+        let _browser_state_env = ScopedEnvVar::unset("PALYRA_BROWSERD_STATE_DIR");
+
+        let loaded = load_config()?;
+
+        assert_eq!(loaded.storage.journal_db_path, state_root.join("data").join("journal.sqlite3"));
+        assert_eq!(loaded.storage.vault_dir, state_root.join("vault"));
+        assert_eq!(
+            loaded.tool_call.browser_service.state_dir,
+            Some(state_root.join("browserd-state"))
+        );
+        Ok(())
     }
 
     #[test]
