@@ -283,9 +283,8 @@ fn build_objective_upsert_payload(args: ObjectiveUpsertArgs) -> Result<Map<Strin
                 payload.insert("cron_expression".to_owned(), Value::String(schedule));
             }
             Some(ObjectiveScheduleTypeArg::Every) => {
-                let interval_ms = schedule.parse::<u64>().context(
-                    "objective schedule must be an integer interval in milliseconds for schedule_type=every",
-                )?;
+                let interval_ms =
+                    commands::routines::parse_every_schedule_interval_ms(schedule.as_str())?;
                 payload.insert("every_interval_ms".to_owned(), Value::from(interval_ms));
             }
             Some(ObjectiveScheduleTypeArg::At) => {
@@ -403,5 +402,47 @@ fn insert_optional_string(payload: &mut Map<String, Value>, key: &str, value: Op
 fn insert_optional_bool(payload: &mut Map<String, Value>, key: &str, value: Option<bool>) {
     if let Some(value) = value {
         payload.insert(key.to_owned(), Value::Bool(value));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn objective_every_schedule_accepts_duration_syntax() {
+        let payload = build_objective_upsert_payload(ObjectiveUpsertArgs {
+            id: None,
+            kind: ObjectiveKindArg::Objective,
+            name: "Check queue".to_owned(),
+            prompt: "Check the queue depth".to_owned(),
+            owner: None,
+            channel: None,
+            session_key: None,
+            session_label: None,
+            priority: ObjectivePriorityArg::Normal,
+            max_runs: None,
+            max_tokens: None,
+            budget_notes: None,
+            current_focus: None,
+            success_criteria: None,
+            exit_condition: None,
+            next_recommended_step: None,
+            standing_order: None,
+            enabled: Some(true),
+            natural_language_schedule: None,
+            schedule_type: Some(ObjectiveScheduleTypeArg::Every),
+            schedule: Some("15m".to_owned()),
+            delivery_mode: RoutineDeliveryModeArg::SameChannel,
+            delivery_channel: None,
+            quiet_hours_start: None,
+            quiet_hours_end: None,
+            quiet_hours_timezone: None,
+            cooldown_ms: 0,
+            approval_mode: RoutineApprovalModeArg::None,
+        })
+        .expect("duration schedule should be accepted");
+
+        assert_eq!(payload.get("every_interval_ms").and_then(Value::as_u64), Some(900_000));
     }
 }
