@@ -72,6 +72,7 @@ pub(crate) fn run_config(command: Option<ConfigCommand>) -> Result<()> {
                 .with_context(|| format!("failed to parse {path}"))?;
             validate_daemon_compatible_document(&document)
                 .with_context(|| format!("failed to parse {path}"))?;
+            let warnings = build_config_validation_warnings(path.as_str());
             if json {
                 return output::print_json_pretty(
                     &json!({
@@ -79,6 +80,7 @@ pub(crate) fn run_config(command: Option<ConfigCommand>) -> Result<()> {
                         "source": path,
                         "version": migration.target_version,
                         "migrated": migration.migrated,
+                        "warnings": warnings,
                     }),
                     "failed to encode config validation as JSON",
                 );
@@ -87,6 +89,16 @@ pub(crate) fn run_config(command: Option<ConfigCommand>) -> Result<()> {
                 "config=valid source={path} version={} migrated={}",
                 migration.target_version, migration.migrated
             );
+            for warning in warnings {
+                println!(
+                    "config.warning severity={} code={} component={} message=\"{}\" remediation=\"{}\"",
+                    warning.severity,
+                    warning.code,
+                    warning.component,
+                    escape_config_warning_text(warning.message.as_str()),
+                    escape_config_warning_text(warning.remediation.as_str())
+                );
+            }
             std::io::stdout().flush().context("stdout flush failed")
         }
         ConfigCommand::List { path, show_secrets, json } => {
@@ -267,6 +279,59 @@ struct ConfigStatusPayload {
     target_version: Option<u32>,
     provider_kind: Option<String>,
     auth_profile_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ConfigValidationWarning {
+    severity: &'static str,
+    code: &'static str,
+    component: &'static str,
+    message: String,
+    remediation: String,
+}
+
+fn build_config_validation_warnings(path: &str) -> Vec<ConfigValidationWarning> {
+    match commands::models::load_models_status(Some(path.to_owned())) {
+        Ok(status) => {
+            if model_provider_auth_is_missing(&status) {
+                vec![ConfigValidationWarning {
+                    severity: "warning",
+                    code: "model_provider_missing_auth",
+                    component: "model_provider",
+                    message: format!(
+                        "config is schema-valid, but model provider '{}' ({}) has no inline API key, vault reference, or auth profile; runtime model calls will fail with missing_auth.",
+                        status.provider_id,
+                        status.provider_kind
+                    ),
+                    remediation: "Run `palyra models status --json` and configure a vault-backed key or auth profile before starting model-backed runs.".to_owned(),
+                }]
+            } else {
+                Vec::new()
+            }
+        }
+        Err(_) => vec![ConfigValidationWarning {
+            severity: "warning",
+            code: "model_provider_readiness_unavailable",
+            component: "model_provider",
+            message: "config is schema-valid, but model-provider readiness could not be evaluated.".to_owned(),
+            remediation: "Run `palyra models status --json` for a dedicated model-provider readiness diagnostic.".to_owned(),
+        }],
+    }
+}
+
+fn model_provider_auth_is_missing(status: &commands::models::ModelsStatusPayload) -> bool {
+    !status.provider_kind.eq_ignore_ascii_case("deterministic")
+        && !status.api_key_configured
+        && status
+            .auth_profile_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_none()
+}
+
+fn escape_config_warning_text(value: &str) -> String {
+    value.replace('"', "'")
 }
 
 fn build_config_status_payload(path: Option<String>) -> Result<ConfigStatusPayload> {

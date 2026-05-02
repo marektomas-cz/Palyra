@@ -161,6 +161,50 @@ variable = "PALYRA_OPENAI_API_KEY"
 }
 
 #[test]
+fn config_validate_json_warns_when_runtime_model_auth_is_missing() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+    let config_path = workdir.path().join("missing-model-auth.toml");
+    fs::write(
+        &config_path,
+        r#"
+version = 1
+
+[model_provider]
+kind = "anthropic"
+auth_provider_kind = "minimax"
+anthropic_model = "MiniMax-M2.7"
+"#,
+    )
+    .with_context(|| format!("failed to write {}", config_path.display()))?;
+
+    let output =
+        run_cli(&workdir, &["config", "validate", "--path", "missing-model-auth.toml", "--json"])?;
+
+    assert!(
+        output.status.success(),
+        "schema-valid config should still validate: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).context("stdout was not UTF-8")?;
+    let payload: serde_json::Value =
+        serde_json::from_str(&stdout).context("config validate stdout was not JSON")?;
+    assert_eq!(payload.get("status").and_then(serde_json::Value::as_str), Some("valid"));
+    assert_eq!(
+        payload.pointer("/warnings/0/code").and_then(serde_json::Value::as_str),
+        Some("model_provider_missing_auth"),
+        "validation output should warn that runtime model auth is not ready: {payload}"
+    );
+    assert!(
+        payload
+            .pointer("/warnings/0/message")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|message| message.contains("missing_auth")),
+        "warning should point at the runtime failure mode: {payload}"
+    );
+    Ok(())
+}
+
+#[test]
 fn config_validate_with_explicit_path_rejects_browser_state_key_secret_conflict() -> Result<()> {
     let workdir = TempDir::new().context("failed to create temporary workdir")?;
     let config_path = workdir.path().join("conflicting-browser-state-key.toml");
