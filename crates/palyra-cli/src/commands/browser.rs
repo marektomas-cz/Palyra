@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     fs::{self, File},
     io::Write,
     path::{Path, PathBuf},
@@ -37,6 +38,31 @@ const BROWSERD_STATE_ENCRYPTION_KEY_LEN: usize = 32;
 const BROWSER_ARTIFACT_DIR: &str = "browser-artifacts";
 const BROWSER_CALLER_PRINCIPAL_HEADER: &str = "x-palyra-principal";
 const BROWSER_PROBE_PRINCIPAL: &str = "admin:browser-probe";
+const BROWSER_GATEWAY_TOOL_NAMES: &[&str] = &[
+    "palyra.browser.session.create",
+    "palyra.browser.session.close",
+    "palyra.browser.navigate",
+    "palyra.browser.click",
+    "palyra.browser.type",
+    "palyra.browser.press",
+    "palyra.browser.select",
+    "palyra.browser.highlight",
+    "palyra.browser.scroll",
+    "palyra.browser.wait_for",
+    "palyra.browser.title",
+    "palyra.browser.screenshot",
+    "palyra.browser.pdf",
+    "palyra.browser.observe",
+    "palyra.browser.network_log",
+    "palyra.browser.console_log",
+    "palyra.browser.reset_state",
+    "palyra.browser.tabs.list",
+    "palyra.browser.tabs.open",
+    "palyra.browser.tabs.switch",
+    "palyra.browser.tabs.close",
+    "palyra.browser.permissions.get",
+    "palyra.browser.permissions.set",
+];
 
 #[cfg(windows)]
 const DETACHED_PROCESS: u32 = 0x0000_0008;
@@ -60,6 +86,8 @@ struct BrowserPolicySnapshot {
     max_screenshot_bytes: Option<u64>,
     max_title_bytes: Option<u64>,
     state_dir: Option<String>,
+    browser_tools_allowlisted: bool,
+    missing_browser_tools: Vec<String>,
     state_key_vault_ref_configured: bool,
     state_encryption_key_env_configured: bool,
     profiles_ready: bool,
@@ -2484,6 +2512,7 @@ fn resolve_browser_config(
     let file_state_dir = document_string(document.as_ref(), "tool_call.browser_service.state_dir");
     let file_state_key_vault_ref =
         document_string(document.as_ref(), "tool_call.browser_service.state_key_vault_ref");
+    let file_allowed_tools = document_string_array(document.as_ref(), "tool_call.allowed_tools");
 
     let env_endpoint = env_optional("PALYRA_BROWSER_SERVICE_ENDPOINT");
     let env_token = env_optional("PALYRA_BROWSER_SERVICE_AUTH_TOKEN");
@@ -2495,6 +2524,8 @@ fn resolve_browser_config(
     let env_state_dir = env_optional("PALYRA_BROWSERD_STATE_DIR");
     let env_state_key_vault_ref = env_optional("PALYRA_BROWSERD_STATE_ENCRYPTION_KEY_VAULT_REF");
     let env_state_encryption_key = env_optional(BROWSERD_STATE_ENCRYPTION_KEY_ENV);
+    let configured_allowed_tools = env_tool_allowlist().unwrap_or(file_allowed_tools);
+    let missing_browser_tools = missing_browser_gateway_tools(configured_allowed_tools.as_slice());
     let state_key_vault_ref = env_state_key_vault_ref.clone().or(file_state_key_vault_ref.clone());
     let state_key_vault_ref_configured = state_key_vault_ref.is_some();
 
@@ -2535,6 +2566,8 @@ fn resolve_browser_config(
             max_screenshot_bytes: env_max_screenshot_bytes.or(file_max_screenshot_bytes),
             max_title_bytes: env_max_title_bytes.or(file_max_title_bytes),
             state_dir: env_state_dir.or(file_state_dir),
+            browser_tools_allowlisted: missing_browser_tools.is_empty(),
+            missing_browser_tools,
             state_key_vault_ref_configured,
             state_encryption_key_env_configured: env_state_encryption_key.is_some(),
             profiles_ready: env_state_encryption_key.is_some(),
@@ -2621,7 +2654,7 @@ fn ensure_browser_service_enabled(
     }
     let enable_command = browser_service_enable_command(config_path);
     anyhow::bail!(
-        "browser service is disabled (tool_call.browser_service.enabled=false).\nNext steps:\n1. Enable the gateway browser service with `{enable_command}`.\n2. Restart the gateway with `palyra gateway run` or restart the running gateway service.\n3. Rerun `palyra browser {action}`."
+        "browser service is disabled (tool_call.browser_service.enabled=false).\nNext steps:\n1. Enable the gateway browser service with `{enable_command}`.\n2. Ensure `tool_call.allowed_tools` includes the `palyra.browser.*` tools for gateway-mediated agent browsing.\n3. Restart the gateway with `palyra gateway run` or restart the running gateway service.\n4. Rerun `palyra browser {action}`."
     );
 }
 
@@ -2675,6 +2708,12 @@ fn browser_status_warnings(
             "browserd is reachable, but the gateway runtime policy could not be verified; if browser service was enabled while the gateway was already running, restart the gateway before using browser action commands"
                 .to_owned(),
         );
+    }
+    if policy.configured_enabled && !policy.browser_tools_allowlisted {
+        warnings.push(format!(
+            "browser service is enabled, but gateway-mediated agent browser tools are not fully allowlisted. Add the missing tools to `tool_call.allowed_tools` ({}) and restart the gateway before expecting agents to use browser actions.",
+            browser_missing_tools_summary(policy.missing_browser_tools.as_slice())
+        ));
     }
     warnings
 }
@@ -2781,6 +2820,33 @@ fn browser_service_enable_command(config_path: Option<&str>) -> String {
     command
 }
 
+fn missing_browser_gateway_tools(allowed_tools: &[String]) -> Vec<String> {
+    let normalized = allowed_tools
+        .iter()
+        .map(|tool| tool.trim().to_ascii_lowercase())
+        .filter(|tool| !tool.is_empty())
+        .collect::<BTreeSet<_>>();
+    BROWSER_GATEWAY_TOOL_NAMES
+        .iter()
+        .filter(|tool| !normalized.contains(**tool))
+        .map(|tool| (*tool).to_owned())
+        .collect()
+}
+
+fn browser_missing_tools_summary(missing_tools: &[String]) -> String {
+    const MAX_EXAMPLES: usize = 5;
+    let examples =
+        missing_tools.iter().take(MAX_EXAMPLES).map(String::as_str).collect::<Vec<_>>().join(", ");
+    if missing_tools.len() <= MAX_EXAMPLES {
+        return examples;
+    }
+    format!(
+        "{} and {} more; full list is in browser status JSON",
+        examples,
+        missing_tools.len() - MAX_EXAMPLES
+    )
+}
+
 fn quote_cli_argument(value: &str) -> String {
     if value.chars().all(|character| {
         character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.' | ':' | '/' | '\\')
@@ -2826,6 +2892,20 @@ fn document_u64(document: Option<&toml::Value>, path: &str) -> Option<u64> {
         .and_then(|value| u64::try_from(value).ok())
 }
 
+fn document_string_array(document: Option<&toml::Value>, path: &str) -> Vec<String> {
+    document
+        .and_then(|document| get_value_at_path(document, path).ok().flatten())
+        .and_then(toml::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str().map(str::trim).map(ToOwned::to_owned))
+                .filter(|value| !value.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn env_optional(name: &str) -> Option<String> {
     env::var(name).ok().map(|value| value.trim().to_owned()).filter(|value| !value.is_empty())
 }
@@ -2836,6 +2916,17 @@ fn env_bool(name: &str) -> Option<bool> {
 
 fn env_u64(name: &str) -> Option<u64> {
     env::var(name).ok().and_then(|value| value.trim().parse::<u64>().ok())
+}
+
+fn env_tool_allowlist() -> Option<Vec<String>> {
+    env_optional("PALYRA_TOOL_CALL_ALLOWED_TOOLS").map(|value| {
+        value
+            .split(',')
+            .map(str::trim)
+            .filter(|tool| !tool.is_empty())
+            .map(ToOwned::to_owned)
+            .collect()
+    })
 }
 
 fn normalize_browser_base_url(raw: String, label: &str) -> Result<String> {
@@ -3102,9 +3193,11 @@ fn format_browser_status_text(payload: &BrowserStatusPayload) -> String {
         payload.health_base_url,
     )];
     lines.push(format!(
-        "browser.policy enabled={} auth_token_configured={} endpoint={} connect_timeout_ms={} request_timeout_ms={} max_screenshot_bytes={} max_title_bytes={}",
+        "browser.policy enabled={} auth_token_configured={} browser_tools_allowlisted={} missing_browser_tools={} endpoint={} connect_timeout_ms={} request_timeout_ms={} max_screenshot_bytes={} max_title_bytes={}",
         payload.policy.configured_enabled,
         payload.policy.auth_token_configured,
+        payload.policy.browser_tools_allowlisted,
+        payload.policy.missing_browser_tools.len(),
         payload.policy.endpoint,
         payload
             .policy
@@ -3694,6 +3787,11 @@ mod tests {
             max_screenshot_bytes: None,
             max_title_bytes: None,
             state_dir: None,
+            browser_tools_allowlisted: false,
+            missing_browser_tools: super::BROWSER_GATEWAY_TOOL_NAMES
+                .iter()
+                .map(|tool| (*tool).to_owned())
+                .collect(),
             state_key_vault_ref_configured: false,
             state_encryption_key_env_configured: false,
             profiles_ready: false,
@@ -3716,6 +3814,8 @@ mod tests {
                 max_screenshot_bytes: None,
                 max_title_bytes: None,
                 state_dir: None,
+                browser_tools_allowlisted: true,
+                missing_browser_tools: Vec::new(),
                 state_key_vault_ref_configured: false,
                 state_encryption_key_env_configured: false,
                 profiles_ready: false,
@@ -4100,6 +4200,8 @@ mod tests {
     fn browser_status_warns_when_gateway_policy_is_stale() {
         let mut policy = disabled_policy();
         policy.configured_enabled = true;
+        policy.browser_tools_allowlisted = true;
+        policy.missing_browser_tools = Vec::new();
         let warnings = browser_status_warnings(
             &policy,
             &BrowserControlPlaneSnapshot {
@@ -4119,6 +4221,35 @@ mod tests {
                     && warning.contains("restart the gateway")
             }),
             "stale gateway policy should produce a restart warning: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn browser_status_warns_when_agent_browser_tools_are_not_allowlisted() {
+        let mut policy = disabled_policy();
+        policy.configured_enabled = true;
+        policy.missing_browser_tools =
+            vec!["palyra.browser.navigate".to_owned(), "palyra.browser.screenshot".to_owned()];
+
+        let warnings = browser_status_warnings(
+            &policy,
+            &BrowserControlPlaneSnapshot {
+                reachable: true,
+                browser_enabled: Some(true),
+                error: None,
+            },
+            true,
+            None,
+            Some(r"C:\Palyra\palyra.toml"),
+        );
+
+        assert!(
+            warnings.iter().any(|warning| {
+                warning.contains("tool_call.allowed_tools")
+                    && warning.contains("palyra.browser.navigate")
+                    && warning.contains("restart the gateway")
+            }),
+            "missing browser tool allowlist should produce actionable guidance: {warnings:?}"
         );
     }
 

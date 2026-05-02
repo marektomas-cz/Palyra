@@ -659,6 +659,29 @@ const LOCAL_DESKTOP_DEFAULT_ALLOWED_TOOLS: &[&str] = &[
     "palyra.routines.query",
     "palyra.http.fetch",
     "palyra.fs.apply_patch",
+    "palyra.browser.session.create",
+    "palyra.browser.session.close",
+    "palyra.browser.navigate",
+    "palyra.browser.click",
+    "palyra.browser.type",
+    "palyra.browser.press",
+    "palyra.browser.select",
+    "palyra.browser.highlight",
+    "palyra.browser.scroll",
+    "palyra.browser.wait_for",
+    "palyra.browser.title",
+    "palyra.browser.screenshot",
+    "palyra.browser.pdf",
+    "palyra.browser.observe",
+    "palyra.browser.network_log",
+    "palyra.browser.console_log",
+    "palyra.browser.reset_state",
+    "palyra.browser.tabs.list",
+    "palyra.browser.tabs.open",
+    "palyra.browser.tabs.switch",
+    "palyra.browser.tabs.close",
+    "palyra.browser.permissions.get",
+    "palyra.browser.permissions.set",
     "palyra.process.run",
 ];
 const LOCAL_DESKTOP_DEFAULT_PROCESS_EXECUTABLES: &[&str] = &["pwd", "echo"];
@@ -9939,6 +9962,14 @@ mod init_command_tests {
         assert!(
             allowed_tools.iter().any(|tool| tool == "palyra.fs.apply_patch"),
             "local init should expose controlled workspace patching"
+        );
+        assert!(
+            allowed_tools.iter().any(|tool| tool == "palyra.browser.navigate"),
+            "local init should allow gateway-mediated browser navigation when the service is enabled"
+        );
+        assert!(
+            allowed_tools.iter().any(|tool| tool == "palyra.browser.screenshot"),
+            "local init should allow gateway-mediated browser inspection when the service is enabled"
         );
         assert_eq!(read_bool(&document, "tool_call.process_runner.enabled"), Some(true));
         assert_eq!(
