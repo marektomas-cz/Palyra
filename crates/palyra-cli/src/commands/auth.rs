@@ -1,6 +1,13 @@
 use crate::*;
 use palyra_control_plane as control_plane;
 
+const AUTH_PROFILES_EMPTY_REGISTRY_NOTE: &str = "This command lists auth-profile registry entries only. Model-provider credentials configured with `palyra configure --section auth-model` can be active vault refs even when this registry is empty; use the model-provider diagnostics commands for MiniMax/model-provider auth state.";
+const AUTH_PROFILES_MODEL_PROVIDER_SOURCES: &[&str] = &[
+    "palyra models status --json",
+    "palyra models test-connection --provider minimax --refresh --json",
+    "palyra secrets inventory --json",
+];
+
 pub(crate) fn run_auth(command: AuthCommand) -> Result<()> {
     match command {
         AuthCommand::Profiles { command } => {
@@ -85,12 +92,14 @@ pub(crate) async fn run_auth_profiles_async(
                 client.list_profiles(request).await.context("failed to call auth ListProfiles")?;
             let payload = response.into_inner();
             if json {
+                let profiles =
+                    payload.profiles.iter().map(auth_profile_to_json).collect::<Vec<_>>();
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&json!({
-                        "profiles": payload.profiles.iter().map(auth_profile_to_json).collect::<Vec<_>>(),
-                        "next_after_profile_id": empty_to_none(payload.next_after_profile_id),
-                    }))?
+                    serde_json::to_string_pretty(&build_auth_profiles_list_json_payload(
+                        profiles,
+                        empty_to_none(payload.next_after_profile_id),
+                    ))?
                 );
             } else {
                 println!(
@@ -109,6 +118,13 @@ pub(crate) async fn run_auth_profiles_async(
                         auth_provider_to_text(profile.provider.as_ref()),
                         auth_scope_to_text(profile.scope.as_ref()),
                         auth_profile_credential_type(profile)
+                    );
+                }
+                if payload.profiles.is_empty() {
+                    println!("auth.profiles.note {}", AUTH_PROFILES_EMPTY_REGISTRY_NOTE);
+                    println!(
+                        "auth.profiles.model_provider_sources {}",
+                        AUTH_PROFILES_MODEL_PROVIDER_SOURCES.join(" | ")
                     );
                 }
             }
@@ -310,6 +326,22 @@ pub(crate) async fn run_auth_profiles_async(
     }
 
     std::io::stdout().flush().context("stdout flush failed")
+}
+
+fn build_auth_profiles_list_json_payload(
+    profiles: Vec<Value>,
+    next_after_profile_id: Option<String>,
+) -> Value {
+    let is_empty = profiles.is_empty();
+    let mut payload = json!({
+        "profiles": profiles,
+        "next_after_profile_id": next_after_profile_id,
+    });
+    if is_empty {
+        payload["empty_registry_note"] = json!(AUTH_PROFILES_EMPTY_REGISTRY_NOTE);
+        payload["model_provider_auth_sources"] = json!(AUTH_PROFILES_MODEL_PROVIDER_SOURCES);
+    }
+    payload
 }
 
 async fn run_auth_profiles_control_plane_async(command: AuthProfilesCommand) -> Result<()> {
@@ -1283,4 +1315,52 @@ fn load_secret_input(
         anyhow::bail!("prompt did not contain a usable secret value");
     }
     Ok(trimmed.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        build_auth_profiles_list_json_payload, AUTH_PROFILES_EMPTY_REGISTRY_NOTE,
+        AUTH_PROFILES_MODEL_PROVIDER_SOURCES,
+    };
+    use serde_json::json;
+
+    #[test]
+    fn empty_auth_profiles_json_points_to_model_provider_auth_sources() {
+        let payload = build_auth_profiles_list_json_payload(Vec::new(), None);
+
+        assert_eq!(payload.get("profiles"), Some(&json!([])));
+        assert!(
+            payload.get("empty_registry_note").and_then(|value| value.as_str()).is_some_and(
+                |note| {
+                    note.contains("configure --section auth-model")
+                        && note.contains("MiniMax/model-provider auth state")
+                }
+            ),
+            "empty auth profile registry should explain model-provider auth diagnostics: {payload}"
+        );
+        assert_eq!(
+            payload.get("model_provider_auth_sources"),
+            Some(&json!(AUTH_PROFILES_MODEL_PROVIDER_SOURCES))
+        );
+    }
+
+    #[test]
+    fn non_empty_auth_profiles_json_stays_focused_on_profiles() {
+        let payload = build_auth_profiles_list_json_payload(
+            vec![json!({"profile_id": "openai-default"})],
+            Some("next-profile".to_owned()),
+        );
+
+        assert!(payload.get("empty_registry_note").is_none());
+        assert!(payload.get("model_provider_auth_sources").is_none());
+        assert_eq!(
+            payload.get("next_after_profile_id").and_then(|value| value.as_str()),
+            Some("next-profile")
+        );
+        assert!(
+            AUTH_PROFILES_EMPTY_REGISTRY_NOTE.contains("auth-profile registry"),
+            "empty-registry note should keep the command boundary explicit"
+        );
+    }
 }
