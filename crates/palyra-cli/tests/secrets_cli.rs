@@ -365,9 +365,65 @@ anthropic_api_key = "sk-test-anthropic-inline"
         Some(1),
         "audit should summarize the inline Anthropic-compatible key warning: {payload}"
     );
+    assert_eq!(
+        payload.pointer("/findings/0/code").and_then(serde_json::Value::as_str),
+        Some("inline_secret_configured"),
+        "audit JSON should expose the warning finding code: {payload}"
+    );
+    assert!(
+        payload
+            .pointer("/findings/0/message")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|message| message.contains("model_provider.anthropic_api_key")),
+        "audit JSON should expose actionable finding details: {payload}"
+    );
     assert!(
         !audit_stdout.contains("sk-test-anthropic-inline"),
         "audit output must not echo inline secret material: {audit_stdout}"
+    );
+    Ok(())
+}
+
+#[test]
+fn secrets_audit_non_json_output_surfaces_redacted_findings() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+    let config_path = workdir.path().join("palyra.toml");
+    fs::write(
+        &config_path,
+        r#"
+version = 1
+
+[model_provider]
+kind = "anthropic"
+auth_provider_kind = "minimax"
+anthropic_model = "MiniMax-M2.7"
+anthropic_api_key = "sk-test-anthropic-inline"
+"#,
+    )
+    .context("failed to write test config")?;
+    let config_arg = config_path.to_string_lossy().into_owned();
+
+    let audit_output =
+        run_cli(&workdir, &["secrets", "audit", "--path", config_arg.as_str(), "--offline"])?;
+    assert!(
+        audit_output.status.success(),
+        "secrets audit should succeed: {}",
+        String::from_utf8_lossy(&audit_output.stderr)
+    );
+    let audit_stdout = String::from_utf8(audit_output.stdout).context("stdout was not UTF-8")?;
+    assert!(
+        audit_stdout.contains(
+            "secrets.finding severity=warning code=inline_secret_configured component=model_provider"
+        ),
+        "audit text output should expose finding details: {audit_stdout}"
+    );
+    assert!(
+        audit_stdout.contains("message=\"model_provider.anthropic_api_key"),
+        "audit text output should include a quoted redacted message: {audit_stdout}"
+    );
+    assert!(
+        !audit_stdout.contains("sk-test-anthropic-inline"),
+        "audit text output must not echo inline secret material: {audit_stdout}"
     );
     Ok(())
 }

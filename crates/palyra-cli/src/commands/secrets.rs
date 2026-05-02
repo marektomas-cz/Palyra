@@ -52,6 +52,17 @@ struct SecretsApplyMode {
 }
 
 #[derive(Debug, Serialize)]
+struct SecretAuditFindingOutput {
+    severity: String,
+    code: String,
+    component: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reference: Option<String>,
+    message: String,
+    remediation: String,
+}
+
+#[derive(Debug, Serialize)]
 struct VaultSecretExplainEnvelope {
     kind: String,
     reference: String,
@@ -214,6 +225,7 @@ pub(crate) fn run_secrets(command: SecretsCommand) -> Result<()> {
                 payload.path.as_str(),
                 payload.runtime_profiles_inspected,
                 payload.runtime_error.is_some(),
+                payload.findings.as_slice(),
                 &payload.summary,
                 output::preferred_json(json),
             )?;
@@ -696,15 +708,18 @@ fn emit_secrets_audit(
     path: &str,
     runtime_profiles_inspected: bool,
     runtime_error_present: bool,
+    findings: &[SecretAuditFinding],
     summary: &SecretAuditSummary,
     json_output: bool,
 ) -> Result<()> {
+    let output_findings = secret_audit_output_findings(findings);
     if json_output {
         output::print_json_pretty(
             &serde_json::json!({
                 "path": path,
                 "runtime_profiles_inspected": runtime_profiles_inspected,
                 "runtime_error_present": runtime_error_present,
+                "findings": output_findings,
                 "summary": {
                     "total_references": summary.total_references,
                     "resolved_references": summary.resolved_references,
@@ -716,11 +731,61 @@ fn emit_secrets_audit(
             "failed to encode secrets audit payload as JSON",
         )?;
     } else {
-        output::print_text_line(
-            "secrets.audit summary=<redacted> use --json for structured output",
-        )?;
+        output::print_text_line(format!(
+            "secrets.audit summary=<redacted> blocking_findings={} warning_findings={} info_findings={} use --json for structured output",
+            summary.blocking_findings, summary.warning_findings, summary.info_findings
+        ).as_str())?;
+        for finding in &output_findings {
+            let reference = finding.reference.as_deref().unwrap_or("none");
+            let message = json_string_text_field(finding.message.as_str())?;
+            let remediation = json_string_text_field(finding.remediation.as_str())?;
+            output::print_text_line(
+                format!(
+                    "secrets.finding severity={} code={} component={} reference={} message={} remediation={}",
+                    finding.severity,
+                    finding.code,
+                    finding.component,
+                    reference,
+                    message,
+                    remediation
+                )
+                .as_str(),
+            )?;
+        }
     }
     std::io::stdout().flush().context("stdout flush failed")
+}
+
+fn secret_audit_output_findings(findings: &[SecretAuditFinding]) -> Vec<SecretAuditFindingOutput> {
+    findings
+        .iter()
+        .map(|finding| {
+            let reference = finding.reference.as_deref();
+            SecretAuditFindingOutput {
+                severity: finding.severity.clone(),
+                code: finding.code.clone(),
+                component: finding.component.clone(),
+                reference: reference.map(|_| "<redacted>".to_owned()),
+                message: redact_secret_audit_finding_text(finding.message.as_str(), reference),
+                remediation: redact_secret_audit_finding_text(
+                    finding.remediation.as_str(),
+                    reference,
+                ),
+            }
+        })
+        .collect()
+}
+
+fn redact_secret_audit_finding_text(value: &str, reference: Option<&str>) -> String {
+    let mut redacted = sanitize_secret_error(value);
+    if let Some(reference) = reference.filter(|reference| !reference.is_empty()) {
+        redacted = redacted.replace(reference, "<redacted>");
+    }
+    redacted
+}
+
+fn json_string_text_field(value: &str) -> Result<String> {
+    serde_json::to_string(value).context("failed to encode secrets audit text field")
 }
 
 fn build_secrets_apply_modes(audit: &SecretAuditPayload) -> Vec<SecretsApplyMode> {
@@ -1096,14 +1161,19 @@ mod tests {
     #[test]
     fn secret_audit_output_redacts_sensitive_fields() {
         let payload = sample_secret_audit_payload();
+        let findings = secret_audit_output_findings(payload.findings.as_slice());
         let output = serde_json::to_string(&serde_json::json!({
             "path": payload.path,
             "runtime_profiles_inspected": payload.runtime_profiles_inspected,
             "runtime_error_present": payload.runtime_error.is_some(),
+            "findings": findings,
             "summary": payload.summary,
         }))
         .expect("audit output should serialize");
         assert!(output.contains("\"runtime_error_present\":true"));
+        assert!(output.contains("\"findings\""));
+        assert!(output.contains("\"reference\":\"<redacted>\""));
+        assert!(output.contains("secret reference present"));
         assert!(!output.contains("vault://global/openai"));
         assert!(!output.contains("resolved from vault"));
         assert!(!output.contains("rotate vault"));
