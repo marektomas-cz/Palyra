@@ -69,6 +69,7 @@ pub(crate) struct RunStreamProviderEventSurface<'a> {
     pub(crate) run_state: &'a mut RunStateMachine,
     pub(crate) model_token_tape_events: &'a mut usize,
     pub(crate) model_token_compaction_emitted: &'a mut bool,
+    pub(crate) allow_sensitive_tools: bool,
 }
 
 pub(crate) struct RouteMessageProviderEventSurface<'a> {
@@ -187,6 +188,7 @@ pub(crate) async fn process_provider_event_for_surface(
                     input_json.as_slice(),
                     tool_catalog_snapshot,
                     remaining_tool_budget,
+                    context.allow_sensitive_tools,
                     tape_seq,
                 )
                 .await?
@@ -246,6 +248,7 @@ pub(crate) async fn process_run_stream_provider_events(
     provider_events: Vec<ProviderEvent>,
     tool_catalog_snapshot: &ModelVisibleToolCatalogSnapshot,
     remaining_tool_budget: &mut u32,
+    allow_sensitive_tools: bool,
     tape_seq: &mut i64,
     model_token_tape_events: &mut usize,
     model_token_compaction_emitted: &mut bool,
@@ -293,6 +296,7 @@ pub(crate) async fn process_run_stream_provider_events(
                     tool_catalog_snapshot,
                     &mut tool_results,
                     remaining_tool_budget,
+                    allow_sensitive_tools,
                     tape_seq,
                 )
                 .await?
@@ -317,6 +321,7 @@ pub(crate) async fn process_run_stream_provider_events(
                     &mut summary_tokens,
                     &mut tool_results,
                     remaining_tool_budget,
+                    allow_sensitive_tools,
                     tape_seq,
                     model_token_tape_events,
                     model_token_compaction_emitted,
@@ -345,6 +350,7 @@ pub(crate) async fn process_run_stream_provider_events(
         tool_catalog_snapshot,
         &mut tool_results,
         remaining_tool_budget,
+        allow_sensitive_tools,
         tape_seq,
     )
     .await?
@@ -373,6 +379,7 @@ async fn flush_pending_run_stream_tool_proposals(
     tool_catalog_snapshot: &ModelVisibleToolCatalogSnapshot,
     tool_results: &mut Vec<RunStreamToolResultForModel>,
     remaining_tool_budget: &mut u32,
+    allow_sensitive_tools: bool,
     tape_seq: &mut i64,
 ) -> Result<RunStreamProviderEventOutcome, Status> {
     if pending_tool_proposals.is_empty() {
@@ -412,6 +419,7 @@ async fn flush_pending_run_stream_tool_proposals(
             proposal.input_json.as_slice(),
             tool_catalog_snapshot,
             remaining_tool_budget,
+            allow_sensitive_tools,
             tape_seq,
         )
         .await?
@@ -533,6 +541,7 @@ async fn process_run_stream_provider_event(
     summary_tokens: &mut Vec<String>,
     tool_results: &mut Vec<RunStreamToolResultForModel>,
     remaining_tool_budget: &mut u32,
+    allow_sensitive_tools: bool,
     tape_seq: &mut i64,
     model_token_tape_events: &mut usize,
     model_token_compaction_emitted: &mut bool,
@@ -555,6 +564,7 @@ async fn process_run_stream_provider_event(
             run_state,
             model_token_tape_events,
             model_token_compaction_emitted,
+            allow_sensitive_tools,
         }),
     )
     .await

@@ -147,6 +147,7 @@ pub(crate) async fn process_run_stream_tool_proposal_event(
     input_json: &[u8],
     tool_catalog_snapshot: &ModelVisibleToolCatalogSnapshot,
     remaining_tool_budget: &mut u32,
+    allow_sensitive_tools: bool,
     tape_seq: &mut i64,
 ) -> Result<RunStreamToolExecutionOutcome, Status> {
     match prepare_run_stream_tool_proposal_event(
@@ -162,6 +163,7 @@ pub(crate) async fn process_run_stream_tool_proposal_event(
         input_json,
         tool_catalog_snapshot,
         remaining_tool_budget,
+        allow_sensitive_tools,
         tape_seq,
     )
     .await?
@@ -199,6 +201,7 @@ pub(crate) async fn prepare_run_stream_tool_proposal_event(
     input_json: &[u8],
     tool_catalog_snapshot: &ModelVisibleToolCatalogSnapshot,
     remaining_tool_budget: &mut u32,
+    allow_sensitive_tools: bool,
     tape_seq: &mut i64,
 ) -> Result<RunStreamToolProposalPreparationOutcome, Status> {
     let NormalizedToolCall { input_json: normalized_input_json, audit } =
@@ -249,6 +252,7 @@ pub(crate) async fn prepare_run_stream_tool_proposal_event(
             tool_name,
             normalized_input_json.as_slice(),
             remaining_tool_budget,
+            allow_sensitive_tools,
             tape_seq,
         )
         .await?;
@@ -762,6 +766,7 @@ async fn prepare_run_stream_tool_proposal_execution(
     tool_name: &str,
     input_json: &[u8],
     remaining_tool_budget: &mut u32,
+    allow_sensitive_tools: bool,
     tape_seq: &mut i64,
 ) -> Result<RunStreamToolProposalPreparation, Status> {
     let resolved_session_id = active_session_id.ok_or_else(|| {
@@ -812,6 +817,7 @@ async fn prepare_run_stream_tool_proposal_execution(
         approval_subject_id.as_str(),
         proposal_approval_required,
         &backend_selection,
+        allow_sensitive_tools,
         tape_seq,
     )
     .await?;
@@ -884,8 +890,27 @@ async fn resolve_run_stream_tool_approval_outcome(
     approval_subject_id: &str,
     proposal_approval_required: bool,
     backend_selection: &ToolProposalBackendSelection,
+    allow_sensitive_tools: bool,
     tape_seq: &mut i64,
 ) -> Result<Option<ToolApprovalOutcome>, Status> {
+    if proposal_approval_required && allow_sensitive_tools {
+        let outcome = allow_sensitive_tools_approval_outcome();
+        send_tool_approval_response_with_tape(
+            sender,
+            runtime_state,
+            run_id,
+            tape_seq,
+            proposal_id,
+            outcome.approval_id.as_str(),
+            outcome.approved,
+            outcome.reason.as_str(),
+            outcome.decision_scope,
+            outcome.decision_scope_ttl_ms,
+        )
+        .await?;
+        return Ok(Some(outcome));
+    }
+
     let cached_approval_outcome = resolve_cached_tool_approval_for_proposal(
         runtime_state,
         request_context,
@@ -1077,6 +1102,17 @@ async fn resolve_run_stream_tool_approval_outcome(
         &response,
     );
     Ok(Some(response))
+}
+
+fn allow_sensitive_tools_approval_outcome() -> ToolApprovalOutcome {
+    ToolApprovalOutcome {
+        approval_id: Ulid::new().to_string(),
+        approved: true,
+        reason: "approved_by_run_stream_allow_sensitive_tools".to_owned(),
+        decision: crate::journal::ApprovalDecision::Allow,
+        decision_scope: crate::journal::ApprovalDecisionScope::Once,
+        decision_scope_ttl_ms: None,
+    }
 }
 
 #[allow(clippy::result_large_err)]
@@ -1446,7 +1482,11 @@ fn truncate_utf8(value: &str, max_bytes: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_tool_parallelism, ToolParallelism};
+    use super::{
+        allow_sensitive_tools_approval_outcome, classify_tool_parallelism, ToolParallelism,
+    };
+    use crate::journal::{ApprovalDecision, ApprovalDecisionScope};
+    use palyra_common::validate_canonical_id;
 
     #[test]
     fn tool_parallelism_classifies_safe_and_unsafe_tools() {
@@ -1472,5 +1512,20 @@ mod tests {
             classify_tool_parallelism("palyra.fs.apply_patch", br#"{"patch":"..."}"#),
             ToolParallelism::Never
         );
+    }
+
+    #[test]
+    fn allow_sensitive_tools_outcome_is_explicit_once_approval() {
+        let outcome = allow_sensitive_tools_approval_outcome();
+
+        assert!(outcome.approved);
+        assert_eq!(outcome.decision, ApprovalDecision::Allow);
+        assert_eq!(outcome.decision_scope, ApprovalDecisionScope::Once);
+        assert!(
+            outcome.reason.contains("allow_sensitive_tools"),
+            "approval reason should identify the run-stream bypass"
+        );
+        validate_canonical_id(outcome.approval_id.as_str())
+            .expect("auto approval id should be canonical");
     }
 }

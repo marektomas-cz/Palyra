@@ -37,12 +37,12 @@ use super::vault::vault_get_requires_approval;
 use super::{
     best_effort_mark_approval_error, common_v1, constant_time_eq,
     enforce_vault_get_approval_policy, enforce_vault_scope_access, ingest_memory_best_effort,
-    resolve_cron_job_channel_for_create, workspace_patch_metrics_from_output,
-    CachedMemorySearchEntry, GatewayAuthConfig, GatewayJournalConfigSnapshot,
-    GatewayRuntimeConfigSnapshot, GatewayRuntimeState, MemoryRuntimeConfig, ProviderRequest,
-    RequestContext, ToolApprovalOutcome, HEADER_CHANNEL, HEADER_DEVICE_ID, HEADER_PRINCIPAL,
-    MAX_APPROVAL_PAGE_LIMIT, VAULT_RATE_LIMIT_MAX_PRINCIPAL_BUCKETS,
-    VAULT_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW,
+    resolve_cron_job_channel_for_create, tool_approval_response_proposal_id,
+    workspace_patch_metrics_from_output, CachedMemorySearchEntry, GatewayAuthConfig,
+    GatewayJournalConfigSnapshot, GatewayRuntimeConfigSnapshot, GatewayRuntimeState,
+    MemoryRuntimeConfig, ProviderRequest, RequestContext, ToolApprovalOutcome, HEADER_CHANNEL,
+    HEADER_DEVICE_ID, HEADER_PRINCIPAL, MAX_APPROVAL_PAGE_LIMIT,
+    VAULT_RATE_LIMIT_MAX_PRINCIPAL_BUCKETS, VAULT_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW,
 };
 use crate::application::tool_security::ToolProposalBackendSelection;
 use crate::application::{
@@ -2739,6 +2739,16 @@ fn approval_required_decision_is_allowed_with_explicit_approval() {
         enforced.reason.contains("explicit approval granted"),
         "allow reason should preserve approval context"
     );
+}
+
+#[test]
+fn tool_approval_response_proposal_id_accepts_provider_tool_call_ids() {
+    let proposal_id = tool_approval_response_proposal_id(Some(common_v1::CanonicalId {
+        ulid: "toolu_01abcDEF_provider".to_owned(),
+    }))
+    .expect("provider tool-call ids should be treated as opaque proposal ids");
+
+    assert_eq!(proposal_id, "toolu_01abcDEF_provider");
 }
 
 #[test]

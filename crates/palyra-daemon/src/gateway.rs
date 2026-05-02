@@ -307,6 +307,14 @@ pub(crate) fn apply_tool_approval_outcome(
     decision
 }
 
+pub(crate) fn tool_approval_response_proposal_id(
+    proposal_id: Option<common_v1::CanonicalId>,
+) -> Result<String, Status> {
+    proposal_id
+        .and_then(|value| non_empty(value.ulid))
+        .ok_or_else(|| Status::invalid_argument("tool_approval_response.proposal_id is required"))
+}
+
 #[allow(clippy::result_large_err)]
 pub(crate) async fn await_tool_approval_response(
     stream: &mut Streaming<common_v1::RunStreamRequest>,
@@ -344,8 +352,7 @@ pub(crate) async fn await_tool_approval_response(
         let Some(response) = message.tool_approval_response else {
             continue;
         };
-        let response_proposal_id =
-            canonical_id(response.proposal_id, "tool_approval_response.proposal_id")?;
+        let response_proposal_id = tool_approval_response_proposal_id(response.proposal_id)?;
         if response_proposal_id != proposal_id {
             return Err(Status::invalid_argument(
                 "tool approval response proposal_id does not match pending tool proposal",
