@@ -1396,6 +1396,27 @@ mod tests {
     }
 
     #[test]
+    fn run_constrained_process_normalizes_repeated_echo_command_arg() {
+        let workspace = std::env::current_dir().expect("workspace current_dir should resolve");
+        let policy = sandbox_policy_with_allowed_executables(workspace, vec!["echo".to_owned()]);
+        let input = br#"{"command":"echo","args":["echo PALYRA_TERMINAL_OK"]}"#;
+
+        let result = run_constrained_process(&policy, input, Duration::from_millis(1_000))
+            .expect("portable echo builtin should execute normalized repeated command args");
+        let output: serde_json::Value =
+            serde_json::from_slice(&result.output_json).expect("output should parse");
+
+        assert_eq!(
+            output.get("stdout").and_then(serde_json::Value::as_str),
+            Some("PALYRA_TERMINAL_OK\n")
+        );
+        assert_eq!(
+            output.get("sandbox_backend").and_then(serde_json::Value::as_str),
+            Some("builtin_portable")
+        );
+    }
+
+    #[test]
     #[cfg(all(unix, not(target_os = "macos")))]
     fn run_constrained_process_executes_allowlisted_command() {
         if Command::new("uname").output().is_err() {

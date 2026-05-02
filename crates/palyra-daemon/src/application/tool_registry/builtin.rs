@@ -261,8 +261,23 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
             object_schema(
                 &["command"],
                 vec![
-                    ("command", json!({"type":"string","maxLength":128})),
-                    ("args", json!({"type":"array","items":{"type":"string"},"maxItems":64})),
+                    (
+                        "command",
+                        json!({
+                            "type":"string",
+                            "maxLength":128,
+                            "description":"Bare executable name only, for example 'echo'. Do not include arguments, shell syntax, or repeat this value in args."
+                        }),
+                    ),
+                    (
+                        "args",
+                        json!({
+                            "type":"array",
+                            "items":{"type":"string"},
+                            "maxItems":64,
+                            "description":"Command arguments only. For `echo hello`, use command='echo' and args=['hello'], not args=['echo hello']."
+                        }),
+                    ),
                     ("cwd", json!({"type":"string"})),
                     (
                         "requested_egress_hosts",

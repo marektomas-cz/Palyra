@@ -26,8 +26,32 @@ pub enum ProcessRunnerToolInputParseError {
 pub fn parse_process_runner_tool_input(
     input_json: &[u8],
 ) -> Result<ProcessRunnerToolInput, ProcessRunnerToolInputParseError> {
-    serde_json::from_slice::<ProcessRunnerToolInput>(input_json)
-        .map_err(|error| ProcessRunnerToolInputParseError::InvalidJson(error.to_string()))
+    let mut input = serde_json::from_slice::<ProcessRunnerToolInput>(input_json)
+        .map_err(|error| ProcessRunnerToolInputParseError::InvalidJson(error.to_string()))?;
+    normalize_repeated_command_argument(&mut input);
+    Ok(input)
+}
+
+fn normalize_repeated_command_argument(input: &mut ProcessRunnerToolInput) {
+    if input.args.len() != 1 {
+        return;
+    }
+    let command = input.command.trim();
+    if command.is_empty() {
+        return;
+    }
+    let argument = input.args[0].trim_start();
+    let Some((first_token, rest)) = argument.split_once(char::is_whitespace) else {
+        if argument.eq_ignore_ascii_case(command) {
+            input.args.clear();
+        }
+        return;
+    };
+    if !first_token.eq_ignore_ascii_case(command) {
+        return;
+    }
+    input.args =
+        rest.split_whitespace().filter(|arg| !arg.is_empty()).map(ToOwned::to_owned).collect();
 }
 
 #[cfg(test)]
@@ -45,6 +69,25 @@ mod tests {
         assert_eq!(parsed.cwd.as_deref(), Some("workspace"));
         assert_eq!(parsed.requested_egress_hosts, vec!["api.example.com"]);
         assert_eq!(parsed.timeout_ms, None);
+    }
+
+    #[test]
+    fn parse_process_runner_tool_input_normalizes_repeated_command_in_single_arg() {
+        let input = br#"{"command":"echo","args":["echo PALYRA_TERMINAL_OK"]}"#;
+        let parsed = parse_process_runner_tool_input(input)
+            .expect("valid process-runner payload should parse");
+
+        assert_eq!(parsed.command, "echo");
+        assert_eq!(parsed.args, vec!["PALYRA_TERMINAL_OK"]);
+    }
+
+    #[test]
+    fn parse_process_runner_tool_input_keeps_literal_command_arg_when_split_already() {
+        let input = br#"{"command":"echo","args":["echo","PALYRA_TERMINAL_OK"]}"#;
+        let parsed = parse_process_runner_tool_input(input)
+            .expect("valid process-runner payload should parse");
+
+        assert_eq!(parsed.args, vec!["echo", "PALYRA_TERMINAL_OK"]);
     }
 
     #[test]
