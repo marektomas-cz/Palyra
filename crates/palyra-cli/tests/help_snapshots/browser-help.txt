@@ -5,6 +5,7 @@ Usage: palyra browser [OPTIONS] <COMMAND>
 Commands:
   status       Show browser service health, policy, and local lifecycle state
   start        Start a local browser service in the background
+  setup        Configure gateway/browserd prerequisites for local browser workflows
   stop         Stop the local browser service started by this CLI
   open         Create a session and immediately navigate it to a URL
   session      Manage browser sessions

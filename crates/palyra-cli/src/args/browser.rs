@@ -26,6 +26,19 @@ pub enum BrowserCommand {
         #[arg(long, default_value_t = 10_000)]
         wait_ms: u64,
         #[arg(long, default_value_t = false)]
+        setup: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    #[command(about = "Configure gateway/browserd prerequisites for local browser workflows")]
+    Setup {
+        #[arg(long)]
+        path: Option<String>,
+        #[arg(long)]
+        token: Option<String>,
+        #[arg(long, default_value_t = false)]
+        force: bool,
+        #[arg(long, default_value_t = false)]
         json: bool,
     },
     #[command(about = "Stop the local browser service started by this CLI")]

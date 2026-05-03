@@ -14,6 +14,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use palyra_common::config_system::get_value_at_path;
 use palyra_control_plane as control_plane;
 use reqwest::{Client as AsyncClient, Url};
+use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -133,6 +134,18 @@ struct BrowserLifecyclePayload {
 }
 
 #[derive(Debug, Clone, Serialize)]
+struct BrowserSetupPayload {
+    config_path: String,
+    browser_service_enabled: bool,
+    auth_token_configured: bool,
+    auth_token_generated: bool,
+    state_key_vault_ref: String,
+    state_key_generated: bool,
+    allowed_tools_added: Vec<String>,
+    migrated: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct BrowserStatusPayload {
     service: &'static str,
     grpc_url: String,
@@ -222,8 +235,11 @@ async fn run_browser_async(command: BrowserCommand) -> Result<()> {
         BrowserCommand::Status { endpoint, health_url, token, json } => {
             run_browser_status(endpoint, health_url, token, json).await
         }
-        BrowserCommand::Start { bin_path, endpoint, health_url, token, wait_ms, json } => {
-            run_browser_start(bin_path, endpoint, health_url, token, wait_ms, json).await
+        BrowserCommand::Start { bin_path, endpoint, health_url, token, wait_ms, setup, json } => {
+            run_browser_start(bin_path, endpoint, health_url, token, wait_ms, setup, json).await
+        }
+        BrowserCommand::Setup { path, token, force, json } => {
+            run_browser_setup(path, token, force, json)
         }
         BrowserCommand::Stop => run_browser_stop(),
         BrowserCommand::Open {
@@ -455,7 +471,10 @@ async fn run_browser_async(command: BrowserCommand) -> Result<()> {
 
 fn browser_command_policy_action(command: &BrowserCommand) -> Option<&'static str> {
     match command {
-        BrowserCommand::Status { .. } | BrowserCommand::Start { .. } | BrowserCommand::Stop => None,
+        BrowserCommand::Status { .. }
+        | BrowserCommand::Start { .. }
+        | BrowserCommand::Setup { .. }
+        | BrowserCommand::Stop => None,
         BrowserCommand::Open { .. } => Some("open"),
         BrowserCommand::Session { command } => Some(browser_session_policy_action(command)),
         BrowserCommand::Profiles { command } => Some(browser_profiles_policy_action(command)),
@@ -600,14 +619,151 @@ async fn run_browser_status(
     )
 }
 
+fn run_browser_setup(
+    path: Option<String>,
+    token: Option<String>,
+    force: bool,
+    json: bool,
+) -> Result<()> {
+    let payload = configure_browser_setup(path, token.as_deref(), force)?;
+    let value = serde_json::to_value(&payload).context("failed to encode browser setup payload")?;
+    emit_browser_value_with_json(
+        &value,
+        format_browser_setup_text(&payload),
+        "failed to encode browser setup output",
+        json,
+    )
+}
+
+fn configure_browser_setup(
+    path: Option<String>,
+    token: Option<&str>,
+    force: bool,
+) -> Result<BrowserSetupPayload> {
+    let token = token.map(str::trim).filter(|value| !value.is_empty()).map(ToOwned::to_owned);
+    let config_path = resolve_config_path(path, false)?;
+    let path_ref = Path::new(&config_path);
+    let (mut document, migration) = load_document_for_mutation(path_ref)
+        .with_context(|| format!("failed to parse {}", path_ref.display()))?;
+
+    set_value_at_path(
+        &mut document,
+        "tool_call.browser_service.enabled",
+        toml::Value::Boolean(true),
+    )?;
+    if document_string(Some(&document), "tool_call.browser_service.endpoint").is_none() {
+        set_value_at_path(
+            &mut document,
+            "tool_call.browser_service.endpoint",
+            toml::Value::String(DEFAULT_BROWSER_GRPC_URL.to_owned()),
+        )?;
+    }
+
+    let existing_auth_token =
+        document_string(Some(&document), "tool_call.browser_service.auth_token");
+    let should_write_auth_token = force || token.is_some() || existing_auth_token.is_none();
+    let mut auth_token_generated = false;
+    if should_write_auth_token {
+        let auth_token = match token {
+            Some(token) => token,
+            None => {
+                auth_token_generated = true;
+                generate_browser_auth_token()
+            }
+        };
+        unset_value_at_path(&mut document, "tool_call.browser_service.auth_token_secret_ref")?;
+        set_value_at_path(
+            &mut document,
+            "tool_call.browser_service.auth_token",
+            toml::Value::String(auth_token),
+        )?;
+    }
+
+    let existing_state_key_ref =
+        document_string(Some(&document), "tool_call.browser_service.state_key_vault_ref");
+    let should_write_state_key = force || existing_state_key_ref.is_none();
+    let state_key_vault_ref = if should_write_state_key {
+        let state_key = generate_browser_state_key()?;
+        validate_browserd_state_encryption_key(state_key.as_str(), "generated browser state key")?;
+        let scope = parse_vault_scope("global")?;
+        let key = "browser_state_key";
+        open_cli_vault()
+            .context("failed to initialize vault runtime")?
+            .put_secret(&scope, key, state_key.as_bytes())
+            .context("failed to store generated browser state key")?;
+        unset_value_at_path(&mut document, "tool_call.browser_service.state_key_secret_ref")?;
+        let vault_ref = format!("{scope}/{key}");
+        set_value_at_path(
+            &mut document,
+            "tool_call.browser_service.state_key_vault_ref",
+            toml::Value::String(vault_ref.clone()),
+        )?;
+        vault_ref
+    } else {
+        existing_state_key_ref.unwrap_or_else(|| "global/browser_state_key".to_owned())
+    };
+
+    let allowed_tools_added = ensure_browser_gateway_tools_allowed(&mut document)?;
+    validate_daemon_compatible_document(&document).with_context(|| {
+        format!("mutated config {} does not match daemon schema", path_ref.display())
+    })?;
+    write_document_with_backups(path_ref, &document, 1)
+        .with_context(|| format!("failed to persist config {}", path_ref.display()))?;
+
+    Ok(BrowserSetupPayload {
+        config_path,
+        browser_service_enabled: true,
+        auth_token_configured: true,
+        auth_token_generated,
+        state_key_vault_ref,
+        state_key_generated: should_write_state_key,
+        allowed_tools_added,
+        migrated: migration.migrated,
+    })
+}
+
+fn ensure_browser_gateway_tools_allowed(document: &mut toml::Value) -> Result<Vec<String>> {
+    let mut allowed_tools = document_string_array(Some(document), "tool_call.allowed_tools");
+    let mut normalized =
+        allowed_tools.iter().map(|tool| tool.trim().to_ascii_lowercase()).collect::<BTreeSet<_>>();
+    let mut added = Vec::new();
+    for tool in BROWSER_GATEWAY_TOOL_NAMES {
+        if normalized.insert((*tool).to_owned()) {
+            allowed_tools.push((*tool).to_owned());
+            added.push((*tool).to_owned());
+        }
+    }
+    set_value_at_path(
+        document,
+        "tool_call.allowed_tools",
+        toml::Value::Array(allowed_tools.into_iter().map(toml::Value::String).collect()),
+    )?;
+    Ok(added)
+}
+
+fn generate_browser_auth_token() -> String {
+    format!("palyra_browser_{}_{}", Ulid::new(), Ulid::new())
+}
+
+fn generate_browser_state_key() -> Result<String> {
+    let rng = SystemRandom::new();
+    let mut key = [0_u8; BROWSERD_STATE_ENCRYPTION_KEY_LEN];
+    rng.fill(&mut key).map_err(|_| anyhow::anyhow!("failed to generate browser state key"))?;
+    Ok(BASE64_STANDARD.encode(key))
+}
+
 async fn run_browser_start(
     bin_path: Option<String>,
     endpoint: Option<String>,
     health_url: Option<String>,
     token: Option<String>,
     wait_ms: u64,
+    setup: bool,
     json: bool,
 ) -> Result<()> {
+    if setup {
+        configure_browser_setup(None, token.as_deref(), false)?;
+    }
     let resolved = resolve_browser_config(endpoint, health_url, token)?;
     ensure_browser_start_preflight(&resolved)?;
     let browserd_state_encryption_key = resolve_browserd_state_encryption_key_for_start(&resolved)?;
@@ -2669,7 +2825,7 @@ fn ensure_browser_start_preflight(resolved: &BrowserResolvedConfig) -> Result<()
         }
     }
     message.push_str(
-        "\n\nAfter applying config changes, restart the gateway with `palyra gateway run` or restart the running gateway service, then rerun `palyra browser start`.",
+        "\n\nRun `palyra browser setup` or `palyra browser start --setup` to create local browser prerequisites, then restart the gateway with `palyra gateway run` or restart the running gateway service and rerun `palyra browser start`.",
     );
 
     Err(anyhow::anyhow!(message))
@@ -2726,7 +2882,7 @@ fn ensure_browser_service_enabled(
     }
     let enable_command = browser_service_enable_command(config_path);
     anyhow::bail!(
-        "browser service is disabled (tool_call.browser_service.enabled=false).\nNext steps:\n1. Enable the gateway browser service with `{enable_command}`.\n2. Ensure `tool_call.allowed_tools` includes the `palyra.browser.*` tools for gateway-mediated agent browsing.\n3. Restart the gateway with `palyra gateway run` or restart the running gateway service.\n4. Rerun `palyra browser {action}`."
+        "browser service is disabled (tool_call.browser_service.enabled=false).\nNext steps:\n1. Run `palyra browser setup` to configure local browser prerequisites, or enable the gateway browser service with `{enable_command}`.\n2. Ensure `tool_call.allowed_tools` includes the `palyra.browser.*` tools for gateway-mediated agent browsing.\n3. Restart the gateway with `palyra gateway run` or restart the running gateway service.\n4. Rerun `palyra browser {action}`."
     );
 }
 
@@ -3354,6 +3510,20 @@ fn format_browser_status_text(payload: &BrowserStatusPayload) -> String {
         ));
     }
     lines.join("\n")
+}
+
+fn format_browser_setup_text(payload: &BrowserSetupPayload) -> String {
+    format!(
+        "browser.setup config_path={} browser_service_enabled={} auth_token_configured={} auth_token_generated={} state_key_vault_ref={} state_key_generated={} allowed_tools_added={} migrated={}",
+        payload.config_path,
+        payload.browser_service_enabled,
+        payload.auth_token_configured,
+        payload.auth_token_generated,
+        payload.state_key_vault_ref,
+        payload.state_key_generated,
+        payload.allowed_tools_added.len(),
+        payload.migrated,
+    )
 }
 
 fn format_browser_lifecycle_text(payload: &BrowserLifecyclePayload) -> String {

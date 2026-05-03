@@ -3598,6 +3598,52 @@ fn parse_browser_start_json_flag() {
                 health_url: None,
                 token: None,
                 wait_ms: 15000,
+                setup: false,
+                json: true,
+            }
+        }
+    );
+}
+
+#[test]
+fn parse_browser_start_setup_flag() {
+    let parsed = Cli::parse_from(["palyra", "browser", "start", "--setup", "--json"]);
+    assert_eq!(
+        parsed.command,
+        Command::Browser {
+            command: BrowserCommand::Start {
+                bin_path: None,
+                endpoint: None,
+                health_url: None,
+                token: None,
+                wait_ms: 10000,
+                setup: true,
+                json: true,
+            }
+        }
+    );
+}
+
+#[test]
+fn parse_browser_setup_command() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "browser",
+        "setup",
+        "--path",
+        "C:/Palyra/palyra.toml",
+        "--token",
+        "browser-token",
+        "--force",
+        "--json",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Browser {
+            command: BrowserCommand::Setup {
+                path: Some("C:/Palyra/palyra.toml".to_owned()),
+                token: Some("browser-token".to_owned()),
+                force: true,
                 json: true,
             }
         }
