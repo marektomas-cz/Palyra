@@ -3938,12 +3938,19 @@ struct ToolApprovalDecision {
     reason: String,
 }
 
+const NONINTERACTIVE_APPROVAL_HINT: &str = "noninteractive CLI cannot approve tool requests; rerun in an interactive terminal or use --allow-sensitive-tools only after reviewing the requested tool risk";
+
+fn approval_required_cli_hint() -> &'static str {
+    NONINTERACTIVE_APPROVAL_HINT
+}
+
 fn prompt_tool_approval_decision(
     approval: &common_v1::ToolApprovalRequest,
 ) -> Result<ToolApprovalDecision> {
     let tool_name = approval.tool_name.trim();
     let summary = approval.request_summary.trim();
     if !std::io::stdin().is_terminal() {
+        eprintln!("agent.approval.non_interactive_hint {}", approval_required_cli_hint());
         return Ok(ToolApprovalDecision {
             approved: false,
             reason: "approval_required_non_interactive_cli".to_owned(),
@@ -4163,13 +4170,14 @@ fn emit_agent_event_text(event: &common_v1::RunStreamEvent) -> Result<()> {
         }
         Some(common_v1::run_stream_event::Body::ToolApprovalRequest(approval_request)) => {
             println!(
-                "agent.tool.approval.request run_id={} proposal_id={} approval_id={} tool_name={} approval_required={} summary=\"{}\"",
+                "agent.tool.approval.request run_id={} proposal_id={} approval_id={} tool_name={} approval_required={} summary=\"{}\" cli_hint=\"{}\"",
                 run_id,
                 redacted_presence_for_output(approval_request.proposal_id.is_some()),
                 redacted_presence_for_output(approval_request.approval_id.is_some()),
                 safe_stream_label_for_output(approval_request.tool_name.as_str()),
                 approval_request.approval_required,
-                redacted_presence_for_output(!approval_request.request_summary.trim().is_empty())
+                redacted_presence_for_output(!approval_request.request_summary.trim().is_empty()),
+                approval_required_cli_hint()
             );
         }
         Some(common_v1::run_stream_event::Body::ToolApprovalResponse(approval_response)) => {
@@ -4375,6 +4383,14 @@ mod agent_stream_output_tests {
         let json = sanitized_optional_json_text(error);
         assert_eq!(json, Value::String("failed with access_token=<redacted>".to_owned()));
     }
+
+    #[test]
+    fn approval_hint_names_interactive_and_override_paths() {
+        let hint = approval_required_cli_hint();
+
+        assert!(hint.contains("interactive"), "{hint}");
+        assert!(hint.contains("--allow-sensitive-tools"), "{hint}");
+    }
 }
 
 fn agent_event_json_value(event: &common_v1::RunStreamEvent) -> serde_json::Value {
@@ -4439,6 +4455,7 @@ fn agent_event_json_value(event: &common_v1::RunStreamEvent) -> serde_json::Valu
                     "details_json": redacted_presence_json_value(!prompt.details_json.is_empty()),
             })),
             "input_json": redacted_presence_json_value(!approval_request.input_json.is_empty()),
+            "cli_hint": approval_required_cli_hint(),
         }),
         Some(common_v1::run_stream_event::Body::ToolApprovalResponse(approval_response)) => json!({
             "type": "tool.approval.response",
