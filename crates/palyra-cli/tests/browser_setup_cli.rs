@@ -62,6 +62,13 @@ fn browser_setup_configures_gateway_and_browserd_prerequisites() -> Result<()> {
         payload.get("state_key_vault_ref").and_then(Value::as_str),
         Some("global/browser_state_key")
     );
+    assert_eq!(payload.get("gateway_reload_required").and_then(Value::as_bool), Some(true));
+    assert!(
+        payload.get("gateway_next_step").and_then(Value::as_str).is_some_and(|value| {
+            value.contains("palyra gateway run") && value.contains("palyra browser open")
+        }),
+        "browser setup should explain gateway reload workflow: {payload}"
+    );
 
     let config_toml = fs::read_to_string(&config_path).context("failed to read config")?;
     assert!(

@@ -142,6 +142,8 @@ struct BrowserSetupPayload {
     state_key_vault_ref: String,
     state_key_generated: bool,
     allowed_tools_added: Vec<String>,
+    gateway_reload_required: bool,
+    gateway_next_step: String,
     migrated: bool,
 }
 
@@ -718,6 +720,8 @@ fn configure_browser_setup(
         state_key_vault_ref,
         state_key_generated: should_write_state_key,
         allowed_tools_added,
+        gateway_reload_required: true,
+        gateway_next_step: browser_setup_gateway_next_step(),
         migrated: migration.migrated,
     })
 }
@@ -761,9 +765,11 @@ async fn run_browser_start(
     setup: bool,
     json: bool,
 ) -> Result<()> {
-    if setup {
-        configure_browser_setup(None, token.as_deref(), false)?;
-    }
+    let setup_payload =
+        if setup { Some(configure_browser_setup(None, token.as_deref(), false)?) } else { None };
+    let setup_warning = setup_payload
+        .as_ref()
+        .map(|payload| browser_setup_gateway_reload_warning(payload.config_path.as_str()));
     let resolved = resolve_browser_config(endpoint, health_url, token)?;
     ensure_browser_start_preflight(&resolved)?;
     let browserd_state_encryption_key = resolve_browserd_state_encryption_key_for_start(&resolved)?;
@@ -775,6 +781,9 @@ async fn run_browser_start(
         false,
         resolved.config_path.as_deref(),
     );
+    if let Some(warning) = setup_warning {
+        lifecycle_warnings.insert(0, warning);
+    }
     lifecycle_warnings.extend(browser_start_auth_token_warnings(&resolved));
     if fetch_browser_health(resolved.connection.health_base_url.as_str()).await.is_ok() {
         let metadata = read_browser_service_metadata()?;
@@ -2860,6 +2869,18 @@ fn browser_gateway_auth_token_setup_warning(config_path: Option<&str>) -> String
     )
 }
 
+fn browser_setup_gateway_next_step() -> String {
+    "Start or restart the gateway so it reloads the browser service config: run `palyra gateway run` or restart the running gateway service, then rerun gateway-mediated browser commands such as `palyra browser open`."
+        .to_owned()
+}
+
+fn browser_setup_gateway_reload_warning(config_path: &str) -> String {
+    format!(
+        "browser setup wrote gateway browser prerequisites to {config_path}. {}",
+        browser_setup_gateway_next_step()
+    )
+}
+
 fn browser_service_auth_token_command(config_path: Option<&str>) -> String {
     let mut command = "palyra config set".to_owned();
     if let Some(path) = config_path.and_then(normalize_optional_text) {
@@ -3514,7 +3535,7 @@ fn format_browser_status_text(payload: &BrowserStatusPayload) -> String {
 
 fn format_browser_setup_text(payload: &BrowserSetupPayload) -> String {
     format!(
-        "browser.setup config_path={} browser_service_enabled={} auth_token_configured={} auth_token_generated={} state_key_vault_ref={} state_key_generated={} allowed_tools_added={} migrated={}",
+        "browser.setup config_path={} browser_service_enabled={} auth_token_configured={} auth_token_generated={} state_key_vault_ref={} state_key_generated={} allowed_tools_added={} gateway_reload_required={} gateway_next_step=\"{}\" migrated={}",
         payload.config_path,
         payload.browser_service_enabled,
         payload.auth_token_configured,
@@ -3522,6 +3543,8 @@ fn format_browser_setup_text(payload: &BrowserSetupPayload) -> String {
         payload.state_key_vault_ref,
         payload.state_key_generated,
         payload.allowed_tools_added.len(),
+        payload.gateway_reload_required,
+        payload.gateway_next_step,
         payload.migrated,
     )
 }
@@ -4025,8 +4048,8 @@ mod tests {
         browser_command_payload_should_emit, browser_command_policy_action, browser_failure_detail,
         browser_identifier_json_value, browser_service_auth_token_command,
         browser_service_enable_command, browser_session_handle_text,
-        browser_snapshot_emits_json_to_stdout, browser_start_auth_token_warnings,
-        browser_status_warnings, ensure_browser_command_success,
+        browser_setup_gateway_reload_warning, browser_snapshot_emits_json_to_stdout,
+        browser_start_auth_token_warnings, browser_status_warnings, ensure_browser_command_success,
         ensure_browser_gateway_auth_token_alignment, ensure_browser_service_enabled,
         ensure_browser_start_preflight, format_browser_session_summary_text,
         normalize_session_scoped_output, redact_browser_output_value, session_summary_value,
@@ -4591,6 +4614,15 @@ mod tests {
             command,
             r#"palyra config set --path C:\Palyra\palyra.toml --key tool_call.browser_service.auth_token --value '"<shared-browser-token>"'"#
         );
+    }
+
+    #[test]
+    fn browser_setup_reload_warning_names_gateway_restart_and_retry() {
+        let warning = browser_setup_gateway_reload_warning(r"C:\Palyra\palyra.toml");
+
+        assert!(warning.contains("C:\\Palyra\\palyra.toml"), "{warning}");
+        assert!(warning.contains("palyra gateway run"), "{warning}");
+        assert!(warning.contains("palyra browser open"), "{warning}");
     }
 
     #[test]
