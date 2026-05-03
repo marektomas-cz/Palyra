@@ -896,7 +896,7 @@ fn default_agent_create_command(signals: &OnboardingSignals) -> String {
         "create".to_owned(),
         "local-default".to_owned(),
         "--display-name".to_owned(),
-        quote_cli_arg("Local Default Agent"),
+        "LocalDefaultAgent".to_owned(),
         "--set-default".to_owned(),
     ];
     if let Some(workspace_root) = signals.workspace_root.as_deref() {
@@ -1021,9 +1021,9 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        build_onboarding_steps, collect_onboarding_signals, derive_posture_status,
-        load_onboarding_document, onboarding_prerequisites_ready, record_cli_first_success,
-        OnboardingSignals, OnboardingVariant,
+        build_onboarding_steps, collect_onboarding_signals, default_agent_create_command,
+        derive_posture_status, load_onboarding_document, onboarding_prerequisites_ready,
+        record_cli_first_success, OnboardingSignals, OnboardingVariant,
     };
     use crate::{app, args::RootOptions};
 
@@ -1088,6 +1088,35 @@ kind = "anthropic"
         let config_step = steps.iter().find(|step| step.step_id == "config").expect("config step");
         let action = config_step.action.as_ref().expect("config step action");
         assert_eq!(action.target, "palyra config list --path C:/portable/palyra.toml");
+    }
+
+    #[test]
+    fn default_agent_create_command_uses_shell_stable_display_name() {
+        let command = default_agent_create_command(&OnboardingSignals {
+            config_exists: true,
+            config_path: "C:/portable/palyra.toml".to_owned(),
+            workspace_root_configured: true,
+            remote_base_url_configured: false,
+            remote_verification_mode: None,
+            remote_posture_safe: true,
+            deployment_warning: None,
+            provider_auth_configured: true,
+            provider_model_selected: true,
+            provider_health_state: "configured".to_owned(),
+            provider_health_message: "configured".to_owned(),
+            model_discovery_ready: true,
+            model_discovery_message: "ready".to_owned(),
+            gateway_runtime_reachable: true,
+            gateway_runtime_message: "reachable".to_owned(),
+            default_agent_configured: false,
+            default_agent_message: "agent registry does not define a default agent".to_owned(),
+            workspace_root: Some("C:/portable".to_owned()),
+            chat_model: Some("MiniMax-M2.7".to_owned()),
+            first_success_completed: false,
+        });
+
+        assert!(command.contains("--display-name LocalDefaultAgent"), "{command}");
+        assert!(!command.contains("\"Local Default Agent\""), "{command}");
     }
 
     #[test]
