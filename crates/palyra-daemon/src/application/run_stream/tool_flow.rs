@@ -33,6 +33,7 @@ use crate::{
         ModelVisibleToolCatalogSnapshot, NormalizedToolCall, ToolArgumentNormalizationAudit,
         ToolCallRejection, ToolResultProjectionPolicy,
     },
+    application::tool_runtime::artifacts::bounded_tool_result_artifact_content,
     application::tool_security::{
         approval_execution_context_for_backend_selection, evaluate_tool_proposal_security,
         record_tool_proposal_decision_audit_trail, resolve_tool_proposal_decision_for_context,
@@ -1358,6 +1359,12 @@ async fn project_tool_result_for_model(
         outcome.output_json.as_slice(),
         budget.max_artifact_preview_bytes,
     );
+    let artifact_max_payload_bytes = runtime_state.tool_result_artifact_max_payload_bytes();
+    let artifact_content = bounded_tool_result_artifact_content(
+        outcome.output_json.as_slice(),
+        artifact_max_payload_bytes,
+    )
+    .map_err(Status::resource_exhausted)?;
     let artifact = runtime_state
         .create_tool_result_artifact(ToolResultArtifactCreateRequest {
             artifact_id: Ulid::new().to_string(),
@@ -1369,7 +1376,7 @@ async fn project_tool_result_for_model(
             sensitivity,
             retention: ArtifactRetentionPolicy::keep(),
             redacted_preview: preview.clone(),
-            content: outcome.output_json.clone(),
+            content: artifact_content.content.clone(),
         })
         .await?;
 
@@ -1395,9 +1402,13 @@ async fn project_tool_result_for_model(
             "max_model_inline_bytes": budget.max_model_inline_bytes,
             "max_model_summary_bytes": budget.max_model_summary_bytes,
             "max_artifact_preview_bytes": budget.max_artifact_preview_bytes,
+            "max_artifact_payload_bytes": artifact_max_payload_bytes,
         },
         "metrics": {
             "spilled_artifacts": 1,
+            "artifact_content_truncated": artifact_content.truncated,
+            "original_artifact_output_bytes": artifact_content.original_output_bytes,
+            "stored_artifact_output_bytes": artifact_content.stored_output_bytes,
             "saved_model_visible_bytes": saved_model_visible_bytes,
         }
     });

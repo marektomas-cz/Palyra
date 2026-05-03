@@ -5320,6 +5320,10 @@ impl fmt::Debug for JournalStore {
 }
 
 impl JournalStore {
+    pub(crate) fn max_payload_bytes(&self) -> usize {
+        self.config.max_payload_bytes
+    }
+
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn open(config: JournalConfig) -> Result<Self, JournalError> {
         Self::open_with_memory_embedding_runtime(

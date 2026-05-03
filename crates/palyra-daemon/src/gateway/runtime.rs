@@ -4321,6 +4321,10 @@ impl GatewayRuntimeState {
             .map_err(|_| Status::internal("tool result artifact create worker panicked"))?
     }
 
+    pub(crate) fn tool_result_artifact_max_payload_bytes(&self) -> usize {
+        self.journal_store.max_payload_bytes()
+    }
+
     #[allow(clippy::result_large_err)]
     fn read_tool_result_artifact_blocking(
         &self,

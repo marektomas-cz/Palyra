@@ -29,6 +29,7 @@ use crate::{
     tool_protocol::{build_tool_execution_outcome, tool_metadata, ToolExecutionOutcome},
 };
 
+use super::artifacts::bounded_tool_result_artifact_content;
 use super::process_registry::{
     BackgroundTaskRecord, BackgroundTaskRegistry, CleanupPolicy, ProcessRegistry,
     RuntimeProcessRecord, RuntimeProcessState,
@@ -676,6 +677,12 @@ async fn create_step_artifact(
 ) -> Result<ToolResultArtifactRef, String> {
     let turn_budget = ToolTurnBudget::default();
     let preview = summarize_output(output_json, turn_budget.max_artifact_preview_bytes);
+    let content = bounded_tool_result_artifact_content(
+        output_json,
+        runtime_state.tool_result_artifact_max_payload_bytes(),
+    )
+    .map_err(|error| format!("failed to prepare tool program step artifact: {error}"))?
+    .content;
     runtime_state
         .create_tool_result_artifact(ToolResultArtifactCreateRequest {
             artifact_id: Ulid::new().to_string(),
@@ -687,7 +694,7 @@ async fn create_step_artifact(
             sensitivity: step_result_sensitivity(step.tool.as_str()),
             retention: ArtifactRetentionPolicy::keep(),
             redacted_preview: preview,
-            content: output_json.to_vec(),
+            content,
         })
         .await
         .map_err(|status| {
