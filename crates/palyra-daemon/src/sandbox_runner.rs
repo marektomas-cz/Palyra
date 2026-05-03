@@ -1226,7 +1226,7 @@ fn build_process_command(
 fn resolve_tier_b_process_program(command: &str) -> PathBuf {
     #[cfg(windows)]
     {
-        return resolve_windows_path_program(command).unwrap_or_else(|| PathBuf::from(command));
+        resolve_windows_path_program(command).unwrap_or_else(|| PathBuf::from(command))
     }
     #[cfg(not(windows))]
     {
