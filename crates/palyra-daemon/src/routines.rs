@@ -28,7 +28,7 @@ const ROUTINES_REGISTRY_FILE: &str = "definitions.json";
 const ROUTINE_RUNS_FILE: &str = "run_metadata.json";
 const MAX_ROUTINE_COUNT: usize = 2_048;
 const MAX_ROUTINE_RUN_METADATA_COUNT: usize = 8_192;
-const MIN_EVERY_INTERVAL_MS: u64 = 5 * 60 * 1_000;
+const MIN_EVERY_INTERVAL_MS: u64 = 60 * 1_000;
 pub const SHADOW_AT_TIMESTAMP_RFC3339: &str = "2100-01-01T00:00:00Z";
 pub const ROUTINE_EXPORT_SCHEMA_ID: &str = "palyra.routine.export.v1";
 pub const ROUTINE_EXPORT_SCHEMA_VERSION: u32 = 1;
@@ -2176,8 +2176,12 @@ fn parse_interval_phrase(
     let normalized = normalize_phrase(phrase);
     let tokens = normalized.split_whitespace().collect::<Vec<_>>();
     let (quantity, unit) = match tokens.as_slice() {
+        ["every", unit @ ("minute" | "minutes")] => ("1", *unit),
         ["every", compact] => split_compact_duration(compact).unwrap_or(("", "")),
         ["every", quantity, unit] => (*quantity, *unit),
+        ["každou", unit @ ("minutu" | "minuty")] | ["kazdou", unit @ ("minutu" | "minuty")] => {
+            ("1", *unit)
+        }
         ["každé", compact] | ["kazde", compact] => {
             split_compact_duration(compact).unwrap_or(("", ""))
         }
@@ -2192,8 +2196,8 @@ fn parse_interval_phrase(
         return Err(RoutineRegistryError::InvalidField {
             field: "phrase",
             message: format!(
-                "repeating schedules must be at least {} minutes apart",
-                MIN_EVERY_INTERVAL_MS / 60_000
+                "repeating schedules must be at least {} second(s) apart",
+                MIN_EVERY_INTERVAL_MS / 1_000
             ),
         });
     }
@@ -2295,7 +2299,9 @@ fn parse_duration_to_ms(
     }
     let normalized = unit.trim().to_lowercase();
     let multiplier = match normalized.as_str() {
-        "m" | "min" | "mins" | "minute" | "minutes" | "minuta" | "minuty" | "minut" => 60_000,
+        "m" | "min" | "mins" | "minute" | "minutes" | "minuta" | "minutu" | "minuty" | "minut" => {
+            60_000
+        }
         "h" | "hr" | "hrs" | "hour" | "hours" | "hod" | "hodina" | "hodiny" | "hodin" => {
             60 * 60_000
         }
@@ -2573,6 +2579,22 @@ mod tests {
         assert_eq!(english.schedule_type, "every");
         assert_eq!(english.schedule_payload["interval_ms"], json!(7_200_000_u64));
 
+        let every_minute =
+            natural_language_schedule_preview("every minute", CronTimezoneMode::Utc, now)
+                .expect("minute interval schedule preview should parse");
+        assert_eq!(every_minute.schedule_type, "every");
+        assert_eq!(every_minute.schedule_payload["interval_ms"], json!(60_000_u64));
+
+        let every_one_minute =
+            natural_language_schedule_preview("every 1 minute", CronTimezoneMode::Utc, now)
+                .expect("explicit minute interval schedule preview should parse");
+        assert_eq!(every_one_minute.schedule_payload["interval_ms"], json!(60_000_u64));
+
+        let czech_minute =
+            natural_language_schedule_preview("každou minutu", CronTimezoneMode::Utc, now)
+                .expect("czech minute interval schedule preview should parse");
+        assert_eq!(czech_minute.schedule_payload["interval_ms"], json!(60_000_u64));
+
         let czech =
             natural_language_schedule_preview("každý pracovní den v 9", CronTimezoneMode::Utc, now)
                 .expect("czech weekday schedule preview should parse");
@@ -2581,11 +2603,11 @@ mod tests {
     }
 
     #[test]
-    fn natural_language_preview_rejects_dangerously_frequent_repeat() {
-        let error = natural_language_schedule_preview("every 1m", CronTimezoneMode::Utc, 0)
-            .expect_err("too-frequent repeat should be rejected");
+    fn natural_language_preview_rejects_zero_repeat() {
+        let error = natural_language_schedule_preview("every 0m", CronTimezoneMode::Utc, 0)
+            .expect_err("zero repeat should be rejected");
         assert!(
-            error.to_string().contains("at least"),
+            error.to_string().contains("greater than zero"),
             "error should explain minimum repeat interval"
         );
     }
