@@ -445,14 +445,8 @@ function Get-PalyraCliCommandRoot {
             throw "Unable to resolve LocalApplicationData for Palyra CLI exposure."
         }
 
-        $windowsApps = Join-Path $localAppData "Microsoft/WindowsApps"
-        if (
-            (Test-PathEntryPresent -Entry $windowsApps -PathValue $env:PATH) -and
-            (Test-DirectoryWritable -Path $windowsApps -Create)
-        ) {
-            return [IO.Path]::GetFullPath($windowsApps)
-        }
-
+        # WindowsApps is reserved for Windows app execution aliases; portable
+        # shims there are not a reliable install target across sessions.
         return Join-Path $localAppData "Palyra/bin"
     }
 
