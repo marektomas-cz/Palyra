@@ -1072,18 +1072,32 @@ fn tool_result_to_provider_message(
     let content = if result.outcome.error.trim().is_empty() {
         output
     } else {
-        json!({
+        let mut content = json!({
             "success": result.outcome.success,
             "tool_name": result.tool_name.as_str(),
             "error": result.outcome.error.as_str(),
             "output": output,
-        })
+        });
+        if let Some(claim_boundary) = failed_tool_claim_boundary(result.tool_name.as_str()) {
+            content["diagnostic_status"] = json!("unknown");
+            content["claim_boundary"] = json!(claim_boundary);
+        }
+        content
     };
     let serialized = serde_json::to_string(&content).map_err(|error| {
         Status::internal(format!("failed to serialize model-visible tool result: {error}"))
     })?;
     let redacted = crate::journal::redact_payload_json(serialized.as_bytes()).unwrap_or(serialized);
     Ok(ProviderMessage::tool_result(result.proposal_id.clone(), redacted))
+}
+
+fn failed_tool_claim_boundary(tool_name: &str) -> Option<&'static str> {
+    match tool_name {
+        crate::gateway::BROWSER_CONSOLE_LOG_TOOL_NAME => Some(
+            "browser console diagnostics failed; console status is unknown, so do not claim the page has no console errors or that the console is clean unless a later successful console diagnostic verifies it",
+        ),
+        _ => None,
+    }
 }
 
 fn terminal_tool_authorization_failure(result: &RunStreamToolResultForModel) -> Option<String> {
@@ -1195,8 +1209,10 @@ async fn persist_run_stream_provider_turn_output(
 mod tests {
     use super::{
         contains_raw_provider_tool_call_markup, terminal_tool_authorization_failure,
-        RunStreamToolResultForModel,
+        tool_result_to_provider_message, RunStreamToolResultForModel,
     };
+    use crate::model_provider::ProviderMessageContentPart;
+    use serde_json::Value;
 
     #[test]
     fn terminal_tool_authorization_failure_detects_approval_errors() {
@@ -1239,6 +1255,43 @@ mod tests {
         assert!(
             terminal_tool_authorization_failure(&result).is_none(),
             "ordinary runtime errors can still be re-fed to the model"
+        );
+    }
+
+    #[test]
+    fn failed_browser_console_result_marks_console_status_unknown_for_model() {
+        let result = RunStreamToolResultForModel {
+            proposal_id: "toolu_console_01".to_owned(),
+            tool_name: crate::gateway::BROWSER_CONSOLE_LOG_TOOL_NAME.to_owned(),
+            outcome: crate::tool_protocol::build_tool_execution_outcome(
+                "toolu_console_01",
+                crate::gateway::BROWSER_CONSOLE_LOG_TOOL_NAME,
+                br#"{"session_id":"browser-session-1"}"#,
+                false,
+                b"{}".to_vec(),
+                "missing caller principal".to_owned(),
+                false,
+                "builtin".to_owned(),
+                "none".to_owned(),
+            ),
+        };
+
+        let message = tool_result_to_provider_message(&result)
+            .expect("failed console tool result should serialize for model");
+        let content = match message.content.first() {
+            Some(ProviderMessageContentPart::Text { text }) => text,
+            _ => panic!("tool result should be serialized as text content"),
+        };
+        let value: Value =
+            serde_json::from_str(content).expect("tool result content should be JSON");
+
+        assert_eq!(value.get("success").and_then(Value::as_bool), Some(false));
+        assert_eq!(value.get("diagnostic_status").and_then(Value::as_str), Some("unknown"));
+        assert!(
+            value.get("claim_boundary").and_then(Value::as_str).is_some_and(
+                |boundary| boundary.contains("do not claim the page has no console errors")
+            ),
+            "{value}"
         );
     }
 
