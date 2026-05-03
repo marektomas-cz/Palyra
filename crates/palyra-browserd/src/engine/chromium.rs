@@ -57,6 +57,89 @@ fn clamp_chromium_snapshot(
     }
 }
 
+const CHROMIUM_PAGE_DIAGNOSTICS_SCRIPT: &str = r#"
+(() => {
+  const rootKey = "__palyraDiagnostics";
+  const state = window[rootKey] = window[rootKey] || {};
+  if (state.installed) {
+    return true;
+  }
+  state.installed = true;
+  state.entries = Array.isArray(state.entries) ? state.entries : [];
+  const stringify = (value) => {
+    try {
+      if (typeof value === "string") return value;
+      return JSON.stringify(value);
+    } catch (_) {
+      return String(value);
+    }
+  };
+  const push = (severity, kind, message, source, stackTrace) => {
+    try {
+      state.entries.push({
+        severity,
+        kind,
+        message: String(message || ""),
+        captured_at_unix_ms: Date.now(),
+        source: String(source || ""),
+        stack_trace: String(stackTrace || ""),
+        page_url: String((window.location && window.location.href) || "")
+      });
+      if (state.entries.length > 512) {
+        state.entries.splice(0, state.entries.length - 512);
+      }
+    } catch (_) {}
+  };
+  const mapSeverity = (level) => {
+    if (level === "warn") return "warn";
+    if (level === "error") return "error";
+    if (level === "debug") return "debug";
+    return "info";
+  };
+  ["debug", "info", "warn", "error", "log"].forEach((level) => {
+    const originalKey = `original_${level}`;
+    if (typeof console[level] !== "function" || state[originalKey]) {
+      return;
+    }
+    state[originalKey] = console[level].bind(console);
+    console[level] = (...args) => {
+      const message = args.map((value) => stringify(value)).join(" ");
+      push(mapSeverity(level), "console", message, `console.${level}`, "");
+      return state[originalKey](...args);
+    };
+  });
+  window.addEventListener("error", (event) => {
+    push(
+      "error",
+      "page_error",
+      event.message || "page error",
+      event.filename || "window.onerror",
+      (event.error && event.error.stack) || ""
+    );
+  });
+  window.addEventListener("unhandledrejection", (event) => {
+    push(
+      "error",
+      "unhandled_rejection",
+      stringify(event.reason),
+      "window.unhandledrejection",
+      ""
+    );
+  });
+  return true;
+})()
+"#;
+
+const CHROMIUM_READ_CONSOLE_LOG_SCRIPT: &str = r#"
+(() => {
+  const state = window.__palyraDiagnostics;
+  if (!state || !Array.isArray(state.entries)) {
+    return "[]";
+  }
+  return JSON.stringify(state.entries);
+})()
+"#;
+
 pub(crate) async fn run_chromium_blocking<T, F>(operation: &str, task: F) -> Result<T, String>
 where
     T: Send + 'static,
@@ -416,6 +499,13 @@ pub(crate) fn configure_chromium_tab(
     tab.enable_request_interception(request_interceptor).map_err(|error| {
         format!("failed to register Chromium request interception callback: {error}")
     })?;
+    tab.call_method(Page::AddScriptToEvaluateOnNewDocument {
+        source: CHROMIUM_PAGE_DIAGNOSTICS_SCRIPT.to_owned(),
+        world_name: None,
+        include_command_line_api: None,
+        run_immediately: None,
+    })
+    .map_err(|error| format!("failed to register Chromium page diagnostics hooks: {error}"))?;
     let remote_ip_guard = Arc::clone(&security_incident);
     let response_policy = Arc::clone(&allow_private_targets);
     tab.register_response_handling(
@@ -716,82 +806,9 @@ async fn chromium_install_page_diagnostics(
     enforce_chromium_remote_ip_guard(runtime, session_id).await?;
     let tab = chromium_tab_for_session(runtime, session_id, tab_id).await?;
     run_chromium_blocking("chromium install page diagnostics", move || {
-        tab.evaluate(
-            r#"
-(() => {
-  const rootKey = "__palyraDiagnostics";
-  const state = window[rootKey] = window[rootKey] || {};
-  if (state.installed) {
-    return true;
-  }
-  state.installed = true;
-  state.entries = Array.isArray(state.entries) ? state.entries : [];
-  const stringify = (value) => {
-    try {
-      if (typeof value === "string") return value;
-      return JSON.stringify(value);
-    } catch (_) {
-      return String(value);
-    }
-  };
-  const push = (severity, kind, message, source, stackTrace) => {
-    try {
-      state.entries.push({
-        severity,
-        kind,
-        message: String(message || ""),
-        captured_at_unix_ms: Date.now(),
-        source: String(source || ""),
-        stack_trace: String(stackTrace || ""),
-        page_url: String((window.location && window.location.href) || "")
-      });
-      if (state.entries.length > 512) {
-        state.entries.splice(0, state.entries.length - 512);
-      }
-    } catch (_) {}
-  };
-  const mapSeverity = (level) => {
-    if (level === "warn") return "warn";
-    if (level === "error") return "error";
-    if (level === "debug") return "debug";
-    return "info";
-  };
-  ["debug", "info", "warn", "error", "log"].forEach((level) => {
-    const originalKey = `original_${level}`;
-    if (typeof console[level] !== "function" || state[originalKey]) {
-      return;
-    }
-    state[originalKey] = console[level].bind(console);
-    console[level] = (...args) => {
-      const message = args.map((value) => stringify(value)).join(" ");
-      push(mapSeverity(level), "console", message, `console.${level}`, "");
-      return state[originalKey](...args);
-    };
-  });
-  window.addEventListener("error", (event) => {
-    push(
-      "error",
-      "page_error",
-      event.message || "page error",
-      event.filename || "window.onerror",
-      (event.error && event.error.stack) || ""
-    );
-  });
-  window.addEventListener("unhandledrejection", (event) => {
-    push(
-      "error",
-      "unhandled_rejection",
-      stringify(event.reason),
-      "window.unhandledrejection",
-      ""
-    );
-  });
-  return true;
-})()
-"#,
-            false,
-        )
-        .map_err(|error| format!("failed to install Chromium page diagnostics hooks: {error}"))?;
+        tab.evaluate(CHROMIUM_PAGE_DIAGNOSTICS_SCRIPT, false).map_err(|error| {
+            format!("failed to install Chromium page diagnostics hooks: {error}")
+        })?;
         Ok(())
     })
     .await?;
@@ -808,26 +825,24 @@ async fn chromium_read_console_log(
     let tab = chromium_tab_for_session(runtime, session_id, tab_id).await?;
     let value = run_chromium_blocking("chromium read console log", move || {
         let value = tab
-            .evaluate(
-                r#"
-(() => {
-  const state = window.__palyraDiagnostics;
-  if (!state || !Array.isArray(state.entries)) {
-    return [];
-  }
-  return state.entries;
-})()
-"#,
-                false,
-            )
+            .evaluate(CHROMIUM_READ_CONSOLE_LOG_SCRIPT, false)
             .map_err(|error| format!("failed to read Chromium console diagnostics: {error}"))?
             .value
-            .unwrap_or(serde_json::Value::Array(Vec::new()));
-        Ok(value)
+            .unwrap_or_else(|| serde_json::Value::String("[]".to_owned()));
+        Ok(decode_chromium_console_entries_value(value))
     })
     .await?;
     enforce_chromium_remote_ip_guard(runtime, session_id).await?;
     Ok(parse_chromium_console_entries(value))
+}
+
+fn decode_chromium_console_entries_value(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::String(raw) => serde_json::from_str::<serde_json::Value>(raw.as_str())
+            .unwrap_or_else(|_| serde_json::Value::Array(Vec::new())),
+        serde_json::Value::Array(_) => value,
+        _ => serde_json::Value::Array(Vec::new()),
+    }
 }
 
 fn parse_chromium_console_entries(value: serde_json::Value) -> Vec<BrowserConsoleEntryInternal> {
@@ -1626,7 +1641,9 @@ pub(crate) async fn export_pdf_with_chromium(
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{
-        chromium_transport_idle_timeout, clamp_chromium_snapshot, ChromiumObserveSnapshot,
+        chromium_transport_idle_timeout, clamp_chromium_snapshot,
+        decode_chromium_console_entries_value, parse_chromium_console_entries,
+        ChromiumObserveSnapshot,
     };
     use crate::DEFAULT_SESSION_IDLE_TTL_MS;
     use std::time::Duration;
@@ -1655,6 +1672,21 @@ mod tests {
         let timeout = chromium_transport_idle_timeout(configured_startup_timeout);
 
         assert_eq!(timeout, Duration::from_millis(DEFAULT_SESSION_IDLE_TTL_MS));
+    }
+
+    #[test]
+    fn parse_chromium_console_entries_accepts_json_string_payload() {
+        let raw = serde_json::Value::String(
+            r#"[{"severity":"error","kind":"console","message":"boom","captured_at_unix_ms":42,"source":"console.error","stack_trace":"","page_url":"http://127.0.0.1/"}]"#
+                .to_owned(),
+        );
+
+        let entries = parse_chromium_console_entries(decode_chromium_console_entries_value(raw));
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].message, "boom");
+        assert_eq!(entries[0].source, "console.error");
+        assert_eq!(entries[0].captured_at_unix_ms, 42);
     }
 }
 
