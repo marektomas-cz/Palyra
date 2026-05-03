@@ -111,6 +111,7 @@ enum RemoteAccessPattern {
 enum HealthStatus {
     ConfigReady,
     RemoteVerified,
+    RuntimeRestartRequired,
     #[default]
     Skipped,
     ManualFollowUpRequired,
@@ -2074,9 +2075,19 @@ fn run_post_apply_health_check(
                     "public bind posture is incomplete; verify TLS paths and dangerous-bind acknowledgement before exposing the daemon".to_owned()
                 },
             });
+            if let Some(runtime_check) =
+                running_gateway_restart_check(context, &document, admin_auth_required)?
+            {
+                checks.push(runtime_check);
+            }
+            let restart_required = checks.iter().any(|check| {
+                matches!(check.status.as_str(), "restart_required" | "restart_recommended")
+            });
             let needs_follow_up = checks.iter().any(|check| check.status != "ok");
             Ok(HealthCheckReport {
-                status: if needs_follow_up {
+                status: if restart_required {
+                    HealthStatus::RuntimeRestartRequired
+                } else if needs_follow_up {
                     HealthStatus::ManualFollowUpRequired
                 } else {
                     HealthStatus::ConfigReady
@@ -2087,12 +2098,76 @@ fn run_post_apply_health_check(
     }
 }
 
+fn running_gateway_restart_check(
+    context: &ApplyContext,
+    document: &toml::Value,
+    admin_auth_required: bool,
+) -> Result<Option<HealthCheckSummary>> {
+    let target = resolve_dashboard_access_target(Some(context.config_path.display().to_string()))?;
+    let http_client = Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .context("failed to build onboarding health HTTP client")?;
+    let status_url = format!("{}/healthz", target.url.trim_end_matches('/'));
+    if fetch_health_with_retry(&http_client, status_url.as_str()).is_err() {
+        return Ok(None);
+    }
+
+    let admin_token = get_string_value_at_path(document, "admin.auth_token")?;
+    let Some(admin_token) = admin_token.filter(|value| !value.trim().is_empty()) else {
+        return Ok(Some(HealthCheckSummary {
+            check: "runtime_config_reload".to_owned(),
+            status: if admin_auth_required { "restart_required" } else { "restart_recommended" }
+                .to_owned(),
+            detail: "gateway is already reachable; restart it after onboarding so the running daemon reloads the updated config"
+                .to_owned(),
+        }));
+    };
+
+    let principal = get_string_value_at_path(document, "admin.bound_principal")?
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_ADMIN_BOUND_PRINCIPAL.to_owned());
+    match fetch_admin_status_payload(
+        &http_client,
+        target.url.as_str(),
+        Some(admin_token),
+        principal,
+        DEFAULT_DEVICE_ID.to_owned(),
+        Some(DEFAULT_CHANNEL.to_owned()),
+        None,
+    ) {
+        Ok(_) => Ok(Some(HealthCheckSummary {
+            check: "runtime_config_reload".to_owned(),
+            status: "restart_recommended".to_owned(),
+            detail: "gateway is already reachable; restart it after onboarding if model-provider, gateway, or runtime settings changed"
+                .to_owned(),
+        })),
+        Err(error) => Ok(Some(HealthCheckSummary {
+            check: "runtime_config_reload".to_owned(),
+            status: "restart_required".to_owned(),
+            detail: format!(
+                "gateway is already reachable but did not accept the newly written admin config: {}. Restart the running gateway so it reloads {}",
+                redact_auth_error(error.to_string().as_str()),
+                context.config_path.display()
+            ),
+        })),
+    }
+}
+
 fn onboarding_summary_next_step(
     flow: WizardFlowKind,
     service_install_mode: ServiceInstallMode,
     health_status: HealthStatus,
     auth_method: &str,
 ) -> (&'static str, Option<&'static str>, Option<&'static str>) {
+    if matches!(health_status, HealthStatus::RuntimeRestartRequired) {
+        return (
+            "configured_runtime_restart_required",
+            Some("gateway_restart"),
+            Some("Restart the already running gateway with `palyra gateway restart`, or stop the current foreground `palyra gateway run` and start it again, then rerun `palyra onboarding status`."),
+        );
+    }
+
     if matches!(health_status, HealthStatus::ManualFollowUpRequired | HealthStatus::Skipped) {
         return (
             "next_step_required",
@@ -3811,6 +3886,24 @@ mod tests {
             }),
             "expected actionable service install warning: {:?}",
             plan.warnings
+        );
+    }
+
+    #[test]
+    fn onboarding_summary_guides_restart_when_gateway_is_already_running() {
+        let (status, recommended_step_id, next_step) = onboarding_summary_next_step(
+            WizardFlowKind::Quickstart,
+            ServiceInstallMode::NotNow,
+            HealthStatus::RuntimeRestartRequired,
+            "minimax-api-key",
+        );
+
+        assert_eq!(status, "configured_runtime_restart_required");
+        assert_eq!(recommended_step_id, Some("gateway_restart"));
+        let next_step = next_step.expect("restart guidance should be present");
+        assert!(
+            next_step.contains("Restart the already running gateway"),
+            "next step should explain restart path: {next_step}"
         );
     }
 

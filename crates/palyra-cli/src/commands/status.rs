@@ -362,9 +362,17 @@ fn build_status_report(
     hints.push("Use `palyra health` for a script-friendly liveness check.".to_owned());
     hints.push("Use `palyra logs --follow` for live journal tailing.".to_owned());
     hints.push("Use `palyra doctor` for prioritized remediation guidance.".to_owned());
+    let runtime_diagnostics_degraded =
+        runtime_diagnostics_are_degraded(should_attempt_admin, runtime_snapshot.as_ref());
     if runtime_snapshot.as_ref().is_some_and(|value| !value.diagnostics_available) {
         hints.push(
             "Provide admin auth to unlock diagnostics for auth, browser, channels, memory, and deployment posture.".to_owned(),
+        );
+    }
+    if runtime_diagnostics_degraded {
+        hints.push(
+            "Authenticated runtime diagnostics failed; if onboarding or configure just changed the config while the gateway was running, restart the gateway so it reloads admin/runtime settings."
+                .to_owned(),
         );
     }
     if deployment.as_ref().is_some_and(|value| value.remote_bind_detected) {
@@ -390,7 +398,8 @@ fn build_status_report(
 
     let degraded = http.error.is_some()
         || grpc.error.is_some()
-        || service.as_ref().is_some_and(|value| value.installed && !value.running);
+        || service.as_ref().is_some_and(|value| value.installed && !value.running)
+        || runtime_diagnostics_degraded;
 
     Ok(StatusReport {
         overall: if degraded { "degraded".to_owned() } else { "ok".to_owned() },
@@ -406,6 +415,13 @@ fn build_status_report(
         runtime: runtime_snapshot,
         hints,
     })
+}
+
+fn runtime_diagnostics_are_degraded(
+    diagnostics_expected: bool,
+    runtime: Option<&StatusRuntimeSnapshot>,
+) -> bool {
+    diagnostics_expected && runtime.is_some_and(|value| !value.diagnostics_available)
 }
 
 fn unavailable_health_surface(error: &str) -> StatusHealthSurface {
@@ -529,5 +545,42 @@ async fn load_runtime_status_snapshot(
             .and_then(|entries| u64::try_from(entries.len()).ok()),
         diagnostics_available: true,
         diagnostics_error: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{runtime_diagnostics_are_degraded, StatusRuntimeSnapshot};
+
+    fn runtime_snapshot(diagnostics_available: bool) -> StatusRuntimeSnapshot {
+        StatusRuntimeSnapshot {
+            deployment_mode: None,
+            bind_profile: None,
+            remote_bind_detected: None,
+            auth_state: None,
+            browser_state: None,
+            browser_sessions: None,
+            connector_degraded: None,
+            connector_queue_depth: None,
+            memory_entries: None,
+            memory_bytes: None,
+            support_bundle_failures: None,
+            self_healing_active_incidents: None,
+            self_healing_resolved_incidents: None,
+            self_healing_heartbeat_count: None,
+            diagnostics_available,
+            diagnostics_error: None,
+        }
+    }
+
+    #[test]
+    fn runtime_diagnostics_degraded_requires_expected_admin_diagnostics() {
+        let unavailable = runtime_snapshot(false);
+        let available = runtime_snapshot(true);
+
+        assert!(runtime_diagnostics_are_degraded(true, Some(&unavailable)));
+        assert!(!runtime_diagnostics_are_degraded(true, Some(&available)));
+        assert!(!runtime_diagnostics_are_degraded(false, Some(&unavailable)));
+        assert!(!runtime_diagnostics_are_degraded(true, None));
     }
 }
