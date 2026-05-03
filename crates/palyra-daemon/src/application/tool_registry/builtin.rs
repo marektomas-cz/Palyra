@@ -40,7 +40,10 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
                 &["query"],
                 vec![
                     ("query", json!({"type":"string","maxLength":8192})),
-                    ("scope", json!({"type":"string","enum":["session","channel","principal"]})),
+                    (
+                        "scope",
+                        json!({"type":"string","enum":["principal","session","channel"],"description":"Defaults to principal for cross-session recall. Use session only for the current session, and channel only for authenticated channel memory."}),
+                    ),
                     ("top_k", json!({"type":"integer","minimum":1,"maximum":20})),
                     ("min_score", json!({"type":"number","minimum":0.0,"maximum":1.0})),
                     ("tags", json!({"type":"array","items":{"type":"string"},"maxItems":16})),
@@ -62,7 +65,10 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
                 vec![
                     ("query", json!({"type":"string","maxLength":8192})),
                     ("channel", json!({"type":"string"})),
-                    ("session_id", json!({"type":"string"})),
+                    (
+                        "session_id",
+                        json!({"type":"string","description":"Optional exact session id. Do not ask users for this for 'previous session' or 'last time'; omit it for principal cross-session recall."}),
+                    ),
                     ("agent_id", json!({"type":"string"})),
                     ("memory_top_k", json!({"type":"integer","minimum":0,"maximum":16})),
                     ("workspace_top_k", json!({"type":"integer","minimum":0,"maximum":16})),

@@ -358,16 +358,9 @@ pub(crate) async fn execute_memory_search_tool(
         );
     }
 
-    let scope = parsed.get("scope").and_then(Value::as_str).unwrap_or("session");
+    let scope = parsed.get("scope").and_then(Value::as_str).unwrap_or("principal");
     let (channel_scope, session_scope, resource) = match scope {
-        "principal" => {
-            let channel_scope = channel.map(str::to_owned);
-            let resource = channel_scope
-                .as_deref()
-                .map(|value| format!("memory:channel:{value}"))
-                .unwrap_or_else(|| "memory:principal".to_owned());
-            (channel_scope, None, resource)
-        }
+        "principal" => (None, None, "memory:principal".to_owned()),
         "channel" => {
             let Some(channel) = channel.map(str::to_owned) else {
                 return memory_tool_execution_outcome(
@@ -738,7 +731,7 @@ pub(crate) async fn execute_memory_recall_tool(
     };
     let request = RecallRequest {
         query,
-        channel: requested_channel.or_else(|| context.channel.map(str::to_owned)),
+        channel: requested_channel,
         session_id: optional_trimmed_string(parsed.get("session_id")),
         agent_id: optional_trimmed_string(parsed.get("agent_id")),
         memory_top_k,

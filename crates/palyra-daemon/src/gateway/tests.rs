@@ -3451,7 +3451,7 @@ async fn memory_recall_tool_finds_principal_memory_without_session_override() {
         .ingest_memory_item(MemoryItemCreateRequest {
             memory_id: "01ARZ3NDEKTSV4RRFFQ69G5FD1".to_owned(),
             principal: context.principal.to_owned(),
-            channel: context.channel.map(str::to_owned),
+            channel: None,
             session_id: None,
             source: MemorySource::Manual,
             content_text: marker.to_owned(),
@@ -3479,6 +3479,50 @@ async fn memory_recall_tool_finds_principal_memory_without_session_override() {
                 .is_some_and(|content| content.contains(marker))
         }),
         "recall tool should surface durable CLI-ingested principal memory: {payload}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn memory_search_tool_defaults_to_principal_cross_session_scope() {
+    let state = build_test_runtime_state(false);
+    let context = routines_tool_test_context();
+    let marker = "PALYRA_E2E_BETA";
+    state
+        .ingest_memory_item(MemoryItemCreateRequest {
+            memory_id: "01ARZ3NDEKTSV4RRFFQ69G5FD3".to_owned(),
+            principal: context.principal.to_owned(),
+            channel: None,
+            session_id: None,
+            source: MemorySource::Manual,
+            content_text: format!("Previous session feature flag was {marker}"),
+            tags: vec!["e2e".to_owned()],
+            confidence: Some(0.95),
+            ttl_unix_ms: None,
+        })
+        .await
+        .expect("manual memory ingest should seed principal search");
+
+    let outcome = execute_memory_search_tool(
+        &state,
+        context.principal,
+        context.channel,
+        "01ARZ3NDEKTSV4RRFFQ69G5FD4",
+        "01ARZ3NDEKTSV4RRFFQ69G5FD5",
+        br#"{"query":"PALYRA_E2E_BETA","top_k":4,"min_score":0.0}"#,
+    )
+    .await;
+
+    assert!(outcome.success, "search tool should succeed: {}", outcome.error);
+    let payload = parse_tool_output_json(&outcome);
+    let hits =
+        payload.get("hits").and_then(Value::as_array).expect("search output should include hits");
+    assert!(
+        hits.iter().any(|hit| {
+            hit.get("content_text")
+                .and_then(Value::as_str)
+                .is_some_and(|content| content.contains(marker))
+        }),
+        "default search should surface principal memory across sessions: {payload}"
     );
 }
 

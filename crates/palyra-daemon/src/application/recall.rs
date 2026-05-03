@@ -659,10 +659,15 @@ async fn execute_recall(
 
     let (memory_hits, memory_diagnostics) =
         if plan_source_selected(plan.sources.as_slice(), RecallSourceKind::Memory) {
+            let memory_channel_scope = if scoped_session_id.is_some() {
+                request.channel.clone().or_else(|| context.channel.clone())
+            } else {
+                request.channel.clone()
+            };
             let outcome = runtime_state
                 .search_memory_with_diagnostics(MemorySearchRequest {
                     principal: context.principal.clone(),
-                    channel: request.channel.clone().or_else(|| context.channel.clone()),
+                    channel: memory_channel_scope,
                     session_id: scoped_session_id.clone(),
                     query: query.to_owned(),
                     top_k: request.memory_top_k.max(1),

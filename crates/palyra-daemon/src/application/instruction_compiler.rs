@@ -7,7 +7,7 @@ use crate::{
     model_provider::{ProviderMessage, ProviderMessageContentPart, ProviderMessageRole},
 };
 
-pub(crate) const INSTRUCTION_COMPILER_VERSION: u32 = 6;
+pub(crate) const INSTRUCTION_COMPILER_VERSION: u32 = 7;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct InstructionTrustSummary {
@@ -171,6 +171,11 @@ fn tool_specific_contract(tool_names: &[String]) -> String {
     if tool_names.iter().any(|tool| tool == "palyra.memory.retain") {
         contracts.push("palyra.memory.retain lifecycle contract: source must be one of manual, summary, import, tape:user_message, or tape:tool_result; use manual for user-stated preferences, corrections, and directives. A successful retain output is authoritative: if durable_memory_write=true and review_state=written, the memory is stored; if durable_memory_write=false, say it was not written and needs review only when review_state says so. Do not claim an approval is pending unless a tool output includes an explicit approval or review identifier.".to_owned());
     }
+    if tool_names.iter().any(|tool| tool == "palyra.memory.search")
+        || tool_names.iter().any(|tool| tool == "palyra.memory.recall")
+    {
+        contracts.push("Palyra memory cross-session contract: for user requests like previous session, last time, earlier, or remembered preference, search principal memory first by omitting session_id or using scope=principal. Do not ask the user for an internal session_id unless the user explicitly wants one exact known session. Use scope=session only for the current active session.".to_owned());
+    }
     if contracts.is_empty() {
         "No tool-specific grammar contracts apply.".to_owned()
     } else {
@@ -254,7 +259,7 @@ mod tests {
         let first = compiler.compile(input.clone());
         let second = compiler.compile(input);
         assert_eq!(first.hash, second.hash);
-        assert_eq!(first.version, 6);
+        assert_eq!(first.version, 7);
         assert_eq!(first.provider_messages().len(), 2);
     }
 
@@ -287,6 +292,19 @@ mod tests {
         assert!(contract.contains("durable_memory_write=true"));
         assert!(contract.contains("review_state=written"));
         assert!(contract.contains("approval"));
+    }
+
+    #[test]
+    fn tool_specific_contract_explains_cross_session_memory() {
+        let contract = super::tool_specific_contract(&[
+            "palyra.memory.search".to_owned(),
+            "palyra.memory.recall".to_owned(),
+        ]);
+
+        assert!(contract.contains("previous session"));
+        assert!(contract.contains("scope=principal"));
+        assert!(contract.contains("internal session_id"));
+        assert!(contract.contains("current active session"));
     }
 
     #[test]
