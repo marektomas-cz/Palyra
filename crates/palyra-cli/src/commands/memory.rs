@@ -958,10 +958,81 @@ fn emit_memory_status(payload: &Value, json_output: bool) -> Result<()> {
         "memory.maintenance interval_ms={} last_run_at_unix_ms={} last_deleted_total={} next_run_at_unix_ms={} next_vacuum_due_at_unix_ms={}",
         interval_ms, last_run_at_ms, last_deleted_total, next_run_at_ms, next_vacuum_due_at_ms
     );
+    if let Some(line) = memory_embeddings_degraded_line(payload) {
+        println!("{line}");
+    }
     if let Some(external_index) = memory_external_index_payload(payload) {
         print_external_index_line("memory.external_index", external_index);
     }
     std::io::stdout().flush().context("stdout flush failed")
+}
+
+fn memory_embeddings_degraded_line(payload: &Value) -> Option<String> {
+    let embeddings = payload.get("embeddings")?;
+    let mode = embeddings.get("mode").and_then(Value::as_str).unwrap_or("unknown");
+    let production_default_active = embeddings
+        .get("production_default_active")
+        .and_then(Value::as_bool)
+        .unwrap_or(mode == "model_provider");
+    let reason_code =
+        embeddings.get("degraded_reason_code").and_then(Value::as_str).unwrap_or("none");
+    let degraded = !production_default_active || mode == "hash_fallback" || reason_code != "none";
+    if !degraded {
+        return None;
+    }
+
+    let warning = embeddings
+        .get("warning")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| memory_embeddings_default_warning(mode, reason_code));
+    let remediation = memory_embeddings_remediation(reason_code);
+    Some(format!(
+        "memory.embeddings.degraded mode={} quality=degraded_hash_fallback production_default_active={} reason_code={} warning={} remediation={}",
+        mode,
+        production_default_active,
+        reason_code,
+        quoted_text_field(warning),
+        quoted_text_field(remediation)
+    ))
+}
+
+fn memory_embeddings_default_warning(mode: &str, reason_code: &str) -> &'static str {
+    match reason_code {
+        "offline_mode_enabled" | "explicit_hash_fallback" => {
+            "memory recall is using the explicit offline hash fallback; semantic similarity quality is degraded"
+        }
+        "embeddings_model_not_configured" => {
+            "memory recall is using hash fallback because no embeddings-capable provider or model is configured"
+        }
+        "embeddings_dimensions_unknown" => {
+            "memory recall is using hash fallback because the configured embeddings dimensions are unknown"
+        }
+        "embeddings_provider_missing_credentials" => {
+            "memory recall is using hash fallback because the embeddings provider credential reference is missing"
+        }
+        _ if mode == "hash_fallback" => {
+            "memory recall is using hash fallback; semantic similarity quality is degraded"
+        }
+        _ => "memory embeddings are degraded; semantic recall quality may be reduced",
+    }
+}
+
+fn memory_embeddings_remediation(reason_code: &str) -> &'static str {
+    match reason_code {
+        "offline_mode_enabled" | "explicit_hash_fallback" => {
+            "disable PALYRA_OFFLINE to use a production embeddings provider, restart the gateway, then run `palyra memory index --until-complete`"
+        }
+        "embeddings_dimensions_unknown" => {
+            "set model_provider.openai_embeddings_dims for the selected embeddings model, restart the gateway, then run `palyra memory index --until-complete`"
+        }
+        "embeddings_provider_missing_credentials" => {
+            "store the embeddings provider credential reference, restart the gateway, then run `palyra memory index --until-complete`"
+        }
+        _ => {
+            "configure an embeddings-capable OpenAI-compatible provider or registry embeddings model, select it with `palyra models set-embeddings <model>`, restart the gateway, then run `palyra memory index --until-complete`; until then memory recall uses hash fallback"
+        }
+    }
 }
 
 fn emit_memory_index(payload: &Value, json_output: bool) -> Result<()> {
@@ -1064,7 +1135,8 @@ fn attach_manual_ingest_visibility(payload: &mut Value) {
 #[cfg(test)]
 mod tests {
     use super::{
-        attach_manual_ingest_visibility, memory_session_scope_label, resolve_optional_query_arg,
+        attach_manual_ingest_visibility, memory_embeddings_degraded_line,
+        memory_session_scope_label, resolve_optional_query_arg,
     };
     use serde_json::json;
 
@@ -1116,5 +1188,37 @@ mod tests {
             payload.pointer("/agent_visibility/recall_for_prompt_preview"),
             Some(&json!("palyra memory recall <query> --json"))
         );
+    }
+
+    #[test]
+    fn memory_status_explains_hash_fallback_quality_and_recovery() {
+        let payload = json!({
+            "embeddings": {
+                "mode": "hash_fallback",
+                "production_default_active": false,
+                "degraded_reason_code": "embeddings_model_not_configured",
+                "warning": "retrieval embeddings defaulted to hash fallback because no embeddings-capable provider or model is configured"
+            }
+        });
+
+        let line = memory_embeddings_degraded_line(&payload)
+            .expect("hash fallback status should produce a diagnostic line");
+
+        assert!(line.contains("quality=degraded_hash_fallback"), "{line}");
+        assert!(line.contains("reason_code=embeddings_model_not_configured"), "{line}");
+        assert!(line.contains("palyra models set-embeddings <model>"), "{line}");
+        assert!(line.contains("palyra memory index --until-complete"), "{line}");
+    }
+
+    #[test]
+    fn memory_status_omits_degraded_line_for_production_embeddings() {
+        let payload = json!({
+            "embeddings": {
+                "mode": "model_provider",
+                "production_default_active": true
+            }
+        });
+
+        assert_eq!(memory_embeddings_degraded_line(&payload), None);
     }
 }
