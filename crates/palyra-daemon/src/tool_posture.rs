@@ -1157,6 +1157,7 @@ pub fn tool_lock_reason(config: &GatewayRuntimeConfigSnapshot, tool_name: &str) 
         ToolCapability::ProcessExec => config.tool_call.process_runner.enabled,
         ToolCapability::Network => true,
         ToolCapability::SecretsRead => true,
+        ToolCapability::FilesystemRead => true,
         ToolCapability::FilesystemWrite => true,
         ToolCapability::ArtifactsRead => true,
     });

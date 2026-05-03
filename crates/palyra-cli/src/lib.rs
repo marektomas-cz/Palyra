@@ -658,6 +658,7 @@ const LOCAL_DESKTOP_DEFAULT_ALLOWED_TOOLS: &[&str] = &[
     "palyra.delegation.query",
     "palyra.routines.query",
     "palyra.http.fetch",
+    "palyra.fs.read_file",
     "palyra.fs.apply_patch",
     "palyra.browser.session.create",
     "palyra.browser.session.close",
@@ -10028,6 +10029,10 @@ mod init_command_tests {
         assert!(
             allowed_tools.iter().any(|tool| tool == "palyra.fs.apply_patch"),
             "local init should expose controlled workspace patching"
+        );
+        assert!(
+            allowed_tools.iter().any(|tool| tool == "palyra.fs.read_file"),
+            "local init should expose controlled workspace file reads"
         );
         assert!(
             allowed_tools.iter().any(|tool| tool == "palyra.browser.navigate"),

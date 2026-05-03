@@ -145,6 +145,8 @@ pub(crate) const MAX_PATCH_TOOL_REDACTION_PATTERNS: usize = 64;
 pub(crate) const MAX_PATCH_TOOL_SECRET_FILE_MARKERS: usize = 64;
 pub(crate) const MAX_PATCH_TOOL_PATTERN_BYTES: usize = 256;
 pub(crate) const MAX_PATCH_TOOL_MARKER_BYTES: usize = 256;
+pub(crate) const MAX_WORKSPACE_READ_FILE_TOOL_INPUT_BYTES: usize = 16 * 1024;
+pub(crate) const MAX_WORKSPACE_READ_FILE_BYTES: u64 = 128 * 1024;
 pub(crate) const MAX_AGENT_STATUS_BINDINGS: usize = 128;
 pub(crate) const MAX_VAULT_SECRET_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_VAULT_LIST_RESULTS: usize = 1_000;
@@ -169,6 +171,7 @@ pub(crate) const ROUTINES_CONTROL_TOOL_NAME: &str = "palyra.routines.control";
 pub(crate) const ARTIFACT_READ_TOOL_NAME: &str = "palyra.artifact.read";
 pub(crate) const DELEGATION_QUERY_TOOL_NAME: &str = "palyra.delegation.query";
 pub(crate) const DELEGATION_CONTROL_TOOL_NAME: &str = "palyra.delegation.control";
+pub(crate) const WORKSPACE_READ_FILE_TOOL_NAME: &str = "palyra.fs.read_file";
 pub(crate) const WORKSPACE_PATCH_TOOL_NAME: &str = "palyra.fs.apply_patch";
 pub(crate) const PROCESS_RUNNER_TOOL_NAME: &str = "palyra.process.run";
 pub(crate) const HTTP_FETCH_TOOL_NAME: &str = "palyra.http.fetch";
@@ -591,6 +594,14 @@ pub(crate) async fn execute_tool_with_runtime_dispatch(
         .await
     } else if tool_name == ARTIFACT_READ_TOOL_NAME {
         crate::application::tool_runtime::artifacts::execute_artifact_read_tool(
+            runtime_state,
+            context,
+            proposal_id,
+            input_json,
+        )
+        .await
+    } else if tool_name == WORKSPACE_READ_FILE_TOOL_NAME {
+        crate::application::tool_runtime::workspace_file::execute_workspace_read_file_tool(
             runtime_state,
             context,
             proposal_id,

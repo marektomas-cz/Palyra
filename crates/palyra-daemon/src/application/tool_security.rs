@@ -242,6 +242,7 @@ fn backend_capability_label(capability: ToolCapability) -> &'static str {
         ToolCapability::ProcessExec => "process_exec",
         ToolCapability::Network => "network",
         ToolCapability::SecretsRead => "secrets_read",
+        ToolCapability::FilesystemRead => "filesystem_read",
         ToolCapability::FilesystemWrite => "filesystem_write",
         ToolCapability::ArtifactsRead => "artifacts_read",
     }
@@ -265,6 +266,7 @@ pub(crate) fn evaluate_backend_capability_gate(
                         capability,
                         ToolCapability::ProcessExec
                             | ToolCapability::SecretsRead
+                            | ToolCapability::FilesystemRead
                             | ToolCapability::FilesystemWrite
                     )
                 })
@@ -784,6 +786,16 @@ mod tests {
         assert!(!decision.allowed);
         assert!(decision.reason.contains("backend.policy.capability_denied"));
         assert!(decision.reason.contains("filesystem_write"));
+    }
+
+    #[test]
+    fn networked_worker_backend_denies_filesystem_read_tools() {
+        let selection = networked_worker_selection();
+        let decision = evaluate_backend_capability_gate("palyra.fs.read_file", &selection)
+            .expect("filesystem read should be blocked on networked workers");
+        assert!(!decision.allowed);
+        assert!(decision.reason.contains("backend.policy.capability_denied"));
+        assert!(decision.reason.contains("filesystem_read"));
     }
 
     #[test]

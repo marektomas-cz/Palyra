@@ -165,6 +165,21 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
             ToolResultProjectionPolicy::InlineUnlessLarge,
         ),
         entry(
+            "palyra.fs.read_file",
+            "Read a bounded chunk from a file inside the current agent workspace root.",
+            object_schema(
+                &["path"],
+                vec![
+                    ("path", json!({"type":"string"})),
+                    ("offset_bytes", json!({"type":"integer","minimum":0})),
+                    ("max_bytes", json!({"type":"integer","minimum":1})),
+                ],
+                false,
+            ),
+            ToolParallelismPolicy::ReadOnly,
+            ToolResultProjectionPolicy::InlineUnlessLarge,
+        ),
+        entry(
             "palyra.delegation.query",
             "Inspect delegated child tasks, child run status and merge previews in the current scope.",
             object_schema(

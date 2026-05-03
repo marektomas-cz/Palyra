@@ -48,6 +48,7 @@ pub enum ToolCapability {
     ProcessExec,
     Network,
     SecretsRead,
+    FilesystemRead,
     FilesystemWrite,
     ArtifactsRead,
 }
@@ -59,6 +60,7 @@ impl ToolCapability {
             Self::ProcessExec => "process_exec",
             Self::Network => "network",
             Self::SecretsRead => "secrets_read",
+            Self::FilesystemRead => "filesystem_read",
             Self::FilesystemWrite => "filesystem_write",
             Self::ArtifactsRead => "artifacts_read",
         }
@@ -134,6 +136,7 @@ const UNSUPPORTED_TOOL_DENY_REASON: &str =
 const TOOL_MAX_SLEEP_MS: u64 = 5_000;
 const EMPTY_TOOL_CAPABILITIES: &[ToolCapability] = &[];
 const PROCESS_RUNNER_CAPABILITIES: &[ToolCapability] = &[ToolCapability::ProcessExec];
+const WORKSPACE_FILE_READ_CAPABILITIES: &[ToolCapability] = &[ToolCapability::FilesystemRead];
 const WORKSPACE_PATCH_CAPABILITIES: &[ToolCapability] = &[ToolCapability::FilesystemWrite];
 const NETWORK_TOOL_CAPABILITIES: &[ToolCapability] = &[ToolCapability::Network];
 const ARTIFACT_READ_CAPABILITIES: &[ToolCapability] = &[ToolCapability::ArtifactsRead];
@@ -153,12 +156,13 @@ const MAX_DELEGATION_CONTROL_TOOL_INPUT_BYTES: usize = 64 * 1024;
 const MAX_HTTP_FETCH_TOOL_INPUT_BYTES: usize = 64 * 1024;
 const MAX_PROCESS_RUNNER_TOOL_INPUT_BYTES: usize = 128 * 1024;
 const MAX_TOOL_PROGRAM_RUN_TOOL_INPUT_BYTES: usize = 256 * 1024;
+const MAX_WORKSPACE_READ_FILE_TOOL_INPUT_BYTES: usize = 16 * 1024;
 const MAX_WORKSPACE_PATCH_TOOL_INPUT_BYTES: usize = 256 * 1024;
 const MAX_BROWSER_TOOL_INPUT_BYTES: usize = 128 * 1024;
 const MAX_ARTIFACT_READ_TOOL_INPUT_BYTES: usize = 16 * 1024;
 const MAX_WASM_PLUGIN_TOOL_INPUT_BYTES: usize = 448 * 1024;
 const SENSITIVE_CAPABILITY_POLICY_NAMES: &[&str] =
-    &["process_exec", "network", "secrets_read", "filesystem_write"];
+    &["process_exec", "network", "secrets_read", "filesystem_read", "filesystem_write"];
 
 pub fn tool_policy_snapshot(config: &ToolCallConfig) -> ToolCallPolicySnapshot {
     ToolCallPolicySnapshot {
@@ -333,6 +337,10 @@ pub fn tool_metadata(tool_name: &str) -> Option<ToolMetadata> {
         "palyra.tool_program.run" => {
             Some(ToolMetadata { capabilities: EMPTY_TOOL_CAPABILITIES, default_sensitive: true })
         }
+        "palyra.fs.read_file" => Some(ToolMetadata {
+            capabilities: WORKSPACE_FILE_READ_CAPABILITIES,
+            default_sensitive: true,
+        }),
         "palyra.fs.apply_patch" => Some(ToolMetadata {
             capabilities: WORKSPACE_PATCH_CAPABILITIES,
             default_sensitive: true,
@@ -425,6 +433,7 @@ pub fn tool_requires_approval(tool_name: &str) -> bool {
                 ToolCapability::ProcessExec
                     | ToolCapability::Network
                     | ToolCapability::SecretsRead
+                    | ToolCapability::FilesystemRead
                     | ToolCapability::FilesystemWrite
             )
         })
@@ -714,6 +723,14 @@ async fn run_allowlisted_tool(
             executor: "workspace_patch".to_owned(),
             sandbox_enforcement: "workspace_roots".to_owned(),
         },
+        "palyra.fs.read_file" => ToolExecutionRawResult {
+            success: false,
+            output_json: b"{}".to_vec(),
+            error: "palyra.fs.read_file requires gateway workspace context".to_owned(),
+            timed_out: false,
+            executor: "workspace_file".to_owned(),
+            sandbox_enforcement: "workspace_roots".to_owned(),
+        },
         "palyra.browser.session.create"
         | "palyra.browser.session.close"
         | "palyra.browser.navigate"
@@ -773,6 +790,7 @@ fn is_runtime_supported_tool(tool_name: &str) -> bool {
             | "palyra.http.fetch"
             | "palyra.process.run"
             | "palyra.tool_program.run"
+            | "palyra.fs.read_file"
             | "palyra.fs.apply_patch"
             | "palyra.browser.session.create"
             | "palyra.browser.session.close"
@@ -806,6 +824,8 @@ fn tool_executor_name(config: &ToolCallConfig, tool_name: &str) -> String {
         process_runner_executor_name(&config.process_runner)
     } else if tool_name == "palyra.tool_program.run" {
         "tool_program_runtime".to_owned()
+    } else if tool_name == "palyra.fs.read_file" {
+        "workspace_file".to_owned()
     } else if tool_name == "palyra.fs.apply_patch" {
         "workspace_patch".to_owned()
     } else if tool_name == "palyra.http.fetch" {
@@ -849,6 +869,7 @@ fn tool_input_limit_bytes(tool_name: &str) -> usize {
         "palyra.http.fetch" => MAX_HTTP_FETCH_TOOL_INPUT_BYTES,
         "palyra.process.run" => MAX_PROCESS_RUNNER_TOOL_INPUT_BYTES,
         "palyra.tool_program.run" => MAX_TOOL_PROGRAM_RUN_TOOL_INPUT_BYTES,
+        "palyra.fs.read_file" => MAX_WORKSPACE_READ_FILE_TOOL_INPUT_BYTES,
         "palyra.fs.apply_patch" => MAX_WORKSPACE_PATCH_TOOL_INPUT_BYTES,
         "palyra.browser.session.create"
         | "palyra.browser.session.close"
@@ -883,6 +904,8 @@ fn sandbox_enforcement_for_tool(config: &ToolCallConfig, tool_name: &str) -> Str
         config.process_runner.egress_enforcement_mode.as_str().to_owned()
     } else if tool_name == "palyra.tool_program.run" {
         "nested_tool_policy".to_owned()
+    } else if tool_name == "palyra.fs.read_file" {
+        "workspace_roots".to_owned()
     } else if tool_name == "palyra.fs.apply_patch" {
         "workspace_roots".to_owned()
     } else if tool_name == "palyra.http.fetch" {
@@ -1410,6 +1433,7 @@ mod tests {
         assert!(tool_requires_approval("palyra.routines.control"));
         assert!(tool_requires_approval("palyra.http.fetch"));
         assert!(tool_requires_approval("palyra.process.run"));
+        assert!(tool_requires_approval("palyra.fs.read_file"));
         assert!(tool_requires_approval("palyra.fs.apply_patch"));
         assert!(tool_requires_approval("palyra.tool_program.run"));
         assert!(tool_requires_approval("palyra.browser.session.create"));
@@ -1447,6 +1471,14 @@ mod tests {
         assert_eq!(metadata.capabilities, &[ToolCapability::ArtifactsRead]);
         assert!(!metadata.default_sensitive);
         assert!(!tool_requires_approval("palyra.artifact.read"));
+    }
+
+    #[test]
+    fn workspace_read_file_tool_exposes_sensitive_filesystem_read_capability() {
+        let metadata = tool_metadata("palyra.fs.read_file").expect("workspace read metadata");
+        assert_eq!(metadata.capabilities, &[ToolCapability::FilesystemRead]);
+        assert!(metadata.default_sensitive);
+        assert!(tool_requires_approval("palyra.fs.read_file"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1493,6 +1525,33 @@ mod tests {
         );
         assert_eq!(outcome.attestation.executor, "tool_program_runtime");
         assert_eq!(outcome.attestation.sandbox_enforcement, "nested_tool_policy");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn execute_tool_call_workspace_read_file_requires_gateway_runtime_context() {
+        let config = ToolCallConfig {
+            allowed_tools: vec!["palyra.fs.read_file".to_owned()],
+            max_calls_per_run: 1,
+            execution_timeout_ms: 250,
+            process_runner: default_process_runner_policy(),
+            wasm_runtime: default_wasm_runtime_policy(),
+        };
+        let outcome = execute_tool_call(
+            &config,
+            "01ARZ3NDEKTSV4RRFFQ69G5FAC",
+            "palyra.fs.read_file",
+            br#"{"path":"agent-e2e-tool-test.js"}"#,
+        )
+        .await;
+
+        assert!(!outcome.success, "generic tool executor should not run workspace file reads");
+        assert!(
+            outcome.error.contains("requires gateway workspace context"),
+            "delegated executor error should be explicit: {}",
+            outcome.error
+        );
+        assert_eq!(outcome.attestation.executor, "workspace_file");
+        assert_eq!(outcome.attestation.sandbox_enforcement, "workspace_roots");
     }
 
     #[tokio::test(flavor = "multi_thread")]
