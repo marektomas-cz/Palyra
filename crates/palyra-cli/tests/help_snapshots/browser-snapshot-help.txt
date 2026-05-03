@@ -13,6 +13,7 @@ Options:
       --max-accessibility-tree-bytes <MAX_ACCESSIBILITY_TREE_BYTES>
       --max-visible-text-bytes <MAX_VISIBLE_TEXT_BYTES>
       --output <OUTPUT>
+      --json
   -h, --help                                                         Print help
 
 Global Options:

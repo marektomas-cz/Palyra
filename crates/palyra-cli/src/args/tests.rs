@@ -3790,9 +3790,45 @@ fn parse_browser_snapshot_with_output() {
                 max_accessibility_tree_bytes: None,
                 max_visible_text_bytes: Some(4096),
                 output: Some("artifacts/browser-snapshot.json".to_owned()),
+                json: false,
             }
         }
     );
+}
+
+#[test]
+fn parse_browser_local_json_flags() {
+    let session_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+
+    let snapshot = Cli::parse_from(["palyra", "browser", "snapshot", session_id, "--json"]);
+    assert!(matches!(
+        snapshot.command,
+        Command::Browser { command: BrowserCommand::Snapshot { json: true, .. } }
+    ));
+
+    let screenshot = Cli::parse_from(["palyra", "browser", "screenshot", session_id, "--json"]);
+    assert!(matches!(
+        screenshot.command,
+        Command::Browser { command: BrowserCommand::Screenshot { json: true, .. } }
+    ));
+
+    let title = Cli::parse_from(["palyra", "browser", "title", session_id, "--json"]);
+    assert!(matches!(
+        title.command,
+        Command::Browser { command: BrowserCommand::Title { json: true, .. } }
+    ));
+
+    let network = Cli::parse_from(["palyra", "browser", "network", session_id, "--json"]);
+    assert!(matches!(
+        network.command,
+        Command::Browser { command: BrowserCommand::Network { json: true, .. } }
+    ));
+
+    let errors = Cli::parse_from(["palyra", "browser", "errors", session_id, "--json"]);
+    assert!(matches!(
+        errors.command,
+        Command::Browser { command: BrowserCommand::Errors { json: true, .. } }
+    ));
 }
 
 #[test]

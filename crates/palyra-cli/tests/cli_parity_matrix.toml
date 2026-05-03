@@ -893,7 +893,7 @@ path = "browser snapshot"
 category = "nested_surface"
 status = "done"
 summary = "Browser snapshot action contract."
-required_flags = ["include-dom-snapshot", "include-visible-text", "output"]
+required_flags = ["include-dom-snapshot", "include-visible-text", "output", "json"]
 
 [entries.snapshot]
 path = "browser snapshot"

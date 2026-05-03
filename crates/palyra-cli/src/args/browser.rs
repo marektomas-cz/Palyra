@@ -178,6 +178,8 @@ pub enum BrowserCommand {
         max_visible_text_bytes: Option<u64>,
         #[arg(long)]
         output: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     #[command(about = "Capture a screenshot from the active tab")]
     Screenshot {
@@ -188,12 +190,16 @@ pub enum BrowserCommand {
         format: Option<String>,
         #[arg(long)]
         output: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     #[command(about = "Read the active page title")]
     Title {
         session_id: String,
         #[arg(long)]
         max_title_bytes: Option<u64>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     #[command(about = "Read the bounded network log for the active tab")]
     Network {
@@ -204,6 +210,8 @@ pub enum BrowserCommand {
         include_headers: bool,
         #[arg(long)]
         max_payload_bytes: Option<u64>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     #[command(about = "Inspect cookies and storage for a browser session")]
     Storage {
@@ -222,6 +230,8 @@ pub enum BrowserCommand {
         limit: Option<u32>,
         #[arg(long)]
         output: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     #[command(about = "Export a trace-like debug artifact for a browser session")]
     Trace {

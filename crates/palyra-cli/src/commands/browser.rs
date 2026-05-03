@@ -199,6 +199,7 @@ struct BrowserSnapshotArgs {
     max_accessibility_tree_bytes: Option<u64>,
     max_visible_text_bytes: Option<u64>,
     output: Option<String>,
+    json: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -383,6 +384,7 @@ async fn run_browser_async(command: BrowserCommand) -> Result<()> {
             max_accessibility_tree_bytes,
             max_visible_text_bytes,
             output,
+            json,
         } => {
             run_browser_snapshot(BrowserSnapshotArgs {
                 session_id,
@@ -393,23 +395,24 @@ async fn run_browser_async(command: BrowserCommand) -> Result<()> {
                 max_accessibility_tree_bytes,
                 max_visible_text_bytes,
                 output,
+                json,
             })
             .await
         }
-        BrowserCommand::Screenshot { session_id, max_bytes, format, output } => {
-            run_browser_screenshot(session_id, max_bytes, format, output).await
+        BrowserCommand::Screenshot { session_id, max_bytes, format, output, json } => {
+            run_browser_screenshot(session_id, max_bytes, format, output, json).await
         }
-        BrowserCommand::Title { session_id, max_title_bytes } => {
-            run_browser_title(session_id, max_title_bytes).await
+        BrowserCommand::Title { session_id, max_title_bytes, json } => {
+            run_browser_title(session_id, max_title_bytes, json).await
         }
-        BrowserCommand::Network { session_id, limit, include_headers, max_payload_bytes } => {
-            run_browser_network(session_id, limit, include_headers, max_payload_bytes).await
+        BrowserCommand::Network { session_id, limit, include_headers, max_payload_bytes, json } => {
+            run_browser_network(session_id, limit, include_headers, max_payload_bytes, json).await
         }
         BrowserCommand::Storage { session_id, principal, output } => {
             run_browser_storage(session_id, principal, output).await
         }
-        BrowserCommand::Errors { session_id, principal, limit, output } => {
-            run_browser_errors(session_id, principal, limit, output).await
+        BrowserCommand::Errors { session_id, principal, limit, output, json } => {
+            run_browser_errors(session_id, principal, limit, output, json).await
         }
         BrowserCommand::Trace { session_id, principal, output } => {
             run_browser_trace(session_id, principal, output).await
@@ -1632,6 +1635,7 @@ async fn run_browser_snapshot(args: BrowserSnapshotArgs) -> Result<()> {
         max_accessibility_tree_bytes,
         max_visible_text_bytes,
         output,
+        json,
     } = args;
     let context =
         client::control_plane::connect_admin_console(app::ConnectionOverrides::default()).await?;
@@ -1669,6 +1673,7 @@ async fn run_browser_snapshot(args: BrowserSnapshotArgs) -> Result<()> {
         ),
         written.is_some(),
         "failed to encode browser snapshot output",
+        json,
     )
 }
 
@@ -1677,6 +1682,7 @@ async fn run_browser_screenshot(
     max_bytes: Option<u64>,
     format: Option<String>,
     output: Option<String>,
+    json: bool,
 ) -> Result<()> {
     let context =
         client::control_plane::connect_admin_console(app::ConnectionOverrides::default()).await?;
@@ -1706,7 +1712,7 @@ async fn run_browser_screenshot(
     strip_large_binary_fields(&mut value, output_path.is_some(), &["image_base64"]);
     maybe_attach_output_path(&mut value, output_path.as_ref());
     normalize_session_scoped_output(&mut value, session_id.as_str());
-    let mode = browser_output_mode();
+    let mode = if json { BrowserOutputMode::Json } else { browser_output_mode() };
     if browser_command_payload_should_emit(mode, success) {
         emit_browser_value_for_mode(
             &value,
@@ -1724,7 +1730,11 @@ async fn run_browser_screenshot(
     ensure_browser_command_success("browser.screenshot", success, error.as_str())
 }
 
-async fn run_browser_title(session_id: String, max_title_bytes: Option<u64>) -> Result<()> {
+async fn run_browser_title(
+    session_id: String,
+    max_title_bytes: Option<u64>,
+    json: bool,
+) -> Result<()> {
     let context =
         client::control_plane::connect_admin_console(app::ConnectionOverrides::default()).await?;
     let envelope = context
@@ -1740,7 +1750,7 @@ async fn run_browser_title(session_id: String, max_title_bytes: Option<u64>) -> 
     let mut value =
         serde_json::to_value(&envelope).context("failed to encode browser title output")?;
     normalize_session_scoped_output(&mut value, session_id.as_str());
-    emit_browser_value(
+    emit_browser_value_with_json(
         &value,
         format!(
             "browser.title session_id={} success={} title={}",
@@ -1749,6 +1759,7 @@ async fn run_browser_title(session_id: String, max_title_bytes: Option<u64>) -> 
             empty_as_dash(envelope.title.as_str()),
         ),
         "failed to encode browser title output",
+        json,
     )?;
     ensure_browser_command_success("browser.title", success, error.as_str())
 }
@@ -1758,6 +1769,7 @@ async fn run_browser_network(
     limit: Option<u32>,
     include_headers: bool,
     max_payload_bytes: Option<u64>,
+    json: bool,
 ) -> Result<()> {
     let context =
         client::control_plane::connect_admin_console(app::ConnectionOverrides::default()).await?;
@@ -1798,7 +1810,7 @@ async fn run_browser_network(
             .as_str(),
         );
     }
-    emit_browser_value(&value, text, "failed to encode browser network output")?;
+    emit_browser_value_with_json(&value, text, "failed to encode browser network output", json)?;
     ensure_browser_command_success("browser.network", success, error.as_str())
 }
 
@@ -1853,6 +1865,7 @@ async fn run_browser_errors(
     principal: Option<String>,
     limit: Option<u32>,
     output: Option<String>,
+    json: bool,
 ) -> Result<()> {
     let mut value = inspect_browser_session(
         session_id.as_str(),
@@ -1897,7 +1910,7 @@ async fn run_browser_errors(
     let written =
         write_optional_json_output(output.as_deref(), session_id.as_str(), "errors", &value)?;
     maybe_attach_output_path(&mut value, written.as_ref());
-    emit_browser_value(
+    emit_browser_value_with_json(
         &value,
         format!(
             "browser.errors session_id={} count={} output={}",
@@ -1906,6 +1919,7 @@ async fn run_browser_errors(
             written.as_deref().unwrap_or("-"),
         ),
         "failed to encode browser errors output",
+        json,
     )
 }
 
@@ -3252,8 +3266,9 @@ fn emit_browser_snapshot_value(
     text: String,
     output_written: bool,
     error_context: &'static str,
+    json: bool,
 ) -> Result<()> {
-    let mode = browser_output_mode();
+    let mode = if json { BrowserOutputMode::Json } else { browser_output_mode() };
     if browser_snapshot_emits_json_to_stdout(mode, output_written) {
         let mut redacted = value.clone();
         redact_browser_output_value(&mut redacted, None);
