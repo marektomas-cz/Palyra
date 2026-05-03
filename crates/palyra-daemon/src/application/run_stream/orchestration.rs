@@ -79,6 +79,7 @@ pub(crate) enum RunStreamProviderResponseOutcome {
     Failed {
         message: String,
         provider_trace_ref: Option<String>,
+        reason: AgentLoopTerminationReason,
     },
     Cancelled,
 }
@@ -890,7 +891,7 @@ pub(crate) async fn process_run_stream_message(
                 )
                 .await?;
             }
-            RunStreamProviderResponseOutcome::Failed { message, provider_trace_ref } => {
+            RunStreamProviderResponseOutcome::Failed { message, provider_trace_ref, reason } => {
                 terminate_run_stream_with_agent_loop_reason(
                     sender,
                     runtime_state,
@@ -898,7 +899,7 @@ pub(crate) async fn process_run_stream_message(
                     run_id.as_str(),
                     tape_seq,
                     &loop_state,
-                    AgentLoopTerminationReason::ApprovalDenied,
+                    reason,
                     message.as_str(),
                     provider_trace_ref,
                 )
@@ -996,6 +997,17 @@ async fn process_run_stream_provider_response(
         return Ok(RunStreamProviderResponseOutcome::Failed {
             message,
             provider_trace_ref: provider_output.raw_provider_refs.provider_trace_ref.clone(),
+            reason: AgentLoopTerminationReason::ApprovalDenied,
+        });
+    }
+
+    if !has_pending_tool_results && contains_raw_provider_tool_call_markup(reply_text.as_str()) {
+        return Ok(RunStreamProviderResponseOutcome::Failed {
+            message:
+                "model provider returned raw tool-call markup instead of a structured tool proposal"
+                    .to_owned(),
+            provider_trace_ref: provider_output.raw_provider_refs.provider_trace_ref.clone(),
+            reason: AgentLoopTerminationReason::ProviderError,
         });
     }
 
@@ -1093,6 +1105,12 @@ fn is_terminal_tool_authorization_error(error: &str) -> bool {
     TERMINAL_TOOL_AUTHORIZATION_ERROR_MARKERS.iter().any(|marker| normalized.contains(marker))
 }
 
+fn contains_raw_provider_tool_call_markup(text: &str) -> bool {
+    let normalized = text.to_ascii_lowercase();
+    normalized.contains("<minimax:tool_call")
+        || (normalized.contains("<tool_call") && normalized.contains("<invoke name="))
+}
+
 const TERMINAL_TOOL_AUTHORIZATION_ERROR_MARKERS: &[&str] = &[
     "approval_response_error",
     "approval_response_timeout",
@@ -1175,7 +1193,10 @@ async fn persist_run_stream_provider_turn_output(
 
 #[cfg(test)]
 mod tests {
-    use super::{terminal_tool_authorization_failure, RunStreamToolResultForModel};
+    use super::{
+        contains_raw_provider_tool_call_markup, terminal_tool_authorization_failure,
+        RunStreamToolResultForModel,
+    };
 
     #[test]
     fn terminal_tool_authorization_failure_detects_approval_errors() {
@@ -1219,5 +1240,19 @@ mod tests {
             terminal_tool_authorization_failure(&result).is_none(),
             "ordinary runtime errors can still be re-fed to the model"
         );
+    }
+
+    #[test]
+    fn raw_provider_tool_call_markup_is_not_a_final_answer() {
+        let raw_tool_call = r#"<minimax:tool_call>
+<invoke name="palyra.fs.read_file">
+{"path":"C:\\Users\\palo\\workspace\\calc.js"}
+</invoke>
+</minimax:tool_call>"#;
+
+        assert!(contains_raw_provider_tool_call_markup(raw_tool_call));
+        assert!(!contains_raw_provider_tool_call_markup(
+            "The page had no tool calls and the final answer is complete."
+        ));
     }
 }
