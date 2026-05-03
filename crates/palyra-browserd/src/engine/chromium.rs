@@ -70,6 +70,7 @@ where
 #[derive(Debug)]
 pub(crate) struct ChromiumSessionProxy {
     pub(crate) proxy_uri: String,
+    allow_private_targets: Arc<AtomicBool>,
     pub(crate) shutdown_tx: Option<oneshot::Sender<()>>,
     pub(crate) task: tokio::task::JoinHandle<()>,
 }
@@ -83,16 +84,27 @@ impl ChromiumSessionProxy {
             format!("failed to resolve Chromium session SOCKS5 proxy addr: {error}")
         })?;
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let allow_private_targets = Arc::new(AtomicBool::new(allow_private_targets));
         let task = tokio::spawn(run_chromium_session_socks5_proxy(
             listener,
-            allow_private_targets,
+            Arc::clone(&allow_private_targets),
             shutdown_rx,
         ));
         Ok(Self {
             proxy_uri: format!("socks5://{local_addr}"),
+            allow_private_targets,
             shutdown_tx: Some(shutdown_tx),
             task,
         })
+    }
+
+    pub(crate) fn allow_private_targets_policy(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.allow_private_targets)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_allow_private_targets(&self, allow_private_targets: bool) -> bool {
+        self.allow_private_targets.swap(allow_private_targets, Ordering::SeqCst)
     }
 }
 
@@ -113,7 +125,7 @@ pub(crate) enum Socks5TargetHost {
 
 pub(crate) async fn run_chromium_session_socks5_proxy(
     listener: tokio::net::TcpListener,
-    allow_private_targets: bool,
+    allow_private_targets: Arc<AtomicBool>,
     mut shutdown_rx: oneshot::Receiver<()>,
 ) {
     loop {
@@ -124,7 +136,9 @@ pub(crate) async fn run_chromium_session_socks5_proxy(
             accepted = listener.accept() => {
                 match accepted {
                     Ok((stream, client_addr)) => {
+                        let allow_private_targets = Arc::clone(&allow_private_targets);
                         tokio::spawn(async move {
+                            let allow_private_targets = allow_private_targets.load(Ordering::SeqCst);
                             if let Err(error) = handle_chromium_session_socks5_client(stream, allow_private_targets).await {
                                 warn!(
                                     client_addr = %client_addr,
@@ -378,16 +392,18 @@ pub(crate) fn chromium_loopback_remote_ip_is_expected_proxy_hop(
 
 pub(crate) fn configure_chromium_tab(
     tab: &Arc<HeadlessTab>,
-    allow_private_targets: bool,
+    allow_private_targets: Arc<AtomicBool>,
     timeout: Duration,
     security_incident: Arc<std::sync::Mutex<Option<String>>>,
 ) -> Result<(), String> {
     tab.set_default_timeout(timeout);
     tab.enable_fetch(None, Some(false))
         .map_err(|error| format!("failed to enable Chromium fetch interception: {error}"))?;
+    let request_policy = Arc::clone(&allow_private_targets);
     let request_interceptor =
         Arc::new(move |_transport, _session_id, intercepted: Fetch::events::RequestPausedEvent| {
             let request_url = intercepted.params.request.url.as_str();
+            let allow_private_targets = request_policy.load(Ordering::SeqCst);
             if validate_target_url_blocking(request_url, allow_private_targets).is_ok() {
                 RequestPausedDecision::Continue(None)
             } else {
@@ -401,9 +417,11 @@ pub(crate) fn configure_chromium_tab(
         format!("failed to register Chromium request interception callback: {error}")
     })?;
     let remote_ip_guard = Arc::clone(&security_incident);
+    let response_policy = Arc::clone(&allow_private_targets);
     tab.register_response_handling(
         CHROMIUM_REMOTE_IP_GUARD_HANDLER_NAME,
         Box::new(move |response, _fetch_body| {
+            let allow_private_targets = response_policy.load(Ordering::SeqCst);
             record_chromium_remote_ip_incident(
                 Some(response.response.url.as_str()),
                 response.response.remote_ip_address.as_deref(),
@@ -426,7 +444,7 @@ pub(crate) fn chromium_new_tab_error_is_retryable(message: &str) -> bool {
 
 pub(crate) fn create_configured_chromium_tab_with_retry(
     browser: &Arc<HeadlessBrowser>,
-    allow_private_targets: bool,
+    allow_private_targets: Arc<AtomicBool>,
     timeout: Duration,
     security_incident: Arc<std::sync::Mutex<Option<String>>>,
     failure_prefix: &str,
@@ -434,7 +452,12 @@ pub(crate) fn create_configured_chromium_tab_with_retry(
     for attempt in 1..=CHROMIUM_NEW_TAB_MAX_ATTEMPTS {
         match browser.new_tab() {
             Ok(tab) => {
-                configure_chromium_tab(&tab, allow_private_targets, timeout, security_incident)?;
+                configure_chromium_tab(
+                    &tab,
+                    Arc::clone(&allow_private_targets),
+                    timeout,
+                    security_incident,
+                )?;
                 return Ok(tab);
             }
             Err(error) => {
@@ -477,6 +500,7 @@ pub(crate) async fn initialize_chromium_session_runtime(
     }
     let proxy = ChromiumSessionProxy::spawn(allow_private_targets).await?;
     let proxy_uri = proxy.proxy_uri.clone();
+    let allow_private_targets_policy = proxy.allow_private_targets_policy();
     let security_incident = Arc::new(std::sync::Mutex::new(None::<String>));
     let mut chromium_session =
         run_chromium_blocking("chromium session initialization", move || {
@@ -494,7 +518,7 @@ pub(crate) async fn initialize_chromium_session_runtime(
             for tab_id in tab_order.iter() {
                 let tab = create_configured_chromium_tab_with_retry(
                     &browser,
-                    allow_private_targets,
+                    Arc::clone(&allow_private_targets_policy),
                     navigation_timeout,
                     Arc::clone(&security_incident),
                     "failed to create Chromium tab for session restore",
@@ -504,6 +528,7 @@ pub(crate) async fn initialize_chromium_session_runtime(
             Ok(ChromiumSessionState {
                 browser,
                 tabs,
+                allow_private_targets: allow_private_targets_policy,
                 security_incident,
                 _profile_dir: profile_dir,
                 _proxy: None,
@@ -526,19 +551,23 @@ pub(crate) async fn chromium_open_tab_runtime(
     session_id: &str,
     tab_id: &str,
 ) -> Result<(), String> {
-    let (allow_private_targets, timeout_ms) = {
+    let timeout_ms = {
         let sessions = runtime.sessions.lock().await;
         let Some(session) = sessions.get(session_id) else {
             return Err("session_not_found".to_owned());
         };
-        (session.allow_private_targets, session.budget.max_navigation_timeout_ms.max(1))
+        session.budget.max_navigation_timeout_ms.max(1)
     };
-    let (browser, security_incident) = {
+    let (browser, allow_private_targets, security_incident) = {
         let chromium_sessions = runtime.chromium_sessions.lock().await;
         let Some(chromium_session) = chromium_sessions.get(session_id) else {
             return Err("chromium_session_not_found".to_owned());
         };
-        (Arc::clone(&chromium_session.browser), Arc::clone(&chromium_session.security_incident))
+        (
+            Arc::clone(&chromium_session.browser),
+            Arc::clone(&chromium_session.allow_private_targets),
+            Arc::clone(&chromium_session.security_incident),
+        )
     };
     let tab = run_chromium_blocking("chromium open tab", move || {
         create_configured_chromium_tab_with_retry(
@@ -620,6 +649,21 @@ pub(crate) async fn chromium_tab_for_session(
         return Err("chromium_session_not_found".to_owned());
     };
     chromium_session.tabs.get(tab_id).cloned().ok_or_else(|| "chromium_tab_not_found".to_owned())
+}
+
+pub(crate) async fn chromium_tab_and_private_target_policy_for_session(
+    runtime: &BrowserRuntimeState,
+    session_id: &str,
+    tab_id: &str,
+) -> Result<(Arc<HeadlessTab>, Arc<AtomicBool>), String> {
+    let chromium_sessions = runtime.chromium_sessions.lock().await;
+    let Some(chromium_session) = chromium_sessions.get(session_id) else {
+        return Err("chromium_session_not_found".to_owned());
+    };
+    let Some(tab) = chromium_session.tabs.get(tab_id) else {
+        return Err("chromium_tab_not_found".to_owned());
+    };
+    Ok((Arc::clone(tab), Arc::clone(&chromium_session.allow_private_targets)))
 }
 
 pub(crate) async fn chromium_active_tab_for_session(
@@ -943,13 +987,20 @@ pub(crate) async fn navigate_tab_with_chromium(
     if !outcome.success {
         return outcome;
     }
-    let tab = match chromium_tab_for_session(runtime, session_id, tab_id).await {
-        Ok(value) => value,
-        Err(error) => {
-            outcome.success = false;
-            outcome.error = format!("chromium tab runtime unavailable: {error}");
-            return outcome;
-        }
+    let (tab, private_target_policy) =
+        match chromium_tab_and_private_target_policy_for_session(runtime, session_id, tab_id).await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                outcome.success = false;
+                outcome.error = format!("chromium tab runtime unavailable: {error}");
+                return outcome;
+            }
+        };
+    let previous_private_target_policy = if params.allow_private_targets {
+        Some(private_target_policy.swap(true, Ordering::SeqCst))
+    } else {
+        None
     };
     let target_url = outcome.final_url.clone();
     let chromium_timeout_ms = params.timeout_ms;
@@ -980,6 +1031,9 @@ pub(crate) async fn navigate_tab_with_chromium(
         Ok(ChromiumObserveSnapshot { page_body, title, page_url })
     })
     .await;
+    if let Some(previous) = previous_private_target_policy {
+        private_target_policy.store(previous, Ordering::SeqCst);
+    }
     let snapshot = match chromium_snapshot {
         Ok(value) => value,
         Err(error) => {

@@ -8,6 +8,7 @@ pub(crate) use chromium::*;
 pub(crate) struct ChromiumSessionState {
     pub(crate) browser: Arc<HeadlessBrowser>,
     pub(crate) tabs: HashMap<String, Arc<HeadlessTab>>,
+    pub(crate) allow_private_targets: Arc<AtomicBool>,
     pub(crate) security_incident: Arc<std::sync::Mutex<Option<String>>>,
     pub(crate) _profile_dir: TempDir,
     pub(crate) _proxy: Option<ChromiumSessionProxy>,

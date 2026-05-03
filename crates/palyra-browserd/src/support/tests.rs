@@ -641,7 +641,7 @@ async fn chromium_session_proxy_blocks_private_targets_without_opt_in() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn chromium_session_proxy_allows_private_targets_when_opted_in() {
+async fn chromium_session_proxy_allows_private_targets_after_runtime_opt_in() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("fixture listener should bind on loopback");
@@ -658,9 +658,13 @@ async fn chromium_session_proxy_allows_private_targets_when_opted_in() {
         inbound.write_all(b"pong").await.expect("fixture server should write tunneled response");
     });
 
-    let proxy = ChromiumSessionProxy::spawn(true)
+    let proxy = ChromiumSessionProxy::spawn(false)
         .await
         .expect("proxy should start for private-target opt-in policy");
+    assert!(
+        !proxy.set_allow_private_targets(true),
+        "runtime opt-in should report the previous deny policy"
+    );
     let proxy_addr = proxy
         .proxy_uri
         .strip_prefix("socks5://")

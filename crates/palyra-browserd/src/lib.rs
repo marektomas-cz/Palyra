@@ -23,7 +23,7 @@ pub(crate) use std::{
     net::{IpAddr, SocketAddr, ToSocketAddrs},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, LazyLock,
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
