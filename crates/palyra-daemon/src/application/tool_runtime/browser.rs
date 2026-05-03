@@ -30,6 +30,9 @@ use crate::{
     tool_protocol::{ToolAttestation, ToolExecutionOutcome},
     transport::grpc::proto::palyra::{browser::v1 as browser_v1, common::v1 as common_v1},
 };
+
+const BROWSER_CALLER_PRINCIPAL_HEADER: &str = "x-palyra-principal";
+
 pub(crate) async fn execute_browser_tool(
     runtime_state: &Arc<GatewayRuntimeState>,
     principal: &str,
@@ -1427,6 +1430,15 @@ pub(crate) async fn execute_browser_tool(
                     error,
                 );
             }
+            if let Err(error) = attach_browser_caller_principal_metadata(&mut request, principal) {
+                return browser_tool_execution_outcome(
+                    proposal_id,
+                    input_json,
+                    false,
+                    b"{}".to_vec(),
+                    error,
+                );
+            }
             match client.console_log(request).await {
                 Ok(response) => {
                     let response = response.into_inner();
@@ -2094,6 +2106,20 @@ fn attach_browser_auth_metadata<T>(
     Ok(())
 }
 
+fn attach_browser_caller_principal_metadata<T>(
+    request: &mut Request<T>,
+    caller_principal: &str,
+) -> Result<(), String> {
+    let caller_principal = caller_principal.trim();
+    if caller_principal.is_empty() {
+        return Err("browser caller principal must not be empty".to_owned());
+    }
+    let value = tonic::metadata::MetadataValue::try_from(caller_principal)
+        .map_err(|error| format!("invalid browser caller principal metadata: {error}"))?;
+    request.metadata_mut().insert(BROWSER_CALLER_PRINCIPAL_HEADER, value);
+    Ok(())
+}
+
 fn sanitize_status_message(status: &Status) -> String {
     truncate_with_ellipsis(status.message().to_owned(), 512)
 }
@@ -2342,9 +2368,13 @@ fn browser_tool_execution_outcome(
 
 #[cfg(test)]
 mod tests {
-    use super::{browser_console_entry_to_json, browser_network_log_entry_to_json};
+    use super::{
+        attach_browser_caller_principal_metadata, browser_console_entry_to_json,
+        browser_network_log_entry_to_json, BROWSER_CALLER_PRINCIPAL_HEADER,
+    };
     use crate::transport::grpc::proto::palyra::browser::v1 as browser_v1;
     use palyra_common::CANONICAL_PROTOCOL_MAJOR;
+    use tonic::Request;
 
     #[test]
     fn console_log_export_redacts_sensitive_message_content() {
@@ -2381,5 +2411,21 @@ mod tests {
         assert_eq!(exported.value["headers"][0]["value"], "<redacted>");
         assert_eq!(exported.value["safety"]["action"], "redact");
         assert!(exported.redacted);
+    }
+
+    #[test]
+    fn browser_console_request_metadata_includes_caller_principal() {
+        let mut request = Request::new(());
+
+        attach_browser_caller_principal_metadata(&mut request, " user:local ")
+            .expect("principal metadata should attach");
+
+        assert_eq!(
+            request
+                .metadata()
+                .get(BROWSER_CALLER_PRINCIPAL_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some("user:local")
+        );
     }
 }
