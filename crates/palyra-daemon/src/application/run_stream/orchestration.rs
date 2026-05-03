@@ -1125,19 +1125,8 @@ fn contains_raw_provider_tool_call_markup(text: &str) -> bool {
         || (normalized.contains("<tool_call") && normalized.contains("<invoke name="))
 }
 
-const TERMINAL_TOOL_AUTHORIZATION_ERROR_MARKERS: &[&str] = &[
-    "approval_response_error",
-    "approval_response_timeout",
-    "approval required",
-    "approval denied",
-    "explicit client approval",
-    "approval.denied",
-    "approval.required",
-    "policy denied",
-    "denied by policy",
-    "not allowed by policy",
-    "blocked by policy",
-];
+const TERMINAL_TOOL_AUTHORIZATION_ERROR_MARKERS: &[&str] =
+    &["approval_response_error", "approval_response_timeout"];
 
 #[allow(clippy::result_large_err)]
 async fn persist_run_stream_reply_text(
@@ -1232,6 +1221,25 @@ mod tests {
         assert!(message.contains("palyra.process.run"));
         assert!(message.contains("toolu_approval_01"));
         assert!(message.contains("approval_response_error"));
+    }
+
+    #[test]
+    fn terminal_tool_authorization_failure_refeeds_explicit_approval_denials() {
+        let result = RunStreamToolResultForModel {
+            proposal_id: "toolu_denied_01".to_owned(),
+            tool_name: "palyra.process.run".to_owned(),
+            outcome: crate::tool_protocol::denied_execution_outcome(
+                "toolu_denied_01",
+                "palyra.process.run",
+                br#"{"command":"cmd","args":["/C","whoami"]}"#,
+                "approval.denied: operator denied tool execution",
+            ),
+        };
+
+        assert!(
+            terminal_tool_authorization_failure(&result).is_none(),
+            "explicit approval denials are tool observations the model can recover from"
+        );
     }
 
     #[test]
