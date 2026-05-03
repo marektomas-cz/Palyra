@@ -7,7 +7,7 @@ use crate::{
     model_provider::{ProviderMessage, ProviderMessageContentPart, ProviderMessageRole},
 };
 
-pub(crate) const INSTRUCTION_COMPILER_VERSION: u32 = 4;
+pub(crate) const INSTRUCTION_COMPILER_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct InstructionTrustSummary {
@@ -165,6 +165,9 @@ fn tool_specific_contract(tool_names: &[String]) -> String {
     if tool_names.iter().any(|tool| tool == "palyra.fs.apply_patch") {
         contracts.push("palyra.fs.apply_patch patch grammar: the patch string must be a complete Palyra patch document, not raw file contents and not prose. Start with '*** Begin Patch' on its own line, then one or more operation headers ('*** Add File: path', '*** Update File: path', or '*** Delete File: path'), then '*** End Patch'. For Add File, every content line must start with '+'. For Update File, add '@@' before each hunk and make every hunk line start with one of space, '+', or '-'. Paths are forward-slash relative paths inside the workspace. On a parse error, retry once with this exact wrapper and corrected prefixes.".to_owned());
     }
+    if tool_names.iter().any(|tool| tool == "palyra.process.run") {
+        contracts.push("palyra.process.run sandbox contract: call only bare executable names, never shell syntax. Local desktop profiles commonly allow pwd, echo, ls, dir, mkdir, python/python3/py, node/npm/npx, and cargo/rustc; use palyra.fs.apply_patch for file writes. Use background=true for temporary dev servers instead of nohup, '&', shell wrappers, or platform-specific launchers. If a command is denied by sandbox policy, treat that as an operational limit and continue with a safe fallback or clearly report the blocked verification step.".to_owned());
+    }
     if contracts.is_empty() {
         "No tool-specific grammar contracts apply.".to_owned()
     } else {
@@ -248,7 +251,7 @@ mod tests {
         let first = compiler.compile(input.clone());
         let second = compiler.compile(input);
         assert_eq!(first.hash, second.hash);
-        assert_eq!(first.version, 4);
+        assert_eq!(first.version, 5);
         assert_eq!(first.provider_messages().len(), 2);
     }
 
@@ -260,6 +263,17 @@ mod tests {
         assert!(contract.contains("*** Add File: path"));
         assert!(contract.contains("@@"));
         assert!(contract.contains("parse error"));
+    }
+
+    #[test]
+    fn tool_specific_contract_explains_process_runner_limits() {
+        let contract = super::tool_specific_contract(&["palyra.process.run".to_owned()]);
+
+        assert!(contract.contains("pwd, echo, ls, dir, mkdir"));
+        assert!(contract.contains("python/python3/py"));
+        assert!(contract.contains("background=true"));
+        assert!(contract.contains("sandbox policy"));
+        assert!(contract.contains("safe fallback"));
     }
 
     #[test]

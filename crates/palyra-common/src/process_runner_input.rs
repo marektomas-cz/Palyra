@@ -14,6 +14,8 @@ pub struct ProcessRunnerToolInput {
     pub requested_egress_hosts: Vec<String>,
     #[serde(default)]
     pub timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub background: bool,
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -69,6 +71,18 @@ mod tests {
         assert_eq!(parsed.cwd.as_deref(), Some("workspace"));
         assert_eq!(parsed.requested_egress_hosts, vec!["api.example.com"]);
         assert_eq!(parsed.timeout_ms, None);
+        assert!(!parsed.background);
+    }
+
+    #[test]
+    fn parse_process_runner_tool_input_accepts_background_flag() {
+        let input =
+            br#"{"command":"python3","args":["-m","http.server","8765"],"background":true}"#;
+        let parsed = parse_process_runner_tool_input(input)
+            .expect("valid background process-runner payload should parse");
+
+        assert_eq!(parsed.command, "python3");
+        assert!(parsed.background);
     }
 
     #[test]

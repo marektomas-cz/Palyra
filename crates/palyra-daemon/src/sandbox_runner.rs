@@ -28,6 +28,8 @@ const MAX_ARG_LENGTH: usize = 4_096;
 const BUILTIN_LIST_MAX_ENTRIES: usize = 512;
 const CAPTURE_POLL_INTERVAL_MS: u64 = 5;
 const CAPTURE_CHUNK_BYTES: usize = 4 * 1024;
+#[cfg(windows)]
+const WINDOWS_DEFAULT_PATH_EXTENSIONS: &[&str] = &[".com", ".exe", ".bat", ".cmd"];
 const INTERPRETER_EXECUTABLE_DENYLIST: &[&str] = &[
     "bash",
     "sh",
@@ -183,9 +185,12 @@ pub fn run_constrained_process(
     if !matches!(policy.egress_enforcement_mode, EgressEnforcementMode::None) {
         validate_egress_hosts(policy, requested_hosts.as_slice())?;
     }
-    if let Some(result) =
-        execute_builtin_process_command(policy, &input, working_directory.as_path())?
-    {
+    if let Some(result) = execute_builtin_process_command(
+        policy,
+        &input,
+        workspace_root.as_path(),
+        working_directory.as_path(),
+    )? {
         return Ok(result);
     }
     validate_platform_resource_quota_support(policy)?;
@@ -198,6 +203,16 @@ pub fn run_constrained_process(
         .map(Duration::from_millis)
         .unwrap_or(execution_timeout)
         .min(execution_timeout);
+
+    if input.background {
+        return spawn_background_process(
+            policy,
+            &input,
+            workspace_root.as_path(),
+            working_directory.as_path(),
+            per_call_timeout,
+        );
+    }
 
     let capture = execute_process(
         policy,
@@ -275,6 +290,7 @@ pub fn run_constrained_process(
 fn execute_builtin_process_command(
     policy: &SandboxProcessRunnerPolicy,
     input: &ProcessRunnerInput,
+    workspace_root: &Path,
     cwd: &Path,
 ) -> Result<Option<SandboxProcessRunSuccess>, SandboxProcessRunError> {
     let stdout = match input.command.trim().to_ascii_lowercase().as_str() {
@@ -291,6 +307,12 @@ fn execute_builtin_process_command(
         "ls" | "dir" => {
             builtin_list_directory_stdout(input.command.trim(), input.args.as_slice(), cwd)?
         }
+        "mkdir" => builtin_make_directory_stdout(
+            input.command.trim(),
+            input.args.as_slice(),
+            workspace_root,
+            cwd,
+        )?,
         _ => return Ok(None),
     };
     let output_json = serde_json::to_vec(&json!({
@@ -401,6 +423,68 @@ fn is_builtin_list_flag(arg: &str) -> bool {
         arg.to_ascii_lowercase().as_str(),
         "-a" | "-l" | "-la" | "-al" | "--all" | "--long" | "/a" | "/b" | "/w"
     )
+}
+
+fn builtin_make_directory_stdout(
+    command: &str,
+    args: &[String],
+    workspace_root: &Path,
+    cwd: &Path,
+) -> Result<String, SandboxProcessRunError> {
+    let mut parents = false;
+    let mut directories = Vec::new();
+    for arg in args {
+        let trimmed = arg.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        match trimmed {
+            "-p" | "--parents" => {
+                parents = true;
+            }
+            value if value.starts_with('-') => {
+                return Err(SandboxProcessRunError {
+                    kind: SandboxProcessRunErrorKind::InvalidInput,
+                    message: format!(
+                        "palyra.process.run builtin '{command}' unsupported flag '{value}'"
+                    ),
+                });
+            }
+            value => directories.push(value),
+        }
+    }
+
+    if directories.is_empty() {
+        return Err(SandboxProcessRunError {
+            kind: SandboxProcessRunErrorKind::InvalidInput,
+            message: format!("palyra.process.run builtin '{command}' requires a directory path"),
+        });
+    }
+
+    let mut created = Vec::new();
+    for directory in directories {
+        let target = resolve_scoped_path(workspace_root, cwd, directory, false)?;
+        if parents {
+            fs::create_dir_all(target.as_path()).map_err(|error| SandboxProcessRunError {
+                kind: SandboxProcessRunErrorKind::RuntimeFailure,
+                message: format!(
+                    "palyra.process.run builtin '{command}' failed to create directory '{}': {error}",
+                    target.display()
+                ),
+            })?;
+        } else {
+            fs::create_dir(target.as_path()).map_err(|error| SandboxProcessRunError {
+                kind: SandboxProcessRunErrorKind::RuntimeFailure,
+                message: format!(
+                    "palyra.process.run builtin '{command}' failed to create directory '{}': {error}",
+                    target.display()
+                ),
+            })?;
+        }
+        created.push(target.to_string_lossy().to_string());
+    }
+
+    Ok(format!("{}\n", created.join("\n")))
 }
 
 fn parse_process_runner_input(
@@ -1037,17 +1121,51 @@ fn execute_process(
     capture_child_output(&mut child, timeout, policy.max_output_bytes as usize)
 }
 
+fn spawn_background_process(
+    policy: &SandboxProcessRunnerPolicy,
+    input: &ProcessRunnerInput,
+    workspace_root: &Path,
+    cwd: &Path,
+    lifetime: Duration,
+) -> Result<SandboxProcessRunSuccess, SandboxProcessRunError> {
+    let mut command = build_process_command(policy, input, workspace_root, cwd)?;
+    command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    attach_resource_limits_unix(&mut command, policy);
+
+    let mut child = command.spawn().map_err(|error| SandboxProcessRunError {
+        kind: SandboxProcessRunErrorKind::SpawnFailed,
+        message: format!("sandbox process spawn failed for command '{}': {error}", input.command),
+    })?;
+    let pid = child.id();
+    thread::spawn(move || {
+        thread::sleep(lifetime);
+        let _ = child.kill();
+        let _ = child.wait();
+    });
+
+    let output_json = serde_json::to_vec(&json!({
+        "exit_code": 0,
+        "stdout": "",
+        "stderr": "",
+        "stdout_truncated": false,
+        "stderr_truncated": false,
+        "duration_ms": 0,
+        "background": true,
+        "pid": pid,
+        "lifetime_ms": lifetime.as_millis() as u64,
+        "tier": policy.tier.as_str(),
+        "sandbox_backend": process_runner_executor_name(policy),
+    }))
+    .map_err(|error| SandboxProcessRunError {
+        kind: SandboxProcessRunErrorKind::RuntimeFailure,
+        message: format!("failed to serialize sandbox background process output JSON: {error}"),
+    })?;
+    Ok(SandboxProcessRunSuccess { output_json })
+}
+
 fn validate_platform_resource_quota_support(
     _policy: &SandboxProcessRunnerPolicy,
 ) -> Result<(), SandboxProcessRunError> {
-    #[cfg(not(unix))]
-    if matches!(_policy.tier, SandboxProcessRunnerTier::B) {
-        return Err(SandboxProcessRunError {
-            kind: SandboxProcessRunErrorKind::UnsupportedPlatform,
-            message: "sandbox tier-b process runner requires unix resource controls for CPU/memory quotas"
-                .to_owned(),
-        });
-    }
     #[cfg(target_os = "macos")]
     {
         return Err(SandboxProcessRunError {
@@ -1094,7 +1212,7 @@ fn build_process_command(
         return Ok(command);
     }
 
-    let mut command = Command::new(input.command.as_str());
+    let mut command = Command::new(resolve_tier_b_process_program(input.command.as_str()));
     command
         .args(input.args.as_slice())
         .current_dir(cwd)
@@ -1103,6 +1221,60 @@ fn build_process_command(
         .env("LANG", "C")
         .env("LC_ALL", "C");
     Ok(command)
+}
+
+fn resolve_tier_b_process_program(command: &str) -> PathBuf {
+    #[cfg(windows)]
+    {
+        return resolve_windows_path_program(command).unwrap_or_else(|| PathBuf::from(command));
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::from(command)
+    }
+}
+
+#[cfg(windows)]
+fn resolve_windows_path_program(command: &str) -> Option<PathBuf> {
+    let command_path = Path::new(command);
+    if command_path.components().count() != 1 {
+        return None;
+    }
+
+    let candidates = windows_command_candidates(command);
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path).find_map(|directory| {
+        candidates
+            .iter()
+            .map(|candidate| directory.join(candidate))
+            .find(|candidate| candidate.is_file())
+    })
+}
+
+#[cfg(windows)]
+fn windows_command_candidates(command: &str) -> Vec<String> {
+    let has_extension = Path::new(command).extension().is_some();
+    if has_extension {
+        return vec![command.to_owned()];
+    }
+
+    let mut candidates = vec![command.to_owned()];
+    let raw_pathext = std::env::var("PATHEXT").unwrap_or_default();
+    let extensions = raw_pathext
+        .split(';')
+        .map(str::trim)
+        .filter(|extension| !extension.is_empty())
+        .collect::<Vec<_>>();
+    let extensions =
+        if extensions.is_empty() { WINDOWS_DEFAULT_PATH_EXTENSIONS.to_vec() } else { extensions };
+    candidates.extend(extensions.into_iter().map(|extension| {
+        if extension.starts_with('.') {
+            format!("{command}{extension}")
+        } else {
+            format!("{command}.{extension}")
+        }
+    }));
+    candidates
 }
 
 fn map_tier_c_backend_error(error: TierCBackendError) -> SandboxProcessRunError {
@@ -1460,14 +1632,24 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(unix))]
-    fn run_constrained_process_fails_closed_on_non_unix() {
+    #[cfg(target_os = "macos")]
+    fn run_constrained_process_fails_closed_on_macos() {
         let workspace = std::env::current_dir().expect("workspace current_dir should resolve");
         let policy = sandbox_policy(workspace);
         let input = br#"{"command":"uname","args":["--version"]}"#;
         let error = run_constrained_process(&policy, input, Duration::from_millis(1_000))
-            .expect_err("non-unix sandbox runner must fail closed");
+            .expect_err("macos sandbox runner must fail closed");
         assert_eq!(error.kind, SandboxProcessRunErrorKind::UnsupportedPlatform);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn tier_b_resource_quota_check_allows_explicit_windows_local_processes() {
+        let workspace = std::env::current_dir().expect("workspace current_dir should resolve");
+        let policy = sandbox_policy(workspace);
+
+        super::validate_platform_resource_quota_support(&policy)
+            .expect("windows tier-b explicit local commands rely on timeout and output guards");
     }
 
     #[test]
@@ -1568,6 +1750,85 @@ mod tests {
 
         let _ = fs::remove_dir_all(workspace.as_path());
         let _ = fs::remove_dir_all(outside.as_path());
+    }
+
+    #[test]
+    fn run_constrained_process_executes_portable_mkdir_builtin() {
+        let workspace = unique_temp_dir("workspace-mkdir-builtin");
+        fs::create_dir_all(workspace.as_path()).expect("workspace directory should be created");
+        let policy =
+            sandbox_policy_with_allowed_executables(workspace.clone(), vec!["mkdir".to_owned()]);
+        let input = br#"{"command":"mkdir","args":["-p","reports/e2e"]}"#;
+
+        let result = run_constrained_process(&policy, input, Duration::from_millis(1_000))
+            .expect("portable mkdir builtin should create scoped directories");
+        let output: serde_json::Value =
+            serde_json::from_slice(&result.output_json).expect("output should parse");
+
+        assert!(workspace.join("reports").join("e2e").is_dir());
+        assert_eq!(output.get("exit_code").and_then(serde_json::Value::as_i64), Some(0));
+        assert_eq!(
+            output.get("sandbox_backend").and_then(serde_json::Value::as_str),
+            Some("builtin_portable")
+        );
+
+        let _ = fs::remove_dir_all(workspace.as_path());
+    }
+
+    #[test]
+    fn run_constrained_process_rejects_mkdir_outside_workspace() {
+        let workspace = unique_temp_dir("workspace-mkdir-deny");
+        let outside = unique_temp_dir("outside-mkdir-deny");
+        fs::create_dir_all(workspace.as_path()).expect("workspace directory should be created");
+        fs::create_dir_all(outside.as_path()).expect("outside directory should be created");
+        let policy =
+            sandbox_policy_with_allowed_executables(workspace.clone(), vec!["mkdir".to_owned()]);
+        let input = format!(
+            r#"{{"command":"mkdir","args":["{}"]}}"#,
+            outside.join("child").to_string_lossy().replace('\\', "\\\\")
+        );
+
+        let error =
+            run_constrained_process(&policy, input.as_bytes(), Duration::from_millis(1_000))
+                .expect_err("portable mkdir builtin should reject paths outside workspace");
+
+        assert_eq!(error.kind, SandboxProcessRunErrorKind::WorkspaceScopeDenied);
+        assert!(error.message.contains("escapes workspace"), "{}", error.message);
+
+        let _ = fs::remove_dir_all(workspace.as_path());
+        let _ = fs::remove_dir_all(outside.as_path());
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn run_constrained_process_starts_allowlisted_python_background_when_available() {
+        let Some(python) = ["python3", "python", "py"]
+            .into_iter()
+            .find(|command| Command::new(command).arg("--version").output().is_ok())
+        else {
+            return;
+        };
+        let workspace = unique_temp_dir("workspace-python-background");
+        fs::create_dir_all(workspace.as_path()).expect("workspace directory should be created");
+        let mut policy =
+            sandbox_policy_with_allowed_executables(workspace.clone(), vec![python.to_owned()]);
+        policy.allow_interpreters = true;
+        policy.egress_enforcement_mode = EgressEnforcementMode::Preflight;
+        let input = format!(
+            r#"{{"command":"{python}","args":["-m","http.server","0"],"background":true,"timeout_ms":100}}"#
+        );
+
+        let result =
+            run_constrained_process(&policy, input.as_bytes(), Duration::from_millis(1_000))
+                .expect("allowlisted python should start as a bounded background process");
+        let output: serde_json::Value =
+            serde_json::from_slice(&result.output_json).expect("output should parse");
+
+        assert_eq!(output.get("background").and_then(serde_json::Value::as_bool), Some(true));
+        assert_eq!(output.get("lifetime_ms").and_then(serde_json::Value::as_u64), Some(100));
+        assert!(output.get("pid").and_then(serde_json::Value::as_u64).is_some());
+
+        let _ = fs::remove_dir_all(workspace.as_path());
     }
 
     #[test]

@@ -272,7 +272,7 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
         ),
         entry(
             "palyra.process.run",
-            "Run an allowlisted executable inside the configured process sandbox.",
+            "Run an allowlisted executable or portable process builtin inside the configured process sandbox.",
             object_schema(
                 &["command"],
                 vec![
@@ -281,7 +281,7 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
                         json!({
                             "type":"string",
                             "maxLength":128,
-                            "description":"Bare executable name only, for example 'echo'. Do not include arguments, shell syntax, or repeat this value in args."
+                            "description":"Bare executable or portable builtin name only. Default local desktop builtins/tools include pwd, echo, ls, dir, mkdir, python3, node, npm, and cargo when configured. Do not include arguments, shell syntax, or repeat this value in args."
                         }),
                     ),
                     (
@@ -294,6 +294,13 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
                         }),
                     ),
                     ("cwd", json!({"type":"string"})),
+                    (
+                        "background",
+                        json!({
+                            "type":"boolean",
+                            "description":"Start an allowlisted long-running local process and return immediately. Use this instead of shell background syntax or nohup for temporary dev servers."
+                        }),
+                    ),
                     (
                         "requested_egress_hosts",
                         json!({"type":"array","items":{"type":"string"},"maxItems":64}),

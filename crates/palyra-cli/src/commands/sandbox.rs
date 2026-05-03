@@ -294,7 +294,7 @@ fn sandbox_process_runner_view(policy: &Value) -> Value {
         } else if tier == "c" {
             "Tier C delegates execution to OS-backed backends and keeps strict mode offline-only."
         } else {
-            "Tier B keeps enforcement in-process. Portable builtins include pwd, echo, ls, and dir; add project-specific test tools through tool_call.process_runner.allowed_executables, and keep allow_interpreters=false unless explicitly reviewed."
+            "Tier B keeps enforcement in-process. Local desktop profiles allow portable builtins plus explicit dev executables such as python3, node, npm, and cargo; use process_runner.allowed_executables and allow_interpreters to review the active posture."
         },
     })
 }

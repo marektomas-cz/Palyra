@@ -685,7 +685,10 @@ const LOCAL_DESKTOP_DEFAULT_ALLOWED_TOOLS: &[&str] = &[
     "palyra.browser.permissions.set",
     "palyra.process.run",
 ];
-const LOCAL_DESKTOP_DEFAULT_PROCESS_EXECUTABLES: &[&str] = &["pwd", "echo", "ls", "dir"];
+const LOCAL_DESKTOP_DEFAULT_PROCESS_EXECUTABLES: &[&str] = &[
+    "pwd", "echo", "ls", "dir", "mkdir", "python", "python3", "py", "node", "npm", "npx", "cargo",
+    "rustc",
+];
 
 fn build_init_config_document(
     mode: InitMode,
@@ -818,6 +821,7 @@ fn apply_local_desktop_tool_defaults(
         string_array_value(LOCAL_DESKTOP_DEFAULT_ALLOWED_TOOLS),
     )?;
     set_value_at_path(document, "tool_call.max_calls_per_run", toml::Value::Integer(8))?;
+    set_value_at_path(document, "tool_call.execution_timeout_ms", toml::Value::Integer(30_000))?;
     set_value_at_path(document, "tool_call.process_runner.enabled", toml::Value::Boolean(true))?;
     set_value_at_path(
         document,
@@ -837,7 +841,7 @@ fn apply_local_desktop_tool_defaults(
     set_value_at_path(
         document,
         "tool_call.process_runner.allow_interpreters",
-        toml::Value::Boolean(false),
+        toml::Value::Boolean(true),
     )?;
     set_value_at_path(
         document,
@@ -9984,6 +9988,14 @@ mod init_command_tests {
         cursor.as_bool()
     }
 
+    fn read_integer(document: &toml::Value, key: &str) -> Option<i64> {
+        let mut cursor = document;
+        for segment in key.split('.') {
+            cursor = cursor.get(segment)?;
+        }
+        cursor.as_integer()
+    }
+
     fn read_string_array(document: &toml::Value, key: &str) -> Vec<String> {
         let mut cursor = document;
         for segment in key.split('.') {
@@ -10060,6 +10072,8 @@ mod init_command_tests {
             "local init should allow gateway-mediated browser inspection when the service is enabled"
         );
         assert_eq!(read_bool(&document, "tool_call.process_runner.enabled"), Some(true));
+        assert_eq!(read_integer(&document, "tool_call.execution_timeout_ms"), Some(30_000));
+        assert_eq!(read_bool(&document, "tool_call.process_runner.allow_interpreters"), Some(true));
         assert_eq!(
             read_string(&document, "tool_call.process_runner.egress_enforcement_mode").as_deref(),
             Some("preflight")
@@ -10079,6 +10093,18 @@ mod init_command_tests {
         assert!(read_string_array(&document, "tool_call.process_runner.allowed_executables")
             .iter()
             .any(|executable| executable == "dir"));
+        assert!(read_string_array(&document, "tool_call.process_runner.allowed_executables")
+            .iter()
+            .any(|executable| executable == "mkdir"));
+        assert!(read_string_array(&document, "tool_call.process_runner.allowed_executables")
+            .iter()
+            .any(|executable| executable == "python3"));
+        assert!(read_string_array(&document, "tool_call.process_runner.allowed_executables")
+            .iter()
+            .any(|executable| executable == "npm"));
+        assert!(read_string_array(&document, "tool_call.process_runner.allowed_executables")
+            .iter()
+            .any(|executable| executable == "cargo"));
     }
 
     #[test]
