@@ -3842,7 +3842,24 @@ impl OpenAiCompatibleProvider {
             });
         }
 
-        let completion_text = extract_completion_text(choice.message.content);
+        let mut completion_text = extract_completion_text(choice.message.content);
+        let coerced_raw_tool_markup = if tool_events.is_empty() {
+            match coerce_raw_tool_call_markup(completion_text.as_str()).map_err(|error| {
+                AttemptError::invalid_response(
+                    format!("openai-compatible raw tool-call markup is invalid: {error}"),
+                    "openai_compatible_raw_tool_call_markup",
+                )
+            })? {
+                Some(extraction) => {
+                    completion_text = extraction.cleaned_text;
+                    tool_events.extend(extraction.tool_events);
+                    true
+                }
+                None => false,
+            }
+        } else {
+            false
+        };
         let full_text = if completion_text.trim().is_empty() && tool_events.is_empty() {
             "ack".to_owned()
         } else {
@@ -3858,7 +3875,11 @@ impl OpenAiCompatibleProvider {
         let output = provider_output_from_text_and_tools(
             full_text,
             tool_events,
-            ProviderFinishReason::from_openai(choice.finish_reason.as_deref()),
+            if coerced_raw_tool_markup {
+                ProviderFinishReason::ToolCalls
+            } else {
+                ProviderFinishReason::from_openai(choice.finish_reason.as_deref())
+            },
             usage,
             ProviderRawProviderRefs {
                 provider_response_id,
@@ -4436,7 +4457,24 @@ impl AnthropicProvider {
             }
         }
 
-        let completion_text = completion_fragments.join("\n");
+        let mut completion_text = completion_fragments.join("\n");
+        let coerced_raw_tool_markup = if tool_events.is_empty() {
+            match coerce_raw_tool_call_markup(completion_text.as_str()).map_err(|error| {
+                AttemptError::invalid_response(
+                    format!("anthropic raw tool-call markup is invalid: {error}"),
+                    "anthropic_raw_tool_call_markup",
+                )
+            })? {
+                Some(extraction) => {
+                    completion_text = extraction.cleaned_text;
+                    tool_events.extend(extraction.tool_events);
+                    true
+                }
+                None => false,
+            }
+        } else {
+            false
+        };
         let full_text = if completion_text.trim().is_empty() && tool_events.is_empty() {
             "ack".to_owned()
         } else {
@@ -4452,7 +4490,7 @@ impl AnthropicProvider {
         let output = provider_output_from_text_and_tools(
             full_text,
             tool_events,
-            finish_reason,
+            if coerced_raw_tool_markup { ProviderFinishReason::ToolCalls } else { finish_reason },
             usage,
             ProviderRawProviderRefs {
                 provider_response_id,
@@ -5027,6 +5065,129 @@ fn extract_completion_text(content: Option<Value>) -> String {
         }
         _ => String::new(),
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RawToolCallMarkupExtraction {
+    cleaned_text: String,
+    tool_events: Vec<ProviderEvent>,
+}
+
+fn coerce_raw_tool_call_markup(text: &str) -> Result<Option<RawToolCallMarkupExtraction>, String> {
+    let lower = text.to_ascii_lowercase();
+    if !lower.contains("<minimax:tool_call") && !lower.contains("<tool_call") {
+        return Ok(None);
+    }
+
+    let mut cursor = 0usize;
+    let mut cleaned_text = String::new();
+    let mut tool_events = Vec::new();
+    while let Some(block) = find_next_raw_tool_call_block(&lower, cursor) {
+        cleaned_text.push_str(&text[cursor..block.start]);
+        let tag_end = text[block.start..]
+            .find('>')
+            .map(|offset| block.start + offset)
+            .ok_or_else(|| "raw tool-call opening tag is missing '>'".to_owned())?;
+        let content_start = tag_end.saturating_add(1);
+        let close_start = lower[content_start..]
+            .find(block.close_tag)
+            .map(|offset| content_start + offset)
+            .ok_or_else(|| "raw tool-call block is missing a closing tag".to_owned())?;
+        let block_content = &text[content_start..close_start];
+        let mut parsed_events = parse_raw_tool_call_invocations(block_content)?;
+        tool_events.append(&mut parsed_events);
+        cursor = close_start + block.close_tag.len();
+    }
+    cleaned_text.push_str(&text[cursor..]);
+
+    if tool_events.is_empty() {
+        return Err("raw tool-call markup did not contain any invoke blocks".to_owned());
+    }
+
+    Ok(Some(RawToolCallMarkupExtraction {
+        cleaned_text: cleaned_text.trim().to_owned(),
+        tool_events,
+    }))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RawToolCallBlock<'a> {
+    start: usize,
+    close_tag: &'a str,
+}
+
+fn find_next_raw_tool_call_block(lower: &str, cursor: usize) -> Option<RawToolCallBlock<'static>> {
+    let minimax = lower[cursor..].find("<minimax:tool_call").map(|offset| RawToolCallBlock {
+        start: cursor + offset,
+        close_tag: "</minimax:tool_call>",
+    });
+    let generic = lower[cursor..]
+        .find("<tool_call")
+        .map(|offset| RawToolCallBlock { start: cursor + offset, close_tag: "</tool_call>" });
+    match (minimax, generic) {
+        (Some(left), Some(right)) => Some(if left.start <= right.start { left } else { right }),
+        (Some(block), None) | (None, Some(block)) => Some(block),
+        (None, None) => None,
+    }
+}
+
+fn parse_raw_tool_call_invocations(block: &str) -> Result<Vec<ProviderEvent>, String> {
+    let lower = block.to_ascii_lowercase();
+    let mut cursor = 0usize;
+    let mut events = Vec::new();
+    while let Some(relative_start) = lower[cursor..].find("<invoke") {
+        let start = cursor + relative_start;
+        let tag_end = block[start..]
+            .find('>')
+            .map(|offset| start + offset)
+            .ok_or_else(|| "invoke opening tag is missing '>'".to_owned())?;
+        let opening_tag = &block[start..=tag_end];
+        let tool_name = extract_raw_tool_invoke_name(opening_tag)
+            .ok_or_else(|| "invoke tag is missing a valid name attribute".to_owned())?;
+        let arguments_start = tag_end.saturating_add(1);
+        let close_start = lower[arguments_start..]
+            .find("</invoke>")
+            .map(|offset| arguments_start + offset)
+            .ok_or_else(|| "invoke block is missing </invoke>".to_owned())?;
+        let input_json = normalize_tool_arguments(block[arguments_start..close_start].trim())?;
+        events.push(ProviderEvent::ToolProposal {
+            proposal_id: Ulid::new().to_string(),
+            tool_name,
+            input_json,
+        });
+        cursor = close_start + "</invoke>".len();
+    }
+    Ok(events)
+}
+
+fn extract_raw_tool_invoke_name(opening_tag: &str) -> Option<String> {
+    let lower = opening_tag.to_ascii_lowercase();
+    let mut cursor = lower.find("name")? + "name".len();
+    let bytes = opening_tag.as_bytes();
+    while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+        cursor = cursor.saturating_add(1);
+    }
+    if bytes.get(cursor).copied() != Some(b'=') {
+        return None;
+    }
+    cursor = cursor.saturating_add(1);
+    while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+        cursor = cursor.saturating_add(1);
+    }
+    let quote = bytes.get(cursor).copied()?;
+    if !matches!(quote, b'"' | b'\'') {
+        return None;
+    }
+    cursor = cursor.saturating_add(1);
+    let value_start = cursor;
+    while let Some(byte) = bytes.get(cursor).copied() {
+        if byte == quote {
+            let value = opening_tag[value_start..cursor].trim();
+            return (!value.is_empty()).then(|| value.to_owned());
+        }
+        cursor = cursor.saturating_add(1);
+    }
+    None
 }
 
 fn normalize_tool_arguments(raw: &str) -> Result<Vec<u8>, String> {
@@ -6071,6 +6232,54 @@ mod tests {
         let error =
             normalize_tool_arguments(oversized.as_str()).expect_err("oversized payload must fail");
         assert!(error.contains("tool arguments exceed"), "error should mention byte limit");
+    }
+
+    #[test]
+    fn raw_minimax_tool_call_markup_is_coerced_to_tool_event() {
+        let raw = r#"<minimax:tool_call>
+<invoke name="palyra.fs.apply_patch">
+{"patch":"*** Begin Patch\n*** Add File: app.js\n+console.log('ok');\n*** End Patch\n"}
+</invoke>
+</minimax:tool_call>"#;
+
+        let extraction = super::coerce_raw_tool_call_markup(raw)
+            .expect("raw MiniMax markup should parse")
+            .expect("raw MiniMax markup should be detected");
+
+        assert!(extraction.cleaned_text.is_empty());
+        assert_eq!(extraction.tool_events.len(), 1);
+        match &extraction.tool_events[0] {
+            ProviderEvent::ToolProposal { tool_name, input_json, .. } => {
+                assert_eq!(tool_name, "palyra.fs.apply_patch");
+                let input: serde_json::Value =
+                    serde_json::from_slice(input_json).expect("tool input should stay valid JSON");
+                assert!(
+                    input["patch"].as_str().is_some_and(|patch| patch.contains("*** Add File")),
+                    "{input}"
+                );
+            }
+            other => panic!("expected tool proposal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn raw_tool_call_markup_is_removed_from_surrounding_text() {
+        let raw = r#"I will inspect it.
+<tool_call>
+<invoke name='palyra.fs.read_file'>
+{"path":"app.js"}
+</invoke>
+</tool_call>
+Then I will continue."#;
+
+        let extraction = super::coerce_raw_tool_call_markup(raw)
+            .expect("raw generic markup should parse")
+            .expect("raw generic markup should be detected");
+
+        assert!(!extraction.cleaned_text.contains("<tool_call>"));
+        assert!(extraction.cleaned_text.contains("I will inspect it."));
+        assert!(extraction.cleaned_text.contains("Then I will continue."));
+        assert_eq!(extraction.tool_events.len(), 1);
     }
 
     #[tokio::test(flavor = "multi_thread")]
