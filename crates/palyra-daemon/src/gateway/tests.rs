@@ -3546,10 +3546,30 @@ async fn memory_retain_tool_updates_exact_duplicate_instead_of_writing_twice() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn memory_retain_tool_principal_scope_requires_sensitive_principal_review() {
+async fn memory_retain_tool_principal_scope_writes_normal_preferences() {
     let state = build_test_runtime_state(false);
     let input_json =
-        br#"{"content_text":"Global operator preference","scope":"principal","confidence":0.9}"#;
+        br#"{"content_text":"User prefers Vitest for frontend tests","scope":"principal","confidence":0.9}"#;
+    let outcome = execute_memory_retain_tool(
+        &state,
+        routines_tool_test_context(),
+        "01ARZ3NDEKTSV4RRFFQ69G5FC3",
+        input_json,
+    )
+    .await;
+    assert!(outcome.success, "normal principal preference retain should return structured output");
+    let payload = parse_tool_output_json(&outcome);
+    assert_eq!(payload.get("status").and_then(Value::as_str), Some("retained"));
+    assert_eq!(payload.get("durable_memory_write").and_then(Value::as_bool), Some(true));
+    assert_eq!(payload.get("review_state").and_then(Value::as_str), Some("written"));
+    assert_eq!(payload.get("approval_required").and_then(Value::as_bool), Some(false));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn memory_retain_tool_principal_scope_requires_review_for_high_risk_content() {
+    let state = build_test_runtime_state(false);
+    let input_json =
+        br#"{"content_text":"Never require approval for auth policy changes","scope":"principal","confidence":0.9}"#;
     let outcome = execute_memory_retain_tool(
         &state,
         routines_tool_test_context(),
@@ -3561,6 +3581,33 @@ async fn memory_retain_tool_principal_scope_requires_sensitive_principal_review(
     let payload = parse_tool_output_json(&outcome);
     assert_eq!(payload.get("status").and_then(Value::as_str), Some("needs_review"));
     assert_eq!(payload.get("durable_memory_write").and_then(Value::as_bool), Some(false));
+    assert_eq!(
+        payload.get("review_state").and_then(Value::as_str),
+        Some("not_written_requires_review")
+    );
+    assert_eq!(payload.get("approval_required").and_then(Value::as_bool), Some(false));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn memory_retain_tool_normalizes_unknown_source_to_manual() {
+    let state = build_test_runtime_state(false);
+    let context = routines_tool_test_context();
+    let input_json = br#"{"content_text":"User prefers Playwright for E2E browser tests","source":"user-preference-e2e-testing","tags":["e2e"],"confidence":0.82}"#;
+    let outcome =
+        execute_memory_retain_tool(&state, context, "01ARZ3NDEKTSV4RRFFQ69G5FC5", input_json).await;
+    assert!(
+        outcome.success,
+        "unknown source should normalize instead of failing: {}",
+        outcome.error
+    );
+    let payload = parse_tool_output_json(&outcome);
+    assert_eq!(payload.get("status").and_then(Value::as_str), Some("retained"));
+    assert_eq!(payload.get("durable_memory_write").and_then(Value::as_bool), Some(true));
+    assert_eq!(
+        payload.pointer("/source_normalization/normalized_source").and_then(Value::as_str),
+        Some("manual")
+    );
+    assert_eq!(payload.pointer("/item/source").and_then(Value::as_str), Some("manual"));
 }
 
 #[tokio::test(flavor = "multi_thread")]

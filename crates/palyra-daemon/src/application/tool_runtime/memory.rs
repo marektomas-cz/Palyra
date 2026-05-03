@@ -30,6 +30,8 @@ const MAX_MEMORY_RECALL_MAX_CANDIDATES: usize = 12;
 const DEFAULT_MEMORY_RECALL_PROMPT_BUDGET_TOKENS: usize = 1_800;
 const MIN_MEMORY_RECALL_PROMPT_BUDGET_TOKENS: usize = 512;
 const MAX_MEMORY_RECALL_PROMPT_BUDGET_TOKENS: usize = 4_096;
+const MEMORY_SOURCE_VALUES: &[&str] =
+    &["manual", "summary", "import", "tape:user_message", "tape:tool_result"];
 
 pub(crate) fn memory_search_tool_output_payload(search_hits: &[MemorySearchHit]) -> Value {
     json!({
@@ -136,21 +138,20 @@ pub(crate) async fn execute_memory_retain_tool(
             );
         }
     };
-    let source = match parsed.get("source").and_then(Value::as_str) {
+    let (source, source_normalization) = match parsed.get("source").and_then(Value::as_str) {
         Some(raw) => match parse_memory_source_literal(raw) {
-            Some(source) => source,
-            None => {
-                return memory_tool_execution_outcome(
-                    namespace,
-                    proposal_id,
-                    input_json,
-                    false,
-                    b"{}".to_vec(),
-                    format!("palyra.memory.retain unknown source value: {raw}"),
-                );
-            }
+            Some(source) => (source, None),
+            None => (
+                MemorySource::Manual,
+                Some(json!({
+                    "input": raw,
+                    "normalized_source": MemorySource::Manual.as_str(),
+                    "reason": "unknown_source_defaulted_to_manual",
+                    "valid_sources": MEMORY_SOURCE_VALUES,
+                })),
+            ),
         },
-        None => MemorySource::Manual,
+        None => (MemorySource::Manual, None),
     };
     let tags = match parse_string_array_field(parsed.get("tags"), "tags", MAX_MEMORY_TOOL_TAGS) {
         Ok(tags) => tags,
@@ -228,7 +229,13 @@ pub(crate) async fn execute_memory_retain_tool(
             );
         }
     };
-    serialize_memory_lifecycle_outcome(namespace, proposal_id, input_json, &outcome)
+    serialize_memory_lifecycle_outcome(
+        namespace,
+        proposal_id,
+        input_json,
+        &outcome,
+        source_normalization,
+    )
 }
 
 pub(crate) async fn execute_memory_reflect_tool(
@@ -940,11 +947,14 @@ fn serialize_memory_lifecycle_outcome(
     proposal_id: &str,
     input_json: &[u8],
     outcome: &MemoryLifecycleRetainOutcome,
+    source_normalization: Option<Value>,
 ) -> ToolExecutionOutcome {
-    let payload = json!({
+    let mut payload = json!({
         "status": outcome.status.as_str(),
         "reason": outcome.reason.as_str(),
         "scope": outcome.scope.as_str(),
+        "review_state": memory_lifecycle_review_state(outcome),
+        "approval_required": false,
         "trust_label": outcome.trust_label.as_str(),
         "durable_memory_write": outcome.durable_memory_write,
         "matched_memory_id": outcome.matched_memory_id.as_deref(),
@@ -952,6 +962,11 @@ fn serialize_memory_lifecycle_outcome(
         "provenance": outcome.provenance.clone(),
         "item": outcome.item.as_ref().map(memory_item_output_payload),
     });
+    if let Some(normalization) = source_normalization {
+        if let Some(fields) = payload.as_object_mut() {
+            fields.insert("source_normalization".to_owned(), normalization);
+        }
+    }
     match serde_json::to_vec(&payload) {
         Ok(output_json) => memory_tool_execution_outcome(
             namespace,
@@ -969,6 +984,16 @@ fn serialize_memory_lifecycle_outcome(
             b"{}".to_vec(),
             format!("palyra.memory.retain failed to serialize output: {error}"),
         ),
+    }
+}
+
+fn memory_lifecycle_review_state(outcome: &MemoryLifecycleRetainOutcome) -> &'static str {
+    if outcome.durable_memory_write {
+        "written"
+    } else if outcome.status == crate::application::memory::MemoryLifecycleStatus::NeedsReview {
+        "not_written_requires_review"
+    } else {
+        "not_written"
     }
 }
 

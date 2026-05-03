@@ -44,7 +44,10 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
                     ("top_k", json!({"type":"integer","minimum":1,"maximum":20})),
                     ("min_score", json!({"type":"number","minimum":0.0,"maximum":1.0})),
                     ("tags", json!({"type":"array","items":{"type":"string"},"maxItems":16})),
-                    ("sources", json!({"type":"array","items":{"type":"string"},"maxItems":16})),
+                    (
+                        "sources",
+                        json!({"type":"array","items":{"type":"string","enum":["manual","summary","import","tape:user_message","tape:tool_result"]},"maxItems":16}),
+                    ),
                 ],
                 false,
             ),
@@ -86,7 +89,10 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
                 vec![
                     ("content_text", json!({"type":"string","maxLength":8192})),
                     ("scope", json!({"type":"string","enum":["session","principal","workspace"]})),
-                    ("source", json!({"type":"string"})),
+                    (
+                        "source",
+                        json!({"type":"string","enum":["manual","summary","import","tape:user_message","tape:tool_result"]}),
+                    ),
                     ("tags", json!({"type":"array","items":{"type":"string"},"maxItems":16})),
                     ("confidence", json!({"type":"number","minimum":0.0,"maximum":1.0})),
                     ("ttl_ms", json!({"type":"integer","minimum":0})),

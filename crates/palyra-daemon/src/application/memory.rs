@@ -398,24 +398,6 @@ async fn retain_memory_candidate(
 
     let (channel_scope, session_scope, resource) = resolve_lifecycle_write_scope(&request)?;
     authorize_memory_action(request.principal.as_str(), "memory.ingest", resource.as_str())?;
-    if request.scope == MemoryLifecycleScope::Principal
-        && !principal_has_sensitive_service_role(
-            request.principal.as_str(),
-            SensitiveServiceRole::AdminOrSystem,
-        )
-    {
-        return Ok(memory_retain_outcome(MemoryRetainOutcomeInput {
-            status: MemoryLifecycleStatus::NeedsReview,
-            reason: "principal-scoped memory retention requires admin/system review",
-            scope: request.scope,
-            durable_memory_write: false,
-            item: None,
-            matched_memory_id: None,
-            provenance: request.provenance,
-            write_classification: Some(classification.clone()),
-        }));
-    }
-
     if let Some(duplicate) = find_lifecycle_duplicate(
         runtime_state,
         &request,
@@ -601,7 +583,7 @@ pub(crate) fn classify_memory_write(
         reason_codes.push("confidence:below_auto_retain_threshold".to_owned());
     }
     if input.scope == MemoryLifecycleScope::Principal {
-        reason_codes.push("scope:principal_review".to_owned());
+        reason_codes.push("scope:principal".to_owned());
     }
     match sensitivity {
         MemoryWriteSensitivity::Normal => {}
@@ -617,7 +599,6 @@ pub(crate) fn classify_memory_write(
     }
 
     let approval_state = if input.confidence < MEMORY_RETAIN_LOW_CONFIDENCE_THRESHOLD
-        || input.scope == MemoryLifecycleScope::Principal
         || sensitivity != MemoryWriteSensitivity::Normal
         || reason_codes.iter().any(|reason| reason == "policy:operator_review_for_runtime_rule")
     {
