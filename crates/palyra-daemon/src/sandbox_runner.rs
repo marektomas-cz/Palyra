@@ -25,6 +25,7 @@ use serde_json::json;
 const MAX_COMMAND_LENGTH: usize = 256;
 const MAX_ARGS_COUNT: usize = 128;
 const MAX_ARG_LENGTH: usize = 4_096;
+const BUILTIN_LIST_MAX_ENTRIES: usize = 512;
 const CAPTURE_POLL_INTERVAL_MS: u64 = 5;
 const CAPTURE_CHUNK_BYTES: usize = 4 * 1024;
 const INTERPRETER_EXECUTABLE_DENYLIST: &[&str] = &[
@@ -287,6 +288,9 @@ fn execute_builtin_process_command(
             format!("{}\n", cwd.to_string_lossy())
         }
         "echo" => format!("{}\n", input.args.join(" ")),
+        "ls" | "dir" => {
+            builtin_list_directory_stdout(input.command.trim(), input.args.as_slice(), cwd)?
+        }
         _ => return Ok(None),
     };
     let output_json = serde_json::to_vec(&json!({
@@ -304,6 +308,99 @@ fn execute_builtin_process_command(
         message: format!("failed to serialize sandbox builtin process output JSON: {error}"),
     })?;
     Ok(Some(SandboxProcessRunSuccess { output_json }))
+}
+
+fn builtin_list_directory_stdout(
+    command: &str,
+    args: &[String],
+    cwd: &Path,
+) -> Result<String, SandboxProcessRunError> {
+    let target = resolve_builtin_list_directory_target(command, args, cwd)?;
+    let mut names = Vec::new();
+    let mut truncated = false;
+    let entries = fs::read_dir(target.as_path()).map_err(|error| SandboxProcessRunError {
+        kind: SandboxProcessRunErrorKind::RuntimeFailure,
+        message: format!(
+            "palyra.process.run builtin '{command}' failed to read directory '{}': {error}",
+            target.display()
+        ),
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|error| SandboxProcessRunError {
+            kind: SandboxProcessRunErrorKind::RuntimeFailure,
+            message: format!(
+                "palyra.process.run builtin '{command}' failed to read directory entry in '{}': {error}",
+                target.display()
+            ),
+        })?;
+        let mut name = entry.file_name().to_string_lossy().to_string();
+        if entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+            name.push('/');
+        }
+        names.push(name);
+        if names.len() >= BUILTIN_LIST_MAX_ENTRIES {
+            truncated = true;
+            break;
+        }
+    }
+    names.sort_by_key(|name| name.to_ascii_lowercase());
+    if truncated {
+        names.push(format!("... truncated after {BUILTIN_LIST_MAX_ENTRIES} entries"));
+    }
+    if names.is_empty() {
+        return Ok(String::new());
+    }
+    Ok(format!("{}\n", names.join("\n")))
+}
+
+fn resolve_builtin_list_directory_target(
+    command: &str,
+    args: &[String],
+    cwd: &Path,
+) -> Result<PathBuf, SandboxProcessRunError> {
+    let mut target = None;
+    for arg in args {
+        let trimmed = arg.trim();
+        if trimmed.is_empty() || is_builtin_list_flag(trimmed) {
+            continue;
+        }
+        if target.replace(trimmed).is_some() {
+            return Err(SandboxProcessRunError {
+                kind: SandboxProcessRunErrorKind::InvalidInput,
+                message: format!(
+                    "palyra.process.run builtin '{command}' supports at most one directory argument"
+                ),
+            });
+        }
+    }
+
+    let raw = target.unwrap_or(".");
+    let candidate = if Path::new(raw).is_absolute() { PathBuf::from(raw) } else { cwd.join(raw) };
+    let canonical =
+        fs::canonicalize(candidate.as_path()).map_err(|error| SandboxProcessRunError {
+            kind: SandboxProcessRunErrorKind::WorkspaceScopeDenied,
+            message: format!(
+                "sandbox denied: directory '{}' is not readable within workspace scope: {error}",
+                candidate.display()
+            ),
+        })?;
+    if !canonical.is_dir() {
+        return Err(SandboxProcessRunError {
+            kind: SandboxProcessRunErrorKind::InvalidInput,
+            message: format!(
+                "palyra.process.run builtin '{command}' target '{}' is not a directory",
+                canonical.display()
+            ),
+        });
+    }
+    Ok(canonical)
+}
+
+fn is_builtin_list_flag(arg: &str) -> bool {
+    matches!(
+        arg.to_ascii_lowercase().as_str(),
+        "-a" | "-l" | "-la" | "-al" | "--all" | "--long" | "/a" | "/b" | "/w"
+    )
 }
 
 fn parse_process_runner_input(
@@ -580,8 +677,11 @@ fn option_compact_value(arg: &str) -> Option<&str> {
 
 fn argument_requires_path_validation(arg: &str) -> bool {
     let trimmed = arg.trim();
-    if trimmed.is_empty() || trimmed.starts_with('-') {
+    if trimmed.is_empty() || trimmed.starts_with('-') || is_builtin_list_flag(trimmed) {
         return false;
+    }
+    if token_looks_like_absolute_path(trimmed) {
+        return true;
     }
     match reqwest::Url::parse(trimmed) {
         Ok(url) => url.scheme().eq_ignore_ascii_case("file"),
@@ -1414,6 +1514,60 @@ mod tests {
             output.get("sandbox_backend").and_then(serde_json::Value::as_str),
             Some("builtin_portable")
         );
+    }
+
+    #[test]
+    fn run_constrained_process_executes_portable_directory_listing_builtin() {
+        let workspace = unique_temp_dir("workspace-list-builtin");
+        let nested = workspace.join("src");
+        fs::create_dir_all(nested.as_path()).expect("workspace directory should be created");
+        fs::write(workspace.join("Cargo.toml"), b"[package]\n")
+            .expect("workspace file should be created");
+        let policy =
+            sandbox_policy_with_allowed_executables(workspace.clone(), vec!["ls".to_owned()]);
+        let input = br#"{"command":"ls","args":["-la"]}"#;
+
+        let result = run_constrained_process(&policy, input, Duration::from_millis(1_000))
+            .expect("portable ls builtin should execute without spawning a platform process");
+        let output: serde_json::Value =
+            serde_json::from_slice(&result.output_json).expect("output should parse");
+        let stdout = output
+            .get("stdout")
+            .and_then(serde_json::Value::as_str)
+            .expect("stdout should be present in process output");
+
+        assert!(stdout.contains("Cargo.toml"), "{stdout}");
+        assert!(stdout.contains("src/"), "{stdout}");
+        assert_eq!(
+            output.get("sandbox_backend").and_then(serde_json::Value::as_str),
+            Some("builtin_portable")
+        );
+
+        let _ = fs::remove_dir_all(workspace.as_path());
+    }
+
+    #[test]
+    fn run_constrained_process_rejects_directory_listing_outside_workspace() {
+        let workspace = unique_temp_dir("workspace-list-deny");
+        let outside = unique_temp_dir("outside-list-deny");
+        fs::create_dir_all(workspace.as_path()).expect("workspace directory should be created");
+        fs::create_dir_all(outside.as_path()).expect("outside directory should be created");
+        let policy =
+            sandbox_policy_with_allowed_executables(workspace.clone(), vec!["dir".to_owned()]);
+        let input = format!(
+            r#"{{"command":"dir","args":["{}"]}}"#,
+            outside.to_string_lossy().replace('\\', "\\\\")
+        );
+
+        let error =
+            run_constrained_process(&policy, input.as_bytes(), Duration::from_millis(1_000))
+                .expect_err("portable dir builtin should reject paths outside workspace");
+
+        assert_eq!(error.kind, SandboxProcessRunErrorKind::WorkspaceScopeDenied);
+        assert!(error.message.contains("escapes workspace"), "{}", error.message);
+
+        let _ = fs::remove_dir_all(workspace.as_path());
+        let _ = fs::remove_dir_all(outside.as_path());
     }
 
     #[test]

@@ -685,7 +685,7 @@ const LOCAL_DESKTOP_DEFAULT_ALLOWED_TOOLS: &[&str] = &[
     "palyra.browser.permissions.set",
     "palyra.process.run",
 ];
-const LOCAL_DESKTOP_DEFAULT_PROCESS_EXECUTABLES: &[&str] = &["pwd", "echo"];
+const LOCAL_DESKTOP_DEFAULT_PROCESS_EXECUTABLES: &[&str] = &["pwd", "echo", "ls", "dir"];
 
 fn build_init_config_document(
     mode: InitMode,
@@ -10073,6 +10073,12 @@ mod init_command_tests {
         assert!(read_string_array(&document, "tool_call.process_runner.allowed_executables")
             .iter()
             .any(|executable| executable == "pwd"));
+        assert!(read_string_array(&document, "tool_call.process_runner.allowed_executables")
+            .iter()
+            .any(|executable| executable == "ls"));
+        assert!(read_string_array(&document, "tool_call.process_runner.allowed_executables")
+            .iter()
+            .any(|executable| executable == "dir"));
     }
 
     #[test]
