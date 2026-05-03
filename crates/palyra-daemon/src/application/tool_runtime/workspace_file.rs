@@ -135,15 +135,17 @@ fn parse_workspace_read_file_input(input_json: &[u8]) -> Result<WorkspaceReadFil
     if matches!(input.max_bytes, Some(0)) {
         return Err(format!("{WORKSPACE_READ_FILE_TOOL_NAME} max_bytes must be >= 1"));
     }
-    validate_workspace_relative_path(input.path.as_str())?;
+    validate_workspace_path_syntax(input.path.as_str())?;
     Ok(input)
 }
 
-fn validate_workspace_relative_path(path: &str) -> Result<(), String> {
-    if path.contains('\\') {
-        return Err(format!("{WORKSPACE_READ_FILE_TOOL_NAME} path must use '/' separators"));
+fn validate_workspace_path_syntax(path: &str) -> Result<(), String> {
+    if path.chars().any(char::is_control) {
+        return Err(format!(
+            "{WORKSPACE_READ_FILE_TOOL_NAME} path contains unsupported characters"
+        ));
     }
-    if path.contains(':') || path.chars().any(char::is_control) {
+    if path.contains(':') && !looks_like_windows_drive_path(path) {
         return Err(format!(
             "{WORKSPACE_READ_FILE_TOOL_NAME} path contains unsupported characters"
         ));
@@ -151,9 +153,7 @@ fn validate_workspace_relative_path(path: &str) -> Result<(), String> {
 
     let parsed = Path::new(path);
     if parsed.is_absolute() {
-        return Err(format!(
-            "{WORKSPACE_READ_FILE_TOOL_NAME} path must be relative to an agent workspace root"
-        ));
+        return Ok(());
     }
     if !parsed.components().all(|component| matches!(component, Component::Normal(_))) {
         return Err(format!(
@@ -161,6 +161,14 @@ fn validate_workspace_relative_path(path: &str) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+fn looks_like_windows_drive_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'/' | b'\\')
 }
 
 fn read_workspace_file_from_roots(
@@ -173,16 +181,26 @@ fn read_workspace_file_from_roots(
         ));
     }
 
-    let mut saw_accessible_root = false;
-    for (workspace_root_index, workspace_root) in workspace_roots.iter().enumerate() {
-        let Ok(canonical_root) = fs::canonicalize(workspace_root) else {
-            continue;
-        };
-        if !canonical_root.is_dir() {
-            continue;
-        }
-        saw_accessible_root = true;
+    let canonical_roots = canonicalize_workspace_roots(workspace_roots)?;
+    if canonical_roots.is_empty() {
+        return Err(format!(
+            "{WORKSPACE_READ_FILE_TOOL_NAME} agent has no accessible workspace roots"
+        ));
+    }
 
+    let requested = Path::new(input.path.as_str());
+    if requested.is_absolute() {
+        let (workspace_root_index, canonical_target, display_path) =
+            resolve_absolute_workspace_file(canonical_roots.as_slice(), requested, input)?;
+        return read_workspace_file_chunk(
+            workspace_root_index,
+            canonical_target,
+            display_path,
+            input,
+        );
+    }
+
+    for (workspace_root_index, canonical_root) in &canonical_roots {
         let candidate = canonical_root.join(Path::new(input.path.as_str()));
         let canonical_target = match fs::canonicalize(&candidate) {
             Ok(path) => path,
@@ -205,22 +223,80 @@ fn read_workspace_file_from_roots(
             ));
         }
 
-        return read_workspace_file_chunk(workspace_root_index, canonical_target, input);
+        let display_path = canonical_target
+            .strip_prefix(canonical_root)
+            .map(normalize_relative_path_display)
+            .unwrap_or_else(|_| input.path.clone());
+        return read_workspace_file_chunk(
+            *workspace_root_index,
+            canonical_target,
+            display_path,
+            input,
+        );
     }
 
-    if saw_accessible_root {
-        Err(format!(
-            "{WORKSPACE_READ_FILE_TOOL_NAME} file not found in agent workspace roots: {}",
-            input.path
-        ))
-    } else {
-        Err(format!("{WORKSPACE_READ_FILE_TOOL_NAME} agent has no accessible workspace roots"))
+    Err(format!(
+        "{WORKSPACE_READ_FILE_TOOL_NAME} file not found in agent workspace roots: {}",
+        input.path
+    ))
+}
+
+fn canonicalize_workspace_roots(
+    workspace_roots: &[PathBuf],
+) -> Result<Vec<(usize, PathBuf)>, String> {
+    let mut canonical_roots = Vec::with_capacity(workspace_roots.len());
+    for (workspace_root_index, workspace_root) in workspace_roots.iter().enumerate() {
+        match fs::canonicalize(workspace_root) {
+            Ok(path) if path.is_dir() => canonical_roots.push((workspace_root_index, path)),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "{WORKSPACE_READ_FILE_TOOL_NAME} failed to resolve workspace root {workspace_root_index}: {error}"
+                ));
+            }
+        }
     }
+    Ok(canonical_roots)
+}
+
+fn resolve_absolute_workspace_file(
+    canonical_roots: &[(usize, PathBuf)],
+    requested: &Path,
+    input: &WorkspaceReadFileInput,
+) -> Result<(usize, PathBuf, String), String> {
+    let canonical_target = fs::canonicalize(requested).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            format!(
+                "{WORKSPACE_READ_FILE_TOOL_NAME} file not found in agent workspace roots: {}",
+                input.path
+            )
+        } else {
+            format!("{WORKSPACE_READ_FILE_TOOL_NAME} failed to resolve path: {error}")
+        }
+    })?;
+    for (workspace_root_index, canonical_root) in canonical_roots {
+        if canonical_target.starts_with(canonical_root) {
+            if !canonical_target.is_file() {
+                return Err(format!(
+                    "{WORKSPACE_READ_FILE_TOOL_NAME} target is not a regular file: {}",
+                    input.path
+                ));
+            }
+            let display_path = canonical_target
+                .strip_prefix(canonical_root)
+                .map(normalize_relative_path_display)
+                .unwrap_or_else(|_| input.path.clone());
+            return Ok((*workspace_root_index, canonical_target, display_path));
+        }
+    }
+    Err(format!("{WORKSPACE_READ_FILE_TOOL_NAME} path escapes agent workspace roots"))
 }
 
 fn read_workspace_file_chunk(
     workspace_root_index: usize,
     path: PathBuf,
+    display_path: String,
     input: &WorkspaceReadFileInput,
 ) -> Result<WorkspaceReadFileOutput, String> {
     let mut file = File::open(path.as_path()).map_err(|error| {
@@ -266,7 +342,7 @@ fn read_workspace_file_chunk(
     };
 
     Ok(WorkspaceReadFileOutput {
-        path: input.path.clone(),
+        path: display_path,
         workspace_root_index,
         offset_bytes: input.offset_bytes,
         returned_bytes,
@@ -276,6 +352,16 @@ fn read_workspace_file_chunk(
         text,
         bytes_base64,
     })
+}
+
+fn normalize_relative_path_display(path: &Path) -> String {
+    let mut rendered = Vec::new();
+    for component in path.components() {
+        if let Component::Normal(value) = component {
+            rendered.push(value.to_string_lossy().into_owned());
+        }
+    }
+    rendered.join("/")
 }
 
 fn workspace_read_file_outcome(
@@ -318,6 +404,7 @@ mod tests {
             .expect("workspace file should be readable");
 
         assert_eq!(output.text.as_deref(), Some(contents));
+        assert_eq!(output.path, "agent-e2e-tool-test.js");
         assert_eq!(output.bytes_base64, None);
         assert_eq!(output.returned_bytes, contents.len() as u64);
         assert!(output.eof);
@@ -340,6 +427,48 @@ mod tests {
         assert_eq!(output.text.as_deref(), Some("cde"));
         assert_eq!(output.returned_bytes, 3);
         assert!(!output.eof);
+    }
+
+    #[test]
+    fn read_workspace_file_accepts_absolute_path_inside_root() {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let workspace = tempdir.path().join("workspace");
+        fs::create_dir_all(workspace.join("nested")).expect("workspace should exist");
+        let file_path = workspace.join("nested").join("calc.js");
+        fs::write(&file_path, "export const add = (a, b) => a + b;\n")
+            .expect("workspace file should be written");
+        let input = WorkspaceReadFileInput {
+            path: file_path.to_string_lossy().into_owned(),
+            offset_bytes: 0,
+            max_bytes: None,
+        };
+
+        let output = read_workspace_file_from_roots(&[workspace], &input)
+            .expect("absolute workspace file should be readable");
+
+        assert_eq!(output.path, "nested/calc.js");
+        assert_eq!(output.text.as_deref(), Some("export const add = (a, b) => a + b;\n"));
+    }
+
+    #[test]
+    fn read_workspace_file_rejects_absolute_path_outside_root() {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let workspace = tempdir.path().join("workspace");
+        let outside = tempdir.path().join("outside");
+        fs::create_dir_all(&workspace).expect("workspace should exist");
+        fs::create_dir_all(&outside).expect("outside directory should exist");
+        let outside_file = outside.join("secret.txt");
+        fs::write(&outside_file, "secret").expect("outside file should be written");
+        let input = WorkspaceReadFileInput {
+            path: outside_file.to_string_lossy().into_owned(),
+            offset_bytes: 0,
+            max_bytes: None,
+        };
+
+        let error = read_workspace_file_from_roots(&[workspace], &input)
+            .expect_err("outside absolute path should be rejected");
+
+        assert!(error.contains("escapes agent workspace roots"), "unexpected error: {error}");
     }
 
     #[test]
