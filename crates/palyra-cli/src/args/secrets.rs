@@ -22,7 +22,7 @@ pub enum SecretsCommand {
         json: bool,
     },
     List {
-        #[arg(help = VAULT_SCOPE_HELP)]
+        #[arg(default_value = "global", help = VAULT_SCOPE_HELP)]
         scope: String,
         #[arg(long, default_value_t = false)]
         json: bool,

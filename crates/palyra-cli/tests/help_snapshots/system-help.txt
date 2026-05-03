@@ -3,7 +3,7 @@ Inspect runtime heartbeat, subsystem presence, operator insights, and recent sys
 Usage: palyra system [OPTIONS] <COMMAND>
 
 Commands:
-  heartbeat
+  heartbeat  [aliases: status]
   presence
   insights   Inspect aggregated operator insights and hotspots
   event      [aliases: events]

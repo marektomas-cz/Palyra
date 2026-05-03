@@ -2,6 +2,7 @@ use clap::{Subcommand, ValueEnum};
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum MemoryCommand {
+    #[command(visible_alias = "list")]
     Status {
         #[arg(long, default_value_t = false)]
         json: bool,

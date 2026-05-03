@@ -1308,6 +1308,9 @@ fn parse_sessions_retry_branch_search_and_export() {
 
 #[test]
 fn parse_message_send_with_thread_id() {
+    let status = Cli::parse_from(["palyra", "message", "status", "--json"]);
+    assert_eq!(status.command, Command::Message { command: MessageCommand::Status { json: true } });
+
     let parsed = Cli::parse_from([
         "palyra",
         "message",
@@ -2228,6 +2231,9 @@ fn parse_memory_status_and_index() {
     let status = Cli::parse_from(["palyra", "memory", "status", "--json"]);
     assert_eq!(status.command, Command::Memory { command: MemoryCommand::Status { json: true } });
 
+    let list = Cli::parse_from(["palyra", "memory", "list"]);
+    assert_eq!(list.command, Command::Memory { command: MemoryCommand::Status { json: false } });
+
     let index = Cli::parse_from([
         "palyra",
         "memory",
@@ -2288,6 +2294,12 @@ fn parse_system_commands() {
     assert_eq!(
         heartbeat.command,
         Command::System { command: SystemCommand::Heartbeat { json: true } }
+    );
+
+    let status = Cli::parse_from(["palyra", "system", "status"]);
+    assert_eq!(
+        status.command,
+        Command::System { command: SystemCommand::Heartbeat { json: false } }
     );
 
     let events = Cli::parse_from(["palyra", "system", "events", "list", "--limit", "25"]);
@@ -5516,6 +5528,14 @@ fn parse_secrets_get_with_reveal() {
 
 #[test]
 fn parse_secrets_list_scope() {
+    let global_default = Cli::parse_from(["palyra", "secrets", "list"]);
+    assert_eq!(
+        global_default.command,
+        Command::Secrets {
+            command: SecretsCommand::List { scope: "global".to_owned(), json: false }
+        }
+    );
+
     let parsed = Cli::parse_from(["palyra", "secrets", "list", "principal:user:ops"]);
     assert_eq!(
         parsed.command,

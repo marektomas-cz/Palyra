@@ -2,6 +2,11 @@ use clap::Subcommand;
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum MessageCommand {
+    #[command(about = "Show message command status guidance")]
+    Status {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     Capabilities {
         connector_id: String,
         #[arg(long)]

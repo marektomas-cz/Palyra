@@ -2,6 +2,7 @@ use clap::{Subcommand, ValueEnum};
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum SystemCommand {
+    #[command(visible_alias = "status")]
     Heartbeat {
         #[arg(long, default_value_t = false)]
         json: bool,

@@ -3,6 +3,7 @@ Inspect and manage routed channel messages
 Usage: palyra message [OPTIONS] <COMMAND>
 
 Commands:
+  status        Show message command status guidance
   capabilities
   send
   thread

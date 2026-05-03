@@ -11,6 +11,12 @@ use crate::{
 };
 
 pub(crate) fn run_message(command: MessageCommand) -> Result<()> {
+    if let MessageCommand::Status { json } = &command {
+        emit_status(output::preferred_json(*json))?;
+        std::io::stdout().flush().context("stdout flush failed")?;
+        return Ok(());
+    }
+
     let root_context = app::current_root_context()
         .ok_or_else(|| anyhow::anyhow!("CLI root context is unavailable for message command"))?;
     let connection = root_context.resolve_grpc_connection(
@@ -23,6 +29,9 @@ pub(crate) fn run_message(command: MessageCommand) -> Result<()> {
 
 async fn run_message_async(command: MessageCommand, runtime: OperatorRuntime) -> Result<()> {
     match command {
+        MessageCommand::Status { .. } => {
+            unreachable!("message status is handled before the gRPC runtime is built")
+        }
         MessageCommand::Capabilities {
             connector_id,
             url,
@@ -322,6 +331,32 @@ async fn run_message_async(command: MessageCommand, runtime: OperatorRuntime) ->
     }
 
     std::io::stdout().flush().context("stdout flush failed")
+}
+
+fn emit_status(json_output: bool) -> Result<()> {
+    if json_output {
+        output::print_json_pretty(
+            &message_status_payload(),
+            "failed to encode message status guidance as JSON",
+        )?;
+    } else {
+        output::print_text_line(message_status_text().as_str())?;
+    }
+    Ok(())
+}
+
+fn message_status_payload() -> Value {
+    serde_json::json!({
+        "surface": "message",
+        "status": "connector_bridge",
+        "canonical_status_command": "palyra channels status",
+        "list_command": "palyra channels list",
+        "capabilities_command": "palyra message capabilities <connector-id>"
+    })
+}
+
+fn message_status_text() -> String {
+    "message.status surface=connector_bridge status_command=\"palyra channels status\" list_command=\"palyra channels list\" capabilities_command=\"palyra message capabilities <connector-id>\"".to_owned()
 }
 
 fn emit_capabilities(
