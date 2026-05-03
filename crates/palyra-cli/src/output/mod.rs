@@ -215,6 +215,12 @@ pub(crate) fn classify_error(error: &anyhow::Error) -> CliExitCode {
     {
         return CliExitCode::Precondition;
     }
+    if lower.contains("failed precondition")
+        || lower.contains("precondition failed")
+        || lower.contains("http 412")
+    {
+        return CliExitCode::Precondition;
+    }
     if lower.contains("unauthorized")
         || lower.contains("forbidden")
         || lower.contains("auth")
@@ -243,12 +249,6 @@ pub(crate) fn classify_error(error: &anyhow::Error) -> CliExitCode {
     }
     if lower.contains("not found") {
         return CliExitCode::NotFound;
-    }
-    if lower.contains("failed precondition")
-        || lower.contains("precondition failed")
-        || lower.contains("http 412")
-    {
-        return CliExitCode::Precondition;
     }
     if lower.contains("invalid")
         || lower.contains("must be")
@@ -416,6 +416,16 @@ mod tests {
         assert_eq!(
             classify_error(&anyhow!(
                 "browser service is disabled (tool_call.browser_service.enabled=false); configure tool_call.browser_service.auth_token before use"
+            )),
+            CliExitCode::Precondition
+        );
+    }
+
+    #[test]
+    fn classify_error_maps_explicit_precondition_before_auth_like_paths() {
+        assert_eq!(
+            classify_error(&anyhow!(
+                "precondition failed: no managed gateway service metadata exists at /tmp/auth-token/gateway-service.json"
             )),
             CliExitCode::Precondition
         );
