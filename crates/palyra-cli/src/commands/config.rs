@@ -164,6 +164,7 @@ pub(crate) fn run_config(command: Option<ConfigCommand>) -> Result<()> {
             let (mut document, migration) = load_document_for_mutation(path_ref)
                 .with_context(|| format!("failed to parse {}", path_ref.display()))?;
             let literal = parse_config_set_value_literal(value.as_str())?;
+            validate_config_set_value(key.as_str(), &literal)?;
             set_value_at_path(&mut document, key.as_str(), literal)
                 .with_context(|| format!("invalid config key path: {}", key))?;
             validate_daemon_compatible_document(&document).with_context(|| {
@@ -396,6 +397,18 @@ fn parse_config_set_value_literal(raw: &str) -> Result<toml::Value> {
         }
         Err(error) => Err(error).context("config set value must be a valid TOML literal"),
     }
+}
+
+fn validate_config_set_value(key: &str, value: &toml::Value) -> Result<()> {
+    if key == "tool_call.browser_service.auth_token" {
+        let Some(token) = value.as_str() else {
+            anyhow::bail!("tool_call.browser_service.auth_token must be a non-empty string");
+        };
+        if token.trim().is_empty() {
+            anyhow::bail!("tool_call.browser_service.auth_token must not be empty");
+        }
+    }
+    Ok(())
 }
 
 fn can_treat_config_set_value_as_bare_string(raw: &str) -> bool {

@@ -578,6 +578,7 @@ fn run_secrets_configure(command: SecretsConfigureCommand) -> Result<()> {
                 value_stdin,
                 &path,
                 backups,
+                None,
                 |document, vault_ref| {
                     set_value_at_path(
                         document,
@@ -628,6 +629,7 @@ fn run_secrets_configure(command: SecretsConfigureCommand) -> Result<()> {
                 value_stdin,
                 &path,
                 backups,
+                Some(validate_browser_state_key_secret_bytes),
                 |document, vault_ref| {
                     set_value_at_path(
                         document,
@@ -653,6 +655,7 @@ fn configure_secret_backed_setting<F>(
     value_stdin: bool,
     path: &str,
     backups: usize,
+    validate_value: Option<fn(&[u8]) -> Result<()>>,
     mutate_document: F,
 ) -> Result<()>
 where
@@ -660,6 +663,9 @@ where
 {
     let vault = open_cli_vault().context("failed to initialize vault runtime")?;
     let value = read_secret_bytes_from_stdin(value_stdin)?;
+    if let Some(validate_value) = validate_value {
+        validate_value(value.as_slice())?;
+    }
     let scope = parse_vault_scope(scope_raw.as_str())?;
     vault
         .put_secret(&scope, key.as_str(), value.as_slice())
@@ -677,6 +683,19 @@ where
         .with_context(|| format!("failed to persist config {}", path_ref.display()))?;
 
     Ok(())
+}
+
+fn validate_browser_state_key_secret_bytes(value: &[u8]) -> Result<()> {
+    let value =
+        std::str::from_utf8(value).context("browser state key secret must be UTF-8 base64 text")?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("browser state key secret must not be empty");
+    }
+    crate::commands::browser::validate_browserd_state_encryption_key(
+        trimmed,
+        "browser-state-key secret",
+    )
 }
 
 fn emit_secret_configure_payload(

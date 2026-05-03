@@ -381,6 +381,42 @@ fn config_set_accepts_bare_string_values() -> Result<()> {
 }
 
 #[test]
+fn config_set_rejects_empty_browser_auth_token() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+    let config_path = workdir.path().join("palyra.toml");
+    fs::write(&config_path, "version = 1\n")
+        .with_context(|| format!("failed to write {}", config_path.display()))?;
+    let config_path_string = config_path.to_string_lossy().into_owned();
+
+    let output = run_cli(
+        &workdir,
+        &[
+            "config",
+            "set",
+            "--path",
+            &config_path_string,
+            "--key",
+            "tool_call.browser_service.auth_token",
+            "--value",
+            "\"\"",
+        ],
+    )?;
+    assert!(!output.status.success(), "empty browser token should fail");
+    let stderr = String::from_utf8(output.stderr).context("stderr was not UTF-8")?;
+    assert!(
+        stderr.contains("tool_call.browser_service.auth_token must not be empty"),
+        "unexpected stderr output: {stderr}"
+    );
+    let config_toml = fs::read_to_string(&config_path)
+        .with_context(|| format!("failed to read {}", config_path.display()))?;
+    assert!(
+        !config_toml.contains("auth_token"),
+        "failed config set should preserve the file without writing an empty token: {config_toml}"
+    );
+    Ok(())
+}
+
+#[test]
 fn config_set_rejects_malformed_toml_container_literal() -> Result<()> {
     let workdir = TempDir::new().context("failed to create temporary workdir")?;
     let config_path = workdir.path().join("palyra.toml");

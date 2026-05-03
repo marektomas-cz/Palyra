@@ -446,7 +446,7 @@ fn secrets_configure_browser_state_key_updates_config() -> Result<()> {
             config_path.as_str(),
             "--json",
         ],
-        b"0123456789abcdef0123456789abcdef",
+        b"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
     )?;
     assert!(
         output.status.success(),
@@ -458,6 +458,41 @@ fn secrets_configure_browser_state_key_updates_config() -> Result<()> {
     assert!(
         config_toml.contains("state_key_vault_ref = \"global/browser_state_key\""),
         "config should reference the configured browser state key: {config_toml}"
+    );
+    Ok(())
+}
+
+#[test]
+fn secrets_configure_browser_state_key_rejects_empty_value() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+    let config_path = bootstrap_local_config(&workdir)?;
+
+    let output = run_cli_with_stdin(
+        &workdir,
+        &[
+            "secrets",
+            "configure",
+            "browser-state-key",
+            "global",
+            "browser_state_key",
+            "--value-stdin",
+            "--path",
+            config_path.as_str(),
+            "--json",
+        ],
+        b" \r\n\t",
+    )?;
+    assert!(!output.status.success(), "empty browser state key should fail");
+    let stderr = String::from_utf8(output.stderr).context("stderr was not UTF-8")?;
+    assert!(
+        stderr.contains("browser state key secret must not be empty"),
+        "unexpected stderr output: {stderr}"
+    );
+
+    let config_toml = fs::read_to_string(&config_path).context("failed to read config")?;
+    assert!(
+        !config_toml.contains("state_key_vault_ref"),
+        "failed configure should not write a browser state key ref: {config_toml}"
     );
     Ok(())
 }

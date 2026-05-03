@@ -2882,7 +2882,7 @@ fn resolve_browserd_state_encryption_key_for_start(
     Ok(Some(trimmed.to_owned()))
 }
 
-fn validate_browserd_state_encryption_key(value: &str, source: &str) -> Result<()> {
+pub(crate) fn validate_browserd_state_encryption_key(value: &str, source: &str) -> Result<()> {
     let decoded = BASE64_STANDARD.decode(value.trim()).with_context(|| {
         format!("{source} must contain a base64-encoded 32-byte browser state key")
     })?;
