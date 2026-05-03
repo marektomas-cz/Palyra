@@ -4145,7 +4145,7 @@ fn emit_agent_event_text(event: &common_v1::RunStreamEvent) -> Result<()> {
                 "agent.tool.proposal run_id={} proposal_id={} tool_name={} approval_required={}",
                 run_id,
                 redacted_presence_for_output(proposal.proposal_id.is_some()),
-                redacted_presence_for_output(!proposal.tool_name.trim().is_empty()),
+                safe_stream_label_for_output(proposal.tool_name.as_str()),
                 proposal.approval_required
             );
         }
@@ -4166,7 +4166,7 @@ fn emit_agent_event_text(event: &common_v1::RunStreamEvent) -> Result<()> {
                 run_id,
                 redacted_presence_for_output(approval_request.proposal_id.is_some()),
                 redacted_presence_for_output(approval_request.approval_id.is_some()),
-                redacted_presence_for_output(!approval_request.tool_name.trim().is_empty()),
+                safe_stream_label_for_output(approval_request.tool_name.as_str()),
                 approval_request.approval_required,
                 redacted_presence_for_output(!approval_request.request_summary.trim().is_empty())
             );
@@ -4189,7 +4189,7 @@ fn emit_agent_event_text(event: &common_v1::RunStreamEvent) -> Result<()> {
                 run_id,
                 redacted_presence_for_output(result.proposal_id.is_some()),
                 result.success,
-                redacted_presence_for_output(!result.error.trim().is_empty())
+                sanitized_optional_text_field(result.error.as_str())
             );
         }
         Some(common_v1::run_stream_event::Body::ToolAttestation(attestation)) => {
@@ -4199,7 +4199,7 @@ fn emit_agent_event_text(event: &common_v1::RunStreamEvent) -> Result<()> {
                 redacted_presence_for_output(attestation.proposal_id.is_some()),
                 redacted_presence_for_output(attestation.attestation_id.is_some()),
                 attestation.timed_out,
-                redacted_presence_for_output(!attestation.executor.trim().is_empty())
+                safe_stream_label_for_output(attestation.executor.as_str())
             );
         }
         Some(common_v1::run_stream_event::Body::A2uiUpdate(update)) => {
@@ -4252,6 +4252,49 @@ fn sanitize_agent_failure_message(message: &str) -> String {
 fn quoted_text_field(value: &str) -> String {
     let escaped = value.replace('"', "'").replace(['\r', '\n'], " ");
     format!("\"{escaped}\"")
+}
+
+fn safe_stream_label_for_output(value: &str) -> String {
+    let sanitized = sanitize_diagnostic_error(value).trim().to_owned();
+    if sanitized.is_empty() {
+        return "none".to_owned();
+    }
+    if sanitized.chars().all(is_safe_stream_label_char) {
+        sanitized
+    } else {
+        quoted_text_field(sanitized.as_str())
+    }
+}
+
+fn safe_stream_label_json_value(value: &str) -> Value {
+    let sanitized = sanitize_diagnostic_error(value).trim().to_owned();
+    if sanitized.is_empty() {
+        Value::Null
+    } else {
+        Value::String(sanitized)
+    }
+}
+
+fn sanitized_optional_text_field(value: &str) -> String {
+    let sanitized = sanitize_diagnostic_error(value).trim().to_owned();
+    if sanitized.is_empty() {
+        "none".to_owned()
+    } else {
+        quoted_text_field(sanitized.as_str())
+    }
+}
+
+fn sanitized_optional_json_text(value: &str) -> Value {
+    let sanitized = sanitize_diagnostic_error(value).trim().to_owned();
+    if sanitized.is_empty() {
+        Value::Null
+    } else {
+        Value::String(sanitized)
+    }
+}
+
+fn is_safe_stream_label_char(candidate: char) -> bool {
+    candidate.is_ascii_alphanumeric() || matches!(candidate, '.' | '_' | '-' | ':' | '/')
 }
 
 #[cfg(test)]
@@ -4308,6 +4351,29 @@ mod agent_stream_output_tests {
             "unexpected error: {error}"
         );
     }
+
+    #[test]
+    fn tool_stream_labels_preserve_safe_diagnostics() {
+        assert_eq!(safe_stream_label_for_output("palyra.fs.apply_patch"), "palyra.fs.apply_patch");
+        assert_eq!(
+            safe_stream_label_json_value("workspace_patch"),
+            Value::String("workspace_patch".to_owned())
+        );
+        assert_eq!(safe_stream_label_for_output(""), "none");
+        assert_eq!(safe_stream_label_json_value(""), Value::Null);
+    }
+
+    #[test]
+    fn tool_stream_errors_are_sanitized_not_presence_redacted() {
+        let error = "failed with access_token=browser-secret";
+
+        let text = sanitized_optional_text_field(error);
+        assert!(text.contains("failed with access_token=<redacted>"), "{text}");
+        assert!(!text.contains("browser-secret"), "{text}");
+
+        let json = sanitized_optional_json_text(error);
+        assert_eq!(json, Value::String("failed with access_token=<redacted>".to_owned()));
+    }
 }
 
 fn agent_event_json_value(event: &common_v1::RunStreamEvent) -> serde_json::Value {
@@ -4329,7 +4395,7 @@ fn agent_event_json_value(event: &common_v1::RunStreamEvent) -> serde_json::Valu
             "type": "tool.proposal",
             "run_id": run_id,
             "proposal_id": redacted_presence_json_value(proposal.proposal_id.is_some()),
-            "tool_name": redacted_presence_json_value(!proposal.tool_name.trim().is_empty()),
+            "tool_name": safe_stream_label_json_value(proposal.tool_name.as_str()),
             "approval_required": proposal.approval_required,
             "input_json": redacted_presence_json_value(!proposal.input_json.is_empty()),
         }),
@@ -4347,7 +4413,7 @@ fn agent_event_json_value(event: &common_v1::RunStreamEvent) -> serde_json::Valu
             "run_id": run_id,
             "proposal_id": redacted_presence_json_value(approval_request.proposal_id.is_some()),
             "approval_id": redacted_presence_json_value(approval_request.approval_id.is_some()),
-            "tool_name": redacted_presence_json_value(!approval_request.tool_name.trim().is_empty()),
+            "tool_name": safe_stream_label_json_value(approval_request.tool_name.as_str()),
             "approval_required": approval_request.approval_required,
             "request_summary": redacted_presence_json_value(
                 !approval_request.request_summary.trim().is_empty()
@@ -4389,7 +4455,7 @@ fn agent_event_json_value(event: &common_v1::RunStreamEvent) -> serde_json::Valu
             "proposal_id": redacted_presence_json_value(result.proposal_id.is_some()),
             "success": result.success,
             "output_json": redacted_presence_json_value(!result.output_json.is_empty()),
-            "error": redacted_presence_json_value(!result.error.trim().is_empty()),
+            "error": sanitized_optional_json_text(result.error.as_str()),
         }),
         Some(common_v1::run_stream_event::Body::ToolAttestation(attestation)) => json!({
             "type": "tool.attestation",
@@ -4399,7 +4465,7 @@ fn agent_event_json_value(event: &common_v1::RunStreamEvent) -> serde_json::Valu
             "execution_sha256": redacted_presence_json_value(!attestation.execution_sha256.trim().is_empty()),
             "executed_at_unix_ms": attestation.executed_at_unix_ms,
             "timed_out": attestation.timed_out,
-            "executor": redacted_presence_json_value(!attestation.executor.trim().is_empty()),
+            "executor": safe_stream_label_json_value(attestation.executor.as_str()),
         }),
         Some(common_v1::run_stream_event::Body::A2uiUpdate(update)) => json!({
             "type": "a2ui.update",
