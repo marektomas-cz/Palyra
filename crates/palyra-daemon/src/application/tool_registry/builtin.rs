@@ -337,12 +337,24 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
         ),
         entry(
             "palyra.fs.apply_patch",
-            "Apply a strict workspace-confined patch with attestation.",
+            "Apply a strict workspace-confined Palyra patch document with attestation.",
             object_schema(
                 &["patch"],
                 vec![
-                    ("patch", json!({"type":"string"})),
-                    ("workspace_root", json!({"type":"string"})),
+                    (
+                        "patch",
+                        json!({
+                            "type":"string",
+                            "description":"A complete Palyra patch document. It must start with '*** Begin Patch', contain one or more '*** Add File:', '*** Update File:', or '*** Delete File:' operations, and end with '*** End Patch'. Add-file body lines must start with '+'. Update-file operations require '@@' hunks whose lines start with ' ', '+', or '-'. Use forward-slash relative paths only."
+                        }),
+                    ),
+                    (
+                        "workspace_root",
+                        json!({
+                            "type":"string",
+                            "description":"Optional existing workspace subdirectory to treat as the patch root. Omit for the agent workspace root."
+                        }),
+                    ),
                     ("dry_run", json!({"type":"boolean"})),
                 ],
                 false,

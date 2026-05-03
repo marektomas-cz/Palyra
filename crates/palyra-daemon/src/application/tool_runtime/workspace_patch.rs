@@ -28,6 +28,8 @@ use crate::{
 
 use checkpoint_flow::WorkspacePatchMutationRequest;
 
+const WORKSPACE_PATCH_GRAMMAR_HINT: &str = "Use a complete Palyra patch document: begin with '*** Begin Patch', then operation headers like '*** Add File: path' or '*** Update File: path', end with '*** End Patch'. Add-file content lines must start with '+'. Update-file hunks must start with '@@' and hunk lines must start with ' ', '+', or '-'.";
+
 pub(crate) struct WorkspacePatchToolRequest<'a> {
     pub(crate) principal: &'a str,
     pub(crate) device_id: &'a str,
@@ -436,6 +438,7 @@ fn workspace_patch_error_outcome(
         "parse_error": error
             .parse_location()
             .map(|(line, column)| json!({ "line": line, "column": column })),
+        "grammar_hint": WORKSPACE_PATCH_GRAMMAR_HINT,
         "error": error.to_string(),
     });
     let output_json = serde_json::to_vec(&failure_payload).unwrap_or_else(|_| b"{}".to_vec());
@@ -444,7 +447,7 @@ fn workspace_patch_error_outcome(
         input_json,
         false,
         output_json,
-        format!("palyra.fs.apply_patch failed: {error}"),
+        format!("palyra.fs.apply_patch failed: {error}. {WORKSPACE_PATCH_GRAMMAR_HINT}"),
     )
 }
 
@@ -529,11 +532,13 @@ fn workspace_patch_tool_execution_outcome(
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_workspace_patch_roots;
+    use super::{
+        resolve_workspace_patch_roots, workspace_patch_error_outcome, WORKSPACE_PATCH_GRAMMAR_HINT,
+    };
     use palyra_common::workspace_patch::{
         apply_workspace_patch, WorkspacePatchLimits, WorkspacePatchRequest,
     };
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     #[test]
     fn workspace_root_override_targets_existing_subdirectory() {
@@ -581,5 +586,40 @@ mod tests {
             .expect_err("outside workspace_root should be rejected");
 
         assert!(error.contains("escapes agent workspace roots"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn parse_failure_result_includes_repairable_patch_grammar_hint() {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let workspace = tempdir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace directory should exist");
+        let limits = WorkspacePatchLimits::default();
+        let request = WorkspacePatchRequest {
+            patch: "function sum(a, b) { return a + b; }".to_owned(),
+            dry_run: true,
+            redaction_policy: Default::default(),
+        };
+        let error = apply_workspace_patch(std::slice::from_ref(&workspace), &request, &limits)
+            .expect_err("raw file contents should fail patch parsing");
+
+        let outcome = workspace_patch_error_outcome(
+            "01ARZ3NDEKTSV4RRFFQ69G5FAW",
+            br#"{"patch":"function sum(a, b) { return a + b; }"}"#,
+            true,
+            request.patch.as_str(),
+            &request.redaction_policy,
+            &limits,
+            &error,
+        );
+
+        assert!(!outcome.success);
+        assert!(outcome.error.contains(WORKSPACE_PATCH_GRAMMAR_HINT));
+        let payload: Value =
+            serde_json::from_slice(outcome.output_json.as_slice()).expect("valid failure json");
+        assert_eq!(
+            payload.get("grammar_hint").and_then(Value::as_str),
+            Some(WORKSPACE_PATCH_GRAMMAR_HINT)
+        );
+        assert_eq!(payload.pointer("/parse_error/line").and_then(Value::as_u64), Some(1));
     }
 }
