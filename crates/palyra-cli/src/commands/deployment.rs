@@ -355,11 +355,7 @@ fn evaluate_preflight_check(
             Some("run palyra deployment recipe for the selected profile".to_owned()),
         ),
         "model_auth" => {
-            let configured =
-                toml_string_at_path(document, "model_provider.openai_api_key_vault_ref").is_some()
-                    || toml_string_at_path(document, "model_provider.anthropic_api_key_vault_ref")
-                        .is_some()
-                    || toml_string_at_path(document, "model_provider.auth_profile_id").is_some();
+            let configured = model_provider_auth_configured_for_preflight(document);
             if configured {
                 ("ok", "model-provider credentials are configured".to_owned(), None)
             } else {
@@ -418,6 +414,34 @@ fn evaluate_preflight_check(
         detail,
         remediation,
     }
+}
+
+fn model_provider_auth_configured_for_preflight(document: &toml::Value) -> bool {
+    [
+        "model_provider.auth_profile_id",
+        "model_provider.auth_profile_ref",
+        "model_provider.openai_api_key",
+        "model_provider.openai_api_key_vault_ref",
+        "model_provider.anthropic_api_key",
+        "model_provider.anthropic_api_key_vault_ref",
+    ]
+    .iter()
+    .any(|path| toml_string_at_path(document, path).is_some())
+        || model_provider_secret_ref_configured(
+            document,
+            "model_provider.openai_api_key_secret_ref",
+        )
+        || model_provider_secret_ref_configured(
+            document,
+            "model_provider.anthropic_api_key_secret_ref",
+        )
+}
+
+fn model_provider_secret_ref_configured(document: &toml::Value, path: &str) -> bool {
+    toml_value_at_path(document, path).is_some_and(|value| match value {
+        toml::Value::Table(table) => !table.is_empty(),
+        _ => false,
+    })
 }
 
 fn evaluate_bind_posture(document: &toml::Value) -> (&'static str, String, Option<String>) {
@@ -979,5 +1003,60 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn preflight_model_auth_accepts_minimax_anthropic_sources() {
+        let document: toml::Value = toml::from_str(
+            r#"
+version = 1
+
+[model_provider]
+kind = "anthropic"
+auth_provider_kind = "minimax"
+anthropic_base_url = "https://api.minimax.io/anthropic"
+anthropic_model = "MiniMax-M2.7"
+anthropic_api_key = "sk-minimax-test"
+"#,
+        )
+        .expect("fixture should parse");
+
+        let check = evaluate_preflight_check(
+            "model_auth",
+            false,
+            Some(&document),
+            std::path::Path::new("palyra.toml"),
+            &deployment_profile_manifest(DeploymentProfileId::Local),
+        );
+
+        assert_eq!(check.status, "ok");
+        assert_eq!(check.detail, "model-provider credentials are configured");
+    }
+
+    #[test]
+    fn preflight_model_auth_accepts_profile_ref_and_structured_secret_ref() {
+        let profile_ref_document: toml::Value = toml::from_str(
+            r#"
+[model_provider]
+kind = "openai_compatible"
+auth_profile_ref = "local-openai"
+"#,
+        )
+        .expect("profile ref fixture should parse");
+        assert!(model_provider_auth_configured_for_preflight(&profile_ref_document));
+
+        let secret_ref_document: toml::Value = toml::from_str(
+            r#"
+[model_provider]
+kind = "anthropic"
+auth_provider_kind = "minimax"
+
+[model_provider.anthropic_api_key_secret_ref]
+kind = "env"
+variable = "PALYRA_MODEL_PROVIDER_MINIMAX_API_KEY"
+"#,
+        )
+        .expect("secret ref fixture should parse");
+        assert!(model_provider_auth_configured_for_preflight(&secret_ref_document));
     }
 }
