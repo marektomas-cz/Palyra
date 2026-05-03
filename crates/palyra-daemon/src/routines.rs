@@ -184,6 +184,7 @@ impl RoutineSilentPolicy {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RoutineRunOutcomeKind {
+    Pending,
     SuccessWithOutput,
     SuccessNoOp,
     Skipped,
@@ -196,6 +197,7 @@ impl RoutineRunOutcomeKind {
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Pending => "pending",
             Self::SuccessWithOutput => "success_with_output",
             Self::SuccessNoOp => "success_no_op",
             Self::Skipped => "skipped",
@@ -1200,9 +1202,7 @@ pub fn default_outcome_from_cron_status(status: CronRunStatus) -> RoutineRunOutc
         CronRunStatus::Skipped => RoutineRunOutcomeKind::Skipped,
         CronRunStatus::Denied => RoutineRunOutcomeKind::Denied,
         CronRunStatus::Failed => RoutineRunOutcomeKind::Failed,
-        CronRunStatus::Accepted | CronRunStatus::Running => {
-            RoutineRunOutcomeKind::SuccessWithOutput
-        }
+        CronRunStatus::Accepted | CronRunStatus::Running => RoutineRunOutcomeKind::Pending,
     }
 }
 
@@ -1257,17 +1257,27 @@ pub fn join_run_metadata(
     run: &CronRunRecord,
     metadata: Option<&RoutineRunMetadataRecord>,
 ) -> Value {
-    let outcome_kind = metadata
-        .and_then(|entry| entry.outcome_override)
-        .unwrap_or_else(|| default_outcome_from_cron_status(run.status));
+    let terminal = !run.status.is_active();
+    let outcome_kind = if terminal {
+        metadata
+            .and_then(|entry| entry.outcome_override)
+            .unwrap_or_else(|| default_outcome_from_cron_status(run.status))
+    } else {
+        RoutineRunOutcomeKind::Pending
+    };
     let execution = metadata.map(|entry| entry.execution.clone()).unwrap_or_default();
     let delivery = metadata.map(|entry| entry.delivery.clone()).unwrap_or_default();
-    let output_delivered = metadata
-        .and_then(|entry| entry.output_delivered)
-        .unwrap_or_else(|| delivery_announced_for_outcome(&delivery, outcome_kind));
-    let delivery_reason = metadata
-        .and_then(|entry| entry.delivery_reason.clone())
-        .unwrap_or_else(|| delivery_reason_for_outcome(&delivery, outcome_kind));
+    let output_delivered = terminal
+        && metadata
+            .and_then(|entry| entry.output_delivered)
+            .unwrap_or_else(|| delivery_announced_for_outcome(&delivery, outcome_kind));
+    let delivery_reason = if terminal {
+        metadata
+            .and_then(|entry| entry.delivery_reason.clone())
+            .unwrap_or_else(|| delivery_reason_for_outcome(&delivery, outcome_kind))
+    } else {
+        delivery_reason_for_outcome(&delivery, outcome_kind)
+    };
     let effective_delivery = effective_delivery_target(
         &delivery,
         matches!(outcome_kind, RoutineRunOutcomeKind::Failed | RoutineRunOutcomeKind::Denied),
@@ -1291,6 +1301,7 @@ pub fn join_run_metadata(
         "run_id": run.run_id,
         "status": run.status.as_str(),
         "outcome_kind": outcome_kind.as_str(),
+        "outcome_provisional": !terminal,
         "outcome_message": metadata.and_then(|entry| entry.outcome_message.clone()).or_else(|| run.error_message_redacted.clone()),
         "error_kind": run.error_kind,
         "trigger_kind": metadata.map(|entry| entry.trigger_kind.as_str()).unwrap_or(RoutineTriggerKind::Schedule.as_str()),
@@ -1851,6 +1862,9 @@ fn delivery_announced_for_outcome(
     delivery: &RoutineDeliveryConfig,
     outcome_kind: RoutineRunOutcomeKind,
 ) -> bool {
+    if outcome_kind == RoutineRunOutcomeKind::Pending {
+        return false;
+    }
     if delivery.silent_policy == RoutineSilentPolicy::AuditOnly {
         return false;
     }
@@ -1867,6 +1881,10 @@ fn delivery_reason_for_outcome(
     delivery: &RoutineDeliveryConfig,
     outcome_kind: RoutineRunOutcomeKind,
 ) -> String {
+    if outcome_kind == RoutineRunOutcomeKind::Pending {
+        return "run is still active; output delivery waits until the routine reaches a terminal status"
+            .to_owned();
+    }
     if delivery.silent_policy == RoutineSilentPolicy::AuditOnly {
         return "delivery suppressed by silent_policy=audit_only; audit trail remains available"
             .to_owned();
@@ -2365,7 +2383,7 @@ fn humanize_duration(duration_ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_routine_export_bundle, default_outcome_from_cron_status,
+        build_routine_export_bundle, default_outcome_from_cron_status, join_run_metadata,
         natural_language_schedule_preview, resolve_routines_root, routine_delivery_contract,
         routine_delivery_preview, routine_retention_dry_run, routine_run_lifecycle_snapshot,
         routine_runtime_backfill_plan, shadow_manual_schedule_payload_json,
@@ -2385,7 +2403,7 @@ mod tests {
         },
     };
     use chrono::DateTime;
-    use serde_json::json;
+    use serde_json::{json, Value};
     use std::{
         collections::BTreeSet,
         time::{SystemTime, UNIX_EPOCH},
@@ -2568,7 +2586,45 @@ mod tests {
             default_outcome_from_cron_status(CronRunStatus::Succeeded).as_str(),
             "success_with_output"
         );
+        assert_eq!(default_outcome_from_cron_status(CronRunStatus::Running).as_str(), "pending");
+        assert_eq!(default_outcome_from_cron_status(CronRunStatus::Accepted).as_str(), "pending");
         assert_eq!(default_outcome_from_cron_status(CronRunStatus::Skipped).as_str(), "skipped");
+    }
+
+    #[test]
+    fn join_run_metadata_marks_active_run_outcome_as_pending() {
+        let now = 1_700_000_000_000_i64;
+        let run = CronRunRecord {
+            run_id: "run-active".to_owned(),
+            job_id: "routine-active".to_owned(),
+            status: CronRunStatus::Running,
+            started_at_unix_ms: now,
+            finished_at_unix_ms: None,
+            attempt: 1,
+            session_id: Some("session-active".to_owned()),
+            orchestrator_run_id: None,
+            error_kind: None,
+            error_message_redacted: None,
+            model_tokens_in: 0,
+            model_tokens_out: 0,
+            tool_calls: 0,
+            tool_denies: 0,
+            created_at_unix_ms: now,
+            updated_at_unix_ms: now,
+        };
+
+        let value = join_run_metadata("routine-active", &run, None);
+
+        assert_eq!(value.get("outcome_kind").and_then(Value::as_str), Some("pending"));
+        assert_eq!(value.get("output_delivered").and_then(Value::as_bool), Some(false));
+        assert_eq!(value.get("outcome_provisional").and_then(Value::as_bool), Some(true));
+        assert!(
+            value
+                .get("delivery_reason")
+                .and_then(Value::as_str)
+                .is_some_and(|reason| reason.contains("terminal status")),
+            "{value}"
+        );
     }
 
     #[test]

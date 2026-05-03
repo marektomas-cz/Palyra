@@ -796,10 +796,11 @@ fn emit_routine_runs(routine_id: &str, payload: &Value, json: bool) -> Result<()
     );
     for run in runs {
         println!(
-            "routines.run run_id={} status={} outcome={} trigger_kind={} dispatch_mode={} run_mode={} output_delivered={} started_at_ms={} finished_at_ms={} tool_calls={} tool_denies={}",
+            "routines.run run_id={} status={} outcome={} outcome_provisional={} trigger_kind={} dispatch_mode={} run_mode={} output_delivered={} started_at_ms={} finished_at_ms={} tool_calls={} tool_denies={}",
             json_optional_string_at(run, "/run_id").unwrap_or_else(|| "unknown".to_owned()),
             json_optional_string_at(run, "/status").unwrap_or_else(|| "unknown".to_owned()),
             json_optional_string_at(run, "/outcome_kind").unwrap_or_else(|| "unknown".to_owned()),
+            json_bool_at(run, "/outcome_provisional").unwrap_or(false),
             json_optional_string_at(run, "/trigger_kind").unwrap_or_else(|| "unknown".to_owned()),
             json_optional_string_at(run, "/dispatch_mode").unwrap_or_else(|| "normal".to_owned()),
             json_optional_string_at(run, "/run_mode").unwrap_or_else(|| "same_session".to_owned()),
