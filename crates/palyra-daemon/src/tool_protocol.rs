@@ -904,9 +904,7 @@ fn sandbox_enforcement_for_tool(config: &ToolCallConfig, tool_name: &str) -> Str
         config.process_runner.egress_enforcement_mode.as_str().to_owned()
     } else if tool_name == "palyra.tool_program.run" {
         "nested_tool_policy".to_owned()
-    } else if tool_name == "palyra.fs.read_file" {
-        "workspace_roots".to_owned()
-    } else if tool_name == "palyra.fs.apply_patch" {
+    } else if matches!(tool_name, "palyra.fs.read_file" | "palyra.fs.apply_patch") {
         "workspace_roots".to_owned()
     } else if tool_name == "palyra.http.fetch" {
         "ssrf_guard".to_owned()

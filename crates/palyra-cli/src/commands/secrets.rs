@@ -649,13 +649,15 @@ fn run_secrets_configure(command: SecretsConfigureCommand) -> Result<()> {
     }
 }
 
+type SecretValueValidator = fn(&[u8]) -> Result<()>;
+
 fn configure_secret_backed_setting<F>(
     scope_raw: String,
     key: String,
     value_stdin: bool,
     path: &str,
     backups: usize,
-    validate_value: Option<fn(&[u8]) -> Result<()>>,
+    validate_value: Option<SecretValueValidator>,
     mutate_document: F,
 ) -> Result<()>
 where
