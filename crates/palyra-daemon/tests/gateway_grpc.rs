@@ -5447,7 +5447,7 @@ async fn grpc_run_stream_executes_memory_recall_tool_and_emits_memory_attestatio
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn grpc_run_stream_memory_search_principal_scope_stays_channel_bounded() -> Result<()> {
+async fn grpc_run_stream_memory_search_principal_scope_crosses_channels() -> Result<()> {
     let response_body = openai_tool_call_response(
         "palyra.memory.search",
         &serde_json::json!({
@@ -5561,8 +5561,8 @@ async fn grpc_run_stream_memory_search_principal_scope_stays_channel_bounded() -
                     "principal-scope tool search from cli channel should include cli memory"
                 );
                 assert!(
-                    returned_ids.iter().all(|memory_id| *memory_id != slack_memory_id.as_str()),
-                    "principal-scope tool search from cli channel must not return slack memory"
+                    returned_ids.contains(&slack_memory_id.as_str()),
+                    "principal-scope tool search should include same-principal memory from other channels"
                 );
                 saw_memory_result = true;
             }
