@@ -2106,6 +2106,7 @@ mod tests {
             cwd: None,
             requested_egress_hosts: Vec::new(),
             timeout_ms: None,
+            background: false,
         };
 
         let hosts = collect_requested_egress_hosts(&input)
