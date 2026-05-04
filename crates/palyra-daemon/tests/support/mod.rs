@@ -282,6 +282,17 @@ fn read_child_stderr(stderr: Option<ChildStderr>) -> String {
     buffer.trim().to_owned()
 }
 
+fn ensure_child_still_running(daemon: &mut Child) -> Result<()> {
+    if let Some(status) = daemon.try_wait().context("failed to check palyrad status")? {
+        let stderr = read_child_stderr(daemon.stderr.take());
+        if stderr.is_empty() {
+            bail!("palyrad exited before becoming healthy with status: {status}");
+        }
+        bail!("palyrad exited before becoming healthy with status: {status}; stderr: {stderr}");
+    }
+    Ok(())
+}
+
 fn wait_for_health(port: u16, daemon: &mut Child) -> Result<()> {
     let timeout_at = Instant::now() + PALYRAD_STARTUP_TIMEOUT;
     let url = format!("http://127.0.0.1:{port}/healthz");
@@ -294,15 +305,13 @@ fn wait_for_health(port: u16, daemon: &mut Child) -> Result<()> {
         if Instant::now() > timeout_at {
             bail!("timed out waiting for palyrad health endpoint");
         }
-        if let Some(status) = daemon.try_wait().context("failed to check palyrad status")? {
-            let stderr = read_child_stderr(daemon.stderr.take());
-            if stderr.is_empty() {
-                bail!("palyrad exited before becoming healthy with status: {status}");
-            }
-            bail!("palyrad exited before becoming healthy with status: {status}; stderr: {stderr}");
-        }
+        ensure_child_still_running(daemon)?;
         if client.get(&url).send().and_then(|response| response.error_for_status()).is_ok() {
-            return Ok(());
+            thread::sleep(Duration::from_millis(100));
+            ensure_child_still_running(daemon)?;
+            if client.get(&url).send().and_then(|response| response.error_for_status()).is_ok() {
+                return Ok(());
+            }
         }
         thread::sleep(Duration::from_millis(100));
     }
