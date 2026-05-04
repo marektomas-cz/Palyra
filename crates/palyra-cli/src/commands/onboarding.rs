@@ -492,7 +492,7 @@ fn build_onboarding_steps(
             control_plane::OnboardingStepStatus::InProgress,
             Some(run_cli_action(
                 "Run smoke prompt",
-                "palyra agent run --session-key onboarding-smoke --reset-session --prompt \"Reply exactly PALYRA_ONBOARDING_OK\""
+                "echo Reply exactly PALYRA_ONBOARDING_OK | palyra agent run --session-key onboarding-smoke --reset-session --prompt-stdin"
                     .to_owned(),
             )),
             StepPresentation::required(Some("prompt_required".to_owned())),
@@ -1155,6 +1155,12 @@ kind = "anthropic"
 
         assert_eq!(verification.status, control_plane::OnboardingStepStatus::InProgress);
         assert_eq!(verification.verification_state.as_deref(), Some("prompt_required"));
+        assert_eq!(
+            verification.action.as_ref().map(|action| action.target.as_str()),
+            Some(
+                "echo Reply exactly PALYRA_ONBOARDING_OK | palyra agent run --session-key onboarding-smoke --reset-session --prompt-stdin"
+            )
+        );
         assert_eq!(first_success.status, control_plane::OnboardingStepStatus::Blocked);
         assert_eq!(
             derive_posture_status(&steps, onboarding_prerequisites_ready(&steps), false),
