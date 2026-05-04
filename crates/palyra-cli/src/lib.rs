@@ -4395,6 +4395,46 @@ mod agent_stream_output_tests {
         assert!(hint.contains("interactive"), "{hint}");
         assert!(hint.contains("--allow-sensitive-tools"), "{hint}");
     }
+
+    #[test]
+    fn tool_events_keep_request_stream_open_for_later_approval_responses() {
+        let tool_result = common_v1::RunStreamEvent {
+            v: CANONICAL_PROTOCOL_MAJOR,
+            run_id: None,
+            body: Some(common_v1::run_stream_event::Body::ToolResult(common_v1::ToolResult {
+                proposal_id: None,
+                success: false,
+                output_json: Vec::new(),
+                error: "sensitive action blocked by default".to_owned(),
+            })),
+        };
+        let tool_attestation = common_v1::RunStreamEvent {
+            v: CANONICAL_PROTOCOL_MAJOR,
+            run_id: None,
+            body: Some(common_v1::run_stream_event::Body::ToolAttestation(
+                common_v1::ToolAttestation {
+                    proposal_id: None,
+                    attestation_id: None,
+                    execution_sha256: String::new(),
+                    executed_at_unix_ms: 0,
+                    timed_out: false,
+                    executor: "palyra".to_owned(),
+                },
+            )),
+        };
+        let final_token = common_v1::RunStreamEvent {
+            v: CANONICAL_PROTOCOL_MAJOR,
+            run_id: None,
+            body: Some(common_v1::run_stream_event::Body::ModelToken(common_v1::ModelToken {
+                token: String::new(),
+                is_final: true,
+            })),
+        };
+
+        assert!(!run_stream_can_close_request_side(&tool_result));
+        assert!(!run_stream_can_close_request_side(&tool_attestation));
+        assert!(run_stream_can_close_request_side(&final_token));
+    }
 }
 
 fn agent_event_json_value(event: &common_v1::RunStreamEvent) -> serde_json::Value {
@@ -4526,10 +4566,6 @@ fn run_stream_can_close_request_side(event: &common_v1::RunStreamEvent) -> bool 
     matches!(
         event.body.as_ref(),
         Some(common_v1::run_stream_event::Body::ModelToken(token)) if token.is_final
-    ) || matches!(
-        event.body.as_ref(),
-        Some(common_v1::run_stream_event::Body::ToolResult(_))
-            | Some(common_v1::run_stream_event::Body::ToolAttestation(_))
     )
 }
 
