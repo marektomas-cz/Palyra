@@ -832,7 +832,13 @@ fn resolve_scoped_path(
             message: "sandbox denied: path contains embedded NUL byte".to_owned(),
         });
     }
-    let candidate = if Path::new(raw).is_absolute() { PathBuf::from(raw) } else { base.join(raw) };
+    let candidate = if let Some(suffix) = virtual_workspace_path_suffix(raw) {
+        workspace_root.join(suffix)
+    } else if Path::new(raw).is_absolute() {
+        PathBuf::from(raw)
+    } else {
+        base.join(raw)
+    };
 
     if candidate.components().any(|component| matches!(component, Component::ParentDir)) {
         return Err(SandboxProcessRunError {
@@ -881,6 +887,24 @@ fn resolve_scoped_path(
     } else {
         Ok(candidate)
     }
+}
+
+fn virtual_workspace_path_suffix(raw: &str) -> Option<PathBuf> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let normalized = trimmed.replace('\\', "/");
+    if normalized == "/" {
+        return Some(PathBuf::new());
+    }
+
+    if normalized == "/workspace" {
+        return Some(PathBuf::new());
+    }
+
+    normalized.strip_prefix("/workspace/").map(PathBuf::from)
 }
 
 fn nearest_existing_ancestor(path: &Path) -> Result<PathBuf, SandboxProcessRunError> {
@@ -1561,10 +1585,11 @@ mod tests {
 
     use super::{
         canonical_workspace_root, collect_requested_egress_hosts,
-        cpu_rlimit_seconds_from_usage_micros, is_host_allowlisted, run_constrained_process,
-        validate_argument_workspace_scope, validate_interpreter_argument_guardrails,
-        validate_runtime_egress_enforcement, EgressEnforcementMode, ProcessRunnerInput,
-        SandboxProcessRunErrorKind, SandboxProcessRunnerPolicy, SandboxProcessRunnerTier,
+        cpu_rlimit_seconds_from_usage_micros, is_host_allowlisted, resolve_working_directory,
+        run_constrained_process, validate_argument_workspace_scope,
+        validate_interpreter_argument_guardrails, validate_runtime_egress_enforcement,
+        EgressEnforcementMode, ProcessRunnerInput, SandboxProcessRunErrorKind,
+        SandboxProcessRunnerPolicy, SandboxProcessRunnerTier,
     };
 
     fn portable_test_memory_limit_bytes() -> u64 {
@@ -1610,6 +1635,82 @@ mod tests {
             .as_nanos();
         std::env::temp_dir()
             .join(format!("palyra-sandbox-runner-{suffix}-{nanos}-{}", std::process::id()))
+    }
+
+    #[test]
+    fn resolve_working_directory_treats_virtual_roots_as_workspace_root() {
+        let workspace = unique_temp_dir("workspace-virtual-root");
+        let nested = workspace.join("e2e-file-workflow");
+        fs::create_dir_all(nested.as_path()).expect("workspace subdirectory should be created");
+        let canonical_workspace = canonical_workspace_root(workspace.as_path())
+            .expect("workspace root should canonicalize");
+        let canonical_nested =
+            fs::canonicalize(nested.as_path()).expect("nested workspace path should canonicalize");
+
+        for alias in ["/", "\\", "/workspace", "\\workspace"] {
+            let resolved = resolve_working_directory(canonical_workspace.as_path(), Some(alias))
+                .expect("virtual workspace root aliases should resolve");
+            assert_eq!(resolved, canonical_workspace, "alias {alias}");
+        }
+
+        for alias in ["/workspace/e2e-file-workflow", "\\workspace\\e2e-file-workflow"] {
+            let resolved = resolve_working_directory(canonical_workspace.as_path(), Some(alias))
+                .expect("virtual workspace child alias should resolve");
+            assert_eq!(resolved, canonical_nested, "alias {alias}");
+        }
+
+        let _ = fs::remove_dir_all(workspace.as_path());
+    }
+
+    #[test]
+    fn validate_argument_workspace_scope_allows_virtual_workspace_paths() {
+        let workspace = unique_temp_dir("workspace-virtual-arg");
+        let nested = workspace.join("e2e-file-workflow");
+        fs::create_dir_all(nested.as_path()).expect("workspace subdirectory should be created");
+        fs::write(nested.join("test.js"), b"console.log('ok');\n")
+            .expect("workspace fixture should be written");
+        let canonical_workspace = canonical_workspace_root(workspace.as_path())
+            .expect("workspace root should canonicalize");
+        let args = vec![
+            "/workspace/e2e-file-workflow/test.js".to_owned(),
+            "--config=\\workspace\\e2e-file-workflow\\test.js".to_owned(),
+        ];
+
+        validate_argument_workspace_scope(
+            canonical_workspace.as_path(),
+            canonical_workspace.as_path(),
+            "node",
+            args.as_slice(),
+        )
+        .expect("virtual workspace path aliases should stay within scope");
+
+        let _ = fs::remove_dir_all(workspace.as_path());
+    }
+
+    #[test]
+    fn validate_argument_workspace_scope_rejects_non_alias_host_absolute_paths() {
+        let workspace = unique_temp_dir("workspace-host-absolute-deny");
+        fs::create_dir_all(workspace.as_path()).expect("workspace directory should be created");
+        let canonical_workspace = canonical_workspace_root(workspace.as_path())
+            .expect("workspace root should canonicalize");
+        #[cfg(windows)]
+        let host_path = "C:\\Windows\\System32\\drivers\\etc\\hosts";
+        #[cfg(not(windows))]
+        let host_path = "/etc/passwd";
+        let args = vec![host_path.to_owned()];
+
+        let error = validate_argument_workspace_scope(
+            canonical_workspace.as_path(),
+            canonical_workspace.as_path(),
+            "node",
+            args.as_slice(),
+        )
+        .expect_err("host absolute path should remain denied");
+
+        assert_eq!(error.kind, SandboxProcessRunErrorKind::WorkspaceScopeDenied);
+        assert!(error.message.contains("escapes workspace"), "{}", error.message);
+
+        let _ = fs::remove_dir_all(workspace.as_path());
     }
 
     #[test]
