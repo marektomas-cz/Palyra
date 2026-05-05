@@ -166,7 +166,10 @@ fn tool_specific_contract(tool_names: &[String]) -> String {
         contracts.push("palyra.fs.apply_patch patch grammar and write contract: use this tool as the primary path for requested workspace file creation, updates, and deletes; do not use process.run, mkdir, touch, echo redirection, or interpreter eval to write files. The patch string must be a complete Palyra patch document, not raw file contents and not prose. Start with '*** Begin Patch' on its own line, then one or more operation headers ('*** Add File: path', '*** Update File: path', or '*** Delete File: path'), then '*** End Patch'. For Add File, every content line must start with '+', and missing parent directories are created by the patch tool. For Update File, add '@@' before each hunk and make every hunk line start with one of space, '+', or '-'. Paths are forward-slash relative paths inside the workspace, for example reports/report.md. If the user asks for an outside-workspace write plus a workspace fallback, treat the outside path as denied by sandbox policy and apply only the relative in-workspace fallback. On a parse error, retry once with this exact wrapper and corrected prefixes.".to_owned());
     }
     if tool_names.iter().any(|tool| tool == "palyra.process.run") {
-        contracts.push("palyra.process.run sandbox contract: call only bare executable names, never shell syntax. Local desktop profiles commonly allow pwd, echo, ls, dir, mkdir, python/python3/py, node/npm/npx, and cargo/rustc; do not use process.run to write files. For requested file creation or edits, call palyra.fs.apply_patch first, then use process.run only for verification commands such as node, npm, cargo, ls, dir, or pwd. Prefer cwd plus relative workspace paths when running scripts, for example command='node', args=['e2e-tool-smoke/hello.js']; if a sandbox error mentions an absolute path-like substring, retry with the relative path from the workspace root. Use background=true for temporary dev servers instead of nohup, '&', shell wrappers, or platform-specific launchers. If a command is denied by sandbox policy, treat that as an operational limit and continue with a safe fallback or clearly report the blocked verification step.".to_owned());
+        contracts.push("palyra.process.run sandbox contract: call only bare executable names, never shell syntax. Local desktop profiles commonly allow pwd, echo, ls, dir, mkdir, python/python3/py, node/npm/npx, and cargo/rustc; do not use process.run to write files. For requested file creation or edits, call palyra.fs.apply_patch first, then use process.run only for verification commands such as node, npm, cargo, ls, dir, or pwd. Prefer cwd plus relative workspace paths when running scripts, for example command='node', args=['e2e-tool-smoke/hello.js']; if a sandbox error mentions an absolute path-like substring, retry with the relative path from the workspace root. Do not wrap commands in sh, bash, pwsh, powershell, cmd, or cmd.exe; pass arguments directly to the allowlisted executable. Use background=true for temporary dev servers instead of nohup, '&', shell wrappers, or platform-specific launchers. If a command is denied by sandbox policy, treat that as an operational limit and continue with a safe fallback or clearly report the blocked verification step.".to_owned());
+    }
+    if tool_names.iter().any(|tool| tool.starts_with("palyra.browser.")) {
+        contracts.push("Palyra browser evidence contract: when answering what text is visible on a page, first call palyra.browser.observe with include_visible_text=true and base the answer on visible_text, dom_snapshot, or accessibility evidence from that successful result. Title, screenshot, console, and network tools are not textual visibility evidence by themselves. If observe fails or was not called, say the visible text is unknown instead of inferring it from the title, URL, screenshot filename, or page intent.".to_owned());
     }
     if tool_names.iter().any(|tool| tool == "palyra.routines.control") {
         contracts.push("palyra.routines.control automation contract: for user requests to create reminders, monitors, standing orders, or scheduled reports, call operation='upsert'. Use trigger_kind='schedule', a concise name, a self-contained prompt describing the recurring work and output path, and natural_language_schedule for phrases like 'every 40 seconds' or 'every 30 minutes'. Prefer delivery_mode='logs_only' when the user asks to write a report file instead of announcing to a channel. Return the routine_id from the successful tool result.".to_owned());
@@ -177,7 +180,7 @@ fn tool_specific_contract(tool_names: &[String]) -> String {
     if tool_names.iter().any(|tool| tool == "palyra.memory.search")
         || tool_names.iter().any(|tool| tool == "palyra.memory.recall")
     {
-        contracts.push("Palyra memory cross-session contract: for user requests like previous session, last time, earlier, or remembered preference, search principal memory first by omitting session_id or using scope=principal. Do not ask the user for an internal session_id unless the user explicitly wants one exact known session. Use scope=session only for the current active session.".to_owned());
+        contracts.push("Palyra memory cross-session contract: for user requests like previous session, last time, earlier, or remembered preference, search principal memory first by omitting session_id or using scope=principal. Do not ask the user for an internal session_id unless the user explicitly wants one exact known session. Use scope=session only for the current active session. If memory.search or memory.recall returns non-empty hits, treat those hits as retrieved evidence; do not answer that no stored preference or prior fact exists. Use the top relevant hit, or explain why the returned hits do not answer the user's question.".to_owned());
     }
     if contracts.is_empty() {
         "No tool-specific grammar contracts apply.".to_owned()
@@ -289,9 +292,24 @@ mod tests {
         assert!(contract.contains("call palyra.fs.apply_patch first"));
         assert!(contract.contains("relative workspace paths"));
         assert!(contract.contains("absolute path-like substring"));
+        assert!(contract.contains("Do not wrap commands in sh, bash"));
         assert!(contract.contains("background=true"));
         assert!(contract.contains("sandbox policy"));
         assert!(contract.contains("safe fallback"));
+    }
+
+    #[test]
+    fn tool_specific_contract_explains_browser_visible_text_evidence() {
+        let contract = super::tool_specific_contract(&[
+            "palyra.browser.title".to_owned(),
+            "palyra.browser.screenshot".to_owned(),
+            "palyra.browser.observe".to_owned(),
+        ]);
+
+        assert!(contract.contains("include_visible_text=true"));
+        assert!(contract.contains("visible_text"));
+        assert!(contract.contains("not textual visibility evidence"));
+        assert!(contract.contains("visible text is unknown"));
     }
 
     #[test]
@@ -325,6 +343,9 @@ mod tests {
         assert!(contract.contains("scope=principal"));
         assert!(contract.contains("internal session_id"));
         assert!(contract.contains("current active session"));
+        assert!(contract.contains("non-empty hits"));
+        assert!(contract.contains("retrieved evidence"));
+        assert!(contract.contains("no stored preference"));
     }
 
     #[test]

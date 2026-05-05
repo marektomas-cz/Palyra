@@ -32,9 +32,14 @@ const MIN_MEMORY_RECALL_PROMPT_BUDGET_TOKENS: usize = 512;
 const MAX_MEMORY_RECALL_PROMPT_BUDGET_TOKENS: usize = 4_096;
 const MEMORY_SOURCE_VALUES: &[&str] =
     &["manual", "summary", "import", "tape:user_message", "tape:tool_result"];
+const MEMORY_HITS_PRESENT_CLAIM_BOUNDARY: &str = "memory hits are retrieved evidence; do not claim no stored preference or prior fact exists unless the hits are irrelevant to the user's question";
+const MEMORY_HITS_ABSENT_CLAIM_BOUNDARY: &str =
+    "no memory hits were returned; do not invent stored preferences or prior facts";
 
 pub(crate) fn memory_search_tool_output_payload(search_hits: &[MemorySearchHit]) -> Value {
     json!({
+        "hit_count": search_hits.len(),
+        "claim_boundary": memory_search_claim_boundary(search_hits.len()),
         "hits": search_hits.iter().map(|hit| {
             json!({
                 "memory_id": hit.item.memory_id,
@@ -66,6 +71,8 @@ pub(crate) fn memory_recall_tool_output_payload(preview: &RecallPreviewEnvelope)
         .unwrap_or_else(|| Value::Array(Vec::new()));
     json!({
         "query": preview.query,
+        "memory_hit_count": preview.memory_hits.len(),
+        "claim_boundary": memory_search_claim_boundary(preview.memory_hits.len()),
         "memory_hits": memory_hits,
         "workspace_hits": preview.workspace_hits,
         "transcript_hits": preview.transcript_hits,
@@ -77,6 +84,14 @@ pub(crate) fn memory_recall_tool_output_payload(preview: &RecallPreviewEnvelope)
         "parameter_delta": preview.parameter_delta,
         "prompt_preview": preview.prompt_preview,
     })
+}
+
+fn memory_search_claim_boundary(hit_count: usize) -> &'static str {
+    if hit_count == 0 {
+        MEMORY_HITS_ABSENT_CLAIM_BOUNDARY
+    } else {
+        MEMORY_HITS_PRESENT_CLAIM_BOUNDARY
+    }
 }
 
 pub(crate) async fn execute_memory_retain_tool(

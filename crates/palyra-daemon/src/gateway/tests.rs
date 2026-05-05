@@ -1751,6 +1751,14 @@ fn memory_search_tool_output_payload_redacts_secret_like_values() {
     };
 
     let payload = memory_search_tool_output_payload(&[hit]);
+    assert_eq!(payload.get("hit_count").and_then(serde_json::Value::as_u64), Some(1));
+    assert!(
+        payload
+            .get("claim_boundary")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|boundary| boundary.contains("retrieved evidence")),
+        "{payload}"
+    );
     let encoded = serde_json::to_string(&payload).expect("payload should serialize");
     assert!(encoded.contains("<redacted>"), "tool output payload should include redaction marker");
     assert!(

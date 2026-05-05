@@ -550,9 +550,13 @@ fn browser_tool_description(tool_name: &str) -> &'static str {
         "palyra.browser.scroll" => "Scroll a brokered browser session.",
         "palyra.browser.wait_for" => "Wait for a browser condition.",
         "palyra.browser.title" => "Read the current browser title.",
-        "palyra.browser.screenshot" => "Capture a bounded browser screenshot.",
+        "palyra.browser.screenshot" => {
+            "Capture a bounded browser screenshot; do not use it alone as visible text evidence."
+        }
         "palyra.browser.pdf" => "Capture a bounded browser PDF.",
-        "palyra.browser.observe" => "Observe visible browser state.",
+        "palyra.browser.observe" => {
+            "Observe visible browser state including visible text for page-content claims."
+        }
         "palyra.browser.network_log" => "Read bounded browser network logs.",
         "palyra.browser.console_log" => "Read bounded browser console logs.",
         "palyra.browser.reset_state" => "Reset browser session state.",
@@ -652,5 +656,15 @@ mod tests {
         assert!(patch_description.contains("missing parent directories"));
         assert!(patch_description.contains("reports/report.md"));
         assert!(patch_description.contains("never use host absolute paths"));
+    }
+
+    #[test]
+    fn browser_registry_marks_observe_as_visible_text_evidence() {
+        let observe = registry_entry("palyra.browser.observe").expect("observe entry exists");
+        assert!(observe.description.contains("visible text"));
+
+        let screenshot =
+            registry_entry("palyra.browser.screenshot").expect("screenshot entry exists");
+        assert!(screenshot.description.contains("do not use it alone"));
     }
 }
