@@ -67,6 +67,8 @@ struct OnboardingSignals {
     default_agent_message: String,
     workspace_root: Option<String>,
     chat_model: Option<String>,
+    memory_embeddings_configured: bool,
+    memory_embeddings_message: String,
     first_success_completed: bool,
 }
 
@@ -93,6 +95,10 @@ struct StepPresentation {
 impl StepPresentation {
     fn required(verification_state: Option<String>) -> Self {
         Self { blocked: None, optional: false, verification_state }
+    }
+
+    fn optional(verification_state: Option<String>) -> Self {
+        Self { blocked: None, optional: true, verification_state }
     }
 
     fn with_blocked(mut self, blocked: Option<control_plane::OnboardingBlockedReason>) -> Self {
@@ -248,6 +254,13 @@ fn collect_onboarding_signals(
     };
     let (gateway_runtime_reachable, gateway_runtime_message) = gateway_runtime_status();
     let (default_agent_configured, default_agent_message) = default_agent_status()?;
+    let memory_embeddings_configured = memory_embeddings_model_configured_from_document(document)?;
+    let memory_embeddings_message = memory_embeddings_onboarding_message(
+        document,
+        provider_kind.as_str(),
+        chat_model.as_deref(),
+        memory_embeddings_configured,
+    );
 
     Ok(OnboardingSignals {
         config_exists: config_path != "defaults"
@@ -275,6 +288,8 @@ fn collect_onboarding_signals(
         default_agent_message,
         workspace_root: get_string_at_path(document, "tool_call.process_runner.workspace_root"),
         chat_model,
+        memory_embeddings_configured,
+        memory_embeddings_message,
         first_success_completed: cli_first_success_completed()?,
     })
 }
@@ -416,6 +431,27 @@ fn build_onboarding_steps(
                 "palyra configure --section auth-model".to_owned(),
             )),
             StepPresentation::required(Some("missing_auth".to_owned())),
+        )
+    };
+
+    let memory_embeddings_step = if signals.memory_embeddings_configured {
+        done_step(
+            "memory_embeddings",
+            "Memory embeddings",
+            signals.memory_embeddings_message.clone(),
+            Some(run_cli_action("Inspect memory status", "palyra memory status".to_owned())),
+        )
+    } else {
+        actionable_step(
+            "memory_embeddings",
+            "Memory embeddings",
+            signals.memory_embeddings_message.clone(),
+            control_plane::OnboardingStepStatus::InProgress,
+            Some(run_cli_action(
+                "Review embeddings setup",
+                format!("palyra models status --path {}", signals.config_path),
+            )),
+            StepPresentation::optional(Some("hash_fallback".to_owned())),
         )
     };
 
@@ -569,7 +605,14 @@ fn build_onboarding_steps(
 
     match variant {
         OnboardingVariant::Quickstart => {
-            vec![config_step, provider_step, agent_step, verification_step, first_success_step]
+            vec![
+                config_step,
+                provider_step,
+                memory_embeddings_step,
+                agent_step,
+                verification_step,
+                first_success_step,
+            ]
         }
         OnboardingVariant::Manual | OnboardingVariant::Remote => {
             vec![
@@ -577,6 +620,7 @@ fn build_onboarding_steps(
                 workspace_step,
                 remote_step,
                 provider_step,
+                memory_embeddings_step,
                 agent_step,
                 verification_step,
                 first_success_step,
@@ -765,6 +809,48 @@ fn default_agent_status() -> Result<(bool, String)> {
             ),
         ))
     }
+}
+
+fn memory_embeddings_model_configured_from_document(document: &toml::Value) -> Result<bool> {
+    let parsed: palyra_common::daemon_config_schema::RootFileConfig =
+        document
+            .clone()
+            .try_into()
+            .context("failed to parse config for memory embeddings onboarding check")?;
+    Ok(crate::memory_embeddings_model_configured(&parsed))
+}
+
+fn memory_embeddings_onboarding_message(
+    document: &toml::Value,
+    provider_kind: &str,
+    chat_model: Option<&str>,
+    configured: bool,
+) -> String {
+    if configured {
+        return "An embeddings-capable provider/model is configured for semantic memory recall."
+            .to_owned();
+    }
+    if minimax_chat_provider_configured(document, provider_kind, chat_model) {
+        return "MiniMax chat is configured, but no embeddings-capable provider/model is selected; semantic memory recall will use hash fallback until you configure an OpenAI-compatible embeddings provider/model, run `palyra models set-embeddings <model>`, restart the gateway, and run `palyra memory index --until-complete`."
+            .to_owned();
+    }
+    "No embeddings-capable provider/model is selected; semantic memory recall will use hash fallback until you configure embeddings, restart the gateway, and run `palyra memory index --until-complete`."
+        .to_owned()
+}
+
+fn minimax_chat_provider_configured(
+    document: &toml::Value,
+    provider_kind: &str,
+    chat_model: Option<&str>,
+) -> bool {
+    let auth_provider_kind = get_string_at_path(document, "model_provider.auth_provider_kind")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    provider_kind.eq_ignore_ascii_case("anthropic")
+        && (auth_provider_kind == "minimax"
+            || chat_model
+                .map(|model| model.to_ascii_lowercase().contains("minimax"))
+                .unwrap_or(false))
 }
 
 fn gateway_runtime_status() -> (bool, String) {
@@ -1082,6 +1168,9 @@ kind = "anthropic"
                 default_agent_message: "agent registry does not define a default agent".to_owned(),
                 workspace_root: Some("C:/portable".to_owned()),
                 chat_model: Some("MiniMax-M2.7".to_owned()),
+                memory_embeddings_configured: false,
+                memory_embeddings_message: "MiniMax chat is configured; memory uses hash fallback"
+                    .to_owned(),
                 first_success_completed: false,
             },
         );
@@ -1112,6 +1201,9 @@ kind = "anthropic"
             default_agent_message: "agent registry does not define a default agent".to_owned(),
             workspace_root: Some("C:/portable".to_owned()),
             chat_model: Some("MiniMax-M2.7".to_owned()),
+            memory_embeddings_configured: false,
+            memory_embeddings_message: "MiniMax chat is configured; memory uses hash fallback"
+                .to_owned(),
             first_success_completed: false,
         });
 
@@ -1143,6 +1235,9 @@ kind = "anthropic"
                 default_agent_message: "default agent `local-default` is configured".to_owned(),
                 workspace_root: Some("C:/portable".to_owned()),
                 chat_model: Some("MiniMax-M2.7".to_owned()),
+                memory_embeddings_configured: false,
+                memory_embeddings_message: "MiniMax chat is configured; memory uses hash fallback"
+                    .to_owned(),
                 first_success_completed: false,
             },
         );
@@ -1193,6 +1288,9 @@ kind = "anthropic"
                 default_agent_message: "agent registry does not define a default agent".to_owned(),
                 workspace_root: Some("C:/portable".to_owned()),
                 chat_model: Some("MiniMax-M2.7".to_owned()),
+                memory_embeddings_configured: false,
+                memory_embeddings_message: "MiniMax chat is configured; memory uses hash fallback"
+                    .to_owned(),
                 first_success_completed: false,
             },
         );
@@ -1232,11 +1330,23 @@ anthropic_api_key = "sk-inline-minimax"
         let steps = build_onboarding_steps(OnboardingVariant::Quickstart, &signals);
         let provider_step =
             steps.iter().find(|step| step.step_id == "provider_auth").expect("provider step");
+        let memory_step = steps
+            .iter()
+            .find(|step| step.step_id == "memory_embeddings")
+            .expect("memory embeddings step");
 
         assert!(signals.provider_auth_configured);
         assert_eq!(signals.provider_health_state, "configured");
+        assert!(!signals.memory_embeddings_configured);
+        assert!(signals.memory_embeddings_message.contains("MiniMax chat"));
+        assert!(signals.memory_embeddings_message.contains("hash fallback"));
+        assert!(signals.memory_embeddings_message.contains("palyra models set-embeddings"));
         assert_eq!(provider_step.status, control_plane::OnboardingStepStatus::Done);
         assert_eq!(provider_step.verification_state.as_deref(), Some("configured"));
+        assert_eq!(memory_step.status, control_plane::OnboardingStepStatus::InProgress);
+        assert!(memory_step.optional);
+        assert_eq!(memory_step.verification_state.as_deref(), Some("hash_fallback"));
+        assert!(memory_step.summary.contains("palyra memory index --until-complete"));
         Ok(())
     }
 
