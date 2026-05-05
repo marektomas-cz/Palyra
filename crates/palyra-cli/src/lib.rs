@@ -657,6 +657,7 @@ const LOCAL_DESKTOP_DEFAULT_ALLOWED_TOOLS: &[&str] = &[
     "palyra.artifact.read",
     "palyra.delegation.query",
     "palyra.routines.query",
+    "palyra.routines.control",
     "palyra.http.fetch",
     "palyra.fs.read_file",
     "palyra.fs.apply_patch",
@@ -10205,6 +10206,10 @@ mod init_command_tests {
         assert!(
             allowed_tools.iter().any(|tool| tool == "palyra.process.run"),
             "local init should expose process runner to local sandbox agents"
+        );
+        assert!(
+            allowed_tools.iter().any(|tool| tool == "palyra.routines.control"),
+            "local init should expose approval-gated routine creation for autonomous monitors"
         );
         assert!(
             allowed_tools.iter().any(|tool| tool == "palyra.fs.apply_patch"),

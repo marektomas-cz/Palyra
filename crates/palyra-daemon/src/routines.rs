@@ -28,7 +28,7 @@ const ROUTINES_REGISTRY_FILE: &str = "definitions.json";
 const ROUTINE_RUNS_FILE: &str = "run_metadata.json";
 const MAX_ROUTINE_COUNT: usize = 2_048;
 const MAX_ROUTINE_RUN_METADATA_COUNT: usize = 8_192;
-const MIN_EVERY_INTERVAL_MS: u64 = 60 * 1_000;
+const MIN_EVERY_INTERVAL_MS: u64 = 30 * 1_000;
 pub const SHADOW_AT_TIMESTAMP_RFC3339: &str = "2100-01-01T00:00:00Z";
 pub const ROUTINE_EXPORT_SCHEMA_ID: &str = "palyra.routine.export.v1";
 pub const ROUTINE_EXPORT_SCHEMA_VERSION: u32 = 1;
@@ -1581,7 +1581,7 @@ pub fn natural_language_schedule_preview(
 
     Err(RoutineRegistryError::InvalidField {
         field: "phrase",
-        message: "supported phrases include 'in 30 minutes', 'za 30 minut', 'every 2h', 'every weekday at 9', 'každý pracovní den v 9', or an RFC3339 timestamp".to_owned(),
+        message: "supported phrases include 'in 30 minutes', 'za 30 minut', 'every 40 seconds', 'every 2h', 'every weekday at 9', 'každý pracovní den v 9', or an RFC3339 timestamp".to_owned(),
     })
 }
 
@@ -2317,6 +2317,8 @@ fn parse_duration_to_ms(
     }
     let normalized = unit.trim().to_lowercase();
     let multiplier = match normalized.as_str() {
+        "s" | "sec" | "secs" | "second" | "seconds" | "sekunda" | "sekundu" | "sekundy"
+        | "sekund" => 1_000,
         "m" | "min" | "mins" | "minute" | "minutes" | "minuta" | "minutu" | "minuty" | "minut" => {
             60_000
         }
@@ -2645,6 +2647,11 @@ mod tests {
             natural_language_schedule_preview("every 1 minute", CronTimezoneMode::Utc, now)
                 .expect("explicit minute interval schedule preview should parse");
         assert_eq!(every_one_minute.schedule_payload["interval_ms"], json!(60_000_u64));
+
+        let every_seconds =
+            natural_language_schedule_preview("every 40 seconds", CronTimezoneMode::Utc, now)
+                .expect("second interval schedule preview should parse");
+        assert_eq!(every_seconds.schedule_payload["interval_ms"], json!(40_000_u64));
 
         let czech_minute =
             natural_language_schedule_preview("každou minutu", CronTimezoneMode::Utc, now)

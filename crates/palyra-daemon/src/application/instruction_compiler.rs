@@ -7,7 +7,7 @@ use crate::{
     model_provider::{ProviderMessage, ProviderMessageContentPart, ProviderMessageRole},
 };
 
-pub(crate) const INSTRUCTION_COMPILER_VERSION: u32 = 7;
+pub(crate) const INSTRUCTION_COMPILER_VERSION: u32 = 8;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct InstructionTrustSummary {
@@ -168,6 +168,9 @@ fn tool_specific_contract(tool_names: &[String]) -> String {
     if tool_names.iter().any(|tool| tool == "palyra.process.run") {
         contracts.push("palyra.process.run sandbox contract: call only bare executable names, never shell syntax. Local desktop profiles commonly allow pwd, echo, ls, dir, mkdir, python/python3/py, node/npm/npx, and cargo/rustc; use palyra.fs.apply_patch for file writes. Prefer cwd plus relative workspace paths when running scripts, for example command='node', args=['e2e-tool-smoke/hello.js']; if a sandbox error mentions an absolute path-like substring, retry with the relative path from the workspace root. Use background=true for temporary dev servers instead of nohup, '&', shell wrappers, or platform-specific launchers. If a command is denied by sandbox policy, treat that as an operational limit and continue with a safe fallback or clearly report the blocked verification step.".to_owned());
     }
+    if tool_names.iter().any(|tool| tool == "palyra.routines.control") {
+        contracts.push("palyra.routines.control automation contract: for user requests to create reminders, monitors, standing orders, or scheduled reports, call operation='upsert'. Use trigger_kind='schedule', a concise name, a self-contained prompt describing the recurring work and output path, and natural_language_schedule for phrases like 'every 40 seconds' or 'every 30 minutes'. Prefer delivery_mode='logs_only' when the user asks to write a report file instead of announcing to a channel. Return the routine_id from the successful tool result.".to_owned());
+    }
     if tool_names.iter().any(|tool| tool == "palyra.memory.retain") {
         contracts.push("palyra.memory.retain lifecycle contract: source must be one of manual, summary, import, tape:user_message, or tape:tool_result; use manual for user-stated preferences, corrections, and directives. A successful retain output is authoritative: if durable_memory_write=true and review_state=written, the memory is stored; if durable_memory_write=false, say it was not written and needs review only when review_state says so. Do not claim an approval is pending unless a tool output includes an explicit approval or review identifier.".to_owned());
     }
@@ -259,7 +262,7 @@ mod tests {
         let first = compiler.compile(input.clone());
         let second = compiler.compile(input);
         assert_eq!(first.hash, second.hash);
-        assert_eq!(first.version, 7);
+        assert_eq!(first.version, 8);
         assert_eq!(first.provider_messages().len(), 2);
     }
 
@@ -284,6 +287,16 @@ mod tests {
         assert!(contract.contains("background=true"));
         assert!(contract.contains("sandbox policy"));
         assert!(contract.contains("safe fallback"));
+    }
+
+    #[test]
+    fn tool_specific_contract_explains_routine_control_creation() {
+        let contract = super::tool_specific_contract(&["palyra.routines.control".to_owned()]);
+
+        assert!(contract.contains("operation='upsert'"));
+        assert!(contract.contains("natural_language_schedule"));
+        assert!(contract.contains("every 40 seconds"));
+        assert!(contract.contains("routine_id"));
     }
 
     #[test]

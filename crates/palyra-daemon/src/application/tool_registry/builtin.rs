@@ -133,13 +133,19 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
         ),
         entry(
             "palyra.routines.query",
-            "Inspect routine definitions, runs and schedule previews.",
+            "Inspect routine definitions, run history, and schedule previews. Use operation=schedule_preview with phrase such as 'every 40 seconds' before creating scheduled monitors.",
             object_schema(
                 &[],
-                vec![(
-                    "operation",
-                    json!({"type":"string","enum":["list","get","list_runs","schedule_preview"]}),
-                )],
+                vec![
+                    (
+                        "operation",
+                        json!({"type":"string","enum":["list","get","list_runs","schedule_preview"]}),
+                    ),
+                    ("routine_id", json!({"type":"string"})),
+                    ("phrase", json!({"type":"string"})),
+                    ("timezone", json!({"type":"string","enum":["local","utc"]})),
+                    ("limit", json!({"type":"integer","minimum":1,"maximum":500})),
+                ],
                 true,
             ),
             ToolParallelismPolicy::ReadOnly,
@@ -147,13 +153,36 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
         ),
         entry(
             "palyra.routines.control",
-            "Mutate or dispatch routines through the approval-aware runtime.",
+            "Create, update, pause, resume, or manually dispatch routines through the approval-aware runtime. For reminders and monitors, use operation=upsert with trigger_kind=schedule, name, prompt, and natural_language_schedule such as 'every 30 minutes' or 'every 40 seconds'.",
             object_schema(
                 &["operation"],
-                vec![(
-                    "operation",
-                    json!({"type":"string","enum":["upsert","pause","resume","run_now","test_run"]}),
-                )],
+                vec![
+                    (
+                        "operation",
+                        json!({"type":"string","enum":["upsert","pause","resume","run_now","test_run"]}),
+                    ),
+                    ("routine_id", json!({"type":"string"})),
+                    ("name", json!({"type":"string"})),
+                    ("prompt", json!({"type":"string"})),
+                    (
+                        "trigger_kind",
+                        json!({"type":"string","enum":["schedule","hook","webhook","system_event","manual"]}),
+                    ),
+                    ("natural_language_schedule", json!({"type":"string"})),
+                    ("schedule_type", json!({"type":"string","enum":["cron","every","at"]})),
+                    ("every_interval_ms", json!({"type":"integer","minimum":1})),
+                    ("cron_expression", json!({"type":"string"})),
+                    ("at_timestamp_rfc3339", json!({"type":"string"})),
+                    (
+                        "delivery_mode",
+                        json!({"type":"string","enum":["same_channel","specific_channel","local_only","logs_only"]}),
+                    ),
+                    (
+                        "execution_posture",
+                        json!({"type":"string","enum":["standard","sensitive_tools"]}),
+                    ),
+                    ("enabled", json!({"type":"boolean"})),
+                ],
                 true,
             ),
             ToolParallelismPolicy::Exclusive,
