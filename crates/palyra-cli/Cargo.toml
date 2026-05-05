@@ -57,4 +57,4 @@ reqwest.workspace = true
 tempfile.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = ["Win32_Globalization"] }
+windows-sys = { workspace = true, features = ["Win32_Globalization", "Win32_System_Console"] }

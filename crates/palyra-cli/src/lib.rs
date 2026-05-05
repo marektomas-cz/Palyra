@@ -3858,11 +3858,12 @@ fn resolve_prompt_input(prompt: Option<String>, prompt_stdin: bool) -> Result<St
         if prompt.is_some() {
             anyhow::bail!("cannot use --prompt together with --prompt-stdin");
         }
-        let mut input = String::new();
+        let mut input = Vec::new();
         std::io::stdin()
             .lock()
-            .read_line(&mut input)
+            .read_until(b'\n', &mut input)
             .context("failed to read prompt from stdin")?;
+        let input = decode_prompt_stdin_bytes(input.as_slice())?;
         let prompt = input.trim_end_matches(['\r', '\n']).trim();
         if prompt.is_empty() {
             anyhow::bail!("prompt from stdin is empty; pipe text into stdin or use --prompt");
@@ -3876,6 +3877,120 @@ fn resolve_prompt_input(prompt: Option<String>, prompt_stdin: bool) -> Result<St
         anyhow::bail!("prompt cannot be empty");
     }
     Ok(prompt.to_owned())
+}
+
+fn decode_prompt_stdin_bytes(input: &[u8]) -> Result<String> {
+    match String::from_utf8(input.to_vec()) {
+        Ok(decoded) => Ok(decoded),
+        Err(error) => decode_prompt_stdin_bytes_fallback(input).with_context(|| {
+            format!(
+                "failed to decode prompt from stdin as UTF-8 or a supported Windows console code page: {error}"
+            )
+        }),
+    }
+}
+
+#[cfg(windows)]
+fn decode_prompt_stdin_bytes_fallback(input: &[u8]) -> Result<String> {
+    let mut code_pages = Vec::new();
+    for code_page in windows_prompt_stdin_code_pages() {
+        if code_page == 0 || code_page == 65001 || code_pages.contains(&code_page) {
+            continue;
+        }
+        code_pages.push(code_page);
+    }
+
+    for code_page in code_pages {
+        if let Some(decoded) = decode_windows_code_page(code_page, input) {
+            return Ok(decoded);
+        }
+    }
+
+    anyhow::bail!(
+        "stream did not contain valid UTF-8 and could not be decoded with active Windows code pages; run `chcp 65001` or pipe UTF-8 text"
+    )
+}
+
+#[cfg(not(windows))]
+fn decode_prompt_stdin_bytes_fallback(_input: &[u8]) -> Result<String> {
+    anyhow::bail!("stream did not contain valid UTF-8")
+}
+
+#[cfg(windows)]
+fn windows_prompt_stdin_code_pages() -> [u32; 4] {
+    use windows_sys::Win32::{
+        Globalization::{GetACP, GetOEMCP},
+        System::Console::{GetConsoleCP, GetConsoleOutputCP},
+    };
+
+    // SAFETY: These Win32 functions take no pointers and return process-global codepage IDs.
+    unsafe { [GetConsoleCP(), GetConsoleOutputCP(), GetOEMCP(), GetACP()] }
+}
+
+#[cfg(windows)]
+fn decode_windows_code_page(code_page: u32, input: &[u8]) -> Option<String> {
+    use windows_sys::Win32::Globalization::{MultiByteToWideChar, MB_ERR_INVALID_CHARS};
+
+    if input.is_empty() {
+        return Some(String::new());
+    }
+
+    let input_len = i32::try_from(input.len()).ok()?;
+    // SAFETY: The input pointer is valid for input_len bytes and no output buffer is supplied for
+    // the sizing pass, as required by MultiByteToWideChar.
+    let wide_len = unsafe {
+        MultiByteToWideChar(
+            code_page,
+            MB_ERR_INVALID_CHARS,
+            input.as_ptr(),
+            input_len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if wide_len <= 0 {
+        return None;
+    }
+
+    let mut wide = vec![0_u16; usize::try_from(wide_len).ok()?];
+    // SAFETY: The output buffer is allocated with the exact size returned by the sizing pass.
+    let written = unsafe {
+        MultiByteToWideChar(
+            code_page,
+            MB_ERR_INVALID_CHARS,
+            input.as_ptr(),
+            input_len,
+            wide.as_mut_ptr(),
+            wide_len,
+        )
+    };
+    if written != wide_len {
+        return None;
+    }
+
+    String::from_utf16(wide.as_slice()).ok()
+}
+
+#[cfg(test)]
+mod prompt_stdin_decode_tests {
+    use super::decode_prompt_stdin_bytes;
+
+    #[test]
+    fn prompt_stdin_decode_accepts_utf8_czech_text() {
+        let decoded = decode_prompt_stdin_bytes("Nastav proveď\n".as_bytes())
+            .expect("UTF-8 prompt should decode");
+
+        assert_eq!(decoded, "Nastav proveď\n");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn prompt_stdin_decode_accepts_windows_cmd_oem_czech_text() {
+        let decoded = super::decode_windows_code_page(852, b"Nastav prove\xD4\n")
+            .expect("CP852 prompt should decode on Windows");
+
+        assert_eq!(decoded, "Nastav proveď\n");
+    }
 }
 
 struct AgentRunInputArgs {
