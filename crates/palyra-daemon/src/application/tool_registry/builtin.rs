@@ -313,7 +313,7 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
         ),
         entry(
             "palyra.process.run",
-            "Run an allowlisted executable or portable process builtin inside the configured process sandbox.",
+            "Run an allowlisted executable or portable process builtin inside the configured process sandbox. Use palyra.fs.apply_patch, not this tool, for workspace file writes.",
             object_schema(
                 &["command"],
                 vec![
@@ -331,10 +331,13 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
                             "type":"array",
                             "items":{"type":"string"},
                             "maxItems":64,
-                            "description":"Command arguments only. For `echo hello`, use command='echo' and args=['hello'], not args=['echo hello']."
+                            "description":"Command arguments only. For `echo hello`, use command='echo' and args=['hello'], not args=['echo hello']. Do not use mkdir, touch, echo redirection, or interpreter eval for file writes; use palyra.fs.apply_patch first, then use this tool only to verify."
                         }),
                     ),
-                    ("cwd", json!({"type":"string"})),
+                    (
+                        "cwd",
+                        json!({"type":"string","description":"Workspace-confined working directory. Omit for the workspace root, or use /workspace and /workspace/subdir as virtual workspace aliases."}),
+                    ),
                     (
                         "background",
                         json!({
@@ -385,7 +388,7 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
         ),
         entry(
             "palyra.fs.apply_patch",
-            "Apply a strict workspace-confined Palyra patch document with attestation.",
+            "Create, update, or delete workspace files by applying a strict workspace-confined Palyra patch document with attestation. This is the primary file-write tool.",
             object_schema(
                 &["patch"],
                 vec![
@@ -393,7 +396,7 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
                         "patch",
                         json!({
                             "type":"string",
-                            "description":"A complete Palyra patch document. It must start with '*** Begin Patch', contain one or more '*** Add File:', '*** Update File:', or '*** Delete File:' operations, and end with '*** End Patch'. Add-file body lines must start with '+'. Update-file operations require '@@' hunks whose lines start with ' ', '+', or '-'. Use forward-slash relative paths only."
+                            "description":"A complete Palyra patch document. It must start with '*** Begin Patch', contain one or more '*** Add File:', '*** Update File:', or '*** Delete File:' operations, and end with '*** End Patch'. Add-file body lines must start with '+', and missing parent directories are created automatically. Update-file operations require '@@' hunks whose lines start with ' ', '+', or '-'. Use forward-slash relative paths only, such as reports/report.md; never use host absolute paths."
                         }),
                     ),
                     (
@@ -609,4 +612,45 @@ fn browser_tool_schema(tool_name: &str) -> Value {
         _ => {}
     }
     object_schema(&[], properties, true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::registry_entry;
+
+    #[test]
+    fn process_runner_registry_steers_file_writes_to_patch_tool() {
+        let entry = registry_entry("palyra.process.run").expect("process runner entry exists");
+        assert!(entry.description.contains("not this tool"));
+
+        let args_description = entry
+            .input_schema
+            .pointer("/properties/args/description")
+            .and_then(serde_json::Value::as_str)
+            .expect("args description should be visible to models");
+        assert!(args_description.contains("Do not use mkdir, touch"));
+        assert!(args_description.contains("palyra.fs.apply_patch first"));
+
+        let cwd_description = entry
+            .input_schema
+            .pointer("/properties/cwd/description")
+            .and_then(serde_json::Value::as_str)
+            .expect("cwd description should be visible to models");
+        assert!(cwd_description.contains("/workspace/subdir"));
+    }
+
+    #[test]
+    fn apply_patch_registry_explains_workspace_report_file_creation() {
+        let entry = registry_entry("palyra.fs.apply_patch").expect("patch entry exists");
+        assert!(entry.description.contains("primary file-write tool"));
+
+        let patch_description = entry
+            .input_schema
+            .pointer("/properties/patch/description")
+            .and_then(serde_json::Value::as_str)
+            .expect("patch description should be visible to models");
+        assert!(patch_description.contains("missing parent directories"));
+        assert!(patch_description.contains("reports/report.md"));
+        assert!(patch_description.contains("never use host absolute paths"));
+    }
 }

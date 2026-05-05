@@ -7,7 +7,7 @@ use crate::{
     model_provider::{ProviderMessage, ProviderMessageContentPart, ProviderMessageRole},
 };
 
-pub(crate) const INSTRUCTION_COMPILER_VERSION: u32 = 8;
+pub(crate) const INSTRUCTION_COMPILER_VERSION: u32 = 9;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct InstructionTrustSummary {
@@ -163,10 +163,10 @@ impl InstructionCompiler {
 fn tool_specific_contract(tool_names: &[String]) -> String {
     let mut contracts = Vec::new();
     if tool_names.iter().any(|tool| tool == "palyra.fs.apply_patch") {
-        contracts.push("palyra.fs.apply_patch patch grammar: the patch string must be a complete Palyra patch document, not raw file contents and not prose. Start with '*** Begin Patch' on its own line, then one or more operation headers ('*** Add File: path', '*** Update File: path', or '*** Delete File: path'), then '*** End Patch'. For Add File, every content line must start with '+'. For Update File, add '@@' before each hunk and make every hunk line start with one of space, '+', or '-'. Paths are forward-slash relative paths inside the workspace. On a parse error, retry once with this exact wrapper and corrected prefixes.".to_owned());
+        contracts.push("palyra.fs.apply_patch patch grammar and write contract: use this tool as the primary path for requested workspace file creation, updates, and deletes; do not use process.run, mkdir, touch, echo redirection, or interpreter eval to write files. The patch string must be a complete Palyra patch document, not raw file contents and not prose. Start with '*** Begin Patch' on its own line, then one or more operation headers ('*** Add File: path', '*** Update File: path', or '*** Delete File: path'), then '*** End Patch'. For Add File, every content line must start with '+', and missing parent directories are created by the patch tool. For Update File, add '@@' before each hunk and make every hunk line start with one of space, '+', or '-'. Paths are forward-slash relative paths inside the workspace, for example reports/report.md. If the user asks for an outside-workspace write plus a workspace fallback, treat the outside path as denied by sandbox policy and apply only the relative in-workspace fallback. On a parse error, retry once with this exact wrapper and corrected prefixes.".to_owned());
     }
     if tool_names.iter().any(|tool| tool == "palyra.process.run") {
-        contracts.push("palyra.process.run sandbox contract: call only bare executable names, never shell syntax. Local desktop profiles commonly allow pwd, echo, ls, dir, mkdir, python/python3/py, node/npm/npx, and cargo/rustc; use palyra.fs.apply_patch for file writes. Prefer cwd plus relative workspace paths when running scripts, for example command='node', args=['e2e-tool-smoke/hello.js']; if a sandbox error mentions an absolute path-like substring, retry with the relative path from the workspace root. Use background=true for temporary dev servers instead of nohup, '&', shell wrappers, or platform-specific launchers. If a command is denied by sandbox policy, treat that as an operational limit and continue with a safe fallback or clearly report the blocked verification step.".to_owned());
+        contracts.push("palyra.process.run sandbox contract: call only bare executable names, never shell syntax. Local desktop profiles commonly allow pwd, echo, ls, dir, mkdir, python/python3/py, node/npm/npx, and cargo/rustc; do not use process.run to write files. For requested file creation or edits, call palyra.fs.apply_patch first, then use process.run only for verification commands such as node, npm, cargo, ls, dir, or pwd. Prefer cwd plus relative workspace paths when running scripts, for example command='node', args=['e2e-tool-smoke/hello.js']; if a sandbox error mentions an absolute path-like substring, retry with the relative path from the workspace root. Use background=true for temporary dev servers instead of nohup, '&', shell wrappers, or platform-specific launchers. If a command is denied by sandbox policy, treat that as an operational limit and continue with a safe fallback or clearly report the blocked verification step.".to_owned());
     }
     if tool_names.iter().any(|tool| tool == "palyra.routines.control") {
         contracts.push("palyra.routines.control automation contract: for user requests to create reminders, monitors, standing orders, or scheduled reports, call operation='upsert'. Use trigger_kind='schedule', a concise name, a self-contained prompt describing the recurring work and output path, and natural_language_schedule for phrases like 'every 40 seconds' or 'every 30 minutes'. Prefer delivery_mode='logs_only' when the user asks to write a report file instead of announcing to a channel. Return the routine_id from the successful tool result.".to_owned());
@@ -262,7 +262,7 @@ mod tests {
         let first = compiler.compile(input.clone());
         let second = compiler.compile(input);
         assert_eq!(first.hash, second.hash);
-        assert_eq!(first.version, 8);
+        assert_eq!(first.version, 9);
         assert_eq!(first.provider_messages().len(), 2);
     }
 
@@ -272,6 +272,9 @@ mod tests {
 
         assert!(contract.contains("*** Begin Patch"));
         assert!(contract.contains("*** Add File: path"));
+        assert!(contract.contains("primary path for requested workspace file creation"));
+        assert!(contract.contains("missing parent directories are created"));
+        assert!(contract.contains("outside-workspace write plus a workspace fallback"));
         assert!(contract.contains("@@"));
         assert!(contract.contains("parse error"));
     }
@@ -282,6 +285,8 @@ mod tests {
 
         assert!(contract.contains("pwd, echo, ls, dir, mkdir"));
         assert!(contract.contains("python/python3/py"));
+        assert!(contract.contains("do not use process.run to write files"));
+        assert!(contract.contains("call palyra.fs.apply_patch first"));
         assert!(contract.contains("relative workspace paths"));
         assert!(contract.contains("absolute path-like substring"));
         assert!(contract.contains("background=true"));
