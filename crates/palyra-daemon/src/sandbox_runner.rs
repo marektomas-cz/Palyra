@@ -1267,15 +1267,29 @@ fn build_process_command(
         return Ok(command);
     }
 
-    let mut command = Command::new(resolve_tier_b_process_program(input.command.as_str()));
-    command
-        .args(input.args.as_slice())
-        .current_dir(cwd)
-        .env_clear()
-        .env("PATH", sandbox_process_path())
-        .env("LANG", "C")
-        .env("LC_ALL", "C");
+    let program = resolve_tier_b_process_program(input.command.as_str());
+    let mut command = Command::new(program.as_path());
+    command.args(input.args.as_slice()).current_dir(cwd);
+    configure_tier_b_process_environment(&mut command, program.as_path(), policy);
     Ok(command)
+}
+
+fn configure_tier_b_process_environment(
+    command: &mut Command,
+    program: &Path,
+    policy: &SandboxProcessRunnerPolicy,
+) {
+    command.env_clear();
+    #[cfg(windows)]
+    {
+        configure_windows_tier_b_process_environment(command, program, policy);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = program;
+        let _ = policy;
+        command.env("PATH", sandbox_process_path()).env("LANG", "C").env("LC_ALL", "C");
+    }
 }
 
 fn resolve_tier_b_process_program(command: &str) -> PathBuf {
@@ -1296,14 +1310,25 @@ fn resolve_windows_path_program(command: &str) -> Option<PathBuf> {
         return None;
     }
 
+    windows_path_program_candidates(command).into_iter().next()
+}
+
+#[cfg(windows)]
+fn windows_path_program_candidates(command: &str) -> Vec<PathBuf> {
+    let command_path = Path::new(command);
+    if command_path.components().count() != 1 {
+        return Vec::new();
+    }
+
     let candidates = windows_command_candidates(command);
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).find_map(|directory| {
-        candidates
-            .iter()
-            .map(|candidate| directory.join(candidate))
-            .find(|candidate| candidate.is_file())
-    })
+    let Some(path) = std::env::var_os("PATH") else {
+        return Vec::new();
+    };
+
+    std::env::split_paths(&path)
+        .flat_map(|directory| candidates.iter().map(move |candidate| directory.join(candidate)))
+        .filter(|candidate| candidate.is_file())
+        .collect()
 }
 
 #[cfg(windows)]
@@ -1330,6 +1355,72 @@ fn windows_command_candidates(command: &str) -> Vec<String> {
         }
     }));
     candidates
+}
+
+#[cfg(windows)]
+fn configure_windows_tier_b_process_environment(
+    command: &mut Command,
+    program: &Path,
+    policy: &SandboxProcessRunnerPolicy,
+) {
+    for key in WINDOWS_TIER_B_SAFE_ENV_KEYS {
+        if let Some(value) = std::env::var_os(key) {
+            command.env(key, value);
+        }
+    }
+    command
+        .env("PATH", windows_tier_b_process_path(program, policy))
+        .env("LANG", "C")
+        .env("LC_ALL", "C");
+}
+
+#[cfg(windows)]
+const WINDOWS_TIER_B_SAFE_ENV_KEYS: &[&str] = &[
+    "APPDATA",
+    "COMSPEC",
+    "LOCALAPPDATA",
+    "PATHEXT",
+    "PROGRAMDATA",
+    "ProgramFiles",
+    "ProgramFiles(x86)",
+    "ProgramW6432",
+    "SystemDrive",
+    "SystemRoot",
+    "TEMP",
+    "TMP",
+    "USERPROFILE",
+    "VOLTA_HOME",
+    "WINDIR",
+];
+
+#[cfg(windows)]
+fn windows_tier_b_process_path(program: &Path, policy: &SandboxProcessRunnerPolicy) -> String {
+    let mut directories = std::env::split_paths(sandbox_process_path()).collect::<Vec<_>>();
+    if let Some(parent) = program.parent() {
+        push_unique_windows_path(&mut directories, parent.to_path_buf());
+    }
+    for allowed in &policy.allowed_executables {
+        for candidate in windows_path_program_candidates(allowed) {
+            if let Some(parent) = candidate.parent() {
+                push_unique_windows_path(&mut directories, parent.to_path_buf());
+            }
+        }
+    }
+    std::env::join_paths(directories)
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| sandbox_process_path().to_owned())
+}
+
+#[cfg(windows)]
+fn push_unique_windows_path(directories: &mut Vec<PathBuf>, candidate: PathBuf) {
+    let candidate_key = candidate.to_string_lossy().to_ascii_lowercase();
+    if directories
+        .iter()
+        .any(|existing| existing.to_string_lossy().to_ascii_lowercase() == candidate_key)
+    {
+        return;
+    }
+    directories.push(candidate);
 }
 
 fn map_tier_c_backend_error(error: TierCBackendError) -> SandboxProcessRunError {
@@ -1959,6 +2050,34 @@ mod tests {
         assert_eq!(output.get("background").and_then(serde_json::Value::as_bool), Some(true));
         assert_eq!(output.get("lifetime_ms").and_then(serde_json::Value::as_u64), Some(100));
         assert!(output.get("pid").and_then(serde_json::Value::as_u64).is_some());
+
+        let _ = fs::remove_dir_all(workspace.as_path());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn run_constrained_process_executes_allowlisted_node_eval_when_available() {
+        if Command::new("node").arg("--version").output().is_err() {
+            return;
+        }
+        let workspace = unique_temp_dir("workspace-node-eval");
+        fs::create_dir_all(workspace.as_path()).expect("workspace directory should be created");
+        let mut policy =
+            sandbox_policy_with_allowed_executables(workspace.clone(), vec!["node".to_owned()]);
+        policy.allow_interpreters = true;
+        policy.egress_enforcement_mode = EgressEnforcementMode::None;
+        let input = br#"{"command":"node","args":["-e","console.log('PALYRA_PROCESS_OK')"]}"#;
+
+        let result = run_constrained_process(&policy, input, Duration::from_millis(5_000))
+            .expect("allowlisted node eval should run with the sanitized Windows environment");
+        let output: serde_json::Value =
+            serde_json::from_slice(&result.output_json).expect("output should parse");
+
+        assert_eq!(output.get("exit_code").and_then(serde_json::Value::as_i64), Some(0));
+        assert_eq!(
+            output.get("stdout").and_then(serde_json::Value::as_str),
+            Some("PALYRA_PROCESS_OK\n")
+        );
 
         let _ = fs::remove_dir_all(workspace.as_path());
     }
