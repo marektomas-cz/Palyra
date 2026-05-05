@@ -43,7 +43,10 @@ use crate::{
         OrchestratorSessionQuickControlsUpdateRequest, SkillExecutionStatus,
         SkillStatusUpsertRequest,
     },
-    routines::{RoutineExecutionPosture, RoutineRunMode},
+    routines::{
+        RoutineDispatchMode, RoutineExecutionPosture, RoutineMetadataRecord,
+        RoutineRunMetadataUpsert, RoutineRunMode, RoutineTriggerKind,
+    },
 };
 
 const SCHEDULER_IDLE_SLEEP: Duration = Duration::from_secs(15);
@@ -1895,6 +1898,7 @@ async fn execute_single_job_attempt(
             session_id: Some(session_id.clone()),
         })
         .await?;
+    record_scheduled_routine_run_metadata(state.as_ref(), job, run_id.as_str()).await?;
 
     let mut append_request = Request::new(gateway_v1::AppendEventRequest {
         v: 1,
@@ -2048,6 +2052,67 @@ async fn execute_single_job_attempt(
     Ok(terminal_status)
 }
 
+async fn record_scheduled_routine_run_metadata(
+    state: &GatewayRuntimeState,
+    job: &CronJobRecord,
+    run_id: &str,
+) -> Result<(), Status> {
+    let Some(runtime) = state.routines_runtime_config().ok() else {
+        return Ok(());
+    };
+    let Some(routine) = runtime.registry.get_routine(job.job_id.as_str()).map_err(|error| {
+        Status::internal(format!("failed to load routine metadata for scheduled run: {error}"))
+    })?
+    else {
+        return Ok(());
+    };
+    let upsert = scheduled_routine_run_metadata_upsert(job, &routine, run_id)?;
+    runtime.registry.upsert_run_metadata(upsert).map_err(|error| {
+        Status::internal(format!("failed to record routine metadata for scheduled run: {error}"))
+    })?;
+    Ok(())
+}
+
+fn scheduled_routine_run_metadata_upsert(
+    job: &CronJobRecord,
+    routine: &RoutineMetadataRecord,
+    run_id: &str,
+) -> Result<RoutineRunMetadataUpsert, Status> {
+    let trigger_payload_json = serde_json::to_string(&scheduled_routine_trigger_payload(job))
+        .map_err(|error| {
+            Status::internal(format!("failed to encode scheduled routine trigger payload: {error}"))
+        })?;
+    Ok(RoutineRunMetadataUpsert {
+        run_id: run_id.to_owned(),
+        routine_id: routine.routine_id.clone(),
+        trigger_kind: RoutineTriggerKind::Schedule,
+        trigger_reason: Some("scheduled run".to_owned()),
+        trigger_payload_json,
+        trigger_dedupe_key: Some(format!("schedule:{}:{run_id}", job.job_id)),
+        execution: routine.execution.clone(),
+        delivery: routine.delivery.clone(),
+        dispatch_mode: RoutineDispatchMode::Normal,
+        source_run_id: None,
+        outcome_override: None,
+        outcome_message: None,
+        output_delivered: None,
+        skip_reason: None,
+        delivery_reason: None,
+        approval_note: None,
+        safety_note: None,
+    })
+}
+
+fn scheduled_routine_trigger_payload(job: &CronJobRecord) -> Value {
+    json!({
+        "source": "cron",
+        "job_id": job.job_id.as_str(),
+        "schedule_type": job.schedule_type.as_str(),
+        "schedule_payload": serde_json::from_str::<Value>(job.schedule_payload_json.as_str())
+            .unwrap_or_else(|_| json!({ "raw": job.schedule_payload_json.as_str() })),
+    })
+}
+
 fn fallback_usage_snapshot(
     run_id: &str,
     session_id: &str,
@@ -2156,15 +2221,19 @@ mod tests {
         build_scheduler_health_snapshot, compute_misfire_recovery_plan, compute_next_run_after,
         cron_misfire_audit_payload, decide_concurrency_policy, load_periodic_reaudit_skills_index,
         normalize_schedule, now_unix_ms_or_fallback, parse_skill_reaudit_interval,
-        periodic_reaudit_targets, should_repair_stale_cron_run, ConcurrencyDecision, CronMatcher,
-        CronMisfireRecoveryAction, CronTimezoneMode, InstalledSkillRecord, InstalledSkillsIndex,
-        SchedulerHealthInput, SCHEDULER_STALE_RUN_AFTER_MS, SKILLS_INDEX_FILE_NAME,
-        SKILLS_LAYOUT_VERSION,
+        periodic_reaudit_targets, scheduled_routine_run_metadata_upsert,
+        should_repair_stale_cron_run, ConcurrencyDecision, CronMatcher, CronMisfireRecoveryAction,
+        CronTimezoneMode, InstalledSkillRecord, InstalledSkillsIndex, SchedulerHealthInput,
+        SCHEDULER_STALE_RUN_AFTER_MS, SKILLS_INDEX_FILE_NAME, SKILLS_LAYOUT_VERSION,
     };
     use crate::gateway::proto::palyra::cron::v1 as cron_v1;
     use crate::journal::{
         CronConcurrencyPolicy, CronJobRecord, CronMisfirePolicy, CronRetryPolicy, CronRunRecord,
         CronRunStatus, CronScheduleType,
+    };
+    use crate::routines::{
+        RoutineApprovalPolicy, RoutineDeliveryConfig, RoutineDeliveryMode, RoutineExecutionConfig,
+        RoutineMetadataRecord, RoutineSilentPolicy, RoutineTriggerKind,
     };
     use chrono::TimeZone;
     use serde_json::json;
@@ -2216,6 +2285,49 @@ mod tests {
             created_at_unix_ms: 0,
             updated_at_unix_ms,
         }
+    }
+
+    fn sample_routine_metadata(routine_id: &str) -> RoutineMetadataRecord {
+        RoutineMetadataRecord {
+            routine_id: routine_id.to_owned(),
+            trigger_kind: RoutineTriggerKind::Schedule,
+            trigger_payload_json: json!({ "source": "test" }).to_string(),
+            execution: RoutineExecutionConfig::default(),
+            delivery: RoutineDeliveryConfig {
+                mode: RoutineDeliveryMode::LogsOnly,
+                channel: None,
+                failure_mode: Some(RoutineDeliveryMode::LogsOnly),
+                failure_channel: None,
+                silent_policy: RoutineSilentPolicy::Noisy,
+            },
+            quiet_hours: None,
+            cooldown_ms: 0,
+            approval_policy: RoutineApprovalPolicy::default(),
+            template_id: None,
+            created_at_unix_ms: 0,
+            updated_at_unix_ms: 0,
+        }
+    }
+
+    #[test]
+    fn scheduled_routine_run_metadata_preserves_configured_delivery() {
+        let job =
+            sample_every_job("01ARZ3NDEKTSV4RRFFQ69G5FAV", Some(1_000), CronMisfirePolicy::Skip);
+        let routine = sample_routine_metadata(job.job_id.as_str());
+        let upsert =
+            scheduled_routine_run_metadata_upsert(&job, &routine, "01ARZ3NDEKTSV4RRFFQ69G5FAW")
+                .expect("scheduled routine run metadata should build");
+
+        assert_eq!(upsert.routine_id, routine.routine_id);
+        assert_eq!(upsert.trigger_kind, RoutineTriggerKind::Schedule);
+        assert_eq!(upsert.delivery.mode, RoutineDeliveryMode::LogsOnly);
+        assert_eq!(upsert.delivery.failure_mode, Some(RoutineDeliveryMode::LogsOnly));
+        let trigger_payload =
+            serde_json::from_str::<serde_json::Value>(upsert.trigger_payload_json.as_str())
+                .expect("trigger payload should parse");
+        assert_eq!(trigger_payload["source"], "cron");
+        assert_eq!(trigger_payload["schedule_type"], "every");
+        assert_eq!(trigger_payload["schedule_payload"]["interval_ms"], 1_000);
     }
 
     #[test]
