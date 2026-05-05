@@ -30,6 +30,7 @@ const DEFAULT_BROWSER_HEALTH_BASE_URL: &str = DEFAULT_BROWSER_URL;
 const DEFAULT_BROWSER_HEALTH_PORT: u16 = 7143;
 const BROWSER_SERVICE_METADATA_SCHEMA_VERSION: u32 = 1;
 const BROWSER_SERVICE_START_POLL_MS: u64 = 250;
+const BROWSER_SERVICE_STOP_TIMEOUT_MS: u64 = 5_000;
 const BROWSER_SERVICE_STATE_DIR: &str = "browser-cli";
 const BROWSER_SERVICE_METADATA_FILE_NAME: &str = "browser-service.json";
 const BROWSER_SERVICE_STDOUT_LOG_FILE_NAME: &str = "browserd.stdout.log";
@@ -243,7 +244,7 @@ async fn run_browser_async(command: BrowserCommand) -> Result<()> {
         BrowserCommand::Setup { path, token, force, json } => {
             run_browser_setup(path, token, force, json)
         }
-        BrowserCommand::Stop => run_browser_stop(),
+        BrowserCommand::Stop => run_browser_stop().await,
         BrowserCommand::Open {
             url,
             principal,
@@ -571,11 +572,12 @@ async fn run_browser_status(
 ) -> Result<()> {
     let resolved = resolve_browser_config(endpoint, health_url, token)?;
     let metadata = read_browser_service_metadata()?;
-    let lifecycle_running = metadata.as_ref().is_some_and(|value| process_is_running(value.pid));
+    let cli_lifecycle_running =
+        metadata.as_ref().is_some_and(|value| process_is_running(value.pid));
     let policy = browser_policy_with_lifecycle_profile_readiness(
         resolved.policy,
         metadata.as_ref(),
-        lifecycle_running,
+        cli_lifecycle_running,
     );
     let health_response =
         fetch_browser_health(resolved.connection.health_base_url.as_str()).await.ok();
@@ -583,6 +585,8 @@ async fn run_browser_status(
         probe_browser_grpc(&resolved.connection).await.err().map(|error| error.to_string());
     let control_plane = probe_browser_control_plane_policy().await;
     let browserd_reachable = health_response.is_some() || grpc_error.is_none();
+    let lifecycle_running =
+        effective_browser_lifecycle_running(cli_lifecycle_running, browserd_reachable);
     let mut warnings = browser_status_warnings(
         &policy,
         &control_plane,
@@ -593,7 +597,7 @@ async fn run_browser_status(
     warnings.extend(browser_profile_prerequisite_warnings(
         &policy,
         metadata.as_ref(),
-        lifecycle_running,
+        cli_lifecycle_running,
         resolved.config_path.as_deref(),
     ));
     let payload = BrowserStatusPayload {
@@ -897,7 +901,7 @@ async fn run_browser_start(
     }
 }
 
-fn run_browser_stop() -> Result<()> {
+async fn run_browser_stop() -> Result<()> {
     let Some(metadata) = read_browser_service_metadata()? else {
         let payload = BrowserLifecyclePayload {
             action: "stop".to_owned(),
@@ -923,6 +927,11 @@ fn run_browser_stop() -> Result<()> {
         terminate_process(metadata.pid)
             .with_context(|| format!("failed to stop browser service process {}", metadata.pid))?;
     }
+    wait_for_browser_service_stop(
+        &metadata,
+        Duration::from_millis(BROWSER_SERVICE_STOP_TIMEOUT_MS),
+    )
+    .await?;
     remove_browser_service_metadata()?;
 
     let payload = BrowserLifecyclePayload {
@@ -933,7 +942,7 @@ fn run_browser_stop() -> Result<()> {
         health_base_url: metadata.health_base_url,
         stdout_log_path: Some(metadata.stdout_log_path),
         stderr_log_path: Some(metadata.stderr_log_path),
-        detail: "browser service stop requested".to_owned(),
+        detail: "browser service stopped and lifecycle metadata removed".to_owned(),
         warnings: Vec::new(),
     };
     let value =
@@ -943,6 +952,63 @@ fn run_browser_stop() -> Result<()> {
         format_browser_lifecycle_text(&payload),
         "failed to encode browser lifecycle output",
     )
+}
+
+async fn wait_for_browser_service_stop(
+    metadata: &BrowserServiceMetadata,
+    timeout: Duration,
+) -> Result<()> {
+    let started = SystemTime::now();
+    loop {
+        let process_running = process_is_running(metadata.pid);
+        let health_reachable =
+            fetch_browser_health(metadata.health_base_url.as_str()).await.is_ok();
+        if browser_service_stop_complete(process_running, health_reachable) {
+            return Ok(());
+        }
+
+        if started.elapsed().unwrap_or_default() >= timeout {
+            let reasons = browser_service_stop_pending_reasons(
+                metadata.pid,
+                process_running,
+                health_reachable,
+                metadata.health_base_url.as_str(),
+            );
+            anyhow::bail!(
+                "browser service did not stop within {} ms; {}; lifecycle metadata was preserved",
+                timeout.as_millis(),
+                reasons.join("; ")
+            );
+        }
+
+        sleep(Duration::from_millis(BROWSER_SERVICE_START_POLL_MS)).await;
+    }
+}
+
+fn browser_service_stop_complete(process_running: bool, health_reachable: bool) -> bool {
+    !process_running && !health_reachable
+}
+
+fn browser_service_stop_pending_reasons(
+    pid: u32,
+    process_running: bool,
+    health_reachable: bool,
+    health_base_url: &str,
+) -> Vec<String> {
+    let mut reasons = Vec::new();
+    if process_running {
+        reasons.push(format!("pid {pid} is still running"));
+    }
+    if health_reachable {
+        reasons.push(format!(
+            "health endpoint {}/healthz is still reachable",
+            health_base_url.trim_end_matches('/')
+        ));
+    }
+    if reasons.is_empty() {
+        reasons.push("stop state could not be confirmed".to_owned());
+    }
+    reasons
 }
 
 async fn run_browser_open(args: BrowserOpenArgs) -> Result<()> {
@@ -2943,6 +3009,18 @@ fn browser_status_warnings(
             browser_gateway_auth_token_setup_warning(config_path)
         ));
     }
+    if browserd_reachable && metadata.is_none() {
+        warnings.push(
+            "browserd is reachable, but no CLI lifecycle metadata exists; the service may have been started outside `palyra browser start` or a previous stop failed before cleanup"
+                .to_owned(),
+        );
+    }
+    if browserd_reachable && metadata.is_some_and(|entry| !process_is_running(entry.pid)) {
+        warnings.push(
+            "browserd is reachable, but the CLI-managed metadata pid is not running; the endpoint may be owned by an unmanaged or stale browser service"
+                .to_owned(),
+        );
+    }
     if policy.configured_enabled
         && control_plane.reachable
         && control_plane.browser_enabled == Some(false)
@@ -2965,6 +3043,13 @@ fn browser_status_warnings(
         ));
     }
     warnings
+}
+
+fn effective_browser_lifecycle_running(
+    cli_lifecycle_running: bool,
+    browserd_reachable: bool,
+) -> bool {
+    cli_lifecycle_running || browserd_reachable
 }
 
 fn browser_profile_prerequisite_warnings(
@@ -4047,9 +4132,11 @@ mod tests {
     use super::{
         browser_command_payload_should_emit, browser_command_policy_action, browser_failure_detail,
         browser_identifier_json_value, browser_service_auth_token_command,
-        browser_service_enable_command, browser_session_handle_text,
+        browser_service_enable_command, browser_service_stop_complete,
+        browser_service_stop_pending_reasons, browser_session_handle_text,
         browser_setup_gateway_reload_warning, browser_snapshot_emits_json_to_stdout,
-        browser_start_auth_token_warnings, browser_status_warnings, ensure_browser_command_success,
+        browser_start_auth_token_warnings, browser_status_warnings,
+        effective_browser_lifecycle_running, ensure_browser_command_success,
         ensure_browser_gateway_auth_token_alignment, ensure_browser_service_enabled,
         ensure_browser_start_preflight, format_browser_session_summary_text,
         normalize_session_scoped_output, redact_browser_output_value, session_summary_value,
@@ -4575,6 +4662,48 @@ mod tests {
             }),
             "stale gateway policy should produce a restart warning: {warnings:?}"
         );
+    }
+
+    #[test]
+    fn browser_status_treats_reachable_unmanaged_browserd_as_running() {
+        let mut policy = disabled_policy();
+        policy.configured_enabled = true;
+        policy.browser_tools_allowlisted = true;
+        policy.missing_browser_tools = Vec::new();
+
+        assert!(
+            effective_browser_lifecycle_running(false, true),
+            "reachable browserd should not be rendered as lifecycle_running=false"
+        );
+
+        let warnings = browser_status_warnings(
+            &policy,
+            &BrowserControlPlaneSnapshot {
+                reachable: true,
+                browser_enabled: Some(true),
+                error: None,
+            },
+            true,
+            None,
+            None,
+        );
+
+        assert!(
+            warnings.iter().any(|warning| warning.contains("no CLI lifecycle metadata")),
+            "reachable unmanaged browserd should produce a clear lifecycle warning: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn browser_stop_wait_requires_process_exit_and_unreachable_health() {
+        assert!(browser_service_stop_complete(false, false));
+        assert!(!browser_service_stop_complete(true, false));
+        assert!(!browser_service_stop_complete(false, true));
+
+        let reasons =
+            browser_service_stop_pending_reasons(42, true, true, "http://127.0.0.1:7143/");
+        assert!(reasons.iter().any(|reason| reason.contains("pid 42")));
+        assert!(reasons.iter().any(|reason| { reason.contains("http://127.0.0.1:7143/healthz") }));
     }
 
     #[test]
