@@ -166,7 +166,7 @@ fn tool_specific_contract(tool_names: &[String]) -> String {
         contracts.push("palyra.fs.apply_patch patch grammar: the patch string must be a complete Palyra patch document, not raw file contents and not prose. Start with '*** Begin Patch' on its own line, then one or more operation headers ('*** Add File: path', '*** Update File: path', or '*** Delete File: path'), then '*** End Patch'. For Add File, every content line must start with '+'. For Update File, add '@@' before each hunk and make every hunk line start with one of space, '+', or '-'. Paths are forward-slash relative paths inside the workspace. On a parse error, retry once with this exact wrapper and corrected prefixes.".to_owned());
     }
     if tool_names.iter().any(|tool| tool == "palyra.process.run") {
-        contracts.push("palyra.process.run sandbox contract: call only bare executable names, never shell syntax. Local desktop profiles commonly allow pwd, echo, ls, dir, mkdir, python/python3/py, node/npm/npx, and cargo/rustc; use palyra.fs.apply_patch for file writes. Use background=true for temporary dev servers instead of nohup, '&', shell wrappers, or platform-specific launchers. If a command is denied by sandbox policy, treat that as an operational limit and continue with a safe fallback or clearly report the blocked verification step.".to_owned());
+        contracts.push("palyra.process.run sandbox contract: call only bare executable names, never shell syntax. Local desktop profiles commonly allow pwd, echo, ls, dir, mkdir, python/python3/py, node/npm/npx, and cargo/rustc; use palyra.fs.apply_patch for file writes. Prefer cwd plus relative workspace paths when running scripts, for example command='node', args=['e2e-tool-smoke/hello.js']; if a sandbox error mentions an absolute path-like substring, retry with the relative path from the workspace root. Use background=true for temporary dev servers instead of nohup, '&', shell wrappers, or platform-specific launchers. If a command is denied by sandbox policy, treat that as an operational limit and continue with a safe fallback or clearly report the blocked verification step.".to_owned());
     }
     if tool_names.iter().any(|tool| tool == "palyra.memory.retain") {
         contracts.push("palyra.memory.retain lifecycle contract: source must be one of manual, summary, import, tape:user_message, or tape:tool_result; use manual for user-stated preferences, corrections, and directives. A successful retain output is authoritative: if durable_memory_write=true and review_state=written, the memory is stored; if durable_memory_write=false, say it was not written and needs review only when review_state says so. Do not claim an approval is pending unless a tool output includes an explicit approval or review identifier.".to_owned());
@@ -279,6 +279,8 @@ mod tests {
 
         assert!(contract.contains("pwd, echo, ls, dir, mkdir"));
         assert!(contract.contains("python/python3/py"));
+        assert!(contract.contains("relative workspace paths"));
+        assert!(contract.contains("absolute path-like substring"));
         assert!(contract.contains("background=true"));
         assert!(contract.contains("sandbox policy"));
         assert!(contract.contains("safe fallback"));

@@ -163,11 +163,16 @@ pub fn run_constrained_process(
     let input = parse_process_runner_input(input_json)?;
     validate_input_shape(&input)?;
     validate_allowed_executable(policy, input.command.as_str())?;
-    validate_interpreter_argument_guardrails(input.command.as_str(), input.args.as_slice())?;
 
     let workspace_root = canonical_workspace_root(policy.workspace_root.as_path())?;
     let working_directory =
         resolve_working_directory(workspace_root.as_path(), input.cwd.as_deref())?;
+    validate_interpreter_argument_guardrails(
+        workspace_root.as_path(),
+        working_directory.as_path(),
+        input.command.as_str(),
+        input.args.as_slice(),
+    )?;
     validate_argument_workspace_scope(
         workspace_root.as_path(),
         working_directory.as_path(),
@@ -569,6 +574,8 @@ fn validate_allowed_executable(
 }
 
 fn validate_interpreter_argument_guardrails(
+    workspace_root: &Path,
+    cwd: &Path,
     command: &str,
     args: &[String],
 ) -> Result<(), SandboxProcessRunError> {
@@ -586,9 +593,17 @@ fn validate_interpreter_argument_guardrails(
         });
     }
 
-    if let Some(argument) =
-        args.iter().find(|arg| contains_embedded_absolute_path(arg.as_str())).map(String::as_str)
-    {
+    for argument in args {
+        if !contains_embedded_absolute_path(argument.as_str()) {
+            continue;
+        }
+        if interpreter_absolute_path_argument_stays_in_workspace(
+            workspace_root,
+            cwd,
+            argument.as_str(),
+        )? {
+            continue;
+        }
         return Err(SandboxProcessRunError {
             kind: SandboxProcessRunErrorKind::WorkspaceScopeDenied,
             message: format!(
@@ -598,6 +613,35 @@ fn validate_interpreter_argument_guardrails(
     }
 
     Ok(())
+}
+
+fn interpreter_absolute_path_argument_stays_in_workspace(
+    workspace_root: &Path,
+    cwd: &Path,
+    argument: &str,
+) -> Result<bool, SandboxProcessRunError> {
+    let trimmed = argument.trim();
+    if trimmed.is_empty() {
+        return Ok(false);
+    }
+
+    if let Some(file_url_path) = parse_file_url_path(trimmed)? {
+        return Ok(resolve_scoped_path(workspace_root, cwd, file_url_path.as_str(), false).is_ok());
+    }
+
+    if let Some(value) = option_assignment_value(trimmed) {
+        return interpreter_absolute_path_argument_stays_in_workspace(workspace_root, cwd, value);
+    }
+
+    if let Some(value) = option_compact_value(trimmed) {
+        return interpreter_absolute_path_argument_stays_in_workspace(workspace_root, cwd, value);
+    }
+
+    if !token_looks_like_absolute_path(trimmed) {
+        return Ok(false);
+    }
+
+    Ok(resolve_scoped_path(workspace_root, cwd, trimmed, false).is_ok())
 }
 
 fn is_interpreter_executable(command: &str) -> bool {
@@ -676,22 +720,9 @@ fn resolve_working_directory(
 fn validate_argument_workspace_scope(
     workspace_root: &Path,
     cwd: &Path,
-    command: &str,
+    _command: &str,
     args: &[String],
 ) -> Result<(), SandboxProcessRunError> {
-    if is_interpreter_executable(command) {
-        for arg in args {
-            if contains_embedded_absolute_path(arg.as_str()) {
-                return Err(SandboxProcessRunError {
-                    kind: SandboxProcessRunErrorKind::WorkspaceScopeDenied,
-                    message: format!(
-                        "sandbox denied: interpreter argument contains absolute path-like substring: '{arg}'"
-                    ),
-                });
-            }
-        }
-    }
-
     for arg in args {
         if let Some(file_url_path) = parse_file_url_path(arg.as_str())? {
             let _ = resolve_scoped_path(workspace_root, cwd, file_url_path.as_str(), false)?;
@@ -1531,9 +1562,9 @@ mod tests {
     use super::{
         canonical_workspace_root, collect_requested_egress_hosts,
         cpu_rlimit_seconds_from_usage_micros, is_host_allowlisted, run_constrained_process,
-        validate_argument_workspace_scope, validate_runtime_egress_enforcement,
-        EgressEnforcementMode, ProcessRunnerInput, SandboxProcessRunErrorKind,
-        SandboxProcessRunnerPolicy, SandboxProcessRunnerTier,
+        validate_argument_workspace_scope, validate_interpreter_argument_guardrails,
+        validate_runtime_egress_enforcement, EgressEnforcementMode, ProcessRunnerInput,
+        SandboxProcessRunErrorKind, SandboxProcessRunnerPolicy, SandboxProcessRunnerTier,
     };
 
     fn portable_test_memory_limit_bytes() -> u64 {
@@ -2232,6 +2263,47 @@ mod tests {
             .expect_err("interpreter shell-eval flags must be rejected");
         assert_eq!(error.kind, SandboxProcessRunErrorKind::WorkspaceScopeDenied);
         assert!(error.message.contains("shell-eval flags"));
+    }
+
+    #[test]
+    fn interpreter_guardrails_allow_absolute_workspace_script_argument() {
+        let workspace = std::env::current_dir().expect("workspace current_dir should resolve");
+        let workspace_root = canonical_workspace_root(workspace.as_path())
+            .expect("workspace root should canonicalize");
+        let script = fs::canonicalize(workspace_root.join("Cargo.toml"))
+            .expect("workspace fixture file should canonicalize");
+        let args = vec![script.to_string_lossy().to_string()];
+
+        validate_interpreter_argument_guardrails(
+            workspace_root.as_path(),
+            workspace_root.as_path(),
+            "node",
+            args.as_slice(),
+        )
+        .expect("absolute script path inside workspace should be allowed");
+    }
+
+    #[test]
+    fn interpreter_guardrails_reject_embedded_absolute_path_substrings() {
+        #[cfg(windows)]
+        let outside_path = r"C:\Windows\win.ini";
+        #[cfg(not(windows))]
+        let outside_path = "/etc/passwd";
+        let workspace = std::env::current_dir().expect("workspace current_dir should resolve");
+        let workspace_root = canonical_workspace_root(workspace.as_path())
+            .expect("workspace root should canonicalize");
+        let args = vec![format!("print(open('{outside_path}').read())")];
+
+        let error = validate_interpreter_argument_guardrails(
+            workspace_root.as_path(),
+            workspace_root.as_path(),
+            "python3",
+            args.as_slice(),
+        )
+        .expect_err("embedded absolute host paths should stay blocked");
+
+        assert_eq!(error.kind, SandboxProcessRunErrorKind::WorkspaceScopeDenied);
+        assert!(error.message.contains("absolute path-like substring"));
     }
 
     #[test]
