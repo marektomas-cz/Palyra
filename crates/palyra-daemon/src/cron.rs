@@ -1883,6 +1883,7 @@ async fn execute_single_job_attempt(
             .await?;
     }
     let orchestrator_run_id = Ulid::new().to_string();
+    let origin_kind = effective.origin_kind.clone();
 
     state
         .finalize_cron_run(CronRunFinalizeRequest {
@@ -1898,7 +1899,9 @@ async fn execute_single_job_attempt(
             session_id: Some(session_id.clone()),
         })
         .await?;
-    record_scheduled_routine_run_metadata(state.as_ref(), job, run_id.as_str()).await?;
+    if origin_kind == "cron" {
+        record_scheduled_routine_run_metadata(state.as_ref(), job, run_id.as_str()).await?;
+    }
 
     let mut append_request = Request::new(gateway_v1::AppendEventRequest {
         v: 1,
@@ -1911,7 +1914,7 @@ async fn execute_single_job_attempt(
             actor: common_v1::journal_event::EventActor::System as i32,
             timestamp_unix_ms: now_unix_ms()?,
             payload_json: json!({
-                "origin": "cron",
+                "origin": origin_kind,
                 "job_id": job.job_id,
                 "job_name": job.name,
                 "attempt": attempt,
