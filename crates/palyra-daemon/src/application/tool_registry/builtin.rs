@@ -567,6 +567,16 @@ fn browser_tool_schema(tool_name: &str) -> Value {
                 json!({"type":"object","properties":{},"additionalProperties":true}),
             ));
         }
+        "palyra.browser.observe" => {
+            properties.push(("include_dom_snapshot", json!({"type":"boolean","default":true})));
+            properties
+                .push(("include_accessibility_tree", json!({"type":"boolean","default":true})));
+            properties.push(("include_visible_text", json!({"type":"boolean","default":true})));
+            properties.push(("max_dom_snapshot_bytes", json!({"type":"integer","minimum":0})));
+            properties
+                .push(("max_accessibility_tree_bytes", json!({"type":"integer","minimum":0})));
+            properties.push(("max_visible_text_bytes", json!({"type":"integer","minimum":0})));
+        }
         _ => {}
     }
     object_schema(&[], properties, true)

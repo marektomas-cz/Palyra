@@ -1,3 +1,4 @@
+use super::builtin::registry_entry;
 use super::types::ToolCallRejectionKind;
 use super::{
     build_model_visible_tool_catalog_snapshot, projection_policy_for_tool,
@@ -153,6 +154,15 @@ fn browser_session_create_returns_model_visible_handle() {
         projection_policy_for_tool("palyra.browser.observe"),
         ToolResultProjectionPolicy::RedactedPreviewAndArtifact
     );
+}
+
+#[test]
+fn browser_observe_schema_exposes_visible_text_default() {
+    let entry = registry_entry("palyra.browser.observe").expect("browser observe tool entry");
+
+    assert_eq!(entry.input_schema["properties"]["include_visible_text"]["type"], "boolean");
+    assert_eq!(entry.input_schema["properties"]["include_visible_text"]["default"], true);
+    assert_eq!(entry.input_schema["properties"]["max_visible_text_bytes"]["minimum"], 0);
 }
 
 #[test]

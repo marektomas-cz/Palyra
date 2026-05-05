@@ -1216,10 +1216,7 @@ pub(crate) async fn execute_browser_tool(
                     .get("include_accessibility_tree")
                     .and_then(Value::as_bool)
                     .unwrap_or(true),
-                include_visible_text: payload
-                    .get("include_visible_text")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
+                include_visible_text: browser_observe_include_visible_text(&payload),
                 max_dom_snapshot_bytes: payload
                     .get("max_dom_snapshot_bytes")
                     .and_then(Value::as_u64)
@@ -2017,6 +2014,10 @@ fn parse_browser_tool_session_id(
     Ok(session_id.to_owned())
 }
 
+fn browser_observe_include_visible_text(payload: &serde_json::Map<String, Value>) -> bool {
+    payload.get("include_visible_text").and_then(Value::as_bool).unwrap_or(true)
+}
+
 fn parse_browser_tool_tab_id(payload: &serde_json::Map<String, Value>) -> Result<String, String> {
     let Some(tab_id) = payload.get("tab_id").and_then(Value::as_str).map(str::trim) else {
         return Err("palyra.browser.tabs.* requires non-empty string field 'tab_id'".to_owned());
@@ -2370,10 +2371,12 @@ fn browser_tool_execution_outcome(
 mod tests {
     use super::{
         attach_browser_caller_principal_metadata, browser_console_entry_to_json,
-        browser_network_log_entry_to_json, BROWSER_CALLER_PRINCIPAL_HEADER,
+        browser_network_log_entry_to_json, browser_observe_include_visible_text,
+        BROWSER_CALLER_PRINCIPAL_HEADER,
     };
     use crate::transport::grpc::proto::palyra::browser::v1 as browser_v1;
     use palyra_common::CANONICAL_PROTOCOL_MAJOR;
+    use serde_json::json;
     use tonic::Request;
 
     #[test]
@@ -2427,5 +2430,16 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("user:local")
         );
+    }
+
+    #[test]
+    fn browser_observe_includes_visible_text_by_default() {
+        let default_payload = serde_json::Map::new();
+        assert!(browser_observe_include_visible_text(&default_payload));
+
+        let explicit_false = json!({"include_visible_text": false});
+        assert!(!browser_observe_include_visible_text(
+            explicit_false.as_object().expect("object payload")
+        ));
     }
 }
