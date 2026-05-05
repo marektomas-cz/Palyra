@@ -385,7 +385,8 @@ fn run_cli() -> Result<()> {
             skip_skills,
         ),
         CliCommand::Gateway { command } => commands::daemon::run_daemon(command),
-        CliCommand::Dashboard { path, verify_remote, identity_store_dir, open, json } => {
+        CliCommand::Dashboard { path, verify_remote, identity_store_dir, open, json }
+        | CliCommand::DashboardUrl { path, verify_remote, identity_store_dir, open, json } => {
             commands::daemon::run_daemon(DaemonCommand::DashboardUrl {
                 path,
                 verify_remote,

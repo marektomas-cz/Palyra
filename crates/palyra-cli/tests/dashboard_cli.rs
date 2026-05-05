@@ -54,6 +54,10 @@ remote_base_url = "https://dashboard.example.com/"
     let dashboard = run_cli(&workdir, &["--config", &config_path_string, "dashboard", "--json"])?;
     assert_dashboard_payload(dashboard, "dashboard", config_path_string.as_str())?;
 
+    let root_dashboard_url =
+        run_cli(&workdir, &["--config", &config_path_string, "dashboard-url", "--json"])?;
+    assert_dashboard_payload(root_dashboard_url, "dashboard-url", config_path_string.as_str())?;
+
     let gateway_dashboard = run_cli(
         &workdir,
         &["--config", &config_path_string, "gateway", "dashboard-url", "--json"],

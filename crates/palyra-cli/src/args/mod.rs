@@ -839,6 +839,19 @@ pub enum Command {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    #[command(name = "dashboard-url", hide = true)]
+    DashboardUrl {
+        #[arg(long)]
+        path: Option<String>,
+        #[arg(long, default_value_t = false)]
+        verify_remote: bool,
+        #[arg(long)]
+        identity_store_dir: Option<String>,
+        #[arg(long, default_value_t = false)]
+        open: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     #[command(
         about = "Create or verify portable operator backups",
         after_long_help = BACKUP_AFTER_HELP

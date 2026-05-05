@@ -4715,6 +4715,31 @@ fn parse_daemon_dashboard_url_with_verification_options() {
 }
 
 #[test]
+fn parse_root_dashboard_url_alias_with_verification_options() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "dashboard-url",
+        "--path",
+        "config/palyra.toml",
+        "--verify-remote",
+        "--identity-store-dir",
+        "state/identity",
+        "--open",
+        "--json",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::DashboardUrl {
+            path: Some("config/palyra.toml".to_owned()),
+            verify_remote: true,
+            identity_store_dir: Some("state/identity".to_owned()),
+            open: true,
+            json: true,
+        }
+    );
+}
+
+#[test]
 fn parse_policy_explain() {
     let parsed = Cli::parse_from([
         "palyra",
