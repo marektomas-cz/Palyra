@@ -1258,13 +1258,7 @@ pub fn join_run_metadata(
     metadata: Option<&RoutineRunMetadataRecord>,
 ) -> Value {
     let terminal = !run.status.is_active();
-    let outcome_kind = if terminal {
-        metadata
-            .and_then(|entry| entry.outcome_override)
-            .unwrap_or_else(|| default_outcome_from_cron_status(run.status))
-    } else {
-        RoutineRunOutcomeKind::Pending
-    };
+    let outcome_kind = effective_run_outcome_kind(run.status, metadata);
     let execution = metadata.map(|entry| entry.execution.clone()).unwrap_or_default();
     let delivery = metadata.map(|entry| entry.delivery.clone()).unwrap_or_default();
     let output_delivered = terminal
@@ -1340,6 +1334,19 @@ pub fn join_run_metadata(
         "tool_calls": run.tool_calls,
         "tool_denies": run.tool_denies,
     })
+}
+
+fn effective_run_outcome_kind(
+    status: CronRunStatus,
+    metadata: Option<&RoutineRunMetadataRecord>,
+) -> RoutineRunOutcomeKind {
+    if status.is_active() {
+        return RoutineRunOutcomeKind::Pending;
+    }
+    match metadata.and_then(|entry| entry.outcome_override) {
+        Some(RoutineRunOutcomeKind::Pending) | None => default_outcome_from_cron_status(status),
+        Some(outcome_kind) => outcome_kind,
+    }
 }
 
 pub fn build_routine_export_bundle(
@@ -2625,6 +2632,25 @@ mod tests {
                 .get("delivery_reason")
                 .and_then(Value::as_str)
                 .is_some_and(|reason| reason.contains("terminal status")),
+            "{value}"
+        );
+    }
+
+    #[test]
+    fn join_run_metadata_reconciles_stale_pending_override_for_terminal_run() {
+        let run = sample_cron_run(CronRunStatus::Succeeded, 3_000);
+        let mut metadata = sample_run_metadata("run-1", "routine-1", 2_000);
+        metadata.outcome_override = Some(RoutineRunOutcomeKind::Pending);
+
+        let value = join_run_metadata("routine-1", &run, Some(&metadata));
+
+        assert_eq!(value.get("outcome_kind").and_then(Value::as_str), Some("success_with_output"));
+        assert_eq!(value.get("outcome_provisional").and_then(Value::as_bool), Some(false));
+        assert!(
+            !value
+                .get("delivery_reason")
+                .and_then(Value::as_str)
+                .is_some_and(|reason| reason.contains("still active")),
             "{value}"
         );
     }
