@@ -13,8 +13,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use palyra_common::process_runner_input::{
-    parse_process_runner_tool_input, ProcessRunnerToolInput,
+use palyra_common::{
+    process_runner_input::{parse_process_runner_tool_input, ProcessRunnerToolInput},
+    redaction::{redact_auth_error, redact_url_segments_in_text, REDACTED},
 };
 use palyra_sandbox::{
     build_tier_c_command_plan, current_backend_capabilities, current_backend_executor,
@@ -28,6 +29,9 @@ const MAX_ARG_LENGTH: usize = 4_096;
 const BUILTIN_LIST_MAX_ENTRIES: usize = 512;
 const CAPTURE_POLL_INTERVAL_MS: u64 = 5;
 const CAPTURE_CHUNK_BYTES: usize = 4 * 1024;
+const PROCESS_FAILURE_STDERR_PREVIEW_BYTES: usize = 512;
+const SENSITIVE_URL_PATH_MARKERS: &[&str] =
+    &["token", "secret", "key", "password", "credential", "session"];
 #[cfg(windows)]
 const WINDOWS_DEFAULT_PATH_EXTENSIONS: &[&str] = &[".com", ".exe", ".bat", ".cmd"];
 const INTERPRETER_EXECUTABLE_DENYLIST: &[&str] = &[
@@ -258,13 +262,17 @@ pub fn run_constrained_process(
     }
     if !capture.exit_status.success() {
         let stderr_bytes = capture.stderr.bytes.len();
+        let stderr_preview = redacted_process_stderr_preview(capture.stderr.bytes.as_slice())
+            .map(|preview| format!(", stderr_preview={preview:?}"))
+            .unwrap_or_default();
         return Err(SandboxProcessRunError {
             kind: SandboxProcessRunErrorKind::RuntimeFailure,
             message: format!(
-                "sandbox process exited unsuccessfully (code={}, stderr_bytes={}, stderr_truncated={})",
+                "sandbox process exited unsuccessfully (code={}, stderr_bytes={}, stderr_truncated={}{})",
                 capture.exit_status.code().unwrap_or(-1),
                 stderr_bytes,
-                capture.stderr.truncated
+                capture.stderr.truncated,
+                stderr_preview
             ),
         });
     }
@@ -290,6 +298,68 @@ pub fn run_constrained_process(
         message: format!("failed to serialize sandbox process output JSON: {error}"),
     })?;
     Ok(SandboxProcessRunSuccess { output_json })
+}
+
+fn redacted_process_stderr_preview(stderr: &[u8]) -> Option<String> {
+    if stderr.is_empty() {
+        return None;
+    }
+    let take_len = stderr.len().min(PROCESS_FAILURE_STDERR_PREVIEW_BYTES);
+    let preview = String::from_utf8_lossy(&stderr[..take_len]);
+    let normalized = preview
+        .chars()
+        .map(|character| if character.is_control() { ' ' } else { character })
+        .collect::<String>();
+    let collapsed = normalized.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return None;
+    }
+    let redacted_urls = redact_url_segments_in_text(collapsed.as_str());
+    let redacted = redact_auth_error(redacted_urls.as_str());
+    let redacted = redact_sensitive_url_path_segments(redacted.as_str());
+    if redacted.trim().is_empty() {
+        None
+    } else {
+        Some(redacted)
+    }
+}
+
+fn redact_sensitive_url_path_segments(value: &str) -> String {
+    value.split_whitespace().map(redact_sensitive_url_path_token).collect::<Vec<_>>().join(" ")
+}
+
+fn redact_sensitive_url_path_token(token: &str) -> String {
+    if !token.contains("://") {
+        return token.to_owned();
+    }
+    let mut output = token.to_owned();
+    for marker in SENSITIVE_URL_PATH_MARKERS {
+        let pattern = format!("/{marker}/");
+        let mut search_start = 0;
+        loop {
+            let normalized = output[search_start..].to_ascii_lowercase();
+            let Some(relative_pos) = normalized.find(pattern.as_str()) else {
+                break;
+            };
+            let secret_start = search_start + relative_pos + pattern.len();
+            let secret_end = output[secret_start..]
+                .char_indices()
+                .find_map(|(offset, character)| {
+                    matches!(character, '/' | '?' | '#' | '&').then_some(secret_start + offset)
+                })
+                .unwrap_or(output.len());
+            if secret_end > secret_start {
+                output.replace_range(secret_start..secret_end, REDACTED);
+                search_start = secret_start + REDACTED.len();
+            } else {
+                search_start = secret_start;
+            }
+            if search_start >= output.len() {
+                break;
+            }
+        }
+    }
+    output
 }
 
 fn execute_builtin_process_command(
@@ -1676,8 +1746,8 @@ mod tests {
 
     use super::{
         canonical_workspace_root, collect_requested_egress_hosts,
-        cpu_rlimit_seconds_from_usage_micros, is_host_allowlisted, resolve_working_directory,
-        run_constrained_process, validate_argument_workspace_scope,
+        cpu_rlimit_seconds_from_usage_micros, is_host_allowlisted, redacted_process_stderr_preview,
+        resolve_working_directory, run_constrained_process, validate_argument_workspace_scope,
         validate_interpreter_argument_guardrails, validate_runtime_egress_enforcement,
         EgressEnforcementMode, ProcessRunnerInput, SandboxProcessRunErrorKind,
         SandboxProcessRunnerPolicy, SandboxProcessRunnerTier,
@@ -2443,7 +2513,9 @@ mod tests {
                 .expect_err("missing file should report runtime failure");
         assert_eq!(error.kind, SandboxProcessRunErrorKind::RuntimeFailure);
         assert!(
-            error.message.contains("code=") && error.message.contains("stderr_bytes="),
+            error.message.contains("code=")
+                && error.message.contains("stderr_bytes=")
+                && error.message.contains("stderr_preview="),
             "runtime failure should remain diagnosable without raw stderr: {}",
             error.message
         );
@@ -2451,6 +2523,24 @@ mod tests {
             !error.message.contains(secret_marker),
             "runtime failure message must not leak raw stderr payload"
         );
+        assert!(
+            error.message.contains("<redacted>"),
+            "runtime failure message should keep a redacted stderr clue: {}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn process_stderr_preview_redacts_secret_like_values() {
+        let preview = redacted_process_stderr_preview(
+            b"node failed for https://example.com/token/abc123?api_key=qwerty token=abc123\nnext",
+        )
+        .expect("preview should be present");
+
+        assert!(preview.contains("<redacted>"), "{preview}");
+        assert!(!preview.contains("abc123"), "{preview}");
+        assert!(!preview.contains("qwerty"), "{preview}");
+        assert!(preview.contains("node failed"), "{preview}");
     }
 
     #[test]
