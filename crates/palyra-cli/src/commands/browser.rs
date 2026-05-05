@@ -1060,10 +1060,7 @@ async fn run_browser_open(args: BrowserOpenArgs) -> Result<()> {
         .context("failed to navigate browser session")?;
     let navigate_success = navigate.success;
     let navigate_error = navigate.error.clone();
-    let payload = json!({
-        "session": create,
-        "navigate": navigate,
-    });
+    let payload = browser_open_output_value(session_id.as_str(), &create, &navigate);
     emit_browser_value_with_json(
         &payload,
         format!(
@@ -1077,6 +1074,18 @@ async fn run_browser_open(args: BrowserOpenArgs) -> Result<()> {
         json,
     )?;
     ensure_browser_command_success("browser.open", navigate_success, navigate_error.as_str())
+}
+
+fn browser_open_output_value(
+    session_id: &str,
+    session: &control_plane::BrowserSessionCreateEnvelope,
+    navigate: &control_plane::BrowserNavigateEnvelope,
+) -> Value {
+    json!({
+        "session_id": session_id,
+        "session": session,
+        "navigate": navigate,
+    })
 }
 
 async fn run_browser_session_command(command: BrowserSessionCommand) -> Result<()> {
@@ -4131,19 +4140,21 @@ fn proto_console_severity_text(value: i32) -> &'static str {
 mod tests {
     use super::{
         browser_command_payload_should_emit, browser_command_policy_action, browser_failure_detail,
-        browser_identifier_json_value, browser_service_auth_token_command,
-        browser_service_enable_command, browser_service_stop_complete,
-        browser_service_stop_pending_reasons, browser_session_handle_text,
-        browser_setup_gateway_reload_warning, browser_snapshot_emits_json_to_stdout,
-        browser_start_auth_token_warnings, browser_status_warnings,
-        effective_browser_lifecycle_running, ensure_browser_command_success,
-        ensure_browser_gateway_auth_token_alignment, ensure_browser_service_enabled,
-        ensure_browser_start_preflight, format_browser_session_summary_text,
-        normalize_session_scoped_output, redact_browser_output_value, session_summary_value,
-        BrowserControlPlaneSnapshot, BrowserOutputMode, BrowserPolicySnapshot,
-        BrowserResolvedConfig, BrowserServiceConnection, BrowserServiceMetadata,
+        browser_identifier_json_value, browser_open_output_value,
+        browser_service_auth_token_command, browser_service_enable_command,
+        browser_service_stop_complete, browser_service_stop_pending_reasons,
+        browser_session_handle_text, browser_setup_gateway_reload_warning,
+        browser_snapshot_emits_json_to_stdout, browser_start_auth_token_warnings,
+        browser_status_warnings, effective_browser_lifecycle_running,
+        ensure_browser_command_success, ensure_browser_gateway_auth_token_alignment,
+        ensure_browser_service_enabled, ensure_browser_start_preflight,
+        format_browser_session_summary_text, normalize_session_scoped_output,
+        redact_browser_output_value, session_summary_value, BrowserControlPlaneSnapshot,
+        BrowserOutputMode, BrowserPolicySnapshot, BrowserResolvedConfig, BrowserServiceConnection,
+        BrowserServiceMetadata,
     };
     use crate::{args::BrowserCommand, browser_v1, common_v1};
+    use palyra_control_plane as control_plane;
     use serde_json::{json, Value};
 
     fn disabled_policy() -> BrowserPolicySnapshot {
@@ -4435,6 +4446,45 @@ mod tests {
         let value = session_summary_value(&summary);
 
         assert_eq!(value.get("session_id").and_then(Value::as_str), Some(session_id));
+    }
+
+    #[test]
+    fn browser_open_output_exposes_reusable_session_id_at_root() {
+        let session_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        let contract = control_plane::ContractDescriptor {
+            contract_version: control_plane::CONTROL_PLANE_CONTRACT_VERSION.to_owned(),
+        };
+        let session = control_plane::BrowserSessionCreateEnvelope {
+            contract: contract.clone(),
+            principal: "user:ops".to_owned(),
+            channel: Some("cli".to_owned()),
+            session_id: Some(session_id.to_owned()),
+            created_at_unix_ms: 1,
+            effective_budget: None,
+            downloads_enabled: false,
+            action_allowed_domains: Vec::new(),
+            persistence_enabled: false,
+            persistence_id: String::new(),
+            state_restored: false,
+            profile_id: None,
+            private_profile: false,
+        };
+        let navigate = control_plane::BrowserNavigateEnvelope {
+            contract,
+            session_id: session_id.to_owned(),
+            success: true,
+            final_url: "https://example.com/".to_owned(),
+            status_code: 200,
+            title: "Example".to_owned(),
+            body_bytes: 256,
+            latency_ms: 10,
+            error: String::new(),
+        };
+
+        let value = browser_open_output_value(session_id, &session, &navigate);
+
+        assert_eq!(value.get("session_id").and_then(Value::as_str), Some(session_id));
+        assert_eq!(value.pointer("/session/session_id").and_then(Value::as_str), Some(session_id));
     }
 
     #[test]

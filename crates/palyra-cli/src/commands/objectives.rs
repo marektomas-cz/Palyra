@@ -336,7 +336,10 @@ fn emit_objectives_list(payload: &Value, json: bool) -> Result<()> {
 
 fn emit_objective_envelope(_event: &str, payload: &Value, json: bool) -> Result<()> {
     if json {
-        return output::print_json_pretty(payload, "failed to encode objective output as JSON");
+        return output::print_json_pretty(
+            &objective_envelope_output_value(payload),
+            "failed to encode objective output as JSON",
+        );
     }
     let objective = payload.pointer("/objective").unwrap_or(payload);
     let objective_id = json_optional_string_at(objective, "/objective_id").unwrap_or_default();
@@ -352,6 +355,21 @@ fn emit_objective_envelope(_event: &str, payload: &Value, json: bool) -> Result<
         println!("next: {next_step}");
     }
     Ok(())
+}
+
+fn objective_envelope_output_value(payload: &Value) -> Value {
+    let mut output = payload.clone();
+    let Some(objective_id) = payload.pointer("/objective/objective_id").and_then(Value::as_str)
+    else {
+        return output;
+    };
+    let Some(object) = output.as_object_mut() else {
+        return output;
+    };
+    object
+        .entry("objective_id".to_owned())
+        .or_insert_with(|| Value::String(objective_id.to_owned()));
+    output
 }
 
 fn build_query_path(path: &str, pairs: Vec<(&str, Option<String>)>) -> String {
@@ -444,5 +462,25 @@ mod tests {
         .expect("duration schedule should be accepted");
 
         assert_eq!(payload.get("every_interval_ms").and_then(Value::as_u64), Some(900_000));
+    }
+
+    #[test]
+    fn objective_envelope_output_exposes_reusable_objective_id_at_root() {
+        let payload = json!({
+            "objective": {
+                "objective_id": "obj-123",
+                "kind": "heartbeat",
+                "state": "active",
+            },
+            "operation": "upsert",
+        });
+
+        let output = objective_envelope_output_value(&payload);
+
+        assert_eq!(output.get("objective_id").and_then(Value::as_str), Some("obj-123"));
+        assert_eq!(
+            output.pointer("/objective/objective_id").and_then(Value::as_str),
+            Some("obj-123")
+        );
     }
 }
