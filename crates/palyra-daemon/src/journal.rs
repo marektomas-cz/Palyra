@@ -13109,7 +13109,7 @@ impl JournalStore {
         let now = current_unix_ms()?;
         let top_k = request.top_k.clamp(1, MAX_MEMORY_ITEMS_LIST_LIMIT);
         let candidate_limit = top_k.saturating_mul(8).clamp(top_k, MAX_MEMORY_SEARCH_CANDIDATES);
-        let fts_query = build_fts_query(query_text.as_str());
+        let fts_queries = build_memory_fts_queries(query_text.as_str());
         let query_embedding = self.query_embedding_for_search(
             query_text.as_str(),
             embedding_model_id.as_str(),
@@ -13123,7 +13123,7 @@ impl JournalStore {
         let mut candidates_by_id = BTreeMap::<String, MemorySearchCandidateRecord>::new();
 
         let mut lexical_latency_ms = 0;
-        if !fts_query.is_empty() {
+        if !fts_queries.is_empty() {
             let lexical_started = Instant::now();
             let mut statement = guard.prepare(
                 r#"
@@ -13160,60 +13160,68 @@ impl JournalStore {
                     LIMIT ?6
                 "#,
             )?;
-            let mut rows = statement.query(params![
-                fts_query,
-                request.principal.as_str(),
-                request.channel.as_deref(),
-                request.session_id.as_deref(),
-                now,
-                candidate_limit as i64,
-                embedding_version,
-            ])?;
+            for fts_query in fts_queries {
+                let mut rows = statement.query(params![
+                    fts_query,
+                    request.principal.as_str(),
+                    request.channel.as_deref(),
+                    request.session_id.as_deref(),
+                    now,
+                    candidate_limit as i64,
+                    embedding_version,
+                ])?;
 
-            while let Some(row) = rows.next()? {
-                let item = map_memory_item_row(row)?;
-                if !memory_source_matches(item.source, request.sources.as_slice()) {
-                    continue;
+                while let Some(row) = rows.next()? {
+                    let item = map_memory_item_row(row)?;
+                    if !memory_source_matches(item.source, request.sources.as_slice()) {
+                        continue;
+                    }
+                    if !memory_tags_match(item.tags.as_slice(), requested_tags.as_slice()) {
+                        continue;
+                    }
+                    let lexical_rank: f64 = row.get(12)?;
+                    let lexical_raw = (-lexical_rank).max(0.0);
+                    let model_id = row.get::<_, Option<String>>(13)?.unwrap_or_default();
+                    let dims = row.get::<_, Option<i64>>(14)?.unwrap_or_default() as usize;
+                    let version = row.get::<_, Option<i64>>(15)?.unwrap_or(embedding_version);
+                    let vector_raw = if model_id == embedding_model_id
+                        && dims == embedding_dims
+                        && version == embedding_version
+                    {
+                        let vector_blob: Option<Vec<u8>> = row.get(16)?;
+                        vector_blob
+                            .as_ref()
+                            .map(|blob| decode_vector_blob(blob.as_slice(), dims))
+                            .map(|embedding| {
+                                cosine_similarity(query_vector.as_slice(), embedding.as_slice())
+                            })
+                            .unwrap_or(0.0)
+                            .max(0.0)
+                    } else {
+                        0.0
+                    };
+                    let recency_raw = recency_score(now, item.created_at_unix_ms);
+                    let snippet = memory_snippet(item.content_text.as_str(), query_text.as_str());
+                    let key = item.memory_id.clone();
+                    if let Some(existing) = candidates_by_id.get_mut(key.as_str()) {
+                        existing.lexical_raw = existing.lexical_raw.max(lexical_raw);
+                        existing.vector_raw = existing.vector_raw.max(vector_raw);
+                        existing.lexical_candidate = true;
+                        continue;
+                    }
+                    candidates_by_id.insert(
+                        key,
+                        MemorySearchCandidateRecord {
+                            item,
+                            snippet,
+                            lexical_raw,
+                            vector_raw,
+                            recency_raw,
+                            lexical_candidate: true,
+                            vector_candidate: false,
+                        },
+                    );
                 }
-                if !memory_tags_match(item.tags.as_slice(), requested_tags.as_slice()) {
-                    continue;
-                }
-                let lexical_rank: f64 = row.get(12)?;
-                let lexical_raw = (-lexical_rank).max(0.0);
-                let model_id = row.get::<_, Option<String>>(13)?.unwrap_or_default();
-                let dims = row.get::<_, Option<i64>>(14)?.unwrap_or_default() as usize;
-                let version = row.get::<_, Option<i64>>(15)?.unwrap_or(embedding_version);
-                let vector_raw = if model_id == embedding_model_id
-                    && dims == embedding_dims
-                    && version == embedding_version
-                {
-                    let vector_blob: Option<Vec<u8>> = row.get(16)?;
-                    vector_blob
-                        .as_ref()
-                        .map(|blob| decode_vector_blob(blob.as_slice(), dims))
-                        .map(|embedding| {
-                            cosine_similarity(query_vector.as_slice(), embedding.as_slice())
-                        })
-                        .unwrap_or(0.0)
-                        .max(0.0)
-                } else {
-                    0.0
-                };
-                let recency_raw = recency_score(now, item.created_at_unix_ms);
-                let snippet = memory_snippet(item.content_text.as_str(), query_text.as_str());
-                let key = item.memory_id.clone();
-                candidates_by_id.insert(
-                    key,
-                    MemorySearchCandidateRecord {
-                        item,
-                        snippet,
-                        lexical_raw,
-                        vector_raw,
-                        recency_raw,
-                        lexical_candidate: true,
-                        vector_candidate: false,
-                    },
-                );
             }
             lexical_latency_ms = elapsed_millis(lexical_started);
         }
@@ -18471,7 +18479,7 @@ fn normalize_memory_tags(raw: &[String]) -> Vec<String> {
     normalized
 }
 
-fn build_fts_query(query: &str) -> String {
+fn normalized_fts_terms(query: &str) -> Vec<String> {
     let mut terms = Vec::new();
     for token in query.split_whitespace() {
         let normalized = token
@@ -18490,7 +18498,33 @@ fn build_fts_query(query: &str) -> String {
             }
         }
     }
-    terms.join(" ")
+    terms
+}
+
+fn build_fts_query(query: &str) -> String {
+    normalized_fts_terms(query).join(" ")
+}
+
+fn build_memory_fts_queries(query: &str) -> Vec<String> {
+    let primary = build_fts_query(query);
+    let mut queries = Vec::new();
+    if !primary.is_empty() {
+        queries.push(primary.clone());
+    }
+
+    for term in normalized_fts_terms(query)
+        .into_iter()
+        .filter(|term| {
+            term.len() >= 12 && (term.contains('_') || term.chars().any(|ch| ch.is_ascii_digit()))
+        })
+        .take(4)
+    {
+        if term != primary && !queries.iter().any(|query| query == &term) {
+            queries.push(term);
+        }
+    }
+
+    queries
 }
 
 fn memory_source_matches(source: MemorySource, filter_sources: &[MemorySource]) -> bool {
@@ -18905,13 +18939,13 @@ mod tests {
     };
 
     use super::{
-        build_fts_query, current_unix_ms, encode_vector_blob, sha256_hex, ApprovalCreateRequest,
-        ApprovalDecision, ApprovalDecisionScope, ApprovalPolicySnapshot, ApprovalPromptOption,
-        ApprovalPromptRecord, ApprovalResolveRequest, ApprovalRiskLevel, ApprovalSubjectType,
-        ApprovalsListFilter, CanvasStateTransitionRequest, CronConcurrencyPolicy,
-        CronJobCreateRequest, CronJobsListFilter, CronMisfirePolicy, CronRetryPolicy,
-        CronRunFinalizeRequest, CronRunStartRequest, CronRunStatus, CronRunsListFilter,
-        CronScheduleType, IdempotencyBeginRequest, IdempotencyCompleteRequest,
+        build_fts_query, build_memory_fts_queries, current_unix_ms, encode_vector_blob, sha256_hex,
+        ApprovalCreateRequest, ApprovalDecision, ApprovalDecisionScope, ApprovalPolicySnapshot,
+        ApprovalPromptOption, ApprovalPromptRecord, ApprovalResolveRequest, ApprovalRiskLevel,
+        ApprovalSubjectType, ApprovalsListFilter, CanvasStateTransitionRequest,
+        CronConcurrencyPolicy, CronJobCreateRequest, CronJobsListFilter, CronMisfirePolicy,
+        CronRetryPolicy, CronRunFinalizeRequest, CronRunStartRequest, CronRunStatus,
+        CronRunsListFilter, CronScheduleType, IdempotencyBeginRequest, IdempotencyCompleteRequest,
         JournalAppendRequest, JournalConfig, JournalError, JournalStore, MemoryEmbeddingProvider,
         MemoryItemCreateRequest, MemoryItemsListFilter, MemoryMaintenanceRequest,
         MemoryPurgeRequest, MemoryRetentionPolicy, MemorySearchRequest, MemorySource,
@@ -21791,6 +21825,22 @@ mod tests {
     }
 
     #[test]
+    fn build_memory_fts_queries_adds_distinctive_identifier_fallback() {
+        let queries = build_memory_fts_queries(
+            "jaké preference jsou uložené pro projekt PALYRA_E2E_MEMORY_SMOKE?",
+        );
+
+        assert_eq!(
+            queries.first().map(String::as_str),
+            Some("jak preference jsou ulo en pro projekt palyra_e2e_memory_smoke")
+        );
+        assert!(
+            queries.iter().any(|query| query == "palyra_e2e_memory_smoke"),
+            "distinctive exact markers should get a standalone fallback query: {queries:?}"
+        );
+    }
+
+    #[test]
     fn memory_search_handles_operator_like_query_tokens_without_sql_errors() {
         let db_path = temp_db_path();
         let store = JournalStore::open(test_journal_config(db_path, false))
@@ -21836,6 +21886,55 @@ mod tests {
         assert!(
             symbol_only_hits.is_empty(),
             "symbol-only query should not produce invalid FTS queries or false-positive hits"
+        );
+    }
+
+    #[test]
+    fn memory_search_matches_distinctive_marker_inside_natural_language_query() {
+        let db_path = temp_db_path();
+        let store = JournalStore::open(test_journal_config(db_path, false))
+            .expect("journal store should open");
+        let marker = "PALYRA_E2E_MEMORY_SMOKE";
+        let memory_id = "01ARZ3NDEKTSV4RRFFQ69G5FCG";
+        store
+            .create_memory_item(&sample_memory_request(
+                memory_id,
+                "user:ops",
+                None,
+                None,
+                MemorySource::Manual,
+                "E2E memory smoke preference: use TypeScript, Vitest, and concise Czech reports for project PALYRA_E2E_MEMORY_SMOKE.",
+            ))
+            .expect("manual marker memory should be created");
+        store
+            .create_memory_item(&sample_memory_request(
+                "01ARZ3NDEKTSV4RRFFQ69G5FCH",
+                "user:ops",
+                None,
+                None,
+                MemorySource::TapeToolResult,
+                "tool=palyra.process.run success=false error=sandbox process exited unsuccessfully",
+            ))
+            .expect("tool-result noise memory should be created");
+
+        let hits = store
+            .search_memory(&MemorySearchRequest {
+                principal: "user:ops".to_owned(),
+                channel: None,
+                session_id: None,
+                query: "jaké preference jsou uložené pro projekt PALYRA_E2E_MEMORY_SMOKE?"
+                    .to_owned(),
+                top_k: 5,
+                min_score: 0.0,
+                tags: Vec::new(),
+                sources: Vec::new(),
+            })
+            .expect("natural-language marker query should search memory");
+
+        assert_eq!(hits.first().map(|hit| hit.item.memory_id.as_str()), Some(memory_id));
+        assert!(
+            hits.first().map(|hit| hit.item.content_text.contains(marker)).unwrap_or(false),
+            "exact marker memory should be top hit: {hits:?}"
         );
     }
 
