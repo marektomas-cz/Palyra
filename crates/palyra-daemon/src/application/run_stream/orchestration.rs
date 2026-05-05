@@ -1106,6 +1106,15 @@ fn terminal_tool_authorization_failure(result: &RunStreamToolResultForModel) -> 
         return None;
     }
 
+    if is_noninteractive_cli_approval_denial(error) {
+        return Some(format!(
+            "tool execution requires approval, but the noninteractive CLI cannot approve it: tool={} proposal_id={} error={}. Rerun in an interactive terminal, or use --allow-sensitive-tools only after reviewing the requested tool risk.",
+            result.tool_name,
+            result.proposal_id,
+            truncate_with_ellipsis(error.to_owned(), 512)
+        ));
+    }
+
     Some(format!(
         "tool execution blocked by approval or policy: tool={} proposal_id={} error={}",
         result.tool_name,
@@ -1119,14 +1128,21 @@ fn is_terminal_tool_authorization_error(error: &str) -> bool {
     TERMINAL_TOOL_AUTHORIZATION_ERROR_MARKERS.iter().any(|marker| normalized.contains(marker))
 }
 
+fn is_noninteractive_cli_approval_denial(error: &str) -> bool {
+    error.to_ascii_lowercase().contains("approval_required_non_interactive_cli")
+}
+
 fn contains_raw_provider_tool_call_markup(text: &str) -> bool {
     let normalized = text.to_ascii_lowercase();
     normalized.contains("<minimax:tool_call")
         || (normalized.contains("<tool_call") && normalized.contains("<invoke name="))
 }
 
-const TERMINAL_TOOL_AUTHORIZATION_ERROR_MARKERS: &[&str] =
-    &["approval_response_error", "approval_response_timeout"];
+const TERMINAL_TOOL_AUTHORIZATION_ERROR_MARKERS: &[&str] = &[
+    "approval_response_error",
+    "approval_response_timeout",
+    "approval_required_non_interactive_cli",
+];
 
 #[allow(clippy::result_large_err)]
 async fn persist_run_stream_reply_text(
@@ -1240,6 +1256,26 @@ mod tests {
             terminal_tool_authorization_failure(&result).is_none(),
             "explicit approval denials are tool observations the model can recover from"
         );
+    }
+
+    #[test]
+    fn terminal_tool_authorization_failure_stops_noninteractive_cli_denials() {
+        let result = RunStreamToolResultForModel {
+            proposal_id: "toolu_noninteractive_01".to_owned(),
+            tool_name: "palyra.process.run".to_owned(),
+            outcome: crate::tool_protocol::denied_execution_outcome(
+                "toolu_noninteractive_01",
+                "palyra.process.run",
+                br#"{"command":"node","args":["-e","console.log(1)"]}"#,
+                "approval.denied: approval_required_non_interactive_cli",
+            ),
+        };
+
+        let message = terminal_tool_authorization_failure(&result)
+            .expect("noninteractive CLI approval denials should terminate the run");
+        assert!(message.contains("noninteractive CLI"));
+        assert!(message.contains("--allow-sensitive-tools"));
+        assert!(message.contains("toolu_noninteractive_01"));
     }
 
     #[test]
