@@ -611,13 +611,7 @@ fn parse_patch_document(patch: &str) -> Result<Vec<PatchOperation>, WorkspacePat
                 if is_patch_header_or_end(body_line) {
                     break;
                 }
-                let Some(content) = body_line.strip_prefix('+') else {
-                    return Err(parse_error(
-                        index + 1,
-                        1,
-                        "add-file body must contain '+' prefixed lines",
-                    ));
-                };
+                let content = body_line.strip_prefix('+').unwrap_or(body_line);
                 add_lines.push(content.to_owned());
                 index = index.saturating_add(1);
             }
@@ -1701,6 +1695,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn apply_workspace_patch_accepts_unprefixed_add_file_body_lines() {
+        let temp = tempdir().expect("tempdir should be created");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace should exist");
+        let patch = "*** Begin Patch\n*** Add File: report.txt\nhello\nworld\n*** End Patch\n";
+
+        let outcome = apply_workspace_patch(
+            std::slice::from_ref(&workspace),
+            &default_request(patch, false),
+            &default_limits(),
+        )
+        .expect("unprefixed add-file body should be treated as file content");
+
+        assert_eq!(outcome.files_touched.len(), 1);
+        assert_eq!(
+            fs::read_to_string(workspace.join("report.txt")).expect("file should be created"),
+            "hello\nworld\n"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn execute_patch_plan_revalidates_paths_before_write_and_blocks_symlink_swap() {
@@ -1790,7 +1805,6 @@ mod tests {
         let corpus = [
             "",
             "*** Begin Patch\n*** End Patch\n",
-            "*** Begin Patch\n*** Add File: bad.txt\nmissing-plus\n*** End Patch\n",
             "*** Begin Patch\n*** Update File: existing.txt\n@@\n*invalid\n*** End Patch\n",
             "*** Begin Patch\n*** Update File: existing.txt\n*** End Patch\n",
             "*** Begin Patch\n*** Add File: nested/../../escape.txt\n+bad\n*** End Patch\n",

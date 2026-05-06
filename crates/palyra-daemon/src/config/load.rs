@@ -3021,7 +3021,21 @@ fn parse_tool_allowlist(raw: &str, source_name: &str) -> Result<Vec<String>> {
 }
 
 fn parse_process_executable_allowlist(raw: &str, source_name: &str) -> Result<Vec<String>> {
-    parse_identifier_allowlist(raw, source_name, "executable name")
+    let mut allowlist = Vec::new();
+    let mut seen_values = HashSet::new();
+    for candidate in raw.split(',').map(str::trim).filter(|value| !value.is_empty()) {
+        if candidate == "*" {
+            push_unique_string(&mut allowlist, &mut seen_values, candidate.to_owned());
+            continue;
+        }
+        if !candidate.chars().all(|ch| {
+            ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '.' | '_' | '-')
+        }) {
+            anyhow::bail!("{source_name} contains invalid executable name '{candidate}'");
+        }
+        push_unique_string(&mut allowlist, &mut seen_values, candidate.to_owned());
+    }
+    Ok(allowlist)
 }
 
 fn parse_process_runner_tier(raw: &str, source_name: &str) -> Result<SandboxProcessRunnerTier> {
@@ -5240,6 +5254,17 @@ state_dir = "browserd-state"
         )
         .expect("allowlist should parse");
         assert_eq!(parsed, vec!["rustc".to_owned(), "cargo".to_owned()]);
+    }
+
+    #[test]
+    fn parse_process_executable_allowlist_accepts_host_access_wildcard() {
+        let parsed = parse_process_executable_allowlist(
+            "*, cargo, *",
+            "tool_call.process_runner.allowed_executables",
+        )
+        .expect("wildcard allowlist should parse");
+
+        assert_eq!(parsed, vec!["*".to_owned(), "cargo".to_owned()]);
     }
 
     #[test]

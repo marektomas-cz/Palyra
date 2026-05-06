@@ -157,6 +157,7 @@ const MAX_HTTP_FETCH_TOOL_INPUT_BYTES: usize = 64 * 1024;
 const MAX_PROCESS_RUNNER_TOOL_INPUT_BYTES: usize = 128 * 1024;
 const MAX_TOOL_PROGRAM_RUN_TOOL_INPUT_BYTES: usize = 256 * 1024;
 const MAX_WORKSPACE_READ_FILE_TOOL_INPUT_BYTES: usize = 16 * 1024;
+const MAX_WORKSPACE_LIST_DIR_TOOL_INPUT_BYTES: usize = 16 * 1024;
 const MAX_WORKSPACE_PATCH_TOOL_INPUT_BYTES: usize = 256 * 1024;
 const MAX_BROWSER_TOOL_INPUT_BYTES: usize = 128 * 1024;
 const MAX_ARTIFACT_READ_TOOL_INPUT_BYTES: usize = 16 * 1024;
@@ -338,6 +339,10 @@ pub fn tool_metadata(tool_name: &str) -> Option<ToolMetadata> {
             Some(ToolMetadata { capabilities: EMPTY_TOOL_CAPABILITIES, default_sensitive: true })
         }
         "palyra.fs.read_file" => Some(ToolMetadata {
+            capabilities: WORKSPACE_FILE_READ_CAPABILITIES,
+            default_sensitive: true,
+        }),
+        "palyra.fs.list_dir" => Some(ToolMetadata {
             capabilities: WORKSPACE_FILE_READ_CAPABILITIES,
             default_sensitive: true,
         }),
@@ -731,6 +736,14 @@ async fn run_allowlisted_tool(
             executor: "workspace_file".to_owned(),
             sandbox_enforcement: "workspace_roots".to_owned(),
         },
+        "palyra.fs.list_dir" => ToolExecutionRawResult {
+            success: false,
+            output_json: b"{}".to_vec(),
+            error: "palyra.fs.list_dir requires gateway workspace context".to_owned(),
+            timed_out: false,
+            executor: "workspace_file".to_owned(),
+            sandbox_enforcement: "workspace_roots".to_owned(),
+        },
         "palyra.browser.session.create"
         | "palyra.browser.session.close"
         | "palyra.browser.navigate"
@@ -791,6 +804,7 @@ fn is_runtime_supported_tool(tool_name: &str) -> bool {
             | "palyra.process.run"
             | "palyra.tool_program.run"
             | "palyra.fs.read_file"
+            | "palyra.fs.list_dir"
             | "palyra.fs.apply_patch"
             | "palyra.browser.session.create"
             | "palyra.browser.session.close"
@@ -824,7 +838,7 @@ fn tool_executor_name(config: &ToolCallConfig, tool_name: &str) -> String {
         process_runner_executor_name(&config.process_runner)
     } else if tool_name == "palyra.tool_program.run" {
         "tool_program_runtime".to_owned()
-    } else if tool_name == "palyra.fs.read_file" {
+    } else if matches!(tool_name, "palyra.fs.read_file" | "palyra.fs.list_dir") {
         "workspace_file".to_owned()
     } else if tool_name == "palyra.fs.apply_patch" {
         "workspace_patch".to_owned()
@@ -870,6 +884,7 @@ fn tool_input_limit_bytes(tool_name: &str) -> usize {
         "palyra.process.run" => MAX_PROCESS_RUNNER_TOOL_INPUT_BYTES,
         "palyra.tool_program.run" => MAX_TOOL_PROGRAM_RUN_TOOL_INPUT_BYTES,
         "palyra.fs.read_file" => MAX_WORKSPACE_READ_FILE_TOOL_INPUT_BYTES,
+        "palyra.fs.list_dir" => MAX_WORKSPACE_LIST_DIR_TOOL_INPUT_BYTES,
         "palyra.fs.apply_patch" => MAX_WORKSPACE_PATCH_TOOL_INPUT_BYTES,
         "palyra.browser.session.create"
         | "palyra.browser.session.close"
@@ -901,10 +916,17 @@ fn tool_input_limit_bytes(tool_name: &str) -> usize {
 
 fn sandbox_enforcement_for_tool(config: &ToolCallConfig, tool_name: &str) -> String {
     if tool_name == "palyra.process.run" {
-        config.process_runner.egress_enforcement_mode.as_str().to_owned()
+        if crate::sandbox_runner::process_runner_allows_host_access(&config.process_runner) {
+            "host_access".to_owned()
+        } else {
+            config.process_runner.egress_enforcement_mode.as_str().to_owned()
+        }
     } else if tool_name == "palyra.tool_program.run" {
         "nested_tool_policy".to_owned()
-    } else if matches!(tool_name, "palyra.fs.read_file" | "palyra.fs.apply_patch") {
+    } else if matches!(
+        tool_name,
+        "palyra.fs.read_file" | "palyra.fs.list_dir" | "palyra.fs.apply_patch"
+    ) {
         "workspace_roots".to_owned()
     } else if tool_name == "palyra.http.fetch" {
         "ssrf_guard".to_owned()
@@ -954,7 +976,11 @@ async fn execute_process_runner_tool(
             "sandbox process runner uses preflight egress validation only; OS-level network egress is not enforced"
         );
     }
-    let sandbox_enforcement = policy.egress_enforcement_mode.as_str().to_owned();
+    let sandbox_enforcement = if crate::sandbox_runner::process_runner_allows_host_access(&policy) {
+        "host_access".to_owned()
+    } else {
+        policy.egress_enforcement_mode.as_str().to_owned()
+    };
     let input = input_json.to_vec();
     let timeout = Duration::from_millis(config.execution_timeout_ms);
     match tokio::task::spawn_blocking(move || {
@@ -1432,6 +1458,7 @@ mod tests {
         assert!(tool_requires_approval("palyra.http.fetch"));
         assert!(tool_requires_approval("palyra.process.run"));
         assert!(tool_requires_approval("palyra.fs.read_file"));
+        assert!(tool_requires_approval("palyra.fs.list_dir"));
         assert!(tool_requires_approval("palyra.fs.apply_patch"));
         assert!(tool_requires_approval("palyra.tool_program.run"));
         assert!(tool_requires_approval("palyra.browser.session.create"));
@@ -1477,6 +1504,11 @@ mod tests {
         assert_eq!(metadata.capabilities, &[ToolCapability::FilesystemRead]);
         assert!(metadata.default_sensitive);
         assert!(tool_requires_approval("palyra.fs.read_file"));
+
+        let metadata = tool_metadata("palyra.fs.list_dir").expect("workspace list metadata");
+        assert_eq!(metadata.capabilities, &[ToolCapability::FilesystemRead]);
+        assert!(metadata.default_sensitive);
+        assert!(tool_requires_approval("palyra.fs.list_dir"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1528,7 +1560,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn execute_tool_call_workspace_read_file_requires_gateway_runtime_context() {
         let config = ToolCallConfig {
-            allowed_tools: vec!["palyra.fs.read_file".to_owned()],
+            allowed_tools: vec!["palyra.fs.read_file".to_owned(), "palyra.fs.list_dir".to_owned()],
             max_calls_per_run: 1,
             execution_timeout_ms: 250,
             process_runner: default_process_runner_policy(),
@@ -1543,6 +1575,23 @@ mod tests {
         .await;
 
         assert!(!outcome.success, "generic tool executor should not run workspace file reads");
+        assert!(
+            outcome.error.contains("requires gateway workspace context"),
+            "delegated executor error should be explicit: {}",
+            outcome.error
+        );
+        assert_eq!(outcome.attestation.executor, "workspace_file");
+        assert_eq!(outcome.attestation.sandbox_enforcement, "workspace_roots");
+
+        let outcome = execute_tool_call(
+            &config,
+            "01ARZ3NDEKTSV4RRFFQ69G5FAD",
+            "palyra.fs.list_dir",
+            br#"{"path":"."}"#,
+        )
+        .await;
+
+        assert!(!outcome.success, "generic tool executor should not run workspace listings");
         assert!(
             outcome.error.contains("requires gateway workspace context"),
             "delegated executor error should be explicit: {}",

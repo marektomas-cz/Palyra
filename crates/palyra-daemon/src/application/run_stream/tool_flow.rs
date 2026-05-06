@@ -509,6 +509,7 @@ pub(crate) fn classify_tool_parallelism(tool_name: &str, input_json: &[u8]) -> T
         | "palyra.routines.query"
         | "palyra.artifact.read"
         | "palyra.fs.read_file"
+        | "palyra.fs.list_dir"
         | "palyra.browser.title"
         | "palyra.browser.screenshot"
         | "palyra.browser.pdf"
@@ -1429,6 +1430,7 @@ fn tool_result_sensitivity(tool_name: &str, default_sensitive: bool) -> ToolResu
         ToolResultSensitivity::ProviderRawPayload
     } else if tool_name == crate::gateway::WORKSPACE_PATCH_TOOL_NAME
         || tool_name == crate::gateway::WORKSPACE_READ_FILE_TOOL_NAME
+        || tool_name == crate::gateway::WORKSPACE_LIST_DIR_TOOL_NAME
     {
         ToolResultSensitivity::InternalPath
     } else if default_sensitive {
@@ -1527,6 +1529,10 @@ mod tests {
                 "palyra.fs.read_file",
                 br#"{"path":"agent-e2e-tool-test.js"}"#
             ),
+            ToolParallelism::ReadOnlySafe
+        );
+        assert_eq!(
+            classify_tool_parallelism("palyra.fs.list_dir", br#"{"path":"scenarios"}"#),
             ToolParallelism::ReadOnlySafe
         );
         assert_eq!(

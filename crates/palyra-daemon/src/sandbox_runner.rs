@@ -126,11 +126,21 @@ pub enum SandboxProcessRunErrorKind {
 
 #[must_use]
 pub fn process_runner_executor_name(policy: &SandboxProcessRunnerPolicy) -> String {
+    if process_runner_allows_host_access(policy) {
+        return "host_process".to_owned();
+    }
     if matches!(policy.tier, SandboxProcessRunnerTier::C) {
         current_backend_executor().to_owned()
     } else {
         "sandbox_tier_b".to_owned()
     }
+}
+
+#[must_use]
+pub fn process_runner_allows_host_access(policy: &SandboxProcessRunnerPolicy) -> bool {
+    matches!(policy.tier, SandboxProcessRunnerTier::B)
+        && matches!(policy.egress_enforcement_mode, EgressEnforcementMode::None)
+        && policy.allowed_executables.iter().any(|allowed| allowed.trim() == "*")
 }
 
 type ProcessRunnerInput = ProcessRunnerToolInput;
@@ -168,21 +178,31 @@ pub fn run_constrained_process(
     validate_input_shape(&input)?;
     validate_allowed_executable(policy, input.command.as_str())?;
 
-    let workspace_root = canonical_workspace_root(policy.workspace_root.as_path())?;
-    let working_directory =
-        resolve_working_directory(workspace_root.as_path(), input.cwd.as_deref())?;
-    validate_interpreter_argument_guardrails(
-        workspace_root.as_path(),
-        working_directory.as_path(),
-        input.command.as_str(),
-        input.args.as_slice(),
-    )?;
-    validate_argument_workspace_scope(
-        workspace_root.as_path(),
-        working_directory.as_path(),
-        input.command.as_str(),
-        input.args.as_slice(),
-    )?;
+    let host_access = process_runner_allows_host_access(policy);
+    let workspace_root = if host_access {
+        default_host_working_root(policy.workspace_root.as_path())?
+    } else {
+        canonical_workspace_root(policy.workspace_root.as_path())?
+    };
+    let working_directory = if host_access {
+        resolve_host_working_directory(workspace_root.as_path(), input.cwd.as_deref())?
+    } else {
+        resolve_working_directory(workspace_root.as_path(), input.cwd.as_deref())?
+    };
+    if !host_access {
+        validate_interpreter_argument_guardrails(
+            workspace_root.as_path(),
+            working_directory.as_path(),
+            input.command.as_str(),
+            input.args.as_slice(),
+        )?;
+        validate_argument_workspace_scope(
+            workspace_root.as_path(),
+            working_directory.as_path(),
+            input.command.as_str(),
+            input.args.as_slice(),
+        )?;
+    }
     let requested_hosts = if matches!(policy.egress_enforcement_mode, EgressEnforcementMode::None) {
         Vec::new()
     } else {
@@ -202,7 +222,9 @@ pub fn run_constrained_process(
     )? {
         return Ok(result);
     }
-    validate_platform_resource_quota_support(policy)?;
+    if !host_access {
+        validate_platform_resource_quota_support(policy)?;
+    }
     if matches!(policy.egress_enforcement_mode, EgressEnforcementMode::Strict) {
         validate_runtime_egress_enforcement(policy)?;
     }
@@ -383,6 +405,7 @@ fn execute_builtin_process_command(
             builtin_list_directory_stdout(input.command.trim(), input.args.as_slice(), cwd)?
         }
         "mkdir" => builtin_make_directory_stdout(
+            process_runner_allows_host_access(policy),
             input.command.trim(),
             input.args.as_slice(),
             workspace_root,
@@ -501,6 +524,7 @@ fn is_builtin_list_flag(arg: &str) -> bool {
 }
 
 fn builtin_make_directory_stdout(
+    host_access: bool,
     command: &str,
     args: &[String],
     workspace_root: &Path,
@@ -538,7 +562,11 @@ fn builtin_make_directory_stdout(
 
     let mut created = Vec::new();
     for directory in directories {
-        let target = resolve_scoped_path(workspace_root, cwd, directory, false)?;
+        let target = if host_access {
+            resolve_host_mutation_path(cwd, directory)?
+        } else {
+            resolve_scoped_path(workspace_root, cwd, directory, false)?
+        };
         if parents {
             fs::create_dir_all(target.as_path()).map_err(|error| SandboxProcessRunError {
                 kind: SandboxProcessRunErrorKind::RuntimeFailure,
@@ -560,6 +588,17 @@ fn builtin_make_directory_stdout(
     }
 
     Ok(format!("{}\n", created.join("\n")))
+}
+
+fn resolve_host_mutation_path(cwd: &Path, raw: &str) -> Result<PathBuf, SandboxProcessRunError> {
+    if raw.contains('\0') {
+        return Err(SandboxProcessRunError {
+            kind: SandboxProcessRunErrorKind::WorkspaceScopeDenied,
+            message: "host process runner denied path with embedded NUL byte".to_owned(),
+        });
+    }
+    let parsed = Path::new(raw);
+    Ok(if parsed.is_absolute() { parsed.to_path_buf() } else { cwd.join(parsed) })
 }
 
 fn parse_process_runner_input(
@@ -624,6 +663,7 @@ fn validate_allowed_executable(
         .allowed_executables
         .iter()
         .any(|allowed| allowed.eq_ignore_ascii_case(normalized.as_str()))
+        && !policy.allowed_executables.iter().any(|allowed| allowed.trim() == "*")
     {
         return Err(SandboxProcessRunError {
             kind: SandboxProcessRunErrorKind::WorkspaceScopeDenied,
@@ -767,6 +807,54 @@ fn canonical_workspace_root(root: &Path) -> Result<PathBuf, SandboxProcessRunErr
         });
     }
     Ok(canonical)
+}
+
+fn default_host_working_root(root: &Path) -> Result<PathBuf, SandboxProcessRunError> {
+    if root.as_os_str().is_empty() {
+        return std::env::current_dir().map_err(|error| SandboxProcessRunError {
+            kind: SandboxProcessRunErrorKind::WorkspaceScopeDenied,
+            message: format!("host process runner failed to resolve current directory: {error}"),
+        });
+    }
+    fs::canonicalize(root).or_else(|_| {
+        std::env::current_dir().map_err(|error| SandboxProcessRunError {
+            kind: SandboxProcessRunErrorKind::WorkspaceScopeDenied,
+            message: format!(
+                "host process runner failed to resolve workspace_root '{}' or current directory: {error}",
+                root.to_string_lossy()
+            ),
+        })
+    })
+}
+
+fn resolve_host_working_directory(
+    default_root: &Path,
+    cwd: Option<&str>,
+) -> Result<PathBuf, SandboxProcessRunError> {
+    let cwd_value = cwd.unwrap_or(".");
+    if cwd_value.contains('\0') {
+        return Err(SandboxProcessRunError {
+            kind: SandboxProcessRunErrorKind::WorkspaceScopeDenied,
+            message: "host process runner denied cwd with embedded NUL byte".to_owned(),
+        });
+    }
+    let raw = Path::new(cwd_value);
+    let candidate = if raw.is_absolute() { raw.to_path_buf() } else { default_root.join(raw) };
+    let resolved =
+        fs::canonicalize(candidate.as_path()).map_err(|error| SandboxProcessRunError {
+            kind: SandboxProcessRunErrorKind::WorkspaceScopeDenied,
+            message: format!(
+                "host process runner cwd '{}' is not a readable directory: {error}",
+                cwd_value
+            ),
+        })?;
+    if !resolved.is_dir() {
+        return Err(SandboxProcessRunError {
+            kind: SandboxProcessRunErrorKind::WorkspaceScopeDenied,
+            message: format!("host process runner cwd '{}' is not a directory", cwd_value),
+        });
+    }
+    Ok(resolved)
 }
 
 fn resolve_working_directory(
@@ -1236,7 +1324,9 @@ fn execute_process(
 ) -> Result<ProcessExecutionCapture, SandboxProcessRunError> {
     let mut command = build_process_command(policy, input, workspace_root, cwd)?;
     command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    attach_resource_limits_unix(&mut command, policy);
+    if !process_runner_allows_host_access(policy) {
+        attach_resource_limits_unix(&mut command, policy);
+    }
 
     let mut child = command.spawn().map_err(|error| SandboxProcessRunError {
         kind: SandboxProcessRunErrorKind::SpawnFailed,
@@ -1255,7 +1345,9 @@ fn spawn_background_process(
 ) -> Result<SandboxProcessRunSuccess, SandboxProcessRunError> {
     let mut command = build_process_command(policy, input, workspace_root, cwd)?;
     command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-    attach_resource_limits_unix(&mut command, policy);
+    if !process_runner_allows_host_access(policy) {
+        attach_resource_limits_unix(&mut command, policy);
+    }
 
     let mut child = command.spawn().map_err(|error| SandboxProcessRunError {
         kind: SandboxProcessRunErrorKind::SpawnFailed,
@@ -1311,6 +1403,13 @@ fn build_process_command(
     workspace_root: &Path,
     cwd: &Path,
 ) -> Result<Command, SandboxProcessRunError> {
+    if process_runner_allows_host_access(policy) {
+        let program = resolve_tier_b_process_program(input.command.as_str());
+        let mut command = Command::new(program.as_path());
+        command.args(input.args.as_slice()).current_dir(cwd);
+        return Ok(command);
+    }
+
     if matches!(policy.tier, SandboxProcessRunnerTier::C) {
         let tier_c_policy = TierCPolicy {
             workspace_root: workspace_root.to_path_buf(),
@@ -1789,6 +1888,14 @@ mod tests {
         sandbox_policy_with_allowed_executables(workspace_root, vec!["uname".to_owned()])
     }
 
+    fn host_access_policy(workspace_root: PathBuf) -> SandboxProcessRunnerPolicy {
+        let mut policy =
+            sandbox_policy_with_allowed_executables(workspace_root, vec!["*".to_owned()]);
+        policy.allow_interpreters = true;
+        policy.egress_enforcement_mode = EgressEnforcementMode::None;
+        policy
+    }
+
     fn unique_temp_dir(suffix: &str) -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -2087,6 +2194,35 @@ mod tests {
 
         assert_eq!(error.kind, SandboxProcessRunErrorKind::WorkspaceScopeDenied);
         assert!(error.message.contains("escapes workspace"), "{}", error.message);
+
+        let _ = fs::remove_dir_all(workspace.as_path());
+        let _ = fs::remove_dir_all(outside.as_path());
+    }
+
+    #[test]
+    fn host_access_process_runner_allows_builtin_mkdir_outside_workspace() {
+        let workspace = unique_temp_dir("workspace-host-mkdir");
+        let outside = unique_temp_dir("outside-host-mkdir");
+        fs::create_dir_all(workspace.as_path()).expect("workspace directory should be created");
+        fs::create_dir_all(outside.as_path()).expect("outside directory should be created");
+        let policy = host_access_policy(workspace.clone());
+        let target = outside.join("child");
+        let input = format!(
+            r#"{{"command":"mkdir","args":["{}"]}}"#,
+            target.to_string_lossy().replace('\\', "\\\\")
+        );
+
+        let result =
+            run_constrained_process(&policy, input.as_bytes(), Duration::from_millis(1_000))
+                .expect("host access mkdir should allow absolute paths outside workspace");
+
+        let output: serde_json::Value =
+            serde_json::from_slice(&result.output_json).expect("output should parse");
+        assert_eq!(
+            output.get("sandbox_backend").and_then(serde_json::Value::as_str),
+            Some("builtin_portable")
+        );
+        assert!(target.is_dir(), "host access mkdir should create the requested directory");
 
         let _ = fs::remove_dir_all(workspace.as_path());
         let _ = fs::remove_dir_all(outside.as_path());
@@ -2778,6 +2914,17 @@ mod tests {
         assert!(
             super::process_runner_executor_name(&policy).starts_with("sandbox_tier_c_"),
             "tier-c executions should expose backend-specific tier-c executor label"
+        );
+        let mut policy = host_access_policy(std::env::current_dir().expect("cwd should resolve"));
+        assert_eq!(
+            super::process_runner_executor_name(&policy),
+            "host_process",
+            "host access executions should expose unsandboxed host executor label"
+        );
+        policy.tier = SandboxProcessRunnerTier::C;
+        assert!(
+            super::process_runner_executor_name(&policy).starts_with("sandbox_tier_c_"),
+            "tier-c should not be downgraded to host access by wildcard allowlists"
         );
     }
 

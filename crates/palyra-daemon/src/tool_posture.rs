@@ -716,6 +716,22 @@ pub const TOOL_CATALOG: &[ToolCatalogEntry] = &[
         recommend_always_allow: false,
     },
     ToolCatalogEntry {
+        tool_name: "palyra.fs.read_file",
+        title: "Workspace file read",
+        description: "Reads bounded chunks from files inside the resolved workspace boundary.",
+        category: "filesystem",
+        risk_level: ApprovalRiskLevel::High,
+        recommend_always_allow: false,
+    },
+    ToolCatalogEntry {
+        tool_name: "palyra.fs.list_dir",
+        title: "Workspace directory list",
+        description: "Lists directory entries inside the resolved workspace boundary.",
+        category: "filesystem",
+        risk_level: ApprovalRiskLevel::High,
+        recommend_always_allow: false,
+    },
+    ToolCatalogEntry {
         tool_name: "palyra.fs.apply_patch",
         title: "Workspace patch",
         description: "Applies attested file patches inside the resolved workspace boundary.",

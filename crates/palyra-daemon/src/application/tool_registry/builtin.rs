@@ -207,13 +207,30 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
         ),
         entry(
             "palyra.fs.read_file",
-            "Read a bounded chunk from a file inside the current agent workspace root.",
+            "Read a bounded chunk from a file inside the current agent workspace root. Accepts relative paths and virtual workspace aliases such as /workspace/file.txt.",
             object_schema(
                 &["path"],
                 vec![
                     ("path", json!({"type":"string"})),
                     ("offset_bytes", json!({"type":"integer","minimum":0})),
                     ("max_bytes", json!({"type":"integer","minimum":1})),
+                ],
+                false,
+            ),
+            ToolParallelismPolicy::ReadOnly,
+            ToolResultProjectionPolicy::InlineUnlessLarge,
+        ),
+        entry(
+            "palyra.fs.list_dir",
+            "List entries in a directory inside the current agent workspace root. Use this for discovery instead of process.run find, grep, cat, or shell commands.",
+            object_schema(
+                &[],
+                vec![
+                    (
+                        "path",
+                        json!({"type":"string","description":"Directory path relative to the workspace root. Omit for the workspace root. /workspace and workspace/ are accepted virtual workspace aliases."}),
+                    ),
+                    ("max_entries", json!({"type":"integer","minimum":1,"maximum":512})),
                 ],
                 false,
             ),
@@ -313,7 +330,7 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
         ),
         entry(
             "palyra.process.run",
-            "Run an allowlisted executable or portable process builtin inside the configured process sandbox. Use palyra.fs.apply_patch, not this tool, for workspace file writes.",
+            "Run a local process using the configured process posture. Local desktop defaults may allow host-wide execution; restrictive deployments can use executable allowlists, egress controls, and workspace scoping. Use palyra.fs.apply_patch, not this tool, for file writes.",
             object_schema(
                 &["command"],
                 vec![
@@ -322,7 +339,7 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
                         json!({
                             "type":"string",
                             "maxLength":128,
-                            "description":"Bare executable or portable builtin name only. Default local desktop builtins/tools include pwd, echo, ls, dir, mkdir, python3, node, npm, and cargo when configured. Do not include arguments, shell syntax, or repeat this value in args."
+                            "description":"Bare executable or portable builtin name only. When process_runner.allowed_executables contains '*', any PATH-resolvable executable is permitted by policy. Do not include arguments, shell syntax, or repeat this value in args."
                         }),
                     ),
                     (

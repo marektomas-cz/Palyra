@@ -661,6 +661,7 @@ const LOCAL_DESKTOP_DEFAULT_ALLOWED_TOOLS: &[&str] = &[
     "palyra.routines.control",
     "palyra.http.fetch",
     "palyra.fs.read_file",
+    "palyra.fs.list_dir",
     "palyra.fs.apply_patch",
     "palyra.browser.session.create",
     "palyra.browser.session.close",
@@ -687,10 +688,7 @@ const LOCAL_DESKTOP_DEFAULT_ALLOWED_TOOLS: &[&str] = &[
     "palyra.browser.permissions.set",
     "palyra.process.run",
 ];
-const LOCAL_DESKTOP_DEFAULT_PROCESS_EXECUTABLES: &[&str] = &[
-    "pwd", "echo", "ls", "dir", "mkdir", "python", "python3", "py", "node", "npm", "npx", "cargo",
-    "rustc",
-];
+const LOCAL_DESKTOP_DEFAULT_PROCESS_EXECUTABLES: &[&str] = &["*"];
 
 fn build_init_config_document(
     mode: InitMode,
@@ -822,8 +820,8 @@ fn apply_local_desktop_tool_defaults(
         "tool_call.allowed_tools",
         string_array_value(LOCAL_DESKTOP_DEFAULT_ALLOWED_TOOLS),
     )?;
-    set_value_at_path(document, "tool_call.max_calls_per_run", toml::Value::Integer(8))?;
-    set_value_at_path(document, "tool_call.execution_timeout_ms", toml::Value::Integer(30_000))?;
+    set_value_at_path(document, "tool_call.max_calls_per_run", toml::Value::Integer(32))?;
+    set_value_at_path(document, "tool_call.execution_timeout_ms", toml::Value::Integer(120_000))?;
     set_value_at_path(document, "tool_call.process_runner.enabled", toml::Value::Boolean(true))?;
     set_value_at_path(
         document,
@@ -848,7 +846,22 @@ fn apply_local_desktop_tool_defaults(
     set_value_at_path(
         document,
         "tool_call.process_runner.egress_enforcement_mode",
-        toml::Value::String("preflight".to_owned()),
+        toml::Value::String("none".to_owned()),
+    )?;
+    set_value_at_path(
+        document,
+        "tool_call.process_runner.cpu_time_limit_ms",
+        toml::Value::Integer(120_000),
+    )?;
+    set_value_at_path(
+        document,
+        "tool_call.process_runner.memory_limit_bytes",
+        toml::Value::Integer(8 * 1024 * 1024 * 1024),
+    )?;
+    set_value_at_path(
+        document,
+        "tool_call.process_runner.max_output_bytes",
+        toml::Value::Integer(4 * 1024 * 1024),
     )?;
     Ok(())
 }
@@ -10221,6 +10234,10 @@ mod init_command_tests {
             "local init should expose controlled workspace file reads"
         );
         assert!(
+            allowed_tools.iter().any(|tool| tool == "palyra.fs.list_dir"),
+            "local init should expose controlled workspace directory listings"
+        );
+        assert!(
             allowed_tools.iter().any(|tool| tool == "palyra.browser.navigate"),
             "local init should allow gateway-mediated browser navigation when the service is enabled"
         );
@@ -10229,11 +10246,24 @@ mod init_command_tests {
             "local init should allow gateway-mediated browser inspection when the service is enabled"
         );
         assert_eq!(read_bool(&document, "tool_call.process_runner.enabled"), Some(true));
-        assert_eq!(read_integer(&document, "tool_call.execution_timeout_ms"), Some(30_000));
+        assert_eq!(read_integer(&document, "tool_call.max_calls_per_run"), Some(32));
+        assert_eq!(read_integer(&document, "tool_call.execution_timeout_ms"), Some(120_000));
         assert_eq!(read_bool(&document, "tool_call.process_runner.allow_interpreters"), Some(true));
         assert_eq!(
             read_string(&document, "tool_call.process_runner.egress_enforcement_mode").as_deref(),
-            Some("preflight")
+            Some("none")
+        );
+        assert_eq!(
+            read_integer(&document, "tool_call.process_runner.cpu_time_limit_ms"),
+            Some(120_000)
+        );
+        assert_eq!(
+            read_integer(&document, "tool_call.process_runner.memory_limit_bytes"),
+            Some(8 * 1024 * 1024 * 1024)
+        );
+        assert_eq!(
+            read_integer(&document, "tool_call.process_runner.max_output_bytes"),
+            Some(4 * 1024 * 1024)
         );
         let expected_workspace_root =
             PathBuf::from("state").join("workspace").to_string_lossy().into_owned();
@@ -10241,27 +10271,10 @@ mod init_command_tests {
             read_string(&document, "tool_call.process_runner.workspace_root").as_deref(),
             Some(expected_workspace_root.as_str())
         );
-        assert!(read_string_array(&document, "tool_call.process_runner.allowed_executables")
-            .iter()
-            .any(|executable| executable == "pwd"));
-        assert!(read_string_array(&document, "tool_call.process_runner.allowed_executables")
-            .iter()
-            .any(|executable| executable == "ls"));
-        assert!(read_string_array(&document, "tool_call.process_runner.allowed_executables")
-            .iter()
-            .any(|executable| executable == "dir"));
-        assert!(read_string_array(&document, "tool_call.process_runner.allowed_executables")
-            .iter()
-            .any(|executable| executable == "mkdir"));
-        assert!(read_string_array(&document, "tool_call.process_runner.allowed_executables")
-            .iter()
-            .any(|executable| executable == "python3"));
-        assert!(read_string_array(&document, "tool_call.process_runner.allowed_executables")
-            .iter()
-            .any(|executable| executable == "npm"));
-        assert!(read_string_array(&document, "tool_call.process_runner.allowed_executables")
-            .iter()
-            .any(|executable| executable == "cargo"));
+        assert_eq!(
+            read_string_array(&document, "tool_call.process_runner.allowed_executables"),
+            vec!["*".to_owned()]
+        );
     }
 
     #[test]

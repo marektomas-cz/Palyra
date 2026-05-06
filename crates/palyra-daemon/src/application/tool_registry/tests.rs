@@ -151,6 +151,10 @@ fn browser_session_create_returns_model_visible_handle() {
         ToolResultProjectionPolicy::InlineUnlessLarge
     );
     assert_eq!(
+        projection_policy_for_tool("palyra.fs.list_dir"),
+        ToolResultProjectionPolicy::InlineUnlessLarge
+    );
+    assert_eq!(
         projection_policy_for_tool("palyra.browser.observe"),
         ToolResultProjectionPolicy::RedactedPreviewAndArtifact
     );

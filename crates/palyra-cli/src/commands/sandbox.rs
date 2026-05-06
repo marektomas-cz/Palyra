@@ -294,7 +294,7 @@ fn sandbox_process_runner_view(policy: &Value) -> Value {
         } else if tier == "c" {
             "Tier C delegates execution to OS-backed backends and keeps strict mode offline-only."
         } else {
-            "Tier B keeps enforcement in-process. Local desktop profiles allow portable builtins plus explicit dev executables such as python3, node, npm, and cargo; use process_runner.allowed_executables and allow_interpreters to review the active posture."
+            "Tier B keeps execution local. Local desktop profiles may set process_runner.allowed_executables=['*'] with egress_enforcement_mode='none' for host-wide agent execution; restrictive profiles can use explicit executable allowlists, egress controls, and allow_interpreters=false."
         },
     })
 }
