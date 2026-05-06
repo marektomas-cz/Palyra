@@ -1207,6 +1207,8 @@ pub(crate) async fn type_with_chromium(
         Typed,
         NotFound,
         NotTypable,
+        Disabled,
+        ReadOnly,
     }
 
     let (tab_id, tab) = match chromium_active_tab_for_session(runtime, session_id).await {
@@ -1229,32 +1231,41 @@ pub(crate) async fn type_with_chromium(
         let tab_for_attempt = Arc::clone(&tab);
         let clear_existing_for_attempt = clear_existing;
         let attempt = run_chromium_blocking("chromium type", move || {
-            let page_body = tab_for_attempt
-                .get_content()
-                .map_err(|error| format!("failed to read Chromium DOM before type action: {error}"))?;
-            let Some(tag) = find_matching_html_tag(selector_for_attempt.as_str(), page_body.as_str()) else {
-                return Ok(TypeAttempt::NotFound);
-            };
-            if !is_typable_tag(tag.as_str()) {
-                return Ok(TypeAttempt::NotTypable);
-            }
-            let element = tab_for_attempt.find_element(selector_for_attempt.as_str()).map_err(
-                |error| format!("failed to resolve selector '{}' on Chromium page: {error}", selector_for_attempt),
+            let script = chromium_type_script(
+                selector_for_attempt.as_str(),
+                text_for_attempt.as_str(),
+                clear_existing_for_attempt,
             )?;
-            if clear_existing_for_attempt {
-                let _ = element.call_js_fn(
-                    "function () { if (this && this.value !== undefined) { this.value = ''; } if (this && this.textContent !== undefined) { this.textContent = ''; } }",
-                    Vec::new(),
-                    false,
-                );
+            let raw_value = tab_for_attempt
+                .evaluate(script.as_str(), true)
+                .map_err(|error| {
+                    format!(
+                        "failed to execute Chromium type script for selector '{}': {error}",
+                        selector_for_attempt
+                    )
+                })?
+                .value
+                .unwrap_or(serde_json::Value::Null);
+            let value = match raw_value {
+                serde_json::Value::String(raw) => {
+                    serde_json::from_str::<serde_json::Value>(raw.as_str())
+                        .unwrap_or(serde_json::Value::Null)
+                }
+                value => value,
+            };
+            let status =
+                value.get("status").and_then(serde_json::Value::as_str).unwrap_or_default();
+            match status {
+                "typed" => Ok(TypeAttempt::Typed),
+                "not_found" => Ok(TypeAttempt::NotFound),
+                "not_typable" => Ok(TypeAttempt::NotTypable),
+                "disabled" => Ok(TypeAttempt::Disabled),
+                "readonly" => Ok(TypeAttempt::ReadOnly),
+                _ => Err(format!(
+                    "Chromium type script returned unexpected status '{}' for selector '{}'",
+                    status, selector_for_attempt
+                )),
             }
-            element
-                .click()
-                .map_err(|error| format!("failed to focus selector '{}' for type action: {error}", selector_for_attempt))?;
-            element
-                .type_into(text_for_attempt.as_str())
-                .map_err(|error| format!("failed to type into selector '{}' on Chromium page: {error}", selector_for_attempt))?;
-            Ok(TypeAttempt::Typed)
         })
         .await;
 
@@ -1273,6 +1284,22 @@ pub(crate) async fn type_with_chromium(
                     success: false,
                     outcome: "selector_not_typable".to_owned(),
                     error: format!("selector '{selector}' does not target an input-like element"),
+                    attempts,
+                };
+            }
+            Ok(TypeAttempt::Disabled) => {
+                return ChromiumActionOutcome {
+                    success: false,
+                    outcome: "selector_disabled".to_owned(),
+                    error: format!("selector '{selector}' is disabled"),
+                    attempts,
+                };
+            }
+            Ok(TypeAttempt::ReadOnly) => {
+                return ChromiumActionOutcome {
+                    success: false,
+                    outcome: "selector_readonly".to_owned(),
+                    error: format!("selector '{selector}' is read-only"),
                     attempts,
                 };
             }
@@ -1299,6 +1326,83 @@ pub(crate) async fn type_with_chromium(
         error: format!("selector '{selector}' was not found"),
         attempts,
     }
+}
+
+fn chromium_type_script(
+    selector: &str,
+    text: &str,
+    clear_existing: bool,
+) -> Result<String, String> {
+    let selector_json = serde_json::to_string(selector)
+        .map_err(|error| format!("failed to encode selector for Chromium type: {error}"))?;
+    let text_json = serde_json::to_string(text)
+        .map_err(|error| format!("failed to encode text for Chromium type: {error}"))?;
+    let clear_existing_json = if clear_existing { "true" } else { "false" };
+    Ok(format!(
+        r#"
+(() => {{
+  const selector = {selector_json};
+  const text = {text_json};
+  const clearExisting = {clear_existing_json};
+  const respond = (payload) => JSON.stringify(payload);
+  const element = document.querySelector(selector);
+  if (!element) {{
+    return respond({{ status: "not_found" }});
+  }}
+  const tagName = (element.tagName || "").toLowerCase();
+  const inputLike = tagName === "input" || tagName === "textarea";
+  const editable = element.isContentEditable === true;
+  if (!inputLike && !editable) {{
+    return respond({{ status: "not_typable", tagName }});
+  }}
+  if (element.disabled) {{
+    return respond({{ status: "disabled" }});
+  }}
+  if (element.readOnly) {{
+    return respond({{ status: "readonly" }});
+  }}
+  if (typeof element.focus === "function") {{
+    element.focus();
+  }}
+  const dispatchInputEvent = () => {{
+    let event;
+    try {{
+      event = new InputEvent("input", {{
+        bubbles: true,
+        cancelable: true,
+        data: text,
+        inputType: clearExisting ? "insertReplacementText" : "insertText",
+      }});
+    }} catch (_) {{
+      event = new Event("input", {{ bubbles: true, cancelable: true }});
+    }}
+    element.dispatchEvent(event);
+    element.dispatchEvent(new Event("change", {{ bubbles: true }}));
+  }};
+  if (inputLike) {{
+    const current = clearExisting ? "" : String(element.value ?? "");
+    const next = current + text;
+    const proto = tagName === "textarea" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    const descriptor = Object.getOwnPropertyDescriptor(proto, "value");
+    if (descriptor && typeof descriptor.set === "function") {{
+      descriptor.set.call(element, next);
+    }} else {{
+      element.value = next;
+    }}
+    if (typeof element.setSelectionRange === "function") {{
+      const end = String(element.value ?? "").length;
+      try {{ element.setSelectionRange(end, end); }} catch (_) {{}}
+    }}
+    dispatchInputEvent();
+    return respond({{ status: "typed", value: String(element.value ?? "") }});
+  }}
+  const currentText = clearExisting ? "" : String(element.textContent ?? "");
+  element.textContent = currentText + text;
+  dispatchInputEvent();
+  return respond({{ status: "typed", value: String(element.textContent ?? "") }});
+}})()
+"#
+    ))
 }
 
 fn parse_key_press_spec(raw: &str) -> Result<(String, Vec<ModifierKey>), String> {

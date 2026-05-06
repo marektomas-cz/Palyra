@@ -2,6 +2,35 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 
 use crate::*;
 
+fn console_browser_allows_private_targets_for_url(
+    state: &AppState,
+    allow_private_targets: Option<bool>,
+    url: &str,
+) -> bool {
+    allow_private_targets.unwrap_or(false)
+        || (state.deployment.mode == "local_desktop" && console_browser_url_targets_loopback(url))
+}
+
+fn console_browser_url_targets_loopback(raw_url: &str) -> bool {
+    let Ok(parsed) = Url::parse(raw_url.trim()) else {
+        return false;
+    };
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return false;
+    }
+    let Some(host) = parsed.host_str().map(str::trim).filter(|host| !host.is_empty()) else {
+        return false;
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
+}
+
 pub(crate) async fn console_browser_profiles_list_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -480,7 +509,11 @@ pub(crate) async fn console_browser_navigate_handler(
         timeout_ms: payload.timeout_ms.unwrap_or(0),
         allow_redirects: payload.allow_redirects.unwrap_or(true),
         max_redirects: payload.max_redirects.unwrap_or(3),
-        allow_private_targets: payload.allow_private_targets.unwrap_or(false),
+        allow_private_targets: console_browser_allows_private_targets_for_url(
+            &state,
+            payload.allow_private_targets,
+            url,
+        ),
     });
     apply_browser_service_auth(&state, request.metadata_mut())?;
     let response = client.navigate(request).await.map_err(runtime_status_response)?.into_inner();
@@ -1251,7 +1284,11 @@ pub(crate) async fn console_browser_tab_open_handler(
         timeout_ms: payload.timeout_ms.unwrap_or(0),
         allow_redirects: payload.allow_redirects.unwrap_or(true),
         max_redirects: payload.max_redirects.unwrap_or(3),
-        allow_private_targets: payload.allow_private_targets.unwrap_or(false),
+        allow_private_targets: console_browser_allows_private_targets_for_url(
+            &state,
+            payload.allow_private_targets,
+            url,
+        ),
     });
     apply_browser_service_auth(&state, request.metadata_mut())?;
     let response = client.open_tab(request).await.map_err(runtime_status_response)?.into_inner();
@@ -2479,6 +2516,16 @@ mod tests {
             control_plane_browser_permission_setting(2),
             control_plane::BrowserPermissionSetting::Allow
         );
+    }
+
+    #[test]
+    fn console_browser_url_targets_loopback_only_for_http_loopback_hosts() {
+        assert!(console_browser_url_targets_loopback("http://localhost:8899/"));
+        assert!(console_browser_url_targets_loopback("http://127.0.0.1:8899/"));
+        assert!(console_browser_url_targets_loopback("http://[::1]:8899/"));
+        assert!(!console_browser_url_targets_loopback("http://10.0.0.5/"));
+        assert!(!console_browser_url_targets_loopback("https://example.test/"));
+        assert!(!console_browser_url_targets_loopback("file:///tmp/index.html"));
     }
 
     #[test]

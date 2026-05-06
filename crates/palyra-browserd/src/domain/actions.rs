@@ -338,85 +338,107 @@ pub(crate) async fn finalize_session_action(
     session_id: &str,
     request: FinalizeActionRequest<'_>,
 ) -> (Option<browser_v1::BrowserActionLogEntry>, Vec<u8>, String) {
-    let mut sessions = runtime.sessions.lock().await;
-    let Some(session) = sessions.get_mut(session_id) else {
-        return (None, Vec::new(), String::new());
-    };
-    let entry = BrowserActionLogEntryInternal {
-        action_id: Ulid::new().to_string(),
-        action_name: request.action_name.to_owned(),
-        selector: request.selector.to_owned(),
-        success: request.success,
-        outcome: request.outcome.to_owned(),
-        error: request.error.to_owned(),
-        started_at_unix_ms: request.started_at_unix_ms,
-        completed_at_unix_ms: current_unix_ms(),
-        attempts: request.attempts,
-        page_url: session.active_tab().and_then(|tab| tab.last_url.clone()).unwrap_or_default(),
-    };
-    session.last_active = Instant::now();
-    session.action_log.push_back(entry.clone());
-    while session.action_log.len() > session.budget.max_action_log_entries {
-        session.action_log.pop_front();
-    }
-    if !request.success {
-        let page_url =
-            session.active_tab().and_then(|tab| tab.last_url.clone()).unwrap_or_default();
-        if let Some(tab) = session.active_tab_mut() {
-            append_console_log_entry(
-                tab,
-                BrowserConsoleEntryInternal {
-                    severity: BrowserDiagnosticSeverityInternal::Error,
-                    kind: "browser_action_failure".to_owned(),
-                    message: format!(
-                        "{} failed: {}",
-                        request.action_name,
-                        if request.error.trim().is_empty() {
-                            request.outcome
-                        } else {
-                            request.error
-                        }
-                    ),
-                    captured_at_unix_ms: current_unix_ms(),
-                    source: format!("browser.action.{}", request.action_name),
-                    stack_trace: String::new(),
-                    page_url,
-                },
-                DEFAULT_MAX_CONSOLE_LOG_ENTRIES,
-                DEFAULT_MAX_CONSOLE_LOG_BYTES,
-            );
+    let (action_log, screenshot_max_bytes) = {
+        let mut sessions = runtime.sessions.lock().await;
+        let Some(session) = sessions.get_mut(session_id) else {
+            return (None, Vec::new(), String::new());
+        };
+        let entry = BrowserActionLogEntryInternal {
+            action_id: Ulid::new().to_string(),
+            action_name: request.action_name.to_owned(),
+            selector: request.selector.to_owned(),
+            success: request.success,
+            outcome: request.outcome.to_owned(),
+            error: request.error.to_owned(),
+            started_at_unix_ms: request.started_at_unix_ms,
+            completed_at_unix_ms: current_unix_ms(),
+            attempts: request.attempts,
+            page_url: session.active_tab().and_then(|tab| tab.last_url.clone()).unwrap_or_default(),
+        };
+        session.last_active = Instant::now();
+        session.action_log.push_back(entry.clone());
+        while session.action_log.len() > session.budget.max_action_log_entries {
+            session.action_log.pop_front();
         }
-    }
-    let (failure_screenshot_bytes, failure_screenshot_mime_type) =
-        if !request.success && request.capture_failure_screenshot {
-            let max_bytes = if request.max_failure_screenshot_bytes == 0 {
+        if !request.success {
+            let page_url =
+                session.active_tab().and_then(|tab| tab.last_url.clone()).unwrap_or_default();
+            if let Some(tab) = session.active_tab_mut() {
+                append_console_log_entry(
+                    tab,
+                    BrowserConsoleEntryInternal {
+                        severity: BrowserDiagnosticSeverityInternal::Error,
+                        kind: "browser_action_failure".to_owned(),
+                        message: format!(
+                            "{} failed: {}",
+                            request.action_name,
+                            if request.error.trim().is_empty() {
+                                request.outcome
+                            } else {
+                                request.error
+                            }
+                        ),
+                        captured_at_unix_ms: current_unix_ms(),
+                        source: format!("browser.action.{}", request.action_name),
+                        stack_trace: String::new(),
+                        page_url,
+                    },
+                    DEFAULT_MAX_CONSOLE_LOG_ENTRIES,
+                    DEFAULT_MAX_CONSOLE_LOG_BYTES,
+                );
+            }
+        }
+        let screenshot_max_bytes = if !request.success && request.capture_failure_screenshot {
+            Some(if request.max_failure_screenshot_bytes == 0 {
                 session.budget.max_screenshot_bytes
             } else {
                 request.max_failure_screenshot_bytes.min(session.budget.max_screenshot_bytes)
-            };
-            if (ONE_BY_ONE_PNG.len() as u64) <= max_bytes {
-                (ONE_BY_ONE_PNG.to_vec(), "image/png".to_owned())
-            } else {
-                (Vec::new(), String::new())
-            }
+            })
+        } else {
+            None
+        };
+        (
+            Some(browser_v1::BrowserActionLogEntry {
+                v: CANONICAL_PROTOCOL_MAJOR,
+                action_id: entry.action_id,
+                action_name: entry.action_name,
+                selector: entry.selector,
+                success: entry.success,
+                outcome: entry.outcome,
+                error: entry.error,
+                started_at_unix_ms: entry.started_at_unix_ms,
+                completed_at_unix_ms: entry.completed_at_unix_ms,
+                attempts: entry.attempts,
+                page_url: entry.page_url,
+            }),
+            screenshot_max_bytes,
+        )
+    };
+    let (failure_screenshot_bytes, failure_screenshot_mime_type) =
+        if let Some(max_bytes) = screenshot_max_bytes {
+            capture_action_failure_screenshot(runtime, session_id, max_bytes).await
         } else {
             (Vec::new(), String::new())
         };
-    (
-        Some(browser_v1::BrowserActionLogEntry {
-            v: CANONICAL_PROTOCOL_MAJOR,
-            action_id: entry.action_id,
-            action_name: entry.action_name,
-            selector: entry.selector,
-            success: entry.success,
-            outcome: entry.outcome,
-            error: entry.error,
-            started_at_unix_ms: entry.started_at_unix_ms,
-            completed_at_unix_ms: entry.completed_at_unix_ms,
-            attempts: entry.attempts,
-            page_url: entry.page_url,
-        }),
-        failure_screenshot_bytes,
-        failure_screenshot_mime_type,
-    )
+    (action_log, failure_screenshot_bytes, failure_screenshot_mime_type)
+}
+
+async fn capture_action_failure_screenshot(
+    runtime: &BrowserRuntimeState,
+    session_id: &str,
+    max_bytes: u64,
+) -> (Vec<u8>, String) {
+    if runtime.engine_mode == BrowserEngineMode::Chromium {
+        return match chromium_screenshot(runtime, session_id).await {
+            Ok(image_bytes) if (image_bytes.len() as u64) <= max_bytes => {
+                (image_bytes, "image/png".to_owned())
+            }
+            _ => (Vec::new(), String::new()),
+        };
+    }
+    if (ONE_BY_ONE_PNG.len() as u64) <= max_bytes {
+        (ONE_BY_ONE_PNG.to_vec(), "image/png".to_owned())
+    } else {
+        (Vec::new(), String::new())
+    }
 }

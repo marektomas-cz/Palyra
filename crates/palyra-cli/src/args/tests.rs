@@ -3887,6 +3887,52 @@ fn parse_browser_local_json_flags() {
         errors.command,
         Command::Browser { command: BrowserCommand::Errors { json: true, .. } }
     ));
+
+    let click = Cli::parse_from([
+        "palyra",
+        "browser",
+        "click",
+        session_id,
+        "--selector",
+        "#submit",
+        "--json",
+    ]);
+    assert!(matches!(
+        click.command,
+        Command::Browser { command: BrowserCommand::Click { json: true, .. } }
+    ));
+
+    let type_text = Cli::parse_from([
+        "palyra",
+        "browser",
+        "type",
+        session_id,
+        "--selector",
+        "#message",
+        "--text",
+        "hello",
+        "--json",
+    ]);
+    assert!(matches!(
+        type_text.command,
+        Command::Browser { command: BrowserCommand::Type { json: true, .. } }
+    ));
+
+    let fill = Cli::parse_from([
+        "palyra",
+        "browser",
+        "fill",
+        session_id,
+        "--selector",
+        "#message",
+        "--text",
+        "hello",
+        "--json",
+    ]);
+    assert!(matches!(
+        fill.command,
+        Command::Browser { command: BrowserCommand::Fill { json: true, .. } }
+    ));
 }
 
 #[test]

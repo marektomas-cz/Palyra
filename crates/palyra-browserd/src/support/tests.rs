@@ -835,7 +835,7 @@ async fn browser_service_chromium_engine_executes_real_dom_actions() {
     };
     let (url, handle) = spawn_static_http_server_with_request_budget(
             200,
-            "<html><head><title>Chromium Fixture</title><script>function markClicked(){document.getElementById('status').textContent='clicked';}</script></head><body><input id='name-input' /><button id='submit-btn' onclick='markClicked()'>Submit</button><div id='status'>idle</div></body></html>",
+            "<html><head><title>Chromium Fixture</title><script>function markClicked(){document.getElementById('status').textContent='clicked';}function markTyped(value){document.getElementById('typed-status').textContent=value;}</script></head><body><input id='name-input' oninput='markTyped(this.value)' /><button id='submit-btn' onclick='markClicked()'>Submit</button><div id='typed-status'>empty</div><div id='status'>idle</div></body></html>",
             8,
         );
     let runtime = std::sync::Arc::new(
@@ -913,6 +913,26 @@ async fn browser_service_chromium_engine_executes_real_dom_actions() {
         .into_inner();
     assert!(typed.success, "chromium type should succeed: {}", typed.error);
 
+    let typed_wait = service
+        .wait_for(Request::new(browser_v1::WaitForRequest {
+            v: 1,
+            session_id: Some(session_id.clone()),
+            selector: "#typed-status".to_owned(),
+            text: "hello chromium".to_owned(),
+            timeout_ms: 5_000,
+            poll_interval_ms: 50,
+            capture_failure_screenshot: true,
+            max_failure_screenshot_bytes: 16 * 1024,
+        }))
+        .await
+        .expect("wait_for typed input side-effect should execute")
+        .into_inner();
+    assert!(
+        typed_wait.success,
+        "chromium wait_for should observe DOM input event after type: {}",
+        typed_wait.error
+    );
+
     let click = service
         .click(Request::new(browser_v1::ClickRequest {
             v: 1,
@@ -967,7 +987,7 @@ async fn browser_service_chromium_engine_executes_real_dom_actions() {
     let observed = service
         .observe(Request::new(browser_v1::ObserveRequest {
             v: 1,
-            session_id: Some(session_id),
+            session_id: Some(session_id.clone()),
             include_dom_snapshot: true,
             include_accessibility_tree: true,
             include_visible_text: true,
@@ -982,6 +1002,29 @@ async fn browser_service_chromium_engine_executes_real_dom_actions() {
     assert!(
         observed.visible_text.contains("clicked"),
         "observe visible text should reflect click side-effect from real DOM"
+    );
+
+    let failed_click = service
+        .click(Request::new(browser_v1::ClickRequest {
+            v: 1,
+            session_id: Some(session_id),
+            selector: "#missing-action-target".to_owned(),
+            max_retries: 1,
+            timeout_ms: 500,
+            capture_failure_screenshot: true,
+            max_failure_screenshot_bytes: 220 * 1024,
+        }))
+        .await
+        .expect("failed click should execute")
+        .into_inner();
+    assert!(!failed_click.success, "missing selector click should fail");
+    assert!(
+        failed_click.failure_screenshot_bytes.starts_with(&[137, 80, 78, 71]),
+        "chromium failure screenshot must return PNG payload"
+    );
+    assert_ne!(
+        failed_click.failure_screenshot_bytes, ONE_BY_ONE_PNG,
+        "chromium failure screenshot should capture the active page, not the simulated placeholder"
     );
 
     drop(handle);

@@ -184,6 +184,17 @@ struct BrowserOpenArgs {
     json: bool,
 }
 
+struct BrowserClickArgs {
+    session_id: String,
+    selector: String,
+    max_retries: Option<u32>,
+    timeout_ms: Option<u64>,
+    capture_failure_screenshot: bool,
+    max_failure_screenshot_bytes: Option<u64>,
+    output: Option<String>,
+    json: bool,
+}
+
 struct BrowserTypeArgs {
     session_id: String,
     selector: String,
@@ -193,6 +204,7 @@ struct BrowserTypeArgs {
     capture_failure_screenshot: bool,
     max_failure_screenshot_bytes: Option<u64>,
     output: Option<String>,
+    json: bool,
 }
 
 struct BrowserWaitArgs {
@@ -300,8 +312,9 @@ async fn run_browser_async(command: BrowserCommand) -> Result<()> {
             capture_failure_screenshot,
             max_failure_screenshot_bytes,
             output,
+            json,
         } => {
-            run_browser_click(
+            run_browser_click(BrowserClickArgs {
                 session_id,
                 selector,
                 max_retries,
@@ -309,7 +322,8 @@ async fn run_browser_async(command: BrowserCommand) -> Result<()> {
                 capture_failure_screenshot,
                 max_failure_screenshot_bytes,
                 output,
-            )
+                json,
+            })
             .await
         }
         BrowserCommand::Type {
@@ -320,6 +334,7 @@ async fn run_browser_async(command: BrowserCommand) -> Result<()> {
             capture_failure_screenshot,
             max_failure_screenshot_bytes,
             output,
+            json,
         } => {
             run_browser_type(BrowserTypeArgs {
                 session_id,
@@ -330,6 +345,7 @@ async fn run_browser_async(command: BrowserCommand) -> Result<()> {
                 capture_failure_screenshot,
                 max_failure_screenshot_bytes,
                 output,
+                json,
             })
             .await
         }
@@ -341,6 +357,7 @@ async fn run_browser_async(command: BrowserCommand) -> Result<()> {
             capture_failure_screenshot,
             max_failure_screenshot_bytes,
             output,
+            json,
         } => {
             run_browser_type(BrowserTypeArgs {
                 session_id,
@@ -351,6 +368,7 @@ async fn run_browser_async(command: BrowserCommand) -> Result<()> {
                 capture_failure_screenshot,
                 max_failure_screenshot_bytes,
                 output,
+                json,
             })
             .await
         }
@@ -1627,15 +1645,17 @@ async fn run_browser_navigate(
     ensure_browser_command_success("browser.navigate", success, error.as_str())
 }
 
-async fn run_browser_click(
-    session_id: String,
-    selector: String,
-    max_retries: Option<u32>,
-    timeout_ms: Option<u64>,
-    capture_failure_screenshot: bool,
-    max_failure_screenshot_bytes: Option<u64>,
-    output: Option<String>,
-) -> Result<()> {
+async fn run_browser_click(args: BrowserClickArgs) -> Result<()> {
+    let BrowserClickArgs {
+        session_id,
+        selector,
+        max_retries,
+        timeout_ms,
+        capture_failure_screenshot,
+        max_failure_screenshot_bytes,
+        output,
+        json,
+    } = args;
     let context =
         client::control_plane::connect_admin_console(app::ConnectionOverrides::default()).await?;
     let envelope = context
@@ -1669,7 +1689,7 @@ async fn run_browser_click(
     );
     maybe_attach_output_path(&mut value, screenshot_path.as_ref());
     normalize_session_scoped_output(&mut value, session_id.as_str());
-    emit_browser_value(
+    emit_browser_value_with_json(
         &value,
         format!(
             "browser.click session_id={} success={} selector={} action_id={} artifact={}",
@@ -1680,6 +1700,7 @@ async fn run_browser_click(
             screenshot_path.as_deref().unwrap_or("-"),
         ),
         "failed to encode browser click output",
+        json,
     )?;
     ensure_browser_command_success("browser.click", success, error.as_str())
 }
@@ -1694,6 +1715,7 @@ async fn run_browser_type(args: BrowserTypeArgs) -> Result<()> {
         capture_failure_screenshot,
         max_failure_screenshot_bytes,
         output,
+        json,
     } = args;
     let context =
         client::control_plane::connect_admin_console(app::ConnectionOverrides::default()).await?;
@@ -1729,7 +1751,7 @@ async fn run_browser_type(args: BrowserTypeArgs) -> Result<()> {
     );
     maybe_attach_output_path(&mut value, screenshot_path.as_ref());
     normalize_session_scoped_output(&mut value, session_id.as_str());
-    emit_browser_value(
+    emit_browser_value_with_json(
         &value,
         format!(
             "browser.{} session_id={} success={} selector={} typed_bytes={} artifact={}",
@@ -1741,6 +1763,7 @@ async fn run_browser_type(args: BrowserTypeArgs) -> Result<()> {
             screenshot_path.as_deref().unwrap_or("-"),
         ),
         "failed to encode browser type output",
+        json,
     )?;
     ensure_browser_command_success(
         if clear_existing { "browser.fill" } else { "browser.type" },

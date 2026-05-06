@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{net::IpAddr, sync::Arc, time::Duration};
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use palyra_common::{
@@ -9,6 +9,7 @@ use palyra_safety::{
     merge_scan_results, redact_text_for_export, ExportRedactionOutcome, SafetyContentKind,
     SafetyPhase, SafetyScanResult, SafetySourceKind, TrustLabel,
 };
+use reqwest::Url;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tonic::{Request, Status};
@@ -27,11 +28,42 @@ use crate::{
         BROWSER_TABS_SWITCH_TOOL_NAME, BROWSER_TITLE_TOOL_NAME, BROWSER_TYPE_TOOL_NAME,
         BROWSER_WAIT_FOR_TOOL_NAME, MAX_BROWSER_TOOL_INPUT_BYTES,
     },
+    sandbox_runner::process_runner_allows_host_access,
     tool_protocol::{ToolAttestation, ToolExecutionOutcome},
     transport::grpc::proto::palyra::{browser::v1 as browser_v1, common::v1 as common_v1},
 };
 
 const BROWSER_CALLER_PRINCIPAL_HEADER: &str = "x-palyra-principal";
+
+fn browser_tool_allows_private_targets_for_url(
+    runtime_state: &GatewayRuntimeState,
+    payload: &serde_json::Map<String, Value>,
+    url: &str,
+) -> bool {
+    payload.get("allow_private_targets").and_then(Value::as_bool).unwrap_or(false)
+        || (process_runner_allows_host_access(&runtime_state.config.tool_call.process_runner)
+            && browser_url_targets_loopback(url))
+}
+
+fn browser_url_targets_loopback(raw_url: &str) -> bool {
+    let Ok(parsed) = Url::parse(raw_url.trim()) else {
+        return false;
+    };
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return false;
+    }
+    let Some(host) = parsed.host_str().map(str::trim).filter(|host| !host.is_empty()) else {
+        return false;
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
+}
 
 pub(crate) async fn execute_browser_tool(
     runtime_state: &Arc<GatewayRuntimeState>,
@@ -394,10 +426,11 @@ pub(crate) async fn execute_browser_tool(
                     .unwrap_or(true),
                 max_redirects: payload.get("max_redirects").and_then(Value::as_u64).unwrap_or(3)
                     as u32,
-                allow_private_targets: payload
-                    .get("allow_private_targets")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
+                allow_private_targets: browser_tool_allows_private_targets_for_url(
+                    runtime_state,
+                    &payload,
+                    url,
+                ),
             });
             if let Err(error) = attach_browser_auth_metadata(
                 &mut request,
@@ -1622,10 +1655,11 @@ pub(crate) async fn execute_browser_tool(
                     );
                 }
             };
+            let url = payload.get("url").and_then(Value::as_str).map(str::trim).unwrap_or_default();
             let mut request = Request::new(browser_v1::OpenTabRequest {
                 v: CANONICAL_PROTOCOL_MAJOR,
                 session_id: Some(common_v1::CanonicalId { ulid: session_id }),
-                url: payload.get("url").and_then(Value::as_str).unwrap_or_default().to_owned(),
+                url: url.to_owned(),
                 activate: payload.get("activate").and_then(Value::as_bool).unwrap_or(true),
                 timeout_ms: payload.get("timeout_ms").and_then(Value::as_u64).unwrap_or(0),
                 allow_redirects: payload
@@ -1634,10 +1668,11 @@ pub(crate) async fn execute_browser_tool(
                     .unwrap_or(true),
                 max_redirects: payload.get("max_redirects").and_then(Value::as_u64).unwrap_or(3)
                     as u32,
-                allow_private_targets: payload
-                    .get("allow_private_targets")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
+                allow_private_targets: browser_tool_allows_private_targets_for_url(
+                    runtime_state,
+                    &payload,
+                    url,
+                ),
             });
             if let Err(error) = attach_browser_auth_metadata(
                 &mut request,
@@ -2372,7 +2407,7 @@ mod tests {
     use super::{
         attach_browser_caller_principal_metadata, browser_console_entry_to_json,
         browser_network_log_entry_to_json, browser_observe_include_visible_text,
-        BROWSER_CALLER_PRINCIPAL_HEADER,
+        browser_url_targets_loopback, BROWSER_CALLER_PRINCIPAL_HEADER,
     };
     use crate::transport::grpc::proto::palyra::browser::v1 as browser_v1;
     use palyra_common::CANONICAL_PROTOCOL_MAJOR;
@@ -2441,5 +2476,15 @@ mod tests {
         assert!(!browser_observe_include_visible_text(
             explicit_false.as_object().expect("object payload")
         ));
+    }
+
+    #[test]
+    fn browser_url_targets_loopback_only_for_http_loopback_hosts() {
+        assert!(browser_url_targets_loopback("http://localhost:8899/"));
+        assert!(browser_url_targets_loopback("http://127.0.0.1:8899/"));
+        assert!(browser_url_targets_loopback("http://[::1]:8899/"));
+        assert!(!browser_url_targets_loopback("http://192.168.1.10/"));
+        assert!(!browser_url_targets_loopback("https://example.com/"));
+        assert!(!browser_url_targets_loopback("file:///tmp/index.html"));
     }
 }

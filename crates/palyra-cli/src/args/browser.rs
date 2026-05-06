@@ -109,6 +109,8 @@ pub enum BrowserCommand {
         max_failure_screenshot_bytes: Option<u64>,
         #[arg(long)]
         output: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     #[command(about = "Type text into an element in the active tab")]
     Type {
@@ -125,6 +127,8 @@ pub enum BrowserCommand {
         max_failure_screenshot_bytes: Option<u64>,
         #[arg(long)]
         output: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     #[command(about = "Clear an element and then type text into it")]
     Fill {
@@ -141,6 +145,8 @@ pub enum BrowserCommand {
         max_failure_screenshot_bytes: Option<u64>,
         #[arg(long)]
         output: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     #[command(about = "Scroll the active tab")]
     Scroll {
