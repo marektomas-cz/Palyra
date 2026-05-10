@@ -79,18 +79,18 @@ use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use clap::{CommandFactory, Parser};
 use cli::{
-    AcpCommand, AgentCommand, AgentsCommand, ApprovalDecisionArg, ApprovalExportFormatArg,
-    ApprovalsCommand, AuthAccessCommand, AuthCommand, AuthCredentialArg, AuthOpenAiCommand,
-    AuthProfilesCommand, AuthProviderArg, AuthScopeArg, BrowserCommand, Cli, Command as CliCommand,
-    CompletionShell, ConfigCommand, ConfigureSectionArg, CronCommand, DaemonCommand,
-    DeploymentCommand, DeploymentProfileArg, DocsCommand, ExtensionCommand, GatewayBindProfileArg,
-    HooksCommand, InitModeArg, InitTlsScaffoldArg, JournalCheckpointModeArg, MemoryCommand,
-    MemoryLearningCommand, MemoryScopeArg, MemorySourceArg, ModelsCommand, OnboardingAuthMethodArg,
-    OnboardingCommand, OnboardingFlowArg, PatchCommand, PluginsCommand, PolicyCommand,
-    ProtocolCommand, RemoteVerificationModeArg, SandboxCommand, SandboxRuntimeArg, SecretsCommand,
-    SecurityCommand, SessionsCommand, SetupWizardOverridesArg, SkillsCommand, SkillsPackageCommand,
-    SupportBundleCommand, SystemCommand, SystemEventCommand, SystemEventSeverityArg,
-    WebhooksCommand, WizardOverridesArg, WorkspaceRoleArg,
+    AcpCommand, AgentApprovalModeArg, AgentCommand, AgentsCommand, ApprovalDecisionArg,
+    ApprovalExportFormatArg, ApprovalsCommand, AuthAccessCommand, AuthCommand, AuthCredentialArg,
+    AuthOpenAiCommand, AuthProfilesCommand, AuthProviderArg, AuthScopeArg, BrowserCommand, Cli,
+    Command as CliCommand, CompletionShell, ConfigCommand, ConfigureSectionArg, CronCommand,
+    DaemonCommand, DeploymentCommand, DeploymentProfileArg, DocsCommand, ExtensionCommand,
+    GatewayBindProfileArg, HooksCommand, InitModeArg, InitTlsScaffoldArg, JournalCheckpointModeArg,
+    MemoryCommand, MemoryLearningCommand, MemoryScopeArg, MemorySourceArg, ModelsCommand,
+    OnboardingAuthMethodArg, OnboardingCommand, OnboardingFlowArg, PatchCommand, PluginsCommand,
+    PolicyCommand, ProtocolCommand, RemoteVerificationModeArg, SandboxCommand, SandboxRuntimeArg,
+    SecretsCommand, SecurityCommand, SessionsCommand, SetupWizardOverridesArg, SkillsCommand,
+    SkillsPackageCommand, SupportBundleCommand, SystemCommand, SystemEventCommand,
+    SystemEventSeverityArg, WebhooksCommand, WizardOverridesArg, WorkspaceRoleArg,
 };
 use cli::{PairingClientKindArg, PairingCommand, PairingMethodArg};
 use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey};
@@ -3795,7 +3795,7 @@ where
         if let Some(common_v1::run_stream_event::Body::ToolApprovalRequest(approval)) =
             event.body.as_ref()
         {
-            let decision = prompt_tool_approval_decision(approval)?;
+            let decision = prompt_tool_approval_decision(approval, resolved.request.approval_mode)?;
             stream
                 .send_tool_approval_response(
                     session_id.ulid.as_str(),
@@ -3862,6 +3862,7 @@ fn parse_acp_shim_input_line(
         allow_sensitive_tools: parsed
             .allow_sensitive_tools
             .unwrap_or(default_allow_sensitive_tools),
+        approval_mode: AgentApprovalMode::Prompt,
         origin_kind: None,
         origin_run_id: None,
         parameter_delta_json: None,
@@ -4017,6 +4018,7 @@ struct AgentRunInputArgs {
     run_id: Option<String>,
     prompt: String,
     allow_sensitive_tools: bool,
+    approval_mode: AgentApprovalMode,
     origin_kind: Option<String>,
     origin_run_id: Option<String>,
     parameter_delta_json: Option<String>,
@@ -4032,11 +4034,29 @@ fn build_agent_run_input(input: AgentRunInputArgs) -> Result<AgentRunInput> {
         run_id: resolve_or_generate_canonical_id(input.run_id)?,
         prompt: input.prompt,
         allow_sensitive_tools: input.allow_sensitive_tools,
+        approval_mode: input.approval_mode,
         origin_kind: normalize_optional_owned_text(input.origin_kind),
         origin_run_id: normalize_optional_owned_text(input.origin_run_id),
         parameter_delta_json: normalize_optional_owned_text(input.parameter_delta_json),
         attachments: Vec::new(),
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentApprovalMode {
+    Prompt,
+    Deny,
+    AllowOnce,
+}
+
+impl From<AgentApprovalModeArg> for AgentApprovalMode {
+    fn from(value: AgentApprovalModeArg) -> Self {
+        match value {
+            AgentApprovalModeArg::Prompt => Self::Prompt,
+            AgentApprovalModeArg::Deny => Self::Deny,
+            AgentApprovalModeArg::AllowOnce => Self::AllowOnce,
+        }
+    }
 }
 
 async fn prepare_agent_run_input(
@@ -4072,13 +4092,30 @@ struct ToolApprovalDecision {
     reason: String,
 }
 
-const NONINTERACTIVE_APPROVAL_HINT: &str = "noninteractive CLI cannot approve tool requests; rerun in an interactive terminal or use --allow-sensitive-tools only after reviewing the requested tool risk";
+const NONINTERACTIVE_APPROVAL_HINT: &str = "noninteractive CLI cannot prompt for tool requests; rerun in an interactive terminal, use --approval-mode allow-once for per-request approval, or use --allow-sensitive-tools only after reviewing the requested tool risk";
 
 fn approval_required_cli_hint() -> &'static str {
     NONINTERACTIVE_APPROVAL_HINT
 }
 
 fn prompt_tool_approval_decision(
+    approval: &common_v1::ToolApprovalRequest,
+    mode: AgentApprovalMode,
+) -> Result<ToolApprovalDecision> {
+    match mode {
+        AgentApprovalMode::Prompt => prompt_tool_approval_decision_from_terminal(approval),
+        AgentApprovalMode::Deny => Ok(ToolApprovalDecision {
+            approved: false,
+            reason: "denied_by_cli_approval_mode_deny".to_owned(),
+        }),
+        AgentApprovalMode::AllowOnce => Ok(ToolApprovalDecision {
+            approved: true,
+            reason: "approved_by_cli_approval_mode_allow_once".to_owned(),
+        }),
+    }
+}
+
+fn prompt_tool_approval_decision_from_terminal(
     approval: &common_v1::ToolApprovalRequest,
 ) -> Result<ToolApprovalDecision> {
     let tool_name = approval.tool_name.trim();
@@ -4523,7 +4560,39 @@ mod agent_stream_output_tests {
         let hint = approval_required_cli_hint();
 
         assert!(hint.contains("interactive"), "{hint}");
+        assert!(hint.contains("--approval-mode allow-once"), "{hint}");
         assert!(hint.contains("--allow-sensitive-tools"), "{hint}");
+    }
+
+    fn approval_request() -> common_v1::ToolApprovalRequest {
+        common_v1::ToolApprovalRequest {
+            proposal_id: None,
+            approval_id: None,
+            tool_name: "palyra.process.run".to_owned(),
+            input_json: Vec::new(),
+            approval_required: true,
+            request_summary: "run a command".to_owned(),
+            prompt: None,
+        }
+    }
+
+    #[test]
+    fn approval_mode_allow_once_approves_current_request_only() {
+        let decision =
+            prompt_tool_approval_decision(&approval_request(), AgentApprovalMode::AllowOnce)
+                .expect("allow-once approval mode should not read stdin");
+
+        assert!(decision.approved);
+        assert_eq!(decision.reason, "approved_by_cli_approval_mode_allow_once");
+    }
+
+    #[test]
+    fn approval_mode_deny_denies_without_prompting() {
+        let decision = prompt_tool_approval_decision(&approval_request(), AgentApprovalMode::Deny)
+            .expect("deny approval mode should not read stdin");
+
+        assert!(!decision.approved);
+        assert_eq!(decision.reason, "denied_by_cli_approval_mode_deny");
     }
 
     #[test]
@@ -4815,6 +4884,7 @@ struct AgentRunInput {
     run_id: String,
     prompt: String,
     allow_sensitive_tools: bool,
+    approval_mode: AgentApprovalMode,
     origin_kind: Option<String>,
     origin_run_id: Option<String>,
     parameter_delta_json: Option<String>,

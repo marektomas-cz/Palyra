@@ -1,4 +1,4 @@
-use clap::Subcommand;
+use clap::{Subcommand, ValueEnum};
 
 use super::{AcpBridgeArgs, AcpShimArgs};
 
@@ -33,6 +33,8 @@ pub enum AgentCommand {
         prompt_stdin: bool,
         #[arg(long, default_value_t = false)]
         allow_sensitive_tools: bool,
+        #[arg(long, value_enum, default_value_t = AgentApprovalModeArg::Prompt)]
+        approval_mode: AgentApprovalModeArg,
         #[arg(long, default_value_t = false)]
         ndjson: bool,
     },
@@ -68,4 +70,11 @@ pub enum AgentCommand {
         #[command(flatten)]
         command: AcpBridgeArgs,
     },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+pub enum AgentApprovalModeArg {
+    Prompt,
+    Deny,
+    AllowOnce,
 }

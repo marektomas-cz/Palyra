@@ -324,6 +324,7 @@ impl LiveMcpBackend {
             run_id: None,
             prompt,
             allow_sensitive_tools,
+            approval_mode: AgentApprovalMode::Prompt,
             origin_kind: Some("mcp_stdio".to_owned()),
             origin_run_id: None,
             parameter_delta_json: None,

@@ -485,6 +485,7 @@ pub(crate) async fn run_sessions_async(
                 run_id: None,
                 prompt,
                 allow_sensitive_tools: false,
+                approval_mode: AgentApprovalMode::Prompt,
                 origin_kind,
                 origin_run_id,
                 parameter_delta_json,

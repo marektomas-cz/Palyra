@@ -1108,7 +1108,7 @@ fn terminal_tool_authorization_failure(result: &RunStreamToolResultForModel) -> 
 
     if is_noninteractive_cli_approval_denial(error) {
         return Some(format!(
-            "tool execution requires approval, but the noninteractive CLI cannot approve it: tool={} proposal_id={} error={}. Rerun in an interactive terminal, or use --allow-sensitive-tools only after reviewing the requested tool risk.",
+            "tool execution requires approval, but the noninteractive CLI cannot prompt for it: tool={} proposal_id={} error={}. Rerun in an interactive terminal, use --approval-mode allow-once for per-request approval, or use --allow-sensitive-tools only after reviewing the requested tool risk.",
             result.tool_name,
             result.proposal_id,
             truncate_with_ellipsis(error.to_owned(), 512)
@@ -1274,6 +1274,7 @@ mod tests {
         let message = terminal_tool_authorization_failure(&result)
             .expect("noninteractive CLI approval denials should terminate the run");
         assert!(message.contains("noninteractive CLI"));
+        assert!(message.contains("--approval-mode allow-once"));
         assert!(message.contains("--allow-sensitive-tools"));
         assert!(message.contains("toolu_noninteractive_01"));
     }

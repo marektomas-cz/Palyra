@@ -735,6 +735,7 @@ impl App {
             run_id: None,
             prompt,
             allow_sensitive_tools: self.allow_sensitive_tools,
+            approval_mode: AgentApprovalMode::Prompt,
             origin_kind,
             origin_run_id,
             parameter_delta_json,

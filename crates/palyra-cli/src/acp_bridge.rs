@@ -15,7 +15,7 @@ use crate::{
     app, build_agent_run_input, build_run_stream_request, build_runtime,
     client::{control_plane, runtime::GatewayRuntimeClient},
     proto::palyra::{common::v1 as common_v1, gateway::v1 as gateway_v1},
-    AgentConnection, AgentRunInputArgs, SessionResolveInput,
+    AgentApprovalMode, AgentConnection, AgentRunInputArgs, SessionResolveInput,
 };
 
 const META_SESSION_KEY: &str = "sessionKey";
@@ -523,6 +523,7 @@ impl PalyraAcpAgent {
             run_id: None,
             prompt,
             allow_sensitive_tools: self.allow_sensitive_tools,
+            approval_mode: AgentApprovalMode::Prompt,
             origin_kind: None,
             origin_run_id: None,
             parameter_delta_json: None,

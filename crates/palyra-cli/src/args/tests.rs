@@ -2,29 +2,30 @@ use clap::{CommandFactory as _, Parser};
 
 use super::{
     AcpBridgeArgs, AcpCommand, AcpConnectionArgs, AcpSessionDefaultsArgs, AcpShimArgs,
-    AcpSubcommand, AgentCommand, AgentsCommand, ApprovalDecisionArg, ApprovalDecisionScopeArg,
-    ApprovalExportFormatArg, ApprovalResolveDecisionArg, ApprovalSubjectTypeArg, ApprovalsCommand,
-    AuthAccessCommand, AuthCommand, AuthCredentialArg, AuthOpenAiCommand, AuthProfilesCommand,
-    AuthProviderArg, AuthScopeArg, BackupCommand, BackupComponentArg, BrowserCommand,
-    BrowserPermissionsCommand, BrowserProfilesCommand, BrowserSessionCommand, ChannelProviderArg,
-    ChannelResolveEntityArg, ChannelsCommand, ChannelsDiscordCommand, ChannelsRouterCommand, Cli,
-    Command, CompletionShell, ConfigCommand, ConfigureSectionArg, CronCommand,
-    CronConcurrencyPolicyArg, CronMisfirePolicyArg, CronScheduleTypeArg, DaemonCommand,
-    DevicesCommand, DocsCommand, ExtensionCommand, FlowStateArg, FlowsCommand,
-    GatewayBindProfileArg, HooksCommand, InitModeArg, InitTlsScaffoldArg, JobsCommand,
-    JournalCheckpointModeArg, MemoryCommand, MemoryLearningCommand, MemoryScopeArg,
-    MemorySourceArg, MessageCommand, ModelsCommand, NodeCommand, NodesCommand, ObjectiveKindArg,
-    ObjectivePriorityArg, ObjectiveScheduleTypeArg, ObjectiveUpsertCommandArgs, ObjectivesCommand,
-    OnboardingAuthMethodArg, OnboardingCommand, OnboardingFlowArg, PairingClientKindArg,
-    PairingCommand, PairingMethodArg, PairingStateArg, PatchCommand, PluginsCommand, PolicyCommand,
-    ProfileCommand, ProfileExportModeArg, ProfileModeArg, ProfileRiskLevelArg, ProtocolCommand,
-    RemoteVerificationModeArg, ResetCommand, ResetScopeArg, RoutineApprovalModeArg,
-    RoutineDeliveryModeArg, RoutineExecutionPostureArg, RoutinePreviewTimezoneArg,
-    RoutineRunModeArg, RoutineSilentPolicyArg, RoutineTriggerKindArg, RoutineUpsertCommand,
-    RoutinesCommand, SandboxCommand, SandboxRuntimeArg, SecretsCommand, SecretsConfigureCommand,
-    SecurityCommand, SessionsCommand, SetupWizardOverridesArg, SkillsCommand, SkillsPackageCommand,
-    SupportBundleCommand, SystemCommand, SystemEventCommand, SystemEventSeverityArg, TuiCommand,
-    UninstallCommand, UpdateCommand, WebhooksCommand, WizardOverridesArg, WorkspaceRoleArg,
+    AcpSubcommand, AgentApprovalModeArg, AgentCommand, AgentsCommand, ApprovalDecisionArg,
+    ApprovalDecisionScopeArg, ApprovalExportFormatArg, ApprovalResolveDecisionArg,
+    ApprovalSubjectTypeArg, ApprovalsCommand, AuthAccessCommand, AuthCommand, AuthCredentialArg,
+    AuthOpenAiCommand, AuthProfilesCommand, AuthProviderArg, AuthScopeArg, BackupCommand,
+    BackupComponentArg, BrowserCommand, BrowserPermissionsCommand, BrowserProfilesCommand,
+    BrowserSessionCommand, ChannelProviderArg, ChannelResolveEntityArg, ChannelsCommand,
+    ChannelsDiscordCommand, ChannelsRouterCommand, Cli, Command, CompletionShell, ConfigCommand,
+    ConfigureSectionArg, CronCommand, CronConcurrencyPolicyArg, CronMisfirePolicyArg,
+    CronScheduleTypeArg, DaemonCommand, DevicesCommand, DocsCommand, ExtensionCommand,
+    FlowStateArg, FlowsCommand, GatewayBindProfileArg, HooksCommand, InitModeArg,
+    InitTlsScaffoldArg, JobsCommand, JournalCheckpointModeArg, MemoryCommand,
+    MemoryLearningCommand, MemoryScopeArg, MemorySourceArg, MessageCommand, ModelsCommand,
+    NodeCommand, NodesCommand, ObjectiveKindArg, ObjectivePriorityArg, ObjectiveScheduleTypeArg,
+    ObjectiveUpsertCommandArgs, ObjectivesCommand, OnboardingAuthMethodArg, OnboardingCommand,
+    OnboardingFlowArg, PairingClientKindArg, PairingCommand, PairingMethodArg, PairingStateArg,
+    PatchCommand, PluginsCommand, PolicyCommand, ProfileCommand, ProfileExportModeArg,
+    ProfileModeArg, ProfileRiskLevelArg, ProtocolCommand, RemoteVerificationModeArg, ResetCommand,
+    ResetScopeArg, RoutineApprovalModeArg, RoutineDeliveryModeArg, RoutineExecutionPostureArg,
+    RoutinePreviewTimezoneArg, RoutineRunModeArg, RoutineSilentPolicyArg, RoutineTriggerKindArg,
+    RoutineUpsertCommand, RoutinesCommand, SandboxCommand, SandboxRuntimeArg, SecretsCommand,
+    SecretsConfigureCommand, SecurityCommand, SessionsCommand, SetupWizardOverridesArg,
+    SkillsCommand, SkillsPackageCommand, SupportBundleCommand, SystemCommand, SystemEventCommand,
+    SystemEventSeverityArg, TuiCommand, UninstallCommand, UpdateCommand, WebhooksCommand,
+    WizardOverridesArg, WorkspaceRoleArg,
 };
 
 mod parser_stability_plugin_tests;
@@ -609,6 +610,7 @@ fn parse_agent_run_with_prompt() {
                 prompt: Some("hello".to_owned()),
                 prompt_stdin: false,
                 allow_sensitive_tools: true,
+                approval_mode: AgentApprovalModeArg::Prompt,
                 ndjson: true,
             }
         }
@@ -632,6 +634,42 @@ fn parse_agent_interactive_with_defaults() {
                 session_label: None,
                 require_existing: false,
                 allow_sensitive_tools: false,
+                ndjson: false,
+            }
+        }
+    );
+}
+
+#[test]
+fn parse_agent_run_with_approval_mode_allow_once() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "agent",
+        "run",
+        "--prompt",
+        "inspect",
+        "--approval-mode",
+        "allow-once",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Agent {
+            command: AgentCommand::Run {
+                grpc_url: None,
+                token: None,
+                principal: None,
+                device_id: None,
+                channel: None,
+                session_id: None,
+                session_key: None,
+                session_label: None,
+                require_existing: false,
+                reset_session: false,
+                run_id: None,
+                prompt: Some("inspect".to_owned()),
+                prompt_stdin: false,
+                allow_sensitive_tools: false,
+                approval_mode: AgentApprovalModeArg::AllowOnce,
                 ndjson: false,
             }
         }
@@ -706,6 +744,7 @@ fn parse_agent_run_with_session_key_controls() {
                 prompt: Some("continue".to_owned()),
                 prompt_stdin: false,
                 allow_sensitive_tools: false,
+                approval_mode: AgentApprovalModeArg::Prompt,
                 ndjson: false,
             }
         }
