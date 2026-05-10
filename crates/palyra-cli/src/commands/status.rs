@@ -358,10 +358,12 @@ fn build_status_report(
     };
     let deployment = runtime.block_on(load_runtime_deployment_snapshot(overrides)).unwrap_or(None);
 
-    let mut hints = Vec::new();
-    hints.push("Use `palyra health` for a script-friendly liveness check.".to_owned());
-    hints.push("Use `palyra logs --follow` for live journal tailing.".to_owned());
-    hints.push("Use `palyra doctor` for prioritized remediation guidance.".to_owned());
+    let mut hints = vec![
+        "Use `palyra health` for a script-friendly liveness check.".to_owned(),
+        "Use `palyra logs --follow` for live journal tailing.".to_owned(),
+        "Use `palyra doctor` for prioritized remediation guidance.".to_owned(),
+        "Use `palyra status --admin --json` to include the raw admin status payload.".to_owned(),
+    ];
     let runtime_diagnostics_degraded =
         runtime_diagnostics_are_degraded(should_attempt_admin, runtime_snapshot.as_ref());
     if runtime_snapshot.as_ref().is_some_and(|value| !value.diagnostics_available) {
@@ -408,13 +410,24 @@ fn build_status_report(
             grpc_url: grpc_connection.grpc_url,
             http,
             grpc,
-            admin: admin_payload,
+            admin: status_admin_payload_for_output(force_admin, admin_payload),
         },
         service,
         deployment,
         runtime: runtime_snapshot,
         hints,
     })
+}
+
+fn status_admin_payload_for_output(
+    force_admin: bool,
+    admin_payload: Option<Value>,
+) -> Option<Value> {
+    if force_admin {
+        admin_payload
+    } else {
+        None
+    }
 }
 
 fn runtime_diagnostics_are_degraded(
@@ -550,7 +563,11 @@ async fn load_runtime_status_snapshot(
 
 #[cfg(test)]
 mod tests {
-    use super::{runtime_diagnostics_are_degraded, StatusRuntimeSnapshot};
+    use serde_json::json;
+
+    use super::{
+        runtime_diagnostics_are_degraded, status_admin_payload_for_output, StatusRuntimeSnapshot,
+    };
 
     fn runtime_snapshot(diagnostics_available: bool) -> StatusRuntimeSnapshot {
         StatusRuntimeSnapshot {
@@ -582,5 +599,16 @@ mod tests {
         assert!(!runtime_diagnostics_are_degraded(true, Some(&available)));
         assert!(!runtime_diagnostics_are_degraded(false, Some(&unavailable)));
         assert!(!runtime_diagnostics_are_degraded(true, None));
+    }
+
+    #[test]
+    fn admin_payload_is_only_emitted_for_explicit_admin_status() {
+        let payload = Some(json!({
+            "status": "ok",
+            "large_admin_only_payload": ["entry-1", "entry-2"],
+        }));
+
+        assert!(status_admin_payload_for_output(false, payload.clone()).is_none());
+        assert_eq!(status_admin_payload_for_output(true, payload.clone()), payload);
     }
 }
