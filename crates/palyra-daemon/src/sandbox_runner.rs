@@ -563,7 +563,7 @@ fn builtin_make_directory_stdout(
     let mut created = Vec::new();
     for directory in directories {
         let target = if host_access {
-            resolve_host_mutation_path(cwd, directory)?
+            resolve_host_mutation_path(workspace_root, cwd, directory)?
         } else {
             resolve_scoped_path(workspace_root, cwd, directory, false)?
         };
@@ -590,12 +590,19 @@ fn builtin_make_directory_stdout(
     Ok(format!("{}\n", created.join("\n")))
 }
 
-fn resolve_host_mutation_path(cwd: &Path, raw: &str) -> Result<PathBuf, SandboxProcessRunError> {
+fn resolve_host_mutation_path(
+    workspace_root: &Path,
+    cwd: &Path,
+    raw: &str,
+) -> Result<PathBuf, SandboxProcessRunError> {
     if raw.contains('\0') {
         return Err(SandboxProcessRunError {
             kind: SandboxProcessRunErrorKind::WorkspaceScopeDenied,
             message: "host process runner denied path with embedded NUL byte".to_owned(),
         });
+    }
+    if named_virtual_workspace_path_suffix(raw).is_some() {
+        return resolve_scoped_path(workspace_root, workspace_root, raw, false);
     }
     let parsed = Path::new(raw);
     Ok(if parsed.is_absolute() { parsed.to_path_buf() } else { cwd.join(parsed) })
@@ -838,6 +845,16 @@ fn resolve_host_working_directory(
             message: "host process runner denied cwd with embedded NUL byte".to_owned(),
         });
     }
+    if named_virtual_workspace_path_suffix(cwd_value).is_some() {
+        let resolved = resolve_scoped_path(default_root, default_root, cwd_value, true)?;
+        if !resolved.is_dir() {
+            return Err(SandboxProcessRunError {
+                kind: SandboxProcessRunErrorKind::WorkspaceScopeDenied,
+                message: format!("host process runner cwd '{cwd_value}' is not a directory"),
+            });
+        }
+        return Ok(resolved);
+    }
     let raw = Path::new(cwd_value);
     let candidate = if raw.is_absolute() { raw.to_path_buf() } else { default_root.join(raw) };
     let resolved =
@@ -1063,6 +1080,60 @@ fn virtual_workspace_path_suffix(raw: &str) -> Option<PathBuf> {
     }
 
     normalized.strip_prefix("/workspace/").map(PathBuf::from)
+}
+
+fn named_virtual_workspace_path_suffix(raw: &str) -> Option<PathBuf> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let normalized = trimmed.replace('\\', "/");
+    if normalized == "/workspace" {
+        return Some(PathBuf::new());
+    }
+
+    normalized.strip_prefix("/workspace/").map(PathBuf::from)
+}
+
+fn rewrite_host_virtual_workspace_args(
+    args: &[String],
+    workspace_root: &Path,
+) -> Result<Vec<String>, SandboxProcessRunError> {
+    args.iter()
+        .map(|arg| rewrite_host_virtual_workspace_arg(arg.as_str(), workspace_root))
+        .collect()
+}
+
+fn rewrite_host_virtual_workspace_arg(
+    arg: &str,
+    workspace_root: &Path,
+) -> Result<String, SandboxProcessRunError> {
+    if let Some(path) = resolve_host_virtual_workspace_arg_path(arg, workspace_root)? {
+        return Ok(path);
+    }
+
+    if let Some((name, value)) = arg.trim().split_once('=') {
+        if name.starts_with('-') {
+            if let Some(path) = resolve_host_virtual_workspace_arg_path(value, workspace_root)? {
+                return Ok(format!("{name}={path}"));
+            }
+        }
+    }
+
+    Ok(arg.to_owned())
+}
+
+fn resolve_host_virtual_workspace_arg_path(
+    raw: &str,
+    workspace_root: &Path,
+) -> Result<Option<String>, SandboxProcessRunError> {
+    if named_virtual_workspace_path_suffix(raw).is_none() {
+        return Ok(None);
+    }
+
+    let resolved = resolve_scoped_path(workspace_root, workspace_root, raw, false)?;
+    Ok(Some(resolved.to_string_lossy().to_string()))
 }
 
 fn nearest_existing_ancestor(path: &Path) -> Result<PathBuf, SandboxProcessRunError> {
@@ -1405,8 +1476,9 @@ fn build_process_command(
 ) -> Result<Command, SandboxProcessRunError> {
     if process_runner_allows_host_access(policy) {
         let program = resolve_tier_b_process_program(input.command.as_str());
+        let args = rewrite_host_virtual_workspace_args(input.args.as_slice(), workspace_root)?;
         let mut command = Command::new(program.as_path());
-        command.args(input.args.as_slice()).current_dir(cwd);
+        command.args(args.as_slice()).current_dir(cwd);
         return Ok(command);
     }
 
@@ -1846,10 +1918,11 @@ mod tests {
     use super::{
         canonical_workspace_root, collect_requested_egress_hosts,
         cpu_rlimit_seconds_from_usage_micros, is_host_allowlisted, redacted_process_stderr_preview,
-        resolve_working_directory, run_constrained_process, validate_argument_workspace_scope,
-        validate_interpreter_argument_guardrails, validate_runtime_egress_enforcement,
-        EgressEnforcementMode, ProcessRunnerInput, SandboxProcessRunErrorKind,
-        SandboxProcessRunnerPolicy, SandboxProcessRunnerTier,
+        resolve_host_working_directory, resolve_working_directory,
+        rewrite_host_virtual_workspace_args, run_constrained_process,
+        validate_argument_workspace_scope, validate_interpreter_argument_guardrails,
+        validate_runtime_egress_enforcement, EgressEnforcementMode, ProcessRunnerInput,
+        SandboxProcessRunErrorKind, SandboxProcessRunnerPolicy, SandboxProcessRunnerTier,
     };
 
     fn portable_test_memory_limit_bytes() -> u64 {
@@ -1931,6 +2004,33 @@ mod tests {
     }
 
     #[test]
+    fn resolve_host_working_directory_treats_named_virtual_roots_as_workspace_root() {
+        let workspace = unique_temp_dir("workspace-host-virtual-root");
+        let nested = workspace.join("fixtures").join("todo-app");
+        fs::create_dir_all(nested.as_path()).expect("workspace subdirectory should be created");
+        let canonical_workspace = fs::canonicalize(workspace.as_path())
+            .expect("workspace root should canonicalize for host access");
+        let canonical_nested =
+            fs::canonicalize(nested.as_path()).expect("nested workspace path should canonicalize");
+
+        for alias in ["/workspace", "\\workspace"] {
+            let resolved =
+                resolve_host_working_directory(canonical_workspace.as_path(), Some(alias))
+                    .expect("host access should resolve named virtual workspace root aliases");
+            assert_eq!(resolved, canonical_workspace, "alias {alias}");
+        }
+
+        for alias in ["/workspace/fixtures/todo-app", "\\workspace\\fixtures\\todo-app"] {
+            let resolved =
+                resolve_host_working_directory(canonical_workspace.as_path(), Some(alias))
+                    .expect("host access should resolve named virtual workspace child aliases");
+            assert_eq!(resolved, canonical_nested, "alias {alias}");
+        }
+
+        let _ = fs::remove_dir_all(workspace.as_path());
+    }
+
+    #[test]
     fn validate_argument_workspace_scope_allows_virtual_workspace_paths() {
         let workspace = unique_temp_dir("workspace-virtual-arg");
         let nested = workspace.join("e2e-file-workflow");
@@ -1951,6 +2051,60 @@ mod tests {
             args.as_slice(),
         )
         .expect("virtual workspace path aliases should stay within scope");
+
+        let _ = fs::remove_dir_all(workspace.as_path());
+    }
+
+    #[test]
+    fn host_access_rewrites_named_virtual_workspace_args() {
+        let workspace = unique_temp_dir("workspace-host-virtual-arg");
+        let nested = workspace.join("fixtures").join("todo-app");
+        fs::create_dir_all(nested.as_path()).expect("workspace subdirectory should be created");
+        fs::write(nested.join("package.json"), b"{\"scripts\":{}}\n")
+            .expect("workspace fixture should be written");
+        let canonical_workspace = fs::canonicalize(workspace.as_path())
+            .expect("workspace root should canonicalize for host access");
+        let expected_manifest = canonical_workspace
+            .join("fixtures")
+            .join("todo-app")
+            .join("package.json")
+            .to_string_lossy()
+            .to_string();
+        #[cfg(windows)]
+        let host_absolute = "C:\\Windows\\System32\\drivers\\etc\\hosts";
+        #[cfg(not(windows))]
+        let host_absolute = "/etc/hosts";
+        let args = vec![
+            "/workspace/fixtures/todo-app/package.json".to_owned(),
+            "--config=\\workspace\\fixtures\\todo-app\\package.json".to_owned(),
+            host_absolute.to_owned(),
+        ];
+
+        let rewritten =
+            rewrite_host_virtual_workspace_args(args.as_slice(), canonical_workspace.as_path())
+                .expect("host access should rewrite named virtual workspace path aliases");
+
+        assert_eq!(rewritten[0], expected_manifest);
+        assert_eq!(rewritten[1], format!("--config={expected_manifest}"));
+        assert_eq!(rewritten[2], host_absolute);
+
+        let _ = fs::remove_dir_all(workspace.as_path());
+    }
+
+    #[test]
+    fn host_access_rejects_traversal_in_named_virtual_workspace_args() {
+        let workspace = unique_temp_dir("workspace-host-virtual-arg-traversal");
+        fs::create_dir_all(workspace.as_path()).expect("workspace directory should be created");
+        let canonical_workspace = fs::canonicalize(workspace.as_path())
+            .expect("workspace root should canonicalize for host access");
+        let args = vec!["/workspace/../outside".to_owned()];
+
+        let error =
+            rewrite_host_virtual_workspace_args(args.as_slice(), canonical_workspace.as_path())
+                .expect_err("host virtual workspace aliases must not escape workspace scope");
+
+        assert_eq!(error.kind, SandboxProcessRunErrorKind::WorkspaceScopeDenied);
+        assert!(error.message.contains("escapes workspace"), "{}", error.message);
 
         let _ = fs::remove_dir_all(workspace.as_path());
     }
