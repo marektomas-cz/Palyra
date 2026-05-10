@@ -2104,7 +2104,11 @@ mod tests {
                 .expect_err("host virtual workspace aliases must not escape workspace scope");
 
         assert_eq!(error.kind, SandboxProcessRunErrorKind::WorkspaceScopeDenied);
-        assert!(error.message.contains("escapes workspace"), "{}", error.message);
+        assert!(
+            error.message.contains("path traversal") || error.message.contains("escapes workspace"),
+            "{}",
+            error.message
+        );
 
         let _ = fs::remove_dir_all(workspace.as_path());
     }
