@@ -400,6 +400,13 @@ fn split_provider_stream_text(input: &str, max_words_per_chunk: usize) -> Vec<St
 
 pub(super) fn provider_events_from_output(output: &ProviderTurnOutput) -> Vec<ProviderEvent> {
     let mut events = Vec::new();
+    let should_mark_final_model_token =
+        !matches!(output.finish_reason, ProviderFinishReason::ToolCalls)
+            && !output
+                .content_parts
+                .iter()
+                .any(|part| matches!(part, ProviderOutputContentPart::ToolCall { .. }));
+    let mut last_model_token_index = None;
     for part in &output.content_parts {
         match part {
             ProviderOutputContentPart::Text { text } => {
@@ -407,10 +414,10 @@ pub(super) fn provider_events_from_output(output: &ProviderTurnOutput) -> Vec<Pr
                     text.as_str(),
                     PROVIDER_STREAM_EVENT_TOKEN_CHUNK_SIZE,
                 );
-                let chunk_count = chunks.len();
-                events.extend(chunks.into_iter().enumerate().map(|(index, token)| {
-                    ProviderEvent::ModelToken { token, is_final: index + 1 == chunk_count }
-                }));
+                for token in chunks {
+                    last_model_token_index = Some(events.len());
+                    events.push(ProviderEvent::ModelToken { token, is_final: false });
+                }
             }
             ProviderOutputContentPart::ToolCall { proposal_id, tool_name, input_json } => {
                 events.push(ProviderEvent::ToolProposal {
@@ -421,5 +428,95 @@ pub(super) fn provider_events_from_output(output: &ProviderTurnOutput) -> Vec<Pr
             }
         }
     }
+    if should_mark_final_model_token {
+        if let Some(index) = last_model_token_index {
+            if let Some(ProviderEvent::ModelToken { is_final, .. }) = events.get_mut(index) {
+                *is_final = true;
+            }
+        }
+    }
     events
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{
+        provider_events_from_output, ProviderEvent, ProviderFinishReason,
+        ProviderOutputContentPart, ProviderRawProviderRefs, ProviderRedactionState,
+        ProviderTurnOutput, ProviderUsage,
+    };
+
+    fn provider_output(
+        content_parts: Vec<ProviderOutputContentPart>,
+        finish_reason: ProviderFinishReason,
+    ) -> ProviderTurnOutput {
+        let full_text = content_parts
+            .iter()
+            .filter_map(|part| match part {
+                ProviderOutputContentPart::Text { text } => Some(text.as_str()),
+                ProviderOutputContentPart::ToolCall { .. } => None,
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        ProviderTurnOutput {
+            full_text,
+            content_parts,
+            finish_reason,
+            usage: ProviderUsage::new(1, 1, "test"),
+            raw_provider_refs: ProviderRawProviderRefs::default(),
+            redaction_state: ProviderRedactionState::default(),
+        }
+    }
+
+    #[test]
+    fn provider_events_from_output_defers_final_when_tool_call_follows_text() {
+        let output = provider_output(
+            vec![
+                ProviderOutputContentPart::Text {
+                    text: "I will inspect the workspace.".to_owned(),
+                },
+                ProviderOutputContentPart::ToolCall {
+                    proposal_id: "proposal-1".to_owned(),
+                    tool_name: "palyra.process.run".to_owned(),
+                    input_json: json!({"command": "ls", "args": []}),
+                },
+            ],
+            ProviderFinishReason::ToolCalls,
+        );
+
+        let events = provider_events_from_output(&output);
+
+        assert!(
+            matches!(events.first(), Some(ProviderEvent::ModelToken { is_final: false, .. })),
+            "{events:?}"
+        );
+        assert!(
+            matches!(events.last(), Some(ProviderEvent::ToolProposal { proposal_id, .. }) if proposal_id == "proposal-1"),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn provider_events_from_output_marks_only_last_text_token_final_without_tool_calls() {
+        let output = provider_output(
+            vec![
+                ProviderOutputContentPart::Text { text: "First part.".to_owned() },
+                ProviderOutputContentPart::Text { text: "Final answer.".to_owned() },
+            ],
+            ProviderFinishReason::Stop,
+        );
+
+        let events = provider_events_from_output(&output);
+        let final_flags = events
+            .iter()
+            .filter_map(|event| match event {
+                ProviderEvent::ModelToken { is_final, .. } => Some(*is_final),
+                ProviderEvent::ToolProposal { .. } => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(final_flags, vec![false, true]);
+    }
 }
