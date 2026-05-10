@@ -870,6 +870,7 @@ exec "$resolvedTargetBinary" "$@"
             }
         }
     }
+    $parentShellPathNote = "The installer updated PATH for this installer process and the selected persistent shell profile when requested, but the parent shell that launched the installer cannot inherit child-process PATH changes. Use command_path from this metadata in the current parent shell, or open a new terminal before running 'palyra'."
 
     return [ordered]@{
         command_name = $commandName
@@ -883,6 +884,9 @@ exec "$resolvedTargetBinary" "$@"
         session_path_updated = $sessionPathUpdated
         persistent_path_requested = $PersistPath
         persistence_strategy = $persistenceStrategy
+        current_shell_command = $shimPaths[0]
+        new_shell_command = $commandName
+        parent_shell_path_note = $parentShellPathNote
         user_path_updated = $userPathUpdated
         legacy_path_entries_removed = @($legacyPathCleanup.removed_roots)
         legacy_session_path_updated = $legacyPathCleanup.session_path_updated

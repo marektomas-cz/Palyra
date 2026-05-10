@@ -142,6 +142,26 @@ $cliPersistenceStrategy = $installMetadata["cli_persistence_strategy"]
 if ([string]::IsNullOrWhiteSpace($cliPersistenceStrategy)) {
     $cliPersistenceStrategy = if ($IsWindows) { "windows-user-path" } else { "posix-profile" }
 }
+$resolvedCliCurrentShellCommand = $installMetadata["cli_current_shell_command"]
+if ([string]::IsNullOrWhiteSpace($resolvedCliCurrentShellCommand)) {
+    $resolvedCliCurrentShellCommand = $resolvedCliCommandPath
+}
+$resolvedCliNewShellCommand = $installMetadata["cli_new_shell_command"]
+if ([string]::IsNullOrWhiteSpace($resolvedCliNewShellCommand)) {
+    $resolvedCliNewShellCommand = "palyra"
+}
+$resolvedCliParentShellNote = $installMetadata["cli_parent_shell_note"]
+if ([string]::IsNullOrWhiteSpace($resolvedCliParentShellNote)) {
+    $resolvedCliParentShellNote = "The installer cannot update PATH in the parent shell that launched it. Use cli_command_path in the current parent shell, or open a new terminal before running 'palyra'."
+}
+$cliSessionPathUpdated = $installMetadata["cli_session_path_updated"]
+if ([string]::IsNullOrWhiteSpace($cliSessionPathUpdated)) {
+    $cliSessionPathUpdated = "unknown"
+}
+$cliUserPathUpdated = $installMetadata["cli_user_path_updated"]
+if ([string]::IsNullOrWhiteSpace($cliUserPathUpdated)) {
+    $cliUserPathUpdated = "unknown"
+}
 
 if ($IsWindows) {
     $windowsPathValue = @(
@@ -206,6 +226,11 @@ $installSummary = [ordered]@{
     cli_command_root = $resolvedCliCommandRoot
     cli_command_path = $resolvedCliCommandPath
     cli_persistence_strategy = $cliPersistenceStrategy
+    cli_session_path_updated = $cliSessionPathUpdated
+    cli_user_path_updated = $cliUserPathUpdated
+    cli_current_shell_command = $resolvedCliCurrentShellCommand
+    cli_new_shell_command = $resolvedCliNewShellCommand
+    cli_parent_shell_note = $resolvedCliParentShellNote
     launcher_path = $launcherPath
 }
 $installSummary |
@@ -224,4 +249,9 @@ Write-Output "state_root=$stateRoot"
 Write-Output "cli_command_root=$resolvedCliCommandRoot"
 Write-Output "cli_command_path=$resolvedCliCommandPath"
 Write-Output "cli_persistence_strategy=$cliPersistenceStrategy"
+Write-Output "cli_session_path_updated=$cliSessionPathUpdated"
+Write-Output "cli_user_path_updated=$cliUserPathUpdated"
+Write-Output "cli_current_shell_command=$resolvedCliCurrentShellCommand"
+Write-Output "cli_new_shell_command=$resolvedCliNewShellCommand"
+Write-Output "cli_parent_shell_note=$resolvedCliParentShellNote"
 Write-Output "launcher_path=$launcherPath"
