@@ -487,14 +487,27 @@ async fn probe_console_provider(
                         } else {
                             "live".to_owned()
                         };
+                    let empty_minimax_discovery_with_configured_models =
+                        payload.discovered_model_ids.is_empty()
+                            && target_uses_minimax_auth(target)
+                            && !target.configured_model_ids.is_empty();
                     payload.state = if payload.discovered_model_ids.is_empty() {
-                        "partial".to_owned()
+                        if empty_minimax_discovery_with_configured_models {
+                            "ok".to_owned()
+                        } else {
+                            "partial".to_owned()
+                        }
                     } else {
                         "ok".to_owned()
                     };
                     payload.message = if payload.discovered_model_ids.is_empty() {
-                        "provider connection succeeded but model discovery returned no ids"
-                            .to_owned()
+                        if empty_minimax_discovery_with_configured_models {
+                            "provider connection succeeded; MiniMax-compatible model discovery returned no ids, so configured model registry remains the source of selectable models"
+                                .to_owned()
+                        } else {
+                            "provider connection succeeded but model discovery returned no ids"
+                                .to_owned()
+                        }
                     } else {
                         format!(
                             "provider connection succeeded and discovered {} model(s)",

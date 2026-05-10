@@ -1033,6 +1033,107 @@ enabled = true
 }
 
 #[test]
+fn models_test_connection_accepts_empty_minimax_live_discovery() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+    let state_root = workdir.path().join("state");
+    fs::create_dir_all(&state_root)
+        .with_context(|| format!("failed to create {}", state_root.display()))?;
+    let server = MockProviderServer::spawn(vec![
+        MockProviderResponse {
+            status_line: "200 OK",
+            body: r#"{"data":[]}"#,
+            expected_header: Some("authorization: Bearer sk-minimax-test".to_owned()),
+        },
+        MockProviderResponse {
+            status_line: "200 OK",
+            body: r#"{"data":[]}"#,
+            expected_header: Some("authorization: Bearer sk-minimax-test".to_owned()),
+        },
+    ])?;
+    let config_path = workdir.path().join("palyra.toml");
+    fs::write(
+        &config_path,
+        format!(
+            r#"
+version = 1
+[model_provider]
+kind = "anthropic"
+auth_provider_kind = "minimax"
+
+[[model_provider.providers]]
+provider_id = "minimax-primary"
+kind = "anthropic"
+auth_provider_kind = "minimax"
+base_url = "{base_url}"
+api_key = "sk-minimax-test"
+
+[[model_provider.models]]
+model_id = "MiniMax-M2.7"
+provider_id = "minimax-primary"
+role = "chat"
+enabled = true
+"#,
+            base_url = server.base_url
+        ),
+    )
+    .with_context(|| format!("failed to write {}", config_path.display()))?;
+    let config_path_string = config_path.to_string_lossy().into_owned();
+    let state_root_string = state_root.to_string_lossy().into_owned();
+
+    for command in ["test-connection", "discover"] {
+        let output = run_cli(
+            &workdir,
+            &[
+                "--state-root",
+                &state_root_string,
+                "models",
+                command,
+                "--path",
+                &config_path_string,
+                "--refresh",
+                "--json",
+            ],
+        )?;
+        assert!(
+            output.status.success(),
+            "models {command} should return a structured MiniMax payload: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout).context("stdout was not valid UTF-8")?;
+        let payload: Value =
+            serde_json::from_str(stdout.as_str()).context("stdout was not JSON")?;
+        let provider =
+            payload.pointer("/providers/0").context("models output should include the provider")?;
+
+        assert_eq!(provider.get("state").and_then(Value::as_str), Some("ok"));
+        assert_eq!(provider.get("live_discovery_verified").and_then(Value::as_bool), Some(true));
+        assert_eq!(provider.get("discovery_source").and_then(Value::as_str), Some("live"));
+        assert_eq!(
+            provider.get("discovered_model_ids").and_then(Value::as_array).map(Vec::len),
+            Some(0)
+        );
+        assert_eq!(
+            provider
+                .get("configured_model_ids")
+                .and_then(Value::as_array)
+                .and_then(|models| models.first())
+                .and_then(Value::as_str),
+            Some("MiniMax-M2.7")
+        );
+        assert!(
+            provider.get("message").and_then(Value::as_str).is_some_and(|message| {
+                message.contains("MiniMax-compatible")
+                    && message.contains("configured model registry")
+            }),
+            "empty MiniMax discovery should explain configured registry source: {payload}"
+        );
+    }
+
+    server.finish()?;
+    Ok(())
+}
+
+#[test]
 fn models_test_connection_accepts_minimax_auth_provider_filter_alias() -> Result<()> {
     let workdir = TempDir::new().context("failed to create temporary workdir")?;
     let state_root = workdir.path().join("state");
