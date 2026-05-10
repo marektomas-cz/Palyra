@@ -1453,7 +1453,7 @@ fn collect_doctor_browser_snapshot(
         .and_then(|payload| payload.pointer("/failures/recent_health_failures"))
         .and_then(Value::as_u64);
     let error = if configured_enabled && !diagnostics_fetched {
-        admin_error.map(ToOwned::to_owned).or(Some("browser diagnostics unavailable".to_owned()))
+        Some(doctor_browser_diagnostics_unavailable_message(admin_error))
     } else {
         None
     };
@@ -1474,6 +1474,16 @@ fn collect_doctor_browser_snapshot(
         recent_relay_action_failures,
         recent_health_failures,
         error,
+    }
+}
+
+fn doctor_browser_diagnostics_unavailable_message(admin_error: Option<&str>) -> String {
+    match admin_error {
+        Some(error) => format!(
+            "gateway admin diagnostics did not provide browserd status: {error}. Run `palyra browser status --json` to check browserd directly, and restart the gateway if browser service configuration changed."
+        ),
+        None => "gateway admin status payload did not include browserd diagnostics; doctor reports browser state surfaced by the gateway only. Run `palyra browser status --json` to check browserd directly, and restart the gateway if browser service configuration changed."
+            .to_owned(),
     }
 }
 
