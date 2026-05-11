@@ -179,6 +179,8 @@ pub enum BrowserCommand {
         max_failure_screenshot_bytes: Option<u64>,
         #[arg(long)]
         output: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     #[command(about = "Observe the active tab and emit a bounded page snapshot")]
     Snapshot {

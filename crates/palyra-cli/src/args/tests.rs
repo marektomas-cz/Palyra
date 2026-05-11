@@ -3972,6 +3972,13 @@ fn parse_browser_local_json_flags() {
         fill.command,
         Command::Browser { command: BrowserCommand::Fill { json: true, .. } }
     ));
+
+    let wait =
+        Cli::parse_from(["palyra", "browser", "wait", session_id, "--text", "ready", "--json"]);
+    assert!(matches!(
+        wait.command,
+        Command::Browser { command: BrowserCommand::Wait { json: true, .. } }
+    ));
 }
 
 #[test]
