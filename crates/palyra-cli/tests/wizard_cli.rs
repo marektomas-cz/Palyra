@@ -149,6 +149,12 @@ fn setup_wizard_quickstart_emits_json_summary() -> Result<()> {
             "api-key",
             "--api-key-env",
             "OPENAI_API_KEY",
+            "--daemon-port",
+            "7152",
+            "--grpc-port",
+            "7452",
+            "--quic-port",
+            "7454",
             "--skip-channels",
             "--skip-skills",
             "--json",
@@ -168,6 +174,10 @@ fn setup_wizard_quickstart_emits_json_summary() -> Result<()> {
     );
     assert_eq!(payload.get("recommended_step_id").and_then(Value::as_str), Some("agent_identity"));
     assert_eq!(payload.get("flow").and_then(Value::as_str), Some("quickstart"));
+    assert_eq!(
+        payload.get("dashboard_url").and_then(Value::as_str),
+        Some("http://127.0.0.1:7152/")
+    );
     assert_eq!(
         payload.get("config_path").and_then(Value::as_str),
         Some(config_path_string.as_str())
@@ -194,6 +204,31 @@ fn setup_wizard_quickstart_emits_json_summary() -> Result<()> {
         "expected structured health checks in JSON summary: {payload}"
     );
     assert!(config_path.exists(), "setup wizard should create config file");
+    let config_toml = fs::read_to_string(config_path.as_path())
+        .with_context(|| format!("failed to read {}", config_path.display()))?;
+    let config_document: toml::Value =
+        toml::from_str(config_toml.as_str()).context("setup wizard config should be valid TOML")?;
+    assert_eq!(
+        config_document
+            .get("daemon")
+            .and_then(|value| value.get("port"))
+            .and_then(toml::Value::as_integer),
+        Some(7152)
+    );
+    assert_eq!(
+        config_document
+            .get("gateway")
+            .and_then(|value| value.get("grpc_port"))
+            .and_then(toml::Value::as_integer),
+        Some(7452)
+    );
+    assert_eq!(
+        config_document
+            .get("gateway")
+            .and_then(|value| value.get("quic_port"))
+            .and_then(toml::Value::as_integer),
+        Some(7454)
+    );
     Ok(())
 }
 

@@ -1058,6 +1058,7 @@ fn execute_onboarding_flow(
         WizardFlowKind::Manual => populate_manual_plan(wizard, request, &mut plan)?,
         WizardFlowKind::Remote => populate_remote_plan(wizard, &mut plan)?,
     }
+    apply_explicit_port_overrides(request, &mut plan);
 
     let configure_channels = wizard.confirm(confirm_step(
         "configure_channels",
@@ -1158,6 +1159,21 @@ fn execute_onboarding_flow(
     }
 
     Ok(plan)
+}
+
+fn apply_explicit_port_overrides(
+    request: &OnboardingWizardRequest,
+    plan: &mut OnboardingMutationPlan,
+) {
+    if let Some(port) = request.options.daemon_port {
+        plan.daemon_port = Some(port);
+    }
+    if let Some(port) = request.options.grpc_port {
+        plan.grpc_port = Some(port);
+    }
+    if let Some(port) = request.options.quic_port {
+        plan.quic_port = Some(port);
+    }
 }
 
 fn populate_quickstart_plan(
