@@ -53,9 +53,9 @@ use crate::application::{
         redact_memory_text_for_output,
     },
     provider_input::{
-        build_previous_run_context_prompt, memory_auto_inject_tape_payload,
-        prepare_model_provider_input, render_memory_augmented_prompt, MemoryPromptFailureMode,
-        PrepareModelProviderInputRequest,
+        build_memory_augmented_prompt, build_previous_run_context_prompt,
+        memory_auto_inject_tape_payload, prepare_model_provider_input,
+        render_memory_augmented_prompt, MemoryPromptFailureMode, PrepareModelProviderInputRequest,
     },
     route_message::approval::resolve_route_tool_approval_outcome,
     route_message::response::parse_route_message_structured_output,
@@ -1551,6 +1551,93 @@ async fn prepare_model_provider_input_fail_mode_propagates_tape_append_error() {
     )
     .await;
     assert!(result.is_err(), "fail mode must propagate memory auto-inject tape persistence errors");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn memory_auto_inject_searches_principal_scope_across_sessions() {
+    let state = build_test_runtime_state(false);
+    let mut memory_config = state.memory_config_snapshot();
+    memory_config.auto_inject_enabled = true;
+    memory_config.auto_inject_max_items = 2;
+    state.configure_memory(memory_config);
+
+    let context = RequestContext {
+        principal: "user:ops".to_owned(),
+        device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+        channel: Some("cli".to_owned()),
+    };
+    let previous_session_id = "01ARZ3NDEKTSV4RRFFQ69G5FC0";
+    let current_session_id = "01ARZ3NDEKTSV4RRFFQ69G5FC1";
+    let current_run_id = "01ARZ3NDEKTSV4RRFFQ69G5FC2";
+    upsert_test_orchestrator_session(&state, &context, previous_session_id);
+    upsert_test_orchestrator_session(&state, &context, current_session_id);
+    state
+        .start_orchestrator_run(OrchestratorRunStartRequest {
+            run_id: current_run_id.to_owned(),
+            session_id: current_session_id.to_owned(),
+            origin_kind: "memory_auto_inject_test".to_owned(),
+            origin_run_id: None,
+            triggered_by_principal: Some(context.principal.clone()),
+            parameter_delta_json: None,
+        })
+        .await
+        .expect("test run should start");
+
+    state
+        .ingest_memory_item(MemoryItemCreateRequest {
+            memory_id: "01ARZ3NDEKTSV4RRFFQ69G5FC3".to_owned(),
+            principal: context.principal.clone(),
+            channel: context.channel.clone(),
+            session_id: Some(previous_session_id.to_owned()),
+            source: MemorySource::Manual,
+            content_text:
+                "Palyra E2E memory smoke preference: TypeScript, Playwright, short Czech reports"
+                    .to_owned(),
+            tags: vec!["preference".to_owned()],
+            confidence: Some(0.95),
+            ttl_unix_ms: None,
+        })
+        .await
+        .expect("memory ingest should seed previous-session recall");
+
+    let mut tape_seq = 1_i64;
+    let prompt = build_memory_augmented_prompt(
+        &state,
+        &context,
+        current_run_id,
+        &mut tape_seq,
+        current_session_id,
+        "Palyra E2E memory smoke TypeScript Playwright Czech reports",
+        "What reporting language and tooling preference should I use?",
+    )
+    .await
+    .expect("cross-session memory auto-inject should succeed");
+
+    assert!(
+        prompt.contains("<memory_context"),
+        "principal-wide recall should inject memory context: {prompt}"
+    );
+    assert!(
+        prompt.contains("TypeScript, Playwright, short Czech reports"),
+        "previous-session preference should be visible in the injected snippet: {prompt}"
+    );
+
+    let tape = state
+        .journal_store
+        .orchestrator_tape(current_run_id)
+        .expect("memory auto-inject tape should load");
+    let event = tape
+        .iter()
+        .find(|event| event.event_type == "memory_auto_inject")
+        .expect("principal recall should append memory_auto_inject tape event");
+    let payload: Value =
+        serde_json::from_str(event.payload_json.as_str()).expect("event payload should decode");
+    assert_eq!(payload.get("injected_count").and_then(Value::as_u64), Some(1));
+    assert_eq!(
+        payload.pointer("/hits/0/scope").and_then(Value::as_str),
+        Some("session"),
+        "principal recall may retrieve a hit originally written in another session"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

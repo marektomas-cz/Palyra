@@ -174,16 +174,16 @@ pub(crate) async fn build_memory_augmented_prompt(
     if !memory_config.auto_inject_enabled || memory_config.auto_inject_max_items == 0 {
         return Ok(prompt_input_text.to_owned());
     }
-    let resource = format!("memory:session:{session_id}");
+    let resource = "memory:principal";
     if let Err(error) =
-        authorize_memory_action(context.principal.as_str(), "memory.search", resource.as_str())
+        authorize_memory_action(context.principal.as_str(), "memory.search", resource)
     {
         warn!(
             run_id,
             principal = %context.principal,
             session_id,
             status_message = %error.message(),
-            "memory auto-inject skipped because policy denied access"
+            "memory auto-inject skipped because policy denied principal recall access"
         );
         return Ok(prompt_input_text.to_owned());
     }
@@ -191,8 +191,8 @@ pub(crate) async fn build_memory_augmented_prompt(
     let search_hits = match runtime_state
         .search_memory(MemorySearchRequest {
             principal: context.principal.clone(),
-            channel: context.channel.clone(),
-            session_id: Some(session_id.to_owned()),
+            channel: None,
+            session_id: None,
             query: memory_query_text.to_owned(),
             top_k: memory_config.auto_inject_max_items,
             min_score: MEMORY_AUTO_INJECT_MIN_SCORE,
