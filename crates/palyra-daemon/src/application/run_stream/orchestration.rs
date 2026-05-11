@@ -1114,6 +1114,14 @@ fn terminal_tool_authorization_failure(result: &RunStreamToolResultForModel) -> 
             truncate_with_ellipsis(error.to_owned(), 512)
         ));
     }
+    if is_cli_approval_mode_deny(error) {
+        return Some(format!(
+            "tool execution was blocked by --approval-mode deny: tool={} proposal_id={} error={}. No approval prompt is pending and the denied tool action was not executed. Rerun in an interactive terminal, use --approval-mode allow-once for per-request approval, or use --allow-sensitive-tools only after reviewing the requested tool risk.",
+            result.tool_name,
+            result.proposal_id,
+            truncate_with_ellipsis(error.to_owned(), 512)
+        ));
+    }
 
     Some(format!(
         "tool execution blocked by approval or policy: tool={} proposal_id={} error={}",
@@ -1132,6 +1140,10 @@ fn is_noninteractive_cli_approval_denial(error: &str) -> bool {
     error.to_ascii_lowercase().contains("approval_required_non_interactive_cli")
 }
 
+fn is_cli_approval_mode_deny(error: &str) -> bool {
+    error.to_ascii_lowercase().contains("denied_by_cli_approval_mode_deny")
+}
+
 fn contains_raw_provider_tool_call_markup(text: &str) -> bool {
     let normalized = text.to_ascii_lowercase();
     normalized.contains("<minimax:tool_call")
@@ -1142,6 +1154,7 @@ const TERMINAL_TOOL_AUTHORIZATION_ERROR_MARKERS: &[&str] = &[
     "approval_response_error",
     "approval_response_timeout",
     "approval_required_non_interactive_cli",
+    "denied_by_cli_approval_mode_deny",
 ];
 
 #[allow(clippy::result_large_err)]
@@ -1277,6 +1290,28 @@ mod tests {
         assert!(message.contains("--approval-mode allow-once"));
         assert!(message.contains("--allow-sensitive-tools"));
         assert!(message.contains("toolu_noninteractive_01"));
+    }
+
+    #[test]
+    fn terminal_tool_authorization_failure_stops_cli_deny_mode() {
+        let result = RunStreamToolResultForModel {
+            proposal_id: "toolu_deny_mode_01".to_owned(),
+            tool_name: "palyra.fs.read_file".to_owned(),
+            outcome: crate::tool_protocol::denied_execution_outcome(
+                "toolu_deny_mode_01",
+                "palyra.fs.read_file",
+                br#"{"path":"generated/temp.txt"}"#,
+                "tool execution denied by explicit client approval response; tool=palyra.fs.read_file; approval_reason=denied_by_cli_approval_mode_deny; original_reason=requires approval",
+            ),
+        };
+
+        let message = terminal_tool_authorization_failure(&result)
+            .expect("CLI deny mode approval denials should terminate the run");
+        assert!(message.contains("--approval-mode deny"));
+        assert!(message.contains("No approval prompt is pending"));
+        assert!(message.contains("was not executed"));
+        assert!(message.contains("--approval-mode allow-once"));
+        assert!(message.contains("toolu_deny_mode_01"));
     }
 
     #[test]
