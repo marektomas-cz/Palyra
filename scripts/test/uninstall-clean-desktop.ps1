@@ -53,7 +53,7 @@ function Remove-CleanDesktopCliExposureFallback {
     if (Test-Path -LiteralPath $commandRootPath -PathType Container) {
         $shimNames =
             if ($IsWindows) {
-                @("palyra.cmd", "palyra.ps1")
+                @("palyra.cmd", "palyra-pwsh.ps1", "palyra.ps1")
             } else {
                 @("palyra")
             }

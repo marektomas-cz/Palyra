@@ -811,7 +811,7 @@ $(if ($null -ne $resolvedConfigPath) { 'set "PALYRA_CONFIG=' + $resolvedConfigPa
         Set-Content -LiteralPath $cmdShimPath -Value $cmdShimBody -NoNewline
         $shimPaths.Add($cmdShimPath) | Out-Null
 
-        $psShimPath = Join-Path $resolvedCommandRoot "$commandName.ps1"
+        $psShimPath = Join-Path $resolvedCommandRoot "$commandName-pwsh.ps1"
         $psShimBody =
 @"
 Set-StrictMode -Version Latest
