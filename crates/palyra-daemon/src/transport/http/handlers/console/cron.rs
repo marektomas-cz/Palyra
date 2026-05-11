@@ -1,3 +1,4 @@
+use crate::journal::CronJobRecord;
 use crate::*;
 
 pub(crate) async fn console_cron_list_handler(
@@ -117,13 +118,27 @@ pub(crate) async fn console_cron_set_enabled_handler(
     validate_canonical_id(job_id.as_str()).map_err(|_| {
         runtime_status_response(tonic::Status::invalid_argument("job_id must be a canonical ULID"))
     })?;
-    ensure_console_cron_job_owner(&state, job_id.as_str(), session.context.principal.as_str())
-        .await?;
+    let job = load_console_cron_job_for_owner(
+        &state,
+        job_id.as_str(),
+        session.context.principal.as_str(),
+    )
+    .await?;
+    let next_run_at_unix_ms = crate::cron::next_run_at_for_enabled_state(
+        &job,
+        payload.enabled,
+        crate::gateway::current_unix_ms_status().map_err(runtime_status_response)?,
+    )
+    .map_err(runtime_status_response)?;
     let updated = state
         .runtime
         .update_cron_job(
             job_id.clone(),
-            CronJobUpdatePatch { enabled: Some(payload.enabled), ..CronJobUpdatePatch::default() },
+            CronJobUpdatePatch {
+                enabled: Some(payload.enabled),
+                next_run_at_unix_ms: Some(next_run_at_unix_ms),
+                ..CronJobUpdatePatch::default()
+            },
         )
         .await
         .map_err(runtime_status_response)?;
@@ -195,6 +210,16 @@ async fn ensure_console_cron_job_owner(
     job_id: &str,
     principal: &str,
 ) -> Result<(), Response> {
+    load_console_cron_job_for_owner(state, job_id, principal).await?;
+    Ok(())
+}
+
+#[allow(clippy::result_large_err)]
+async fn load_console_cron_job_for_owner(
+    state: &AppState,
+    job_id: &str,
+    principal: &str,
+) -> Result<CronJobRecord, Response> {
     let job = state
         .runtime
         .cron_job(job_id.to_owned())
@@ -210,7 +235,7 @@ async fn ensure_console_cron_job_owner(
             "cron job owner mismatch for authenticated principal",
         )));
     }
-    Ok(())
+    Ok(job)
 }
 
 #[allow(clippy::result_large_err)]

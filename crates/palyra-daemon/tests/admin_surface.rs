@@ -1609,6 +1609,10 @@ fn console_cron_workflow_create_disable_and_list_runs() -> Result<()> {
         Some(false),
         "console cron disable response should set enabled=false"
     );
+    assert!(
+        disable_response.get("job").and_then(|job| job.get("next_run_at_unix_ms")).is_none(),
+        "disabled cron jobs must not expose a future next_run_at_unix_ms"
+    );
 
     let runs_response = client
         .get(format!("http://127.0.0.1:{admin_port}/console/v1/cron/jobs/{job_id}/runs"))

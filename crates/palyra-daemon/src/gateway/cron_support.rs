@@ -198,7 +198,7 @@ pub(crate) fn cron_job_message(job: &CronJobRecord) -> Result<cron_v1::Job, Stat
         }),
         misfire_policy: cron_misfire_to_proto(job.misfire_policy),
         jitter_ms: job.jitter_ms,
-        next_run_at_unix_ms: job.next_run_at_unix_ms.unwrap_or_default(),
+        next_run_at_unix_ms: crate::cron::visible_next_run_at_unix_ms(job).unwrap_or_default(),
         last_run_at_unix_ms: job.last_run_at_unix_ms.unwrap_or_default(),
         created_at_unix_ms: job.created_at_unix_ms,
         updated_at_unix_ms: job.updated_at_unix_ms,

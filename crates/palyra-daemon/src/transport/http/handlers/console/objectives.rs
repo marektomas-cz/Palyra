@@ -829,7 +829,7 @@ async fn load_objective_routine(
         "schedule_type": job.schedule_type.as_str(),
         "schedule_payload": serde_json::from_str::<Value>(job.schedule_payload_json.as_str())
             .unwrap_or_else(|_| json!({ "raw": job.schedule_payload_json })),
-        "next_run_at_unix_ms": job.next_run_at_unix_ms,
+        "next_run_at_unix_ms": cron::visible_next_run_at_unix_ms(&job),
         "last_run_at_unix_ms": job.last_run_at_unix_ms,
         "queued_run": job.queued_run,
     })))
@@ -880,13 +880,17 @@ fn compute_objective_health(
             _ => "active",
         },
     };
+    let next_run_at_unix_ms = if objective.state == ObjectiveState::Active
+        && objective.automation.enabled
+    {
+        routine.and_then(|entry| entry.get("next_run_at_unix_ms")).cloned().unwrap_or(Value::Null)
+    } else {
+        Value::Null
+    };
     json!({
         "state": health,
         "last_run_status": status,
-        "next_run_at_unix_ms": routine
-            .and_then(|entry| entry.get("next_run_at_unix_ms"))
-            .cloned()
-            .unwrap_or(Value::Null),
+        "next_run_at_unix_ms": next_run_at_unix_ms,
     })
 }
 
@@ -975,11 +979,31 @@ async fn set_objective_job_enabled(
     let Some(routine_id) = objective.automation.routine_id.as_ref() else {
         return Ok(());
     };
+    let job = state
+        .runtime
+        .cron_job(routine_id.clone())
+        .await
+        .map_err(runtime_status_response)?
+        .ok_or_else(|| {
+            runtime_status_response(tonic::Status::not_found(format!(
+                "objective routine not found: {routine_id}"
+            )))
+        })?;
+    let next_run_at_unix_ms = cron::next_run_at_for_enabled_state(
+        &job,
+        enabled,
+        crate::gateway::current_unix_ms_status().map_err(runtime_status_response)?,
+    )
+    .map_err(runtime_status_response)?;
     state
         .runtime
         .update_cron_job(
             routine_id.clone(),
-            CronJobUpdatePatch { enabled: Some(enabled), ..CronJobUpdatePatch::default() },
+            CronJobUpdatePatch {
+                enabled: Some(enabled),
+                next_run_at_unix_ms: Some(next_run_at_unix_ms),
+                ..CronJobUpdatePatch::default()
+            },
         )
         .await
         .map_err(runtime_status_response)?;
@@ -2109,6 +2133,18 @@ mod tests {
             Some(&json!({ "status": "failed" })),
         );
         assert_eq!(health.get("state").and_then(serde_json::Value::as_str), Some("attention"));
+    }
+
+    #[test]
+    fn health_hides_next_run_for_paused_objectives() {
+        let mut objective = sample_objective();
+        objective.state = ObjectiveState::Paused;
+        objective.automation.enabled = false;
+
+        let health =
+            compute_objective_health(&objective, Some(&json!({ "next_run_at_unix_ms": 10 })), None);
+
+        assert!(health.get("next_run_at_unix_ms").is_some_and(serde_json::Value::is_null));
     }
 
     #[test]

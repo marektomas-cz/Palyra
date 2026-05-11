@@ -556,11 +556,16 @@ async fn set_routine_enabled(
             ),
         )
         .await?;
+    let effective_enabled = enabled && !approval_required;
+    let next_run_at_unix_ms =
+        cron::next_run_at_for_enabled_state(&routine.job, effective_enabled, current_unix_ms())
+            .map_err(sanitize_status_message)?;
     let updated = runtime_state
         .update_cron_job(
             routine.job.job_id.clone(),
             CronJobUpdatePatch {
-                enabled: Some(enabled && !approval_required),
+                enabled: Some(effective_enabled),
+                next_run_at_unix_ms: Some(next_run_at_unix_ms),
                 ..CronJobUpdatePatch::default()
             },
         )
@@ -1234,7 +1239,7 @@ fn routine_view_from_parts(job: &CronJobRecord, metadata: &RoutineMetadataRecord
         "enabled": job.enabled,
         "schedule_type": job.schedule_type.as_str(),
         "schedule_payload": serde_json::from_str::<Value>(job.schedule_payload_json.as_str()).unwrap_or_else(|_| json!({ "raw": job.schedule_payload_json })),
-        "next_run_at_unix_ms": job.next_run_at_unix_ms,
+        "next_run_at_unix_ms": cron::visible_next_run_at_unix_ms(job),
         "last_run_at_unix_ms": job.last_run_at_unix_ms,
         "queued_run": job.queued_run,
         "concurrency_policy": job.concurrency_policy.as_str(),

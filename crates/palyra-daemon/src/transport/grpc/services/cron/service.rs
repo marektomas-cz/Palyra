@@ -133,6 +133,7 @@ impl cron_v1::cron_service_server::CronService for CronServiceImpl {
             .ok_or_else(|| Status::not_found(format!("cron job not found: {job_id}")))?;
         enforce_cron_job_owner(context.principal.as_str(), existing_job.owner_principal.as_str())?;
 
+        let now_unix_ms = current_unix_ms_status()?;
         let mut patch = CronJobUpdatePatch::default();
         if let Some(name) = payload.name {
             patch.name = Some(validate_cron_job_name(name)?);
@@ -157,17 +158,25 @@ impl cron_v1::cron_service_server::CronService for CronServiceImpl {
             patch.session_label = Some(non_empty(session_label));
         }
         if payload.schedule.is_some() {
-            let schedule = normalize_schedule(
-                payload.schedule,
-                current_unix_ms_status()?,
-                self.cron_timezone_mode,
-            )?;
+            let schedule =
+                normalize_schedule(payload.schedule, now_unix_ms, self.cron_timezone_mode)?;
             patch.schedule_type = Some(schedule.schedule_type);
             patch.schedule_payload_json = Some(schedule.schedule_payload_json);
             patch.next_run_at_unix_ms = Some(schedule.next_run_at_unix_ms);
         }
         if let Some(enabled) = payload.enabled {
             patch.enabled = Some(enabled);
+            if enabled {
+                if patch.next_run_at_unix_ms.is_none() {
+                    patch.next_run_at_unix_ms = Some(crate::cron::next_run_at_for_enabled_state(
+                        &existing_job,
+                        true,
+                        now_unix_ms,
+                    )?);
+                }
+            } else {
+                patch.next_run_at_unix_ms = Some(None);
+            }
         }
         if let Some(concurrency_policy) = payload.concurrency_policy {
             patch.concurrency_policy = Some(cron_concurrency_from_proto(concurrency_policy)?);

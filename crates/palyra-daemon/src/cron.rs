@@ -578,6 +578,27 @@ pub fn compute_misfire_recovery_plan(
     })
 }
 
+#[must_use]
+pub fn visible_next_run_at_unix_ms(job: &CronJobRecord) -> Option<i64> {
+    if job.enabled {
+        job.next_run_at_unix_ms
+    } else {
+        None
+    }
+}
+
+pub fn next_run_at_for_enabled_state(
+    job: &CronJobRecord,
+    enabled: bool,
+    now_unix_ms: i64,
+) -> Result<Option<i64>, Status> {
+    if !enabled {
+        return Ok(None);
+    }
+
+    Ok(compute_misfire_recovery_plan(job, now_unix_ms, now_unix_ms)?.next_run_at_unix_ms)
+}
+
 #[allow(dead_code)]
 pub fn build_scheduler_health_snapshot(
     input: SchedulerHealthInput<'_>,
