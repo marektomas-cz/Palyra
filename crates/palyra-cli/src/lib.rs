@@ -4483,6 +4483,126 @@ fn sanitized_optional_json_text(value: &str) -> Value {
     }
 }
 
+const STREAM_JSON_MAX_DEPTH: usize = 8;
+const STREAM_JSON_MAX_OBJECT_FIELDS: usize = 64;
+const STREAM_JSON_MAX_ARRAY_ITEMS: usize = 64;
+const STREAM_JSON_MAX_STRING_CHARS: usize = 2_048;
+
+fn stream_json_payload_value(bytes: &[u8]) -> Value {
+    if bytes.is_empty() {
+        return Value::Null;
+    }
+
+    match serde_json::from_slice::<Value>(bytes) {
+        Ok(value) => redact_stream_json_value(value, None, 0),
+        Err(_) => match std::str::from_utf8(bytes) {
+            Ok(raw) => {
+                let sanitized = sanitize_stream_json_string(raw);
+                if sanitized.trim().is_empty() {
+                    json!({ "raw_utf8": Value::Null })
+                } else {
+                    json!({ "raw_utf8": sanitized })
+                }
+            }
+            Err(_) => json!({
+                "decode_error": "payload is not valid JSON or UTF-8",
+                "byte_len": bytes.len(),
+            }),
+        },
+    }
+}
+
+fn redact_stream_json_value(value: Value, key_context: Option<&str>, depth: usize) -> Value {
+    if depth >= STREAM_JSON_MAX_DEPTH {
+        return Value::String("<truncated:depth>".to_owned());
+    }
+
+    match value {
+        Value::Object(map) => {
+            let mut output = serde_json::Map::new();
+            let mut omitted = 0usize;
+            for (key, entry) in map {
+                if output.len() >= STREAM_JSON_MAX_OBJECT_FIELDS {
+                    omitted += 1;
+                    continue;
+                }
+                let value = if is_sensitive_key(key.as_str()) {
+                    Value::String(REDACTED.to_owned())
+                } else {
+                    redact_stream_json_value(entry, Some(key.as_str()), depth + 1)
+                };
+                output.insert(key, value);
+            }
+            if omitted > 0 {
+                output.insert("_truncated_fields".to_owned(), json!(omitted));
+            }
+            Value::Object(output)
+        }
+        Value::Array(items) => {
+            let mut output = Vec::new();
+            let mut redact_next = false;
+            let mut omitted = 0usize;
+            for item in items {
+                if output.len() >= STREAM_JSON_MAX_ARRAY_ITEMS {
+                    omitted += 1;
+                    continue;
+                }
+                let redacted = if redact_next {
+                    redact_next = false;
+                    Value::String(REDACTED.to_owned())
+                } else {
+                    let next_is_sensitive = match &item {
+                        Value::String(raw) => is_sensitive_cli_arg_marker(raw.as_str()),
+                        _ => false,
+                    };
+                    let redacted = redact_stream_json_value(item, key_context, depth + 1);
+                    redact_next = next_is_sensitive;
+                    redacted
+                };
+                output.push(redacted);
+            }
+            if omitted > 0 {
+                output.push(json!({ "_truncated_items": omitted }));
+            }
+            Value::Array(output)
+        }
+        Value::String(raw) => {
+            if key_context.is_some_and(is_sensitive_key) {
+                return Value::String(REDACTED.to_owned());
+            }
+            Value::String(sanitize_stream_json_string_with_context(raw.as_str(), key_context))
+        }
+        other => other,
+    }
+}
+
+fn sanitize_stream_json_string_with_context(raw: &str, key_context: Option<&str>) -> String {
+    if key_context
+        .map(|key| key_contains_any(key, &["url", "uri", "endpoint", "location"]))
+        .unwrap_or(false)
+    {
+        return truncate_utf8_chars(redact_url(raw).as_str(), STREAM_JSON_MAX_STRING_CHARS);
+    }
+    sanitize_stream_json_string(raw)
+}
+
+fn sanitize_stream_json_string(raw: &str) -> String {
+    truncate_utf8_chars(sanitize_diagnostic_error(raw).as_str(), STREAM_JSON_MAX_STRING_CHARS)
+}
+
+fn is_sensitive_cli_arg_marker(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    if trimmed.eq_ignore_ascii_case("bearer") {
+        return true;
+    }
+    let normalized = trimmed
+        .trim_start_matches('-')
+        .replace(['-', '.'], "_")
+        .trim_matches(|candidate: char| candidate == '=' || candidate == ':')
+        .to_owned();
+    !normalized.is_empty() && is_sensitive_key(normalized.as_str())
+}
+
 fn is_safe_stream_label_char(candidate: char) -> bool {
     candidate.is_ascii_alphanumeric() || matches!(candidate, '.' | '_' | '-' | ':' | '/')
 }
@@ -4563,6 +4683,132 @@ mod agent_stream_output_tests {
 
         let json = sanitized_optional_json_text(error);
         assert_eq!(json, Value::String("failed with access_token=<redacted>".to_owned()));
+    }
+
+    #[test]
+    fn ndjson_tool_payloads_keep_safe_fields_and_redact_secrets() {
+        let event = common_v1::RunStreamEvent {
+            v: CANONICAL_PROTOCOL_MAJOR,
+            run_id: None,
+            body: Some(common_v1::run_stream_event::Body::ToolProposal(common_v1::ToolProposal {
+                proposal_id: None,
+                tool_name: "palyra.process.run".to_owned(),
+                input_json: serde_json::to_vec(&json!({
+                    "cmd": "palyra browser wait --json",
+                    "cwd": "C:/workspace",
+                    "api_key": "sk-test-secret",
+                    "args": ["--token", "raw-token", "--json"],
+                    "env": {
+                        "PATH": "C:/tools",
+                        "AUTHORIZATION": "Bearer hidden"
+                    }
+                }))
+                .expect("test payload should serialize"),
+                approval_required: false,
+            })),
+        };
+
+        let value = agent_event_json_value(&event);
+
+        assert_eq!(value["input_json"]["cmd"], "palyra browser wait --json");
+        assert_eq!(value["input_json"]["cwd"], "C:/workspace");
+        assert_eq!(value["input_json"]["api_key"], REDACTED);
+        assert_eq!(value["input_json"]["args"][1], REDACTED);
+        assert_eq!(value["input_json"]["env"]["PATH"], "C:/tools");
+        assert_eq!(value["input_json"]["env"]["AUTHORIZATION"], REDACTED);
+        let encoded = value.to_string();
+        assert!(!encoded.contains("sk-test-secret"), "{encoded}");
+        assert!(!encoded.contains("raw-token"), "{encoded}");
+        assert!(!encoded.contains("Bearer hidden"), "{encoded}");
+    }
+
+    #[test]
+    fn ndjson_tool_results_keep_safe_output_and_redact_inline_secrets() {
+        let event = common_v1::RunStreamEvent {
+            v: CANONICAL_PROTOCOL_MAJOR,
+            run_id: None,
+            body: Some(common_v1::run_stream_event::Body::ToolResult(common_v1::ToolResult {
+                proposal_id: None,
+                success: true,
+                output_json: serde_json::to_vec(&json!({
+                    "stdout": "PASS access_token=browser-secret",
+                    "url": "https://example.test/callback?access_token=raw&mode=ok",
+                    "status": "ok"
+                }))
+                .expect("test payload should serialize"),
+                error: String::new(),
+            })),
+        };
+
+        let value = agent_event_json_value(&event);
+
+        assert_eq!(value["output_json"]["stdout"], "PASS access_token=<redacted>");
+        assert_eq!(
+            value["output_json"]["url"],
+            "https://example.test/callback?access_token=<redacted>&mode=ok"
+        );
+        assert_eq!(value["output_json"]["status"], "ok");
+        let encoded = value.to_string();
+        assert!(!encoded.contains("browser-secret"), "{encoded}");
+        assert!(!encoded.contains("access_token=raw"), "{encoded}");
+    }
+
+    #[test]
+    fn ndjson_approval_prompts_keep_diagnostics_and_redact_details() {
+        let event = common_v1::RunStreamEvent {
+            v: CANONICAL_PROTOCOL_MAJOR,
+            run_id: None,
+            body: Some(common_v1::run_stream_event::Body::ToolApprovalRequest(
+                common_v1::ToolApprovalRequest {
+                    proposal_id: None,
+                    approval_id: None,
+                    tool_name: "palyra.fs.apply_patch".to_owned(),
+                    input_json: serde_json::to_vec(&json!({
+                        "path": "src/main.rs",
+                        "token": "raw-token"
+                    }))
+                    .expect("test payload should serialize"),
+                    approval_required: true,
+                    request_summary: "apply a workspace patch".to_owned(),
+                    prompt: Some(common_v1::ApprovalPrompt {
+                        title: "Apply patch".to_owned(),
+                        risk_level: common_v1::ApprovalRiskLevel::Medium as i32,
+                        subject_id: "approval-subject".to_owned(),
+                        summary: "Modify one file".to_owned(),
+                        options: vec![common_v1::ApprovalOption {
+                            option_id: "allow-once".to_owned(),
+                            label: "Allow once".to_owned(),
+                            description: "Approve this tool call".to_owned(),
+                            default_selected: true,
+                            decision_scope: common_v1::ApprovalDecisionScope::Once as i32,
+                            timebox_ttl_ms: 0,
+                        }],
+                        timeout_seconds: 30,
+                        details_json: serde_json::to_vec(&json!({
+                            "reason": "needs patch token=details-secret",
+                            "api_key": "sk-hidden"
+                        }))
+                        .expect("test payload should serialize"),
+                        policy_explanation: "workspace write requires approval".to_owned(),
+                    }),
+                },
+            )),
+        };
+
+        let value = agent_event_json_value(&event);
+
+        assert_eq!(value["request_summary"], "apply a workspace patch");
+        assert_eq!(value["prompt"]["title"], "Apply patch");
+        assert_eq!(value["prompt"]["summary"], "Modify one file");
+        assert_eq!(value["prompt"]["options"][0]["label"], "Allow once");
+        assert_eq!(value["input_json"]["path"], "src/main.rs");
+        assert_eq!(value["input_json"]["token"], REDACTED);
+        assert_eq!(value["prompt"]["details_json"]["api_key"], REDACTED);
+        assert_eq!(value["prompt"]["details_json"]["reason"], "needs patch token=<redacted>");
+        let encoded = value.to_string();
+        assert!(!encoded.contains("raw-token"), "{encoded}");
+        assert!(!encoded.contains("details-secret"), "{encoded}");
+        assert!(!encoded.contains("sk-hidden"), "{encoded}");
     }
 
     #[test]
@@ -4667,14 +4913,14 @@ fn agent_event_json_value(event: &common_v1::RunStreamEvent) -> serde_json::Valu
             "proposal_id": redacted_presence_json_value(proposal.proposal_id.is_some()),
             "tool_name": safe_stream_label_json_value(proposal.tool_name.as_str()),
             "approval_required": proposal.approval_required,
-            "input_json": redacted_presence_json_value(!proposal.input_json.is_empty()),
+            "input_json": stream_json_payload_value(proposal.input_json.as_slice()),
         }),
         Some(common_v1::run_stream_event::Body::ToolDecision(decision)) => json!({
             "type": "tool.decision",
             "run_id": run_id,
             "proposal_id": redacted_presence_json_value(decision.proposal_id.is_some()),
             "kind": tool_decision_kind_to_text(decision.kind),
-            "reason": redacted_presence_json_value(!decision.reason.trim().is_empty()),
+            "reason": sanitized_optional_json_text(decision.reason.as_str()),
             "approval_required": decision.approval_required,
             "policy_enforced": decision.policy_enforced,
         }),
@@ -4685,29 +4931,25 @@ fn agent_event_json_value(event: &common_v1::RunStreamEvent) -> serde_json::Valu
             "approval_id": redacted_presence_json_value(approval_request.approval_id.is_some()),
             "tool_name": safe_stream_label_json_value(approval_request.tool_name.as_str()),
             "approval_required": approval_request.approval_required,
-            "request_summary": redacted_presence_json_value(
-                !approval_request.request_summary.trim().is_empty()
-            ),
+            "request_summary": sanitized_optional_json_text(approval_request.request_summary.as_str()),
             "prompt": approval_request.prompt.as_ref().map(|prompt| json!({
-                "title": redacted_presence_json_value(!prompt.title.trim().is_empty()),
+                "title": sanitized_optional_json_text(prompt.title.as_str()),
                 "risk_level": approval_risk_to_text(prompt.risk_level),
                 "subject_id": redacted_presence_json_value(!prompt.subject_id.trim().is_empty()),
-                "summary": redacted_presence_json_value(!prompt.summary.trim().is_empty()),
-                "policy_explanation": redacted_presence_json_value(
-                    !prompt.policy_explanation.trim().is_empty()
-                ),
+                "summary": sanitized_optional_json_text(prompt.summary.as_str()),
+                "policy_explanation": sanitized_optional_json_text(prompt.policy_explanation.as_str()),
                 "timeout_seconds": prompt.timeout_seconds,
                 "options": prompt.options.iter().map(|option| json!({
                     "option_id": redacted_presence_json_value(!option.option_id.trim().is_empty()),
-                    "label": redacted_presence_json_value(!option.label.trim().is_empty()),
-                    "description": redacted_presence_json_value(!option.description.trim().is_empty()),
+                    "label": sanitized_optional_json_text(option.label.as_str()),
+                    "description": sanitized_optional_json_text(option.description.as_str()),
                     "default_selected": option.default_selected,
                     "decision_scope": approval_scope_to_text(option.decision_scope),
                     "timebox_ttl_ms": option.timebox_ttl_ms,
                 })).collect::<Vec<_>>(),
-                    "details_json": redacted_presence_json_value(!prompt.details_json.is_empty()),
+                    "details_json": stream_json_payload_value(prompt.details_json.as_slice()),
             })),
-            "input_json": redacted_presence_json_value(!approval_request.input_json.is_empty()),
+            "input_json": stream_json_payload_value(approval_request.input_json.as_slice()),
             "cli_hint": approval_required_cli_hint(),
         }),
         Some(common_v1::run_stream_event::Body::ToolApprovalResponse(approval_response)) => json!({
@@ -4716,7 +4958,7 @@ fn agent_event_json_value(event: &common_v1::RunStreamEvent) -> serde_json::Valu
             "proposal_id": redacted_presence_json_value(approval_response.proposal_id.is_some()),
             "approval_id": redacted_presence_json_value(approval_response.approval_id.is_some()),
             "approved": approval_response.approved,
-            "reason": redacted_presence_json_value(!approval_response.reason.trim().is_empty()),
+            "reason": sanitized_optional_json_text(approval_response.reason.as_str()),
             "decision_scope": approval_scope_to_text(approval_response.decision_scope),
             "decision_scope_ttl_ms": approval_response.decision_scope_ttl_ms,
         }),
@@ -4725,7 +4967,7 @@ fn agent_event_json_value(event: &common_v1::RunStreamEvent) -> serde_json::Valu
             "run_id": run_id,
             "proposal_id": redacted_presence_json_value(result.proposal_id.is_some()),
             "success": result.success,
-            "output_json": redacted_presence_json_value(!result.output_json.is_empty()),
+            "output_json": stream_json_payload_value(result.output_json.as_slice()),
             "error": sanitized_optional_json_text(result.error.as_str()),
         }),
         Some(common_v1::run_stream_event::Body::ToolAttestation(attestation)) => json!({
