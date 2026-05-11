@@ -34,6 +34,7 @@ $desktopPackageOutput = Join-Path $artifactsRoot "desktop"
 $cargoTargetRoot = Join-Path $artifactsRoot "cargo-target"
 $installRoot = Join-Path $workspaceRoot "install"
 $stateRoot = Join-Path $workspaceRoot "state"
+$cliCommandRoot = Join-Path $workspaceRoot "cli-bin"
 $desktopExecutable = Resolve-ExecutableName -BaseName "palyra-desktop-control-center"
 $daemonExecutable = Resolve-ExecutableName -BaseName "palyrad"
 $browserExecutable = Resolve-ExecutableName -BaseName "palyra-browserd"
@@ -123,6 +124,7 @@ $installOutput = & (Join-Path $repoRoot "scripts/release/install-desktop-package
     -ArchivePath $archivePath `
     -InstallRoot $installRoot `
     -StateRoot $stateRoot `
+    -CliCommandRoot $cliCommandRoot `
     -Force
 $installMetadata = Convert-KeyValueOutputToHashtable -Lines $installOutput
 $resolvedInstallRoot = $installMetadata["install_root"]
