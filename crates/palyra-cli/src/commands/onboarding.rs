@@ -446,7 +446,7 @@ fn build_onboarding_steps(
             "memory_embeddings",
             "Memory embeddings",
             signals.memory_embeddings_message.clone(),
-            control_plane::OnboardingStepStatus::InProgress,
+            control_plane::OnboardingStepStatus::Skipped,
             Some(run_cli_action(
                 "Review embeddings setup",
                 format!("palyra models status --path {}", signals.config_path),
@@ -1343,7 +1343,7 @@ anthropic_api_key = "sk-inline-minimax"
         assert!(signals.memory_embeddings_message.contains("palyra models set-embeddings"));
         assert_eq!(provider_step.status, control_plane::OnboardingStepStatus::Done);
         assert_eq!(provider_step.verification_state.as_deref(), Some("configured"));
-        assert_eq!(memory_step.status, control_plane::OnboardingStepStatus::InProgress);
+        assert_eq!(memory_step.status, control_plane::OnboardingStepStatus::Skipped);
         assert!(memory_step.optional);
         assert_eq!(memory_step.verification_state.as_deref(), Some("hash_fallback"));
         assert!(memory_step.summary.contains("palyra memory index --until-complete"));
