@@ -160,6 +160,7 @@ impl WorkspacePatchError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PatchOperation {
     Add { path: String, lines: Vec<String> },
+    Replace { path: String, lines: Vec<String> },
     Update { path: String, move_to: Option<String>, hunks: Vec<PatchHunk> },
     Delete { path: String },
 }
@@ -619,6 +620,23 @@ fn parse_patch_document(patch: &str) -> Result<Vec<PatchOperation>, WorkspacePat
             continue;
         }
 
+        if let Some(path) = control_line.strip_prefix("*** Replace File: ") {
+            index = index.saturating_add(1);
+            let mut replace_lines = Vec::new();
+            while index < lines.len() {
+                let body_line = lines[index];
+                if is_patch_header_or_end(body_line) {
+                    break;
+                }
+                let content = body_line.strip_prefix('+').unwrap_or(body_line);
+                replace_lines.push(content.to_owned());
+                index = index.saturating_add(1);
+            }
+            operations
+                .push(PatchOperation::Replace { path: path.to_owned(), lines: replace_lines });
+            continue;
+        }
+
         if let Some(path) = control_line.strip_prefix("*** Delete File: ") {
             operations.push(PatchOperation::Delete { path: path.to_owned() });
             index = index.saturating_add(1);
@@ -700,7 +718,7 @@ fn parse_patch_document(patch: &str) -> Result<Vec<PatchOperation>, WorkspacePat
         return Err(parse_error(
             index + 1,
             1,
-            "expected patch operation header: *** Add File, *** Update File, or *** Delete File",
+            "expected patch operation header: *** Add File, *** Replace File, *** Update File, or *** Delete File",
         ));
     }
 
@@ -792,6 +810,31 @@ fn build_patch_plan(
                     before_size_bytes: Some(before_bytes.len() as u64),
                     after_sha256: None,
                     after_size_bytes: None,
+                });
+            }
+            PatchOperation::Replace { path, lines } => {
+                let relative = parse_relative_patch_path(path)?;
+                let (target, target_root_index) =
+                    resolve_existing_path(canonical_roots, &relative, path)?;
+                let before_bytes = read_file_capped(target.as_path(), path, limits.max_file_bytes)?;
+                let after_bytes = render_add_file_bytes(lines.as_slice());
+                ensure_file_size(path, after_bytes.len(), limits.max_file_bytes)?;
+
+                touched_paths.insert(target.clone());
+                actions.push(PlannedAction::Write {
+                    path: target,
+                    root: canonical_roots[target_root_index].clone(),
+                    bytes: after_bytes.clone(),
+                });
+                file_attestations.push(WorkspacePatchFileAttestation {
+                    path: normalize_relative_path_display(&relative),
+                    workspace_root_index: target_root_index,
+                    operation: "replace".to_owned(),
+                    moved_from: None,
+                    before_sha256: Some(sha256_hex(before_bytes.as_slice())),
+                    before_size_bytes: Some(before_bytes.len() as u64),
+                    after_sha256: Some(sha256_hex(after_bytes.as_slice())),
+                    after_size_bytes: Some(after_bytes.len() as u64),
                 });
             }
             PatchOperation::Update { path, move_to, hunks } => {
@@ -1392,6 +1435,32 @@ mod tests {
             fs::read_to_string(workspace.join("notes.txt")).expect("updated file should read"),
             "alpha\nbeta-updated\n"
         );
+    }
+
+    #[test]
+    fn apply_workspace_patch_replaces_existing_file() {
+        let temp = tempdir().expect("tempdir should be created");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace should exist");
+        fs::write(workspace.join("math.test.js"), "function add(a, b) { return a + b; }\n")
+            .expect("seed file should exist");
+
+        let patch = "*** Begin Patch\n*** Replace File: math.test.js\n+function add(a, b) { return a + b; }\n+function subtract(a, b) { return a - b; }\n+\n+console.log(add(2, 3));\n+console.log(subtract(5, 2));\n*** End Patch\n";
+        let outcome = apply_workspace_patch(
+            std::slice::from_ref(&workspace),
+            &default_request(patch, false),
+            &default_limits(),
+        )
+        .expect("replace-file patch should apply");
+
+        assert_eq!(
+            fs::read_to_string(workspace.join("math.test.js")).expect("replaced file should read"),
+            "function add(a, b) { return a + b; }\nfunction subtract(a, b) { return a - b; }\n\nconsole.log(add(2, 3));\nconsole.log(subtract(5, 2));\n"
+        );
+        let attestation = attestation_by_path(&outcome, "math.test.js");
+        assert_eq!(attestation.operation, "replace");
+        assert!(attestation.before_sha256.is_some());
+        assert!(attestation.after_sha256.is_some());
     }
 
     #[test]

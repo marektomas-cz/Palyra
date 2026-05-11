@@ -29,7 +29,7 @@ use crate::{
 
 use checkpoint_flow::WorkspacePatchMutationRequest;
 
-const WORKSPACE_PATCH_GRAMMAR_HINT: &str = "Use a complete Palyra patch document: begin with '*** Begin Patch', then operation headers like '*** Add File: path' or '*** Update File: path', end with '*** End Patch'. Add-file content lines must start with '+'. Update-file hunks must start with '@@' and hunk lines must start with ' ', '+', or '-'.";
+const WORKSPACE_PATCH_GRAMMAR_HINT: &str = "Use a complete Palyra patch document: begin with '*** Begin Patch', then operation headers like '*** Add File: path', '*** Replace File: path', or '*** Update File: path', end with '*** End Patch'. Add-file and replace-file content lines may start with '+'. Use Add File only for missing files. If an Update File hunk fails with context not found, read the current file and retry with Replace File plus the full intended file content. Update-file hunks must start with '@@' and hunk lines must start with ' ', '+', or '-'.";
 
 pub(crate) struct WorkspacePatchToolRequest<'a> {
     pub(crate) principal: &'a str,

@@ -413,7 +413,7 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
                         "patch",
                         json!({
                             "type":"string",
-                            "description":"A complete Palyra patch document. It must start with '*** Begin Patch', contain one or more '*** Add File:', '*** Update File:', or '*** Delete File:' operations, and end with '*** End Patch'. Add-file body lines must start with '+', and missing parent directories are created automatically. Update-file operations require '@@' hunks whose lines start with ' ', '+', or '-'. Use forward-slash relative paths only, such as reports/report.md; never use host absolute paths."
+                            "description":"A complete Palyra patch document. It must start with '*** Begin Patch', contain one or more '*** Add File:', '*** Replace File:', '*** Update File:', or '*** Delete File:' operations, and end with '*** End Patch'. Add-file and replace-file body lines may start with '+'. For Add File, missing parent directories are created automatically; Replace File requires the target to exist and is the deterministic fallback after reading a file when update hunk context cannot be matched. Update-file operations require '@@' hunks whose lines start with ' ', '+', or '-'. Use forward-slash relative paths only, such as reports/report.md; never use host absolute paths."
                         }),
                     ),
                     (
@@ -670,6 +670,8 @@ mod tests {
             .pointer("/properties/patch/description")
             .and_then(serde_json::Value::as_str)
             .expect("patch description should be visible to models");
+        assert!(patch_description.contains("*** Replace File:"));
+        assert!(patch_description.contains("context cannot be matched"));
         assert!(patch_description.contains("missing parent directories"));
         assert!(patch_description.contains("reports/report.md"));
         assert!(patch_description.contains("never use host absolute paths"));
