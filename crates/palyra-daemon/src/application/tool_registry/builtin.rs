@@ -589,22 +589,55 @@ fn browser_tool_description(tool_name: &str) -> &'static str {
 
 fn browser_tool_schema(tool_name: &str) -> Value {
     let mut properties = vec![
-        ("session_id", json!({"type":"string"})),
+        (
+            "session_id",
+            json!({
+                "type":"string",
+                "description":"Required for every browser tool except palyra.browser.session.create. Copy the exact 26-character session_id returned by palyra.browser.session.create; do not invent, shorten, or reuse a URL/label as the session_id."
+            }),
+        ),
         ("timeout_ms", json!({"type":"integer","minimum":1})),
     ];
+    let mut required = if tool_name == "palyra.browser.session.create" {
+        Vec::<&str>::new()
+    } else {
+        vec!["session_id"]
+    };
     match tool_name {
         "palyra.browser.navigate" | "palyra.browser.tabs.open" => {
-            properties.push(("url", json!({"type":"string"})));
+            properties.push((
+                "url",
+                json!({
+                    "type":"string",
+                    "description":"Target URL. For localhost, 127.0.0.1, or other private targets, set allow_private_targets=true on both session.create and this navigation/open call."
+                }),
+            ));
+            properties.push((
+                "allow_private_targets",
+                json!({
+                    "type":"boolean",
+                    "description":"Required when url targets localhost, 127.0.0.1, RFC1918/private IPs, or other private network hosts."
+                }),
+            ));
+            required.push("url");
         }
-        "palyra.browser.click"
-        | "palyra.browser.type"
-        | "palyra.browser.press"
-        | "palyra.browser.select"
-        | "palyra.browser.highlight" => {
+        "palyra.browser.click" | "palyra.browser.highlight" => {
+            properties.push(("selector", json!({"type":"string"})));
+            required.push("selector");
+        }
+        "palyra.browser.type" => {
             properties.push(("selector", json!({"type":"string"})));
             properties.push(("text", json!({"type":"string"})));
+            required.extend(["selector", "text"]);
+        }
+        "palyra.browser.press" => {
             properties.push(("key", json!({"type":"string"})));
+            required.push("key");
+        }
+        "palyra.browser.select" => {
+            properties.push(("selector", json!({"type":"string"})));
             properties.push(("value", json!({"type":"string"})));
+            required.extend(["selector", "value"]);
         }
         "palyra.browser.scroll" => {
             properties.push(("delta_x", json!({"type":"integer"})));
@@ -632,7 +665,7 @@ fn browser_tool_schema(tool_name: &str) -> Value {
         }
         _ => {}
     }
-    object_schema(&[], properties, true)
+    object_schema(required.as_slice(), properties, true)
 }
 
 #[cfg(test)]
@@ -681,6 +714,31 @@ mod tests {
     fn browser_registry_marks_observe_as_visible_text_evidence() {
         let observe = registry_entry("palyra.browser.observe").expect("observe entry exists");
         assert!(observe.description.contains("visible text"));
+        assert_eq!(
+            observe.input_schema.pointer("/required/0").and_then(serde_json::Value::as_str),
+            Some("session_id")
+        );
+
+        let navigate = registry_entry("palyra.browser.navigate").expect("navigate entry exists");
+        let required = navigate
+            .input_schema
+            .pointer("/required")
+            .and_then(serde_json::Value::as_array)
+            .expect("navigate required fields should be present");
+        assert!(required.iter().any(|value| value.as_str() == Some("session_id")));
+        assert!(required.iter().any(|value| value.as_str() == Some("url")));
+        let session_description = navigate
+            .input_schema
+            .pointer("/properties/session_id/description")
+            .and_then(serde_json::Value::as_str)
+            .expect("browser session_id description should be visible to models");
+        assert!(session_description.contains("26-character session_id"));
+        let url_description = navigate
+            .input_schema
+            .pointer("/properties/url/description")
+            .and_then(serde_json::Value::as_str)
+            .expect("browser url description should be visible to models");
+        assert!(url_description.contains("localhost"));
 
         let screenshot =
             registry_entry("palyra.browser.screenshot").expect("screenshot entry exists");
