@@ -30,6 +30,8 @@ const BUILTIN_LIST_MAX_ENTRIES: usize = 512;
 const CAPTURE_POLL_INTERVAL_MS: u64 = 5;
 const CAPTURE_CHUNK_BYTES: usize = 4 * 1024;
 const PROCESS_FAILURE_STDERR_PREVIEW_BYTES: usize = 512;
+const DEFAULT_BACKGROUND_PROCESS_LIFETIME_MS: u64 = 60_000;
+const MAX_BACKGROUND_PROCESS_LIFETIME_MS: u64 = 5 * 60_000;
 const SENSITIVE_URL_PATH_MARKERS: &[&str] =
     &["token", "secret", "key", "password", "credential", "session"];
 #[cfg(windows)]
@@ -229,13 +231,8 @@ pub fn run_constrained_process(
         validate_runtime_egress_enforcement(policy)?;
     }
 
-    let per_call_timeout = input
-        .timeout_ms
-        .map(Duration::from_millis)
-        .unwrap_or(execution_timeout)
-        .min(execution_timeout);
-
     if input.background {
+        let per_call_timeout = background_process_lifetime(input.timeout_ms, execution_timeout);
         return spawn_background_process(
             policy,
             &input,
@@ -244,6 +241,12 @@ pub fn run_constrained_process(
             per_call_timeout,
         );
     }
+
+    let per_call_timeout = input
+        .timeout_ms
+        .map(Duration::from_millis)
+        .unwrap_or(execution_timeout)
+        .min(execution_timeout);
 
     let capture = execute_process(
         policy,
@@ -1451,6 +1454,15 @@ fn spawn_background_process(
     Ok(SandboxProcessRunSuccess { output_json })
 }
 
+fn background_process_lifetime(timeout_ms: Option<u64>, execution_timeout: Duration) -> Duration {
+    let default_lifetime =
+        execution_timeout.max(Duration::from_millis(DEFAULT_BACKGROUND_PROCESS_LIFETIME_MS));
+    timeout_ms
+        .map(Duration::from_millis)
+        .unwrap_or(default_lifetime)
+        .min(Duration::from_millis(MAX_BACKGROUND_PROCESS_LIFETIME_MS))
+}
+
 fn validate_platform_resource_quota_support(
     _policy: &SandboxProcessRunnerPolicy,
 ) -> Result<(), SandboxProcessRunError> {
@@ -2416,6 +2428,23 @@ mod tests {
         assert!(output.get("pid").and_then(serde_json::Value::as_u64).is_some());
 
         let _ = fs::remove_dir_all(workspace.as_path());
+    }
+
+    #[test]
+    fn background_process_lifetime_uses_server_friendly_default() {
+        let lifetime = super::background_process_lifetime(None, Duration::from_millis(750));
+
+        assert_eq!(lifetime, Duration::from_millis(60_000));
+    }
+
+    #[test]
+    fn background_process_lifetime_honors_explicit_bounded_timeout() {
+        let short = super::background_process_lifetime(Some(100), Duration::from_millis(750));
+        let capped =
+            super::background_process_lifetime(Some(10 * 60_000), Duration::from_millis(750));
+
+        assert_eq!(short, Duration::from_millis(100));
+        assert_eq!(capped, Duration::from_millis(5 * 60_000));
     }
 
     #[test]

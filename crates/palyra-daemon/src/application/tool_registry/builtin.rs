@@ -359,7 +359,7 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
                         "background",
                         json!({
                             "type":"boolean",
-                            "description":"Start an allowlisted long-running local process and return immediately. Use this instead of shell background syntax or nohup for temporary dev servers."
+                            "description":"Start an allowlisted long-running local process and return immediately. Use this instead of shell background syntax or nohup for temporary dev servers. For local browser verification, bind to 127.0.0.1 with an explicit port and set timeout_ms to a bounded verification window such as 60000."
                         }),
                     ),
                     (
