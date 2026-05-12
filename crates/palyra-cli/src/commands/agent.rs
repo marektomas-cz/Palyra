@@ -46,6 +46,7 @@ pub(crate) fn run_agent(command: AgentCommand) -> Result<()> {
             approval_mode,
             ndjson,
         } => {
+            ensure_agent_run_approval_flags(allow_sensitive_tools, approval_mode)?;
             let input_prompt = resolve_prompt_input(prompt, prompt_stdin)?;
             let connection = root_context.resolve_grpc_connection(
                 app::ConnectionOverrides {
@@ -128,6 +129,18 @@ pub(crate) fn run_agent(command: AgentCommand) -> Result<()> {
         AgentCommand::AcpShim { command } => commands::acp::run_legacy_agent_acp_shim(command),
         AgentCommand::Acp { command } => commands::acp::run_legacy_agent_acp(command),
     }
+}
+
+fn ensure_agent_run_approval_flags(
+    allow_sensitive_tools: bool,
+    approval_mode: AgentApprovalModeArg,
+) -> Result<()> {
+    if allow_sensitive_tools && approval_mode == AgentApprovalModeArg::Deny {
+        anyhow::bail!(
+            "--allow-sensitive-tools cannot be combined with --approval-mode deny; remove --allow-sensitive-tools to deny sensitive tool requests, or use --approval-mode allow-once after reviewing the requested tool risk"
+        );
+    }
+    Ok(())
 }
 
 struct AgentInteractiveOptions {
@@ -327,7 +340,8 @@ async fn ensure_interactive_session(
 
 #[cfg(test)]
 mod tests {
-    use super::interactive_session_started_message;
+    use super::{ensure_agent_run_approval_flags, interactive_session_started_message};
+    use crate::args::AgentApprovalModeArg;
     use crate::proto::palyra::{common::v1 as common_v1, gateway::v1 as gateway_v1};
 
     #[test]
@@ -352,5 +366,22 @@ mod tests {
         assert!(banner.contains("exit_hint=/exit"));
         assert!(banner.contains("session_key=ops:triage"));
         assert!(!banner.contains("session_id="));
+    }
+
+    #[test]
+    fn allow_sensitive_tools_conflicts_with_approval_deny() {
+        let error = ensure_agent_run_approval_flags(true, AgentApprovalModeArg::Deny)
+            .expect_err("contradictory approval flags should fail before a run starts");
+
+        assert!(error.to_string().contains("--allow-sensitive-tools"), "{error}");
+        assert!(error.to_string().contains("--approval-mode deny"), "{error}");
+    }
+
+    #[test]
+    fn allow_sensitive_tools_can_pair_with_prompt_or_allow_once() {
+        ensure_agent_run_approval_flags(true, AgentApprovalModeArg::Prompt)
+            .expect("prompt mode remains valid with explicit sensitive-tool opt-in");
+        ensure_agent_run_approval_flags(true, AgentApprovalModeArg::AllowOnce)
+            .expect("allow-once remains valid with explicit sensitive-tool opt-in");
     }
 }
