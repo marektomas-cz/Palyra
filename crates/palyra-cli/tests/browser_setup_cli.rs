@@ -63,9 +63,19 @@ fn browser_setup_configures_gateway_and_browserd_prerequisites() -> Result<()> {
         Some("global/browser_state_key")
     );
     assert_eq!(payload.get("gateway_reload_required").and_then(Value::as_bool), Some(true));
+    assert_eq!(
+        payload.get("gateway_restart_command").and_then(Value::as_str),
+        Some("palyra gateway run")
+    );
+    assert_eq!(
+        payload.get("gateway_verify_command").and_then(Value::as_str),
+        Some("palyra browser status --json")
+    );
     assert!(
         payload.get("gateway_next_step").and_then(Value::as_str).is_some_and(|value| {
-            value.contains("palyra gateway run") && value.contains("palyra browser open")
+            value.contains("palyra gateway run")
+                && value.contains("palyra browser status --json")
+                && value.contains("palyra browser open")
         }),
         "browser setup should explain gateway reload workflow: {payload}"
     );
@@ -93,5 +103,27 @@ fn browser_setup_configures_gateway_and_browserd_prerequisites() -> Result<()> {
     let decoded =
         BASE64_STANDARD.decode(encoded).context("generated browser state key should be base64")?;
     assert_eq!(decoded.len(), 32, "generated browser state key should be 32 bytes");
+    Ok(())
+}
+
+#[test]
+fn browser_stop_supports_json_without_lifecycle_metadata() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+
+    let stop = run_cli(&workdir, &["browser", "stop", "--json"])?;
+
+    assert!(
+        stop.status.success(),
+        "browser stop --json should succeed without metadata: {}",
+        String::from_utf8_lossy(&stop.stderr)
+    );
+    let payload: Value =
+        serde_json::from_slice(&stop.stdout).context("browser stop stdout was not JSON")?;
+    assert_eq!(payload.get("action").and_then(Value::as_str), Some("stop"));
+    assert_eq!(payload.get("running").and_then(Value::as_bool), Some(false));
+    assert_eq!(
+        payload.get("detail").and_then(Value::as_str),
+        Some("no CLI-managed browser service metadata found")
+    );
     Ok(())
 }

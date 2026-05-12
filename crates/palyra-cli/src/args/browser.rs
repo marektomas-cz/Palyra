@@ -42,7 +42,10 @@ pub enum BrowserCommand {
         json: bool,
     },
     #[command(about = "Stop the local browser service started by this CLI")]
-    Stop,
+    Stop {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     #[command(about = "Create a session and immediately navigate it to a URL")]
     Open {
         #[arg(long)]

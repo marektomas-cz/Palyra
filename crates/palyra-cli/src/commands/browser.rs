@@ -145,6 +145,8 @@ struct BrowserSetupPayload {
     allowed_tools_added: Vec<String>,
     gateway_reload_required: bool,
     gateway_next_step: String,
+    gateway_restart_command: String,
+    gateway_verify_command: String,
     migrated: bool,
 }
 
@@ -257,7 +259,7 @@ async fn run_browser_async(command: BrowserCommand) -> Result<()> {
         BrowserCommand::Setup { path, token, force, json } => {
             run_browser_setup(path, token, force, json)
         }
-        BrowserCommand::Stop => run_browser_stop().await,
+        BrowserCommand::Stop { json } => run_browser_stop(json).await,
         BrowserCommand::Open {
             url,
             principal,
@@ -498,7 +500,7 @@ fn browser_command_policy_action(command: &BrowserCommand) -> Option<&'static st
         BrowserCommand::Status { .. }
         | BrowserCommand::Start { .. }
         | BrowserCommand::Setup { .. }
-        | BrowserCommand::Stop => None,
+        | BrowserCommand::Stop { .. } => None,
         BrowserCommand::Open { .. } => Some("open"),
         BrowserCommand::Session { command } => Some(browser_session_policy_action(command)),
         BrowserCommand::Profiles { command } => Some(browser_profiles_policy_action(command)),
@@ -747,6 +749,8 @@ fn configure_browser_setup(
         allowed_tools_added,
         gateway_reload_required: true,
         gateway_next_step: browser_setup_gateway_next_step(),
+        gateway_restart_command: browser_setup_gateway_restart_command(),
+        gateway_verify_command: browser_setup_gateway_verify_command(),
         migrated: migration.migrated,
     })
 }
@@ -922,7 +926,7 @@ async fn run_browser_start(
     }
 }
 
-async fn run_browser_stop() -> Result<()> {
+async fn run_browser_stop(json: bool) -> Result<()> {
     let Some(metadata) = read_browser_service_metadata()? else {
         let payload = BrowserLifecyclePayload {
             action: "stop".to_owned(),
@@ -937,10 +941,11 @@ async fn run_browser_stop() -> Result<()> {
         };
         let value =
             serde_json::to_value(&payload).context("failed to encode browser lifecycle payload")?;
-        return emit_browser_value(
+        return emit_browser_value_with_json(
             &value,
             format_browser_lifecycle_text(&payload),
             "failed to encode browser lifecycle output",
+            json,
         );
     };
 
@@ -968,10 +973,11 @@ async fn run_browser_stop() -> Result<()> {
     };
     let value =
         serde_json::to_value(&payload).context("failed to encode browser lifecycle payload")?;
-    emit_browser_value(
+    emit_browser_value_with_json(
         &value,
         format_browser_lifecycle_text(&payload),
         "failed to encode browser lifecycle output",
+        json,
     )
 }
 
@@ -2973,8 +2979,19 @@ fn browser_gateway_auth_token_setup_warning(config_path: Option<&str>) -> String
 }
 
 fn browser_setup_gateway_next_step() -> String {
-    "Start or restart the gateway so it reloads the browser service config: run `palyra gateway run` or restart the running gateway service, then rerun gateway-mediated browser commands such as `palyra browser open`."
-        .to_owned()
+    format!(
+        "Gateway reload required before agent/browser tools can use this config. If no gateway is running, run `{}`. If a gateway is already running, stop and restart that gateway process or service. Then verify with `{}` and rerun gateway-mediated browser commands such as `palyra browser open`.",
+        browser_setup_gateway_restart_command(),
+        browser_setup_gateway_verify_command()
+    )
+}
+
+fn browser_setup_gateway_restart_command() -> String {
+    "palyra gateway run".to_owned()
+}
+
+fn browser_setup_gateway_verify_command() -> String {
+    "palyra browser status --json".to_owned()
 }
 
 fn browser_setup_gateway_reload_warning(config_path: &str) -> String {
@@ -3657,7 +3674,7 @@ fn format_browser_status_text(payload: &BrowserStatusPayload) -> String {
 
 fn format_browser_setup_text(payload: &BrowserSetupPayload) -> String {
     format!(
-        "browser.setup config_path={} browser_service_enabled={} auth_token_configured={} auth_token_generated={} state_key_vault_ref={} state_key_generated={} allowed_tools_added={} gateway_reload_required={} gateway_next_step=\"{}\" migrated={}",
+        "browser.setup config_path={} browser_service_enabled={} auth_token_configured={} auth_token_generated={} state_key_vault_ref={} state_key_generated={} allowed_tools_added={} gateway_reload_required={} gateway_restart_command=\"{}\" gateway_verify_command=\"{}\" gateway_next_step=\"{}\" migrated={}",
         payload.config_path,
         payload.browser_service_enabled,
         payload.auth_token_configured,
@@ -3666,6 +3683,8 @@ fn format_browser_setup_text(payload: &BrowserSetupPayload) -> String {
         payload.state_key_generated,
         payload.allowed_tools_added.len(),
         payload.gateway_reload_required,
+        payload.gateway_restart_command,
+        payload.gateway_verify_command,
         payload.gateway_next_step,
         payload.migrated,
     )
