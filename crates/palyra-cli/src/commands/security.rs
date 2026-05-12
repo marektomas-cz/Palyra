@@ -69,6 +69,26 @@ struct LocalSecurityConfigSnapshot {
     browser_service_enabled: bool,
     browser_service_auth_token_configured: bool,
     effective_provider_kind: Option<String>,
+    process_runner: LocalProcessRunnerConfigSnapshot,
+}
+
+#[derive(Debug, Clone, Default)]
+struct LocalProcessRunnerConfigSnapshot {
+    enabled: bool,
+    tier: String,
+    allowed_executables_wildcard: bool,
+    allow_interpreters: bool,
+    egress_enforcement_mode: String,
+}
+
+impl LocalProcessRunnerConfigSnapshot {
+    fn is_permissive_host_process_profile(&self) -> bool {
+        self.enabled
+            && matches!(self.tier.as_str(), "b" | "tier_b")
+            && self.allowed_executables_wildcard
+            && self.allow_interpreters
+            && self.egress_enforcement_mode == "none"
+    }
 }
 
 pub(crate) fn run_security(command: SecurityCommand) -> Result<()> {
@@ -362,6 +382,16 @@ fn build_security_findings(
         });
     }
 
+    if local_config.process_runner.is_permissive_host_process_profile() {
+        findings.push(SecurityFinding {
+            severity: "warning".to_owned(),
+            code: "process_runner_permissive_host_process_profile".to_owned(),
+            component: "sandbox".to_owned(),
+            message: "Process runner is enabled as Tier B with wildcard executable selection, interpreter execution, and egress enforcement disabled.".to_owned(),
+            remediation: "Use this only for trusted local desktop automation. For tighter posture, replace `allowed_executables = [\"*\"]` with an explicit allowlist, set `allow_interpreters = false`, and use `egress_enforcement_mode = \"preflight\"` or `\"strict\"`; path-like inputs remain workspace-confined, but Tier B is not an OS-level filesystem sandbox.".to_owned(),
+        });
+    }
+
     if !doctor.sandbox.tier_b_egress_allowlists_preflight_only {
         findings.push(SecurityFinding {
             severity: "warning".to_owned(),
@@ -577,6 +607,7 @@ fn load_local_security_config_snapshot(
                     browser_service_enabled: false,
                     browser_service_auth_token_configured: false,
                     effective_provider_kind: None,
+                    process_runner: LocalProcessRunnerConfigSnapshot::default(),
                 });
             }
         },
@@ -636,6 +667,7 @@ fn load_local_security_config_snapshot(
             .is_some_and(|value| !value.is_empty());
     let effective_provider_kind =
         load_models_status(Some(resolved.clone())).ok().map(|status| status.provider_kind);
+    let process_runner = load_local_process_runner_config_snapshot(&document)?;
 
     Ok(LocalSecurityConfigSnapshot {
         path_exists: true,
@@ -648,7 +680,49 @@ fn load_local_security_config_snapshot(
         browser_service_enabled,
         browser_service_auth_token_configured,
         effective_provider_kind,
+        process_runner,
     })
+}
+
+fn load_local_process_runner_config_snapshot(
+    document: &toml::Value,
+) -> Result<LocalProcessRunnerConfigSnapshot> {
+    let enabled = get_value_at_path(document, "tool_call.process_runner.enabled")?
+        .and_then(toml::Value::as_bool)
+        .unwrap_or(false);
+    let tier = normalize_process_runner_token(
+        get_value_at_path(document, "tool_call.process_runner.tier")?
+            .and_then(toml::Value::as_str)
+            .unwrap_or("b"),
+    );
+    let allowed_executables_wildcard =
+        get_value_at_path(document, "tool_call.process_runner.allowed_executables")?
+            .and_then(toml::Value::as_array)
+            .map(|values| {
+                values.iter().filter_map(toml::Value::as_str).any(|value| value.trim() == "*")
+            })
+            .unwrap_or(false);
+    let allow_interpreters =
+        get_value_at_path(document, "tool_call.process_runner.allow_interpreters")?
+            .and_then(toml::Value::as_bool)
+            .unwrap_or(false);
+    let egress_enforcement_mode = normalize_process_runner_token(
+        get_value_at_path(document, "tool_call.process_runner.egress_enforcement_mode")?
+            .and_then(toml::Value::as_str)
+            .unwrap_or("strict"),
+    );
+
+    Ok(LocalProcessRunnerConfigSnapshot {
+        enabled,
+        tier,
+        allowed_executables_wildcard,
+        allow_interpreters,
+        egress_enforcement_mode,
+    })
+}
+
+fn normalize_process_runner_token(value: &str) -> String {
+    value.trim().replace('-', "_").to_ascii_lowercase()
 }
 
 #[cfg(test)]
@@ -797,6 +871,7 @@ mod tests {
             browser_service_enabled: false,
             browser_service_auth_token_configured: false,
             effective_provider_kind: None,
+            process_runner: LocalProcessRunnerConfigSnapshot::default(),
         };
         let runtime = RuntimeSecuritySnapshot {
             used_runtime_posture: false,
@@ -826,6 +901,7 @@ mod tests {
             browser_service_enabled: false,
             browser_service_auth_token_configured: false,
             effective_provider_kind: Some("deterministic".to_owned()),
+            process_runner: LocalProcessRunnerConfigSnapshot::default(),
         };
         let runtime = RuntimeSecuritySnapshot {
             used_runtime_posture: false,
@@ -855,6 +931,7 @@ mod tests {
             browser_service_enabled: false,
             browser_service_auth_token_configured: false,
             effective_provider_kind: Some("openai_compatible".to_owned()),
+            process_runner: LocalProcessRunnerConfigSnapshot::default(),
         };
         let runtime = RuntimeSecuritySnapshot {
             used_runtime_posture: false,
@@ -884,6 +961,7 @@ mod tests {
             browser_service_enabled: false,
             browser_service_auth_token_configured: false,
             effective_provider_kind: Some("anthropic".to_owned()),
+            process_runner: LocalProcessRunnerConfigSnapshot::default(),
         };
         let runtime = RuntimeSecuritySnapshot {
             used_runtime_posture: false,
@@ -896,6 +974,48 @@ mod tests {
         assert!(
             !findings.iter().any(|finding| finding.code == "model_provider_missing_auth"),
             "security audit should not flag missing auth when Anthropic-compatible vault auth is configured"
+        );
+    }
+
+    #[test]
+    fn security_audit_warns_on_permissive_process_runner_profile() {
+        let doctor = minimal_doctor();
+        let local = LocalSecurityConfigSnapshot {
+            path_exists: true,
+            provider_kind: "deterministic".to_owned(),
+            auth_profile_id: None,
+            openai_api_key_vault_ref: None,
+            openai_inline_api_key: false,
+            anthropic_api_key_vault_ref: None,
+            anthropic_inline_api_key: false,
+            browser_service_enabled: false,
+            browser_service_auth_token_configured: false,
+            effective_provider_kind: Some("deterministic".to_owned()),
+            process_runner: LocalProcessRunnerConfigSnapshot {
+                enabled: true,
+                tier: "tier_b".to_owned(),
+                allowed_executables_wildcard: true,
+                allow_interpreters: true,
+                egress_enforcement_mode: "none".to_owned(),
+            },
+        };
+        let runtime = RuntimeSecuritySnapshot {
+            used_runtime_posture: false,
+            deployment: None,
+            auth_summary: None,
+            browser: None,
+            error: None,
+        };
+
+        let findings = build_security_findings(&doctor, &local, &runtime, &minimal_secrets());
+
+        assert!(
+            findings.iter().any(|finding| {
+                finding.code == "process_runner_permissive_host_process_profile"
+                    && finding.severity == "warning"
+                    && finding.remediation.contains("explicit allowlist")
+            }),
+            "security audit should flag permissive local process-runner posture"
         );
     }
 
@@ -950,6 +1070,7 @@ anthropic_api_key_vault_ref = "global/minimax_api_key"
             browser_service_enabled: false,
             browser_service_auth_token_configured: false,
             effective_provider_kind: Some("deterministic".to_owned()),
+            process_runner: LocalProcessRunnerConfigSnapshot::default(),
         };
         let runtime = RuntimeSecuritySnapshot {
             used_runtime_posture: true,
@@ -1005,6 +1126,7 @@ anthropic_api_key_vault_ref = "global/minimax_api_key"
             browser_service_enabled: true,
             browser_service_auth_token_configured: true,
             effective_provider_kind: Some("deterministic".to_owned()),
+            process_runner: LocalProcessRunnerConfigSnapshot::default(),
         };
         let runtime = RuntimeSecuritySnapshot {
             used_runtime_posture: true,
