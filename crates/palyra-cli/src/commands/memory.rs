@@ -1008,7 +1008,7 @@ fn memory_embeddings_default_warning(mode: &str, reason_code: &str) -> &'static 
         "embeddings_dimensions_unknown" => {
             "memory recall is using hash fallback because the configured embeddings dimensions are unknown"
         }
-        "embeddings_provider_missing_credentials" => {
+        "embeddings_credentials_missing" | "embeddings_provider_missing_credentials" => {
             "memory recall is using hash fallback because the embeddings provider credential reference is missing"
         }
         _ if mode == "hash_fallback" => {
@@ -1026,7 +1026,7 @@ fn memory_embeddings_remediation(reason_code: &str) -> &'static str {
         "embeddings_dimensions_unknown" => {
             "set model_provider.openai_embeddings_dims for the selected embeddings model, restart the gateway, then run `palyra memory index --until-complete`"
         }
-        "embeddings_provider_missing_credentials" => {
+        "embeddings_credentials_missing" | "embeddings_provider_missing_credentials" => {
             "store the embeddings provider credential reference, restart the gateway, then run `palyra memory index --until-complete`"
         }
         _ => {

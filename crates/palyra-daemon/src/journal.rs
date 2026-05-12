@@ -793,15 +793,62 @@ pub struct MemoryEmbeddingsStatus {
     pub indexed_count: u64,
     pub pending_count: u64,
     pub production_default_active: bool,
+    pub quality: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub degraded_reason_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<String>,
     pub backfill_strategy: String,
     pub batch_limit: usize,
     pub request_timeout_ms: u64,
     pub retry_max: u32,
     pub query_cache: QueryEmbeddingCacheStatus,
+}
+
+fn memory_embeddings_status_quality(
+    mode: MemoryEmbeddingsMode,
+    production_default_active: bool,
+) -> &'static str {
+    if production_default_active && mode == MemoryEmbeddingsMode::ModelProvider {
+        "production_semantic"
+    } else {
+        "degraded_hash_fallback"
+    }
+}
+
+fn memory_embeddings_status_remediation(
+    degraded_reason_code: Option<&str>,
+    production_default_active: bool,
+) -> Option<String> {
+    if production_default_active {
+        return None;
+    }
+    Some(match degraded_reason_code {
+        Some("offline_mode_enabled" | "explicit_hash_fallback") => {
+            "Disable PALYRA_OFFLINE, restart the gateway, then run `palyra memory index --until-complete`."
+        }
+        Some("embeddings_dimensions_unknown") => {
+            "Set model_provider.openai_embeddings_dims for the selected embeddings model, restart the gateway, then run `palyra memory index --until-complete`."
+        }
+        Some("embeddings_credentials_missing" | "embeddings_provider_missing_credentials") => {
+            "Store the embeddings provider credential reference, restart the gateway, then run `palyra memory index --until-complete`."
+        }
+        Some("embeddings_provider_kind_unsupported") => {
+            "Select an OpenAI-compatible embeddings provider/model with `palyra models set-embeddings <model>`, restart the gateway, then run `palyra memory index --until-complete`."
+        }
+        Some("embeddings_runtime_init_failed") => {
+            "Repair the embeddings provider runtime error, restart the gateway, then run `palyra memory index --until-complete`."
+        }
+        Some("legacy_hash_fallback") => {
+            "Configure an embeddings-capable provider/model, restart the gateway, then run `palyra memory index --until-complete`."
+        }
+        _ => {
+            "Configure an embeddings-capable OpenAI-compatible provider/model, select it with `palyra models set-embeddings <model>`, restart the gateway, then run `palyra memory index --until-complete`; until then memory recall uses hash fallback."
+        }
+    }
+    .to_owned())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -12851,6 +12898,9 @@ impl JournalStore {
         let usage = query_memory_usage_snapshot(&guard)?;
         let target_model_id = self.memory_embedding_runtime.active_model_id.clone();
         let target_dims = self.memory_embedding_runtime.active_dims;
+        let mode = self.memory_embedding_runtime.mode();
+        let production_default_active = self.memory_embedding_runtime.production_default_active;
+        let degraded_reason_code = self.memory_embedding_runtime.degraded_reason_code.clone();
         let pending_count = query_pending_memory_embeddings_count(
             &guard,
             target_model_id.as_str(),
@@ -12858,7 +12908,7 @@ impl JournalStore {
             CURRENT_MEMORY_EMBEDDING_VERSION,
         )?;
         Ok(MemoryEmbeddingsStatus {
-            mode: self.memory_embedding_runtime.mode(),
+            mode,
             posture: self.memory_embedding_runtime.posture,
             desired_model_id: self.memory_embedding_runtime.desired_model_id.clone(),
             target_model_id,
@@ -12867,9 +12917,14 @@ impl JournalStore {
             total_count: usage.entries,
             indexed_count: usage.entries.saturating_sub(pending_count),
             pending_count,
-            production_default_active: self.memory_embedding_runtime.production_default_active,
-            degraded_reason_code: self.memory_embedding_runtime.degraded_reason_code.clone(),
+            production_default_active,
+            quality: memory_embeddings_status_quality(mode, production_default_active).to_owned(),
+            degraded_reason_code: degraded_reason_code.clone(),
             warning: self.memory_embedding_runtime.warning.clone(),
+            remediation: memory_embeddings_status_remediation(
+                degraded_reason_code.as_deref(),
+                production_default_active,
+            ),
             backfill_strategy: self.memory_embedding_runtime.backfill_strategy.clone(),
             batch_limit: self.memory_embedding_runtime.batch_limit,
             request_timeout_ms: self.memory_embedding_runtime.request_timeout_ms,
@@ -18936,6 +18991,7 @@ mod tests {
     use crate::{
         domain::workspace::{WorkspaceDocumentState, WorkspaceRiskState},
         orchestrator::RunLifecycleState,
+        retrieval::{MemoryEmbeddingsPosture, MemoryEmbeddingsRuntimeProfile},
     };
 
     use super::{
@@ -18945,14 +19001,14 @@ mod tests {
         ApprovalSubjectType, ApprovalsListFilter, CanvasStateTransitionRequest,
         CronConcurrencyPolicy, CronJobCreateRequest, CronJobsListFilter, CronMisfirePolicy,
         CronRetryPolicy, CronRunFinalizeRequest, CronRunStartRequest, CronRunStatus,
-        CronRunsListFilter, CronScheduleType, IdempotencyBeginRequest, IdempotencyCompleteRequest,
-        JournalAppendRequest, JournalConfig, JournalError, JournalStore, MemoryEmbeddingProvider,
-        MemoryItemCreateRequest, MemoryItemsListFilter, MemoryMaintenanceRequest,
-        MemoryPurgeRequest, MemoryRetentionPolicy, MemorySearchRequest, MemorySource,
-        OrchestratorCancelRequest, OrchestratorRunStartRequest, OrchestratorSessionUpsertRequest,
-        OrchestratorTapeAppendRequest, OrchestratorUsageDelta, RecallArtifactCreateRequest,
-        RecallArtifactListFilter, SessionSearchRequest, SkillExecutionStatus,
-        SkillStatusUpsertRequest, ToolJobAttachRequest, ToolJobCreateRequest,
+        CronRunsListFilter, CronScheduleType, HashMemoryEmbeddingProvider, IdempotencyBeginRequest,
+        IdempotencyCompleteRequest, JournalAppendRequest, JournalConfig, JournalError,
+        JournalStore, MemoryEmbeddingProvider, MemoryItemCreateRequest, MemoryItemsListFilter,
+        MemoryMaintenanceRequest, MemoryPurgeRequest, MemoryRetentionPolicy, MemorySearchRequest,
+        MemorySource, OrchestratorCancelRequest, OrchestratorRunStartRequest,
+        OrchestratorSessionUpsertRequest, OrchestratorTapeAppendRequest, OrchestratorUsageDelta,
+        RecallArtifactCreateRequest, RecallArtifactListFilter, SessionSearchRequest,
+        SkillExecutionStatus, SkillStatusUpsertRequest, ToolJobAttachRequest, ToolJobCreateRequest,
         ToolJobRetentionPolicy, ToolJobRetryPolicy, ToolJobRetryRequest, ToolJobState,
         ToolJobTailAppendRequest, ToolJobTailReadRequest, ToolJobTailStream,
         ToolJobTransitionRequest, ToolJobsListFilter, ToolResultArtifactCreateRequest,
@@ -21553,6 +21609,41 @@ mod tests {
             .expect("direct vector branch should surface the memory item");
         assert!(!candidate.lexical_candidate, "fixture should not have an FTS seed");
         assert!(candidate.vector_candidate, "vector branch should generate the candidate directly");
+    }
+
+    #[test]
+    fn memory_embeddings_status_guides_hash_fallback_recovery() {
+        let db_path = temp_db_path();
+        let store = JournalStore::open_with_memory_embedding_runtime(
+            test_journal_config(db_path, false),
+            Arc::new(HashMemoryEmbeddingProvider::default()),
+            MemoryEmbeddingsRuntimeProfile {
+                posture: MemoryEmbeddingsPosture::DegradedConfigFallback,
+                desired_model_id: None,
+                active_model_id: HashMemoryEmbeddingProvider::default().model_name().to_owned(),
+                active_dims: 1_536,
+                degraded_reason_code: Some("embeddings_model_not_configured".to_owned()),
+                warning: Some(
+                    "retrieval embeddings defaulted to hash fallback because no embeddings-capable provider or model is configured"
+                        .to_owned(),
+                ),
+                production_default_active: false,
+                backfill_strategy: "incremental".to_owned(),
+                batch_limit: 64,
+                request_timeout_ms: 15_000,
+                retry_max: 2,
+            },
+        )
+        .expect("journal store should open");
+
+        let status =
+            store.memory_embeddings_status().expect("embedding status should be available");
+
+        assert_eq!(status.quality, "degraded_hash_fallback");
+        assert_eq!(status.degraded_reason_code.as_deref(), Some("embeddings_model_not_configured"));
+        let remediation = status.remediation.as_deref().expect("remediation should be present");
+        assert!(remediation.contains("palyra models set-embeddings <model>"), "{remediation}");
+        assert!(remediation.contains("palyra memory index --until-complete"), "{remediation}");
     }
 
     #[test]

@@ -1616,8 +1616,10 @@ mod tests {
                 indexed_count: 16,
                 pending_count: 0,
                 production_default_active: true,
+                quality: "production_semantic".to_owned(),
                 degraded_reason_code: None,
                 warning: None,
+                remediation: None,
                 backfill_strategy: "lazy_reindex".to_owned(),
                 batch_limit: 64,
                 request_timeout_ms: 15_000,
@@ -1647,9 +1649,14 @@ mod tests {
                 indexed_count: 4,
                 pending_count: 12,
                 production_default_active: false,
+                quality: "degraded_hash_fallback".to_owned(),
                 degraded_reason_code: Some("offline_mode_enabled".to_owned()),
                 warning: Some(
                     "PALYRA_OFFLINE is enabled; retrieval embeddings are using the explicit hash fallback"
+                        .to_owned(),
+                ),
+                remediation: Some(
+                    "Disable PALYRA_OFFLINE, restart the gateway, then run `palyra memory index --until-complete`."
                         .to_owned(),
                 ),
                 backfill_strategy: "lazy_reindex".to_owned(),

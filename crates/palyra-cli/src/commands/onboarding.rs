@@ -446,12 +446,12 @@ fn build_onboarding_steps(
             "memory_embeddings",
             "Memory embeddings",
             signals.memory_embeddings_message.clone(),
-            control_plane::OnboardingStepStatus::Skipped,
+            control_plane::OnboardingStepStatus::InProgress,
             Some(run_cli_action(
-                "Review embeddings setup",
+                "Configure embeddings",
                 format!("palyra models status --path {}", signals.config_path),
             )),
-            StepPresentation::optional(Some("hash_fallback".to_owned())),
+            StepPresentation::optional(Some("degraded_hash_fallback".to_owned())),
         )
     };
 
@@ -831,10 +831,10 @@ fn memory_embeddings_onboarding_message(
             .to_owned();
     }
     if minimax_chat_provider_configured(document, provider_kind, chat_model) {
-        return "MiniMax chat is configured, but no embeddings-capable provider/model is selected; semantic memory recall will use hash fallback until you configure an OpenAI-compatible embeddings provider/model, run `palyra models set-embeddings <model>`, restart the gateway, and run `palyra memory index --until-complete`."
+        return "MiniMax chat is configured, but no embeddings-capable provider/model is selected; memory recall remains usable with hash fallback, but semantic recall quality is degraded until you configure an OpenAI-compatible embeddings provider/model, run `palyra models set-embeddings <model>`, restart the gateway, and run `palyra memory index --until-complete`."
             .to_owned();
     }
-    "No embeddings-capable provider/model is selected; semantic memory recall will use hash fallback until you configure embeddings, restart the gateway, and run `palyra memory index --until-complete`."
+    "No embeddings-capable provider/model is selected; memory recall remains usable with hash fallback, but semantic recall quality is degraded until you configure embeddings, restart the gateway, and run `palyra memory index --until-complete`."
         .to_owned()
 }
 
@@ -1340,12 +1340,13 @@ anthropic_api_key = "sk-inline-minimax"
         assert!(!signals.memory_embeddings_configured);
         assert!(signals.memory_embeddings_message.contains("MiniMax chat"));
         assert!(signals.memory_embeddings_message.contains("hash fallback"));
+        assert!(signals.memory_embeddings_message.contains("semantic recall quality is degraded"));
         assert!(signals.memory_embeddings_message.contains("palyra models set-embeddings"));
         assert_eq!(provider_step.status, control_plane::OnboardingStepStatus::Done);
         assert_eq!(provider_step.verification_state.as_deref(), Some("configured"));
-        assert_eq!(memory_step.status, control_plane::OnboardingStepStatus::Skipped);
+        assert_eq!(memory_step.status, control_plane::OnboardingStepStatus::InProgress);
         assert!(memory_step.optional);
-        assert_eq!(memory_step.verification_state.as_deref(), Some("hash_fallback"));
+        assert_eq!(memory_step.verification_state.as_deref(), Some("degraded_hash_fallback"));
         assert!(memory_step.summary.contains("palyra memory index --until-complete"));
         Ok(())
     }
