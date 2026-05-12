@@ -49,8 +49,18 @@ function Remove-CleanDesktopCliExposureFallback {
     $persistentPathUpdated = $false
     $commandRootRemoved = $false
     $commandRootPath = [IO.Path]::GetFullPath($CommandRoot)
+    $candidateRoots = New-Object System.Collections.Generic.List[string]
+    $candidateRoots.Add($commandRootPath) | Out-Null
+    foreach ($aliasRoot in (Get-WindowsPalyraCliAliasRoots)) {
+        if (-not [string]::IsNullOrWhiteSpace($aliasRoot)) {
+            $candidateRoots.Add($aliasRoot) | Out-Null
+        }
+    }
 
-    if (Test-Path -LiteralPath $commandRootPath -PathType Container) {
+    foreach ($candidateRoot in ($candidateRoots | Select-Object -Unique)) {
+        if (-not (Test-Path -LiteralPath $candidateRoot -PathType Container)) {
+            continue
+        }
         $shimNames =
             if ($IsWindows) {
                 @("palyra.cmd", "palyra-pwsh.ps1", "palyra.ps1")
@@ -59,23 +69,54 @@ function Remove-CleanDesktopCliExposureFallback {
             }
 
         foreach ($shimName in $shimNames) {
-            $shimPath = Join-Path $commandRootPath $shimName
+            $shimPath = Join-Path $candidateRoot $shimName
             if (Test-Path -LiteralPath $shimPath -PathType Leaf) {
                 Remove-Item -LiteralPath $shimPath -Force
             }
         }
 
-        if (Test-DirectoryEmpty -Path $commandRootPath) {
-            Remove-Item -LiteralPath $commandRootPath -Force
-            $commandRootRemoved = $true
+        $isWindowsAppsRoot = $false
+        if ($IsWindows) {
+            $localAppData = [Environment]::GetFolderPath("LocalApplicationData")
+            if (-not [string]::IsNullOrWhiteSpace($localAppData)) {
+                $isWindowsAppsRoot = Test-PathEntryEquals `
+                    -Left $candidateRoot `
+                    -Right (Join-Path $localAppData "Microsoft/WindowsApps")
+            }
+        }
+
+        if ((-not $isWindowsAppsRoot) -and (Test-DirectoryEmpty -Path $candidateRoot)) {
+            Remove-Item -LiteralPath $candidateRoot -Force
+            if (Test-PathEntryEquals -Left $candidateRoot -Right $commandRootPath) {
+                $commandRootRemoved = $true
+            }
         }
     }
 
     if ($IsWindows) {
-        $persistentPathUpdated = Remove-WindowsUserPathEntry -Entry $commandRootPath
+        foreach ($candidateRoot in ($candidateRoots | Select-Object -Unique)) {
+            $localAppData = [Environment]::GetFolderPath("LocalApplicationData")
+            $isWindowsAppsRoot = (-not [string]::IsNullOrWhiteSpace($localAppData)) -and
+                (Test-PathEntryEquals -Left $candidateRoot -Right (Join-Path $localAppData "Microsoft/WindowsApps"))
+            if ($isWindowsAppsRoot) {
+                continue
+            }
+            $persistentPathUpdated = (Remove-WindowsUserPathEntry -Entry $candidateRoot) -or $persistentPathUpdated
+        }
     }
 
-    $sessionPathUpdated = Remove-CurrentSessionPathEntry -Entry $commandRootPath
+    foreach ($candidateRoot in ($candidateRoots | Select-Object -Unique)) {
+        if ($IsWindows) {
+            $localAppData = [Environment]::GetFolderPath("LocalApplicationData")
+            if (
+                (-not [string]::IsNullOrWhiteSpace($localAppData)) -and
+                (Test-PathEntryEquals -Left $candidateRoot -Right (Join-Path $localAppData "Microsoft/WindowsApps"))
+            ) {
+                continue
+            }
+        }
+        $sessionPathUpdated = (Remove-CurrentSessionPathEntry -Entry $candidateRoot) -or $sessionPathUpdated
+    }
 
     return [ordered]@{
         command_root_removed = $commandRootRemoved

@@ -575,6 +575,43 @@ function Get-PalyraLegacyCliCommandRoots {
     return @($roots | ForEach-Object { [IO.Path]::GetFullPath($_) } | Select-Object -Unique)
 }
 
+function Get-WindowsPalyraCliAliasRoots {
+    if (-not $IsWindows) {
+        return @()
+    }
+
+    $localAppData = [Environment]::GetFolderPath("LocalApplicationData")
+    if ([string]::IsNullOrWhiteSpace($localAppData)) {
+        return @()
+    }
+
+    $roots = New-Object System.Collections.Generic.List[string]
+    $roots.Add((Join-Path $localAppData "Palyra/bin")) | Out-Null
+    $roots.Add((Join-Path $localAppData "Microsoft/WindowsApps")) | Out-Null
+
+    return @($roots | ForEach-Object { [IO.Path]::GetFullPath($_) } | Select-Object -Unique)
+}
+
+function Test-WindowsPalyraCliAliasRootIsOsManaged {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if (-not $IsWindows) {
+        return $false
+    }
+
+    $localAppData = [Environment]::GetFolderPath("LocalApplicationData")
+    if ([string]::IsNullOrWhiteSpace($localAppData)) {
+        return $false
+    }
+
+    return Test-PathEntryEquals `
+        -Left $Path `
+        -Right (Join-Path $localAppData "Microsoft/WindowsApps")
+}
+
 function Remove-LegacyPalyraCliPathEntries {
     param(
         [Parameter(Mandatory = $true)]
@@ -798,9 +835,17 @@ function Install-PalyraCliExposure {
 
     $commandName = "palyra"
     $shimPaths = New-Object System.Collections.Generic.List[string]
+    $secondaryAliasRoots = New-Object System.Collections.Generic.List[string]
 
-    if ($IsWindows) {
-        $cmdShimPath = Join-Path $resolvedCommandRoot "$commandName.cmd"
+    function Write-WindowsPalyraCliShims {
+        param(
+            [Parameter(Mandatory = $true)]
+            [string]$Root
+        )
+
+        New-Item -ItemType Directory -Path $Root -Force | Out-Null
+
+        $cmdShimPath = Join-Path $Root "$commandName.cmd"
         $cmdShimBody =
 @"
 @echo off
@@ -809,9 +854,8 @@ $(if ($null -ne $resolvedConfigPath) { 'set "PALYRA_CONFIG=' + $resolvedConfigPa
 "$resolvedTargetBinary" %*
 "@
         Set-Content -LiteralPath $cmdShimPath -Value $cmdShimBody -NoNewline
-        $shimPaths.Add($cmdShimPath) | Out-Null
 
-        $psShimPath = Join-Path $resolvedCommandRoot "$commandName-pwsh.ps1"
+        $psShimPath = Join-Path $Root "$commandName-pwsh.ps1"
         $psShimBody =
 @"
 Set-StrictMode -Version Latest
@@ -828,7 +872,14 @@ if (`$MyInvocation.ExpectingInput) {
 exit `$LASTEXITCODE
 "@
         Set-Content -LiteralPath $psShimPath -Value $psShimBody -NoNewline
-        $shimPaths.Add($psShimPath) | Out-Null
+
+        return @($cmdShimPath, $psShimPath)
+    }
+
+    if ($IsWindows) {
+        foreach ($shimPath in (Write-WindowsPalyraCliShims -Root $resolvedCommandRoot)) {
+            $shimPaths.Add($shimPath) | Out-Null
+        }
     } else {
         $shimPath = Join-Path $resolvedCommandRoot $commandName
         $shimBody =
@@ -862,6 +913,21 @@ exec "$resolvedTargetBinary" "$@"
     if ($PersistPath) {
         if ($IsWindows) {
             $userPathUpdated = Add-WindowsUserPathEntry -Entry $resolvedCommandRoot
+            foreach ($aliasRoot in (Get-WindowsPalyraCliAliasRoots)) {
+                if (Test-PathEntryEquals -Left $aliasRoot -Right $resolvedCommandRoot) {
+                    continue
+                }
+                if (-not (Test-DirectoryWritable -Path $aliasRoot -Create)) {
+                    continue
+                }
+
+                foreach ($shimPath in (Write-WindowsPalyraCliShims -Root $aliasRoot)) {
+                    $shimPaths.Add($shimPath) | Out-Null
+                }
+                $secondaryAliasRoots.Add($aliasRoot) | Out-Null
+                Add-CurrentSessionPathEntry -Entry $aliasRoot | Out-Null
+                Add-WindowsUserPathEntry -Entry $aliasRoot | Out-Null
+            }
         } elseif (-not $commandRootAlreadyOnPath) {
             foreach ($profilePath in (Get-PalyraCliManagedProfilePaths)) {
                 if (Ensure-ProfileBlock -ProfilePath $profilePath -CommandRoot $resolvedCommandRoot) {
@@ -888,6 +954,7 @@ exec "$resolvedTargetBinary" "$@"
         new_shell_command = $commandName
         parent_shell_path_note = $parentShellPathNote
         user_path_updated = $userPathUpdated
+        secondary_alias_roots = @($secondaryAliasRoots)
         legacy_path_entries_removed = @($legacyPathCleanup.removed_roots)
         legacy_session_path_updated = $legacyPathCleanup.session_path_updated
         legacy_user_path_updated = $legacyPathCleanup.user_path_updated
@@ -977,6 +1044,27 @@ function Remove-PalyraCliExposure {
                 if (Remove-ProfileBlock -ProfilePath $profilePathString) {
                     $profileFilesRemoved.Add($profilePathString) | Out-Null
                 }
+            }
+        }
+    }
+
+    if ($null -ne $CliExposure.secondary_alias_roots) {
+        foreach ($aliasRootValue in $CliExposure.secondary_alias_roots) {
+            $aliasRoot = [string]$aliasRootValue
+            if ([string]::IsNullOrWhiteSpace($aliasRoot)) {
+                continue
+            }
+            if (Test-WindowsPalyraCliAliasRootIsOsManaged -Path $aliasRoot) {
+                continue
+            }
+            if (Test-Path -LiteralPath $aliasRoot -PathType Container) {
+                if (Test-DirectoryEmpty -Path $aliasRoot) {
+                    Remove-Item -LiteralPath $aliasRoot -Force
+                }
+            }
+            Remove-CurrentSessionPathEntry -Entry $aliasRoot | Out-Null
+            if ($persistentPathRequested -and $IsWindows) {
+                Remove-WindowsUserPathEntry -Entry $aliasRoot | Out-Null
             }
         }
     }
