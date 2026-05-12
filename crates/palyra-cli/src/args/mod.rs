@@ -266,6 +266,7 @@ Examples:
 
 const COMPLETION_AFTER_HELP: &str = "\
 Examples:
+  palyra completion powershell
   palyra completion --shell powershell
   palyra completion --shell bash > palyra.bash";
 
@@ -726,8 +727,15 @@ pub enum Command {
         after_long_help = COMPLETION_AFTER_HELP
     )]
     Completion {
-        #[arg(long, value_enum)]
-        shell: CompletionShell,
+        #[arg(
+            value_enum,
+            value_name = "SHELL",
+            required_unless_present = "shell_flag",
+            conflicts_with = "shell_flag"
+        )]
+        shell: Option<CompletionShell>,
+        #[arg(long = "shell", value_enum, value_name = "SHELL", conflicts_with = "shell")]
+        shell_flag: Option<CompletionShell>,
     },
     #[command(visible_alias = "onboard", after_long_help = ONBOARDING_AFTER_HELP)]
     Onboarding {

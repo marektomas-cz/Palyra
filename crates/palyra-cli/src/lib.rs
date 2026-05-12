@@ -320,7 +320,12 @@ fn run_cli() -> Result<()> {
         CliCommand::Browser { command } => commands::browser::run_browser(command),
         CliCommand::System { command } => commands::system::run_system(command),
         CliCommand::Sandbox { command } => commands::sandbox::run_sandbox(command),
-        CliCommand::Completion { shell } => commands::completion::run_completion(shell),
+        CliCommand::Completion { shell, shell_flag } => {
+            let shell = shell.or(shell_flag).ok_or_else(|| {
+                anyhow!("completion requires a shell, for example `palyra completion powershell`")
+            })?;
+            commands::completion::run_completion(shell)
+        }
         CliCommand::Onboarding { command } => commands::onboarding::run_onboarding(command),
         CliCommand::Deployment { command } => commands::deployment::run_deployment(command),
         CliCommand::Configure {

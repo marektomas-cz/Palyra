@@ -1,6 +1,10 @@
 Generate shell completion scripts
 
-Usage: palyra completion [OPTIONS] --shell <SHELL>
+Usage: palyra completion [OPTIONS] [SHELL]
+
+Arguments:
+  [SHELL]
+          [possible values: bash, zsh, fish, powershell, elvish]
 
 Options:
       --shell <SHELL>
@@ -50,5 +54,6 @@ Global Options:
           Permit strict profile-scoped actions after explicit profile checks
 
 Examples:
+  palyra completion powershell
   palyra completion --shell powershell
   palyra completion --shell bash > palyra.bash

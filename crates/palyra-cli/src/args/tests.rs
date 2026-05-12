@@ -4058,7 +4058,19 @@ fn parse_tunnel_command_defaults_ports_to_gateway_admin() {
 #[test]
 fn parse_completion_powershell() {
     let parsed = Cli::parse_from(["palyra", "completion", "--shell", "powershell"]);
-    assert_eq!(parsed.command, Command::Completion { shell: CompletionShell::Powershell });
+    assert_eq!(
+        parsed.command,
+        Command::Completion { shell: None, shell_flag: Some(CompletionShell::Powershell) }
+    );
+}
+
+#[test]
+fn parse_completion_positional_powershell() {
+    let parsed = Cli::parse_from(["palyra", "completion", "powershell"]);
+    assert_eq!(
+        parsed.command,
+        Command::Completion { shell: Some(CompletionShell::Powershell), shell_flag: None }
+    );
 }
 
 #[test]

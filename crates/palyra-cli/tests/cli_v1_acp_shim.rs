@@ -429,6 +429,22 @@ fn completion_generates_bash_script() -> Result<()> {
 }
 
 #[test]
+fn completion_accepts_positional_shell() -> Result<()> {
+    let output = Command::new(env!("CARGO_BIN_EXE_palyra"))
+        .args(["completion", "powershell"])
+        .output()
+        .context("failed to execute palyra completion")?;
+    assert!(
+        output.status.success(),
+        "completion command should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).context("stdout was not valid UTF-8")?;
+    assert!(stdout.contains("Register-ArgumentCompleter"), "{stdout}");
+    Ok(())
+}
+
+#[test]
 fn completion_treats_closed_stdout_pipe_as_clean_exit() -> Result<()> {
     let mut child = Command::new(env!("CARGO_BIN_EXE_palyra"))
         .args(["completion", "--shell", "powershell"])
