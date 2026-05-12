@@ -181,30 +181,24 @@ pub fn run_constrained_process(
     validate_allowed_executable(policy, input.command.as_str())?;
 
     let host_access = process_runner_allows_host_access(policy);
-    let workspace_root = if host_access {
-        default_host_working_root(policy.workspace_root.as_path())?
-    } else {
-        canonical_workspace_root(policy.workspace_root.as_path())?
-    };
+    let workspace_root = canonical_workspace_root(policy.workspace_root.as_path())?;
     let working_directory = if host_access {
         resolve_host_working_directory(workspace_root.as_path(), input.cwd.as_deref())?
     } else {
         resolve_working_directory(workspace_root.as_path(), input.cwd.as_deref())?
     };
-    if !host_access {
-        validate_interpreter_argument_guardrails(
-            workspace_root.as_path(),
-            working_directory.as_path(),
-            input.command.as_str(),
-            input.args.as_slice(),
-        )?;
-        validate_argument_workspace_scope(
-            workspace_root.as_path(),
-            working_directory.as_path(),
-            input.command.as_str(),
-            input.args.as_slice(),
-        )?;
-    }
+    validate_interpreter_argument_guardrails(
+        workspace_root.as_path(),
+        working_directory.as_path(),
+        input.command.as_str(),
+        input.args.as_slice(),
+    )?;
+    validate_argument_workspace_scope(
+        workspace_root.as_path(),
+        working_directory.as_path(),
+        input.command.as_str(),
+        input.args.as_slice(),
+    )?;
     let requested_hosts = if matches!(policy.egress_enforcement_mode, EgressEnforcementMode::None) {
         Vec::new()
     } else {
@@ -604,11 +598,7 @@ fn resolve_host_mutation_path(
             message: "host process runner denied path with embedded NUL byte".to_owned(),
         });
     }
-    if named_virtual_workspace_path_suffix(raw).is_some() {
-        return resolve_scoped_path(workspace_root, workspace_root, raw, false);
-    }
-    let parsed = Path::new(raw);
-    Ok(if parsed.is_absolute() { parsed.to_path_buf() } else { cwd.join(parsed) })
+    resolve_scoped_path(workspace_root, cwd, raw, false)
 }
 
 fn parse_process_runner_input(
@@ -819,26 +809,8 @@ fn canonical_workspace_root(root: &Path) -> Result<PathBuf, SandboxProcessRunErr
     Ok(canonical)
 }
 
-fn default_host_working_root(root: &Path) -> Result<PathBuf, SandboxProcessRunError> {
-    if root.as_os_str().is_empty() {
-        return std::env::current_dir().map_err(|error| SandboxProcessRunError {
-            kind: SandboxProcessRunErrorKind::WorkspaceScopeDenied,
-            message: format!("host process runner failed to resolve current directory: {error}"),
-        });
-    }
-    fs::canonicalize(root).or_else(|_| {
-        std::env::current_dir().map_err(|error| SandboxProcessRunError {
-            kind: SandboxProcessRunErrorKind::WorkspaceScopeDenied,
-            message: format!(
-                "host process runner failed to resolve workspace_root '{}' or current directory: {error}",
-                root.to_string_lossy()
-            ),
-        })
-    })
-}
-
 fn resolve_host_working_directory(
-    default_root: &Path,
+    workspace_root: &Path,
     cwd: Option<&str>,
 ) -> Result<PathBuf, SandboxProcessRunError> {
     let cwd_value = cwd.unwrap_or(".");
@@ -848,26 +820,7 @@ fn resolve_host_working_directory(
             message: "host process runner denied cwd with embedded NUL byte".to_owned(),
         });
     }
-    if named_virtual_workspace_path_suffix(cwd_value).is_some() {
-        let resolved = resolve_scoped_path(default_root, default_root, cwd_value, true)?;
-        if !resolved.is_dir() {
-            return Err(SandboxProcessRunError {
-                kind: SandboxProcessRunErrorKind::WorkspaceScopeDenied,
-                message: format!("host process runner cwd '{cwd_value}' is not a directory"),
-            });
-        }
-        return Ok(resolved);
-    }
-    let raw = Path::new(cwd_value);
-    let candidate = if raw.is_absolute() { raw.to_path_buf() } else { default_root.join(raw) };
-    let resolved =
-        fs::canonicalize(candidate.as_path()).map_err(|error| SandboxProcessRunError {
-            kind: SandboxProcessRunErrorKind::WorkspaceScopeDenied,
-            message: format!(
-                "host process runner cwd '{}' is not a readable directory: {error}",
-                cwd_value
-            ),
-        })?;
+    let resolved = resolve_scoped_path(workspace_root, workspace_root, cwd_value, true)?;
     if !resolved.is_dir() {
         return Err(SandboxProcessRunError {
             kind: SandboxProcessRunErrorKind::WorkspaceScopeDenied,
@@ -2370,7 +2323,7 @@ mod tests {
     }
 
     #[test]
-    fn host_access_process_runner_allows_builtin_mkdir_outside_workspace() {
+    fn host_access_process_runner_rejects_builtin_mkdir_outside_workspace() {
         let workspace = unique_temp_dir("workspace-host-mkdir");
         let outside = unique_temp_dir("outside-host-mkdir");
         fs::create_dir_all(workspace.as_path()).expect("workspace directory should be created");
@@ -2382,17 +2335,15 @@ mod tests {
             target.to_string_lossy().replace('\\', "\\\\")
         );
 
-        let result =
+        let error =
             run_constrained_process(&policy, input.as_bytes(), Duration::from_millis(1_000))
-                .expect("host access mkdir should allow absolute paths outside workspace");
+                .expect_err(
+                    "host-access profile must still reject absolute paths outside workspace",
+                );
 
-        let output: serde_json::Value =
-            serde_json::from_slice(&result.output_json).expect("output should parse");
-        assert_eq!(
-            output.get("sandbox_backend").and_then(serde_json::Value::as_str),
-            Some("builtin_portable")
-        );
-        assert!(target.is_dir(), "host access mkdir should create the requested directory");
+        assert_eq!(error.kind, SandboxProcessRunErrorKind::WorkspaceScopeDenied);
+        assert!(error.message.contains("escapes workspace"), "{}", error.message);
+        assert!(!target.exists(), "outside-workspace mkdir target must not be created");
 
         let _ = fs::remove_dir_all(workspace.as_path());
         let _ = fs::remove_dir_all(outside.as_path());
