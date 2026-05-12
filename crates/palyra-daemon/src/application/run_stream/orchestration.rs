@@ -402,12 +402,13 @@ async fn terminate_run_stream_with_agent_loop_reason(
     message: &str,
     provider_trace_ref: Option<String>,
 ) -> Result<(), Status> {
+    let message = loop_state.message_with_cleanup_guidance(message);
     append_agent_loop_tape_event(
         runtime_state,
         run_id,
         tape_seq,
         "agent_loop.terminated",
-        loop_state.termination_payload(run_id, reason, message, provider_trace_ref),
+        loop_state.termination_payload(run_id, reason, message.as_str(), provider_trace_ref),
     )
     .await?;
     run_state
@@ -417,7 +418,7 @@ async fn terminate_run_stream_with_agent_loop_reason(
         .update_orchestrator_run_state(
             run_id.to_owned(),
             RunLifecycleState::Failed,
-            Some(message.to_owned()),
+            Some(message.clone()),
         )
         .await?;
     runtime_state.clear_self_healing_heartbeat(WorkHeartbeatKind::Run, run_id);
@@ -427,7 +428,7 @@ async fn terminate_run_stream_with_agent_loop_reason(
         run_id,
         tape_seq,
         common_v1::stream_status::StatusKind::Failed,
-        message,
+        message.as_str(),
     )
     .await
 }

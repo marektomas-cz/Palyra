@@ -1,7 +1,10 @@
-use std::time::{Duration, Instant};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::{Duration, Instant},
+};
 
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::{
     gateway::current_unix_ms,
@@ -9,7 +12,10 @@ use crate::{
 };
 
 pub(crate) const DEFAULT_AGENT_LOOP_MAX_MODEL_TURNS: u32 = 8;
-pub(crate) const DEFAULT_AGENT_LOOP_WALL_CLOCK_BUDGET_MS: u64 = 120_000;
+pub(crate) const DEFAULT_AGENT_LOOP_WALL_CLOCK_BUDGET_MS: u64 = 300_000;
+
+const BROWSER_SESSION_CREATE_TOOL_NAME: &str = "palyra.browser.session.create";
+const BROWSER_SESSION_CLOSE_TOOL_NAME: &str = "palyra.browser.session.close";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -242,15 +248,99 @@ impl AgentRunLoopState {
         .unwrap_or_else(|_| "{}".to_owned())
     }
 
+    pub(crate) fn message_with_cleanup_guidance(&self, message: &str) -> String {
+        let cleanup = self.cleanup_instructions();
+        if cleanup.is_empty() {
+            return message.to_owned();
+        }
+        format!("{message} Cleanup required: {}", cleanup.join(" "))
+    }
+
+    fn cleanup_instructions(&self) -> Vec<String> {
+        pending_browser_session_ids(self.messages.as_slice())
+            .into_iter()
+            .map(|session_id| {
+                format!(
+                    "browser session {session_id} may still be open; close it with `palyra browser session close {session_id} --json` or stop browserd with `palyra browser stop --json`."
+                )
+            })
+            .collect()
+    }
+
     fn elapsed(&self) -> Duration {
         Instant::now().saturating_duration_since(self.started_at)
     }
 }
 
+#[derive(Debug, Clone)]
+struct BrowserToolCallRef {
+    tool_name: String,
+    input_json: Value,
+}
+
+fn pending_browser_session_ids(messages: &[ProviderMessage]) -> BTreeSet<String> {
+    let mut tool_calls_by_id = BTreeMap::<String, BrowserToolCallRef>::new();
+    let mut open_session_ids = BTreeSet::<String>::new();
+
+    for message in messages {
+        for tool_call in &message.tool_calls {
+            if matches!(
+                tool_call.tool_name.as_str(),
+                BROWSER_SESSION_CREATE_TOOL_NAME | BROWSER_SESSION_CLOSE_TOOL_NAME
+            ) {
+                tool_calls_by_id.insert(
+                    tool_call.proposal_id.clone(),
+                    BrowserToolCallRef {
+                        tool_name: tool_call.tool_name.clone(),
+                        input_json: tool_call.input_json.clone(),
+                    },
+                );
+            }
+        }
+
+        if message.role != crate::model_provider::ProviderMessageRole::Tool {
+            continue;
+        }
+        let Some(tool_call_id) = message.tool_call_id.as_deref() else {
+            continue;
+        };
+        let Some(tool_call) = tool_calls_by_id.get(tool_call_id) else {
+            continue;
+        };
+        let Ok(output) = serde_json::from_str::<Value>(message.text_content().as_str()) else {
+            continue;
+        };
+
+        match tool_call.tool_name.as_str() {
+            BROWSER_SESSION_CREATE_TOOL_NAME => {
+                if let Some(session_id) = output.get("session_id").and_then(Value::as_str) {
+                    open_session_ids.insert(session_id.to_owned());
+                }
+            }
+            BROWSER_SESSION_CLOSE_TOOL_NAME => {
+                let closed = output.get("closed").and_then(Value::as_bool).unwrap_or(false);
+                if closed {
+                    if let Some(session_id) =
+                        tool_call.input_json.get("session_id").and_then(Value::as_str)
+                    {
+                        open_session_ids.remove(session_id);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    open_session_ids
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model_provider::{ProviderFinishReason, ProviderRawProviderRefs, ProviderUsage};
+    use crate::model_provider::{
+        ProviderFinishReason, ProviderMessageContentPart, ProviderMessageRole,
+        ProviderMessageToolCall, ProviderRawProviderRefs, ProviderUsage,
+    };
 
     #[test]
     fn loop_state_enforces_turn_budget_and_serializes_termination() {
@@ -293,5 +383,77 @@ mod tests {
         let tool = ProviderMessage::tool_result("call-01", r#"{"echo":"hello"}"#);
         assert_eq!(tool.tool_call_id.as_deref(), Some("call-01"));
         assert!(tool.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn loop_state_reports_browser_session_cleanup_guidance_on_failure() {
+        let session_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        let messages = vec![
+            ProviderMessage {
+                role: ProviderMessageRole::Assistant,
+                content: Vec::new(),
+                name: None,
+                tool_call_id: None,
+                tool_calls: vec![ProviderMessageToolCall {
+                    proposal_id: "call-create".to_owned(),
+                    tool_name: BROWSER_SESSION_CREATE_TOOL_NAME.to_owned(),
+                    input_json: serde_json::json!({"allow_private_targets": true}),
+                }],
+            },
+            ProviderMessage::tool_result(
+                "call-create",
+                serde_json::json!({"session_id": session_id}).to_string(),
+            ),
+        ];
+        let state = AgentRunLoopState::new(messages, 2, 4, 10_000);
+
+        let message = state.message_with_cleanup_guidance("agent loop wall-clock budget exhausted");
+
+        assert!(message.contains("agent loop wall-clock budget exhausted"));
+        assert!(message.contains("browser session 01ARZ3NDEKTSV4RRFFQ69G5FAV"));
+        assert!(message.contains("palyra browser session close 01ARZ3NDEKTSV4RRFFQ69G5FAV --json"));
+        assert!(message.contains("palyra browser stop --json"));
+    }
+
+    #[test]
+    fn loop_state_omits_cleanup_guidance_for_closed_browser_sessions() {
+        let session_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        let messages = vec![
+            ProviderMessage {
+                role: ProviderMessageRole::Assistant,
+                content: vec![ProviderMessageContentPart::text("creating browser")],
+                name: None,
+                tool_call_id: None,
+                tool_calls: vec![ProviderMessageToolCall {
+                    proposal_id: "call-create".to_owned(),
+                    tool_name: BROWSER_SESSION_CREATE_TOOL_NAME.to_owned(),
+                    input_json: serde_json::json!({}),
+                }],
+            },
+            ProviderMessage::tool_result(
+                "call-create",
+                serde_json::json!({"session_id": session_id}).to_string(),
+            ),
+            ProviderMessage {
+                role: ProviderMessageRole::Assistant,
+                content: Vec::new(),
+                name: None,
+                tool_call_id: None,
+                tool_calls: vec![ProviderMessageToolCall {
+                    proposal_id: "call-close".to_owned(),
+                    tool_name: BROWSER_SESSION_CLOSE_TOOL_NAME.to_owned(),
+                    input_json: serde_json::json!({"session_id": session_id}),
+                }],
+            },
+            ProviderMessage::tool_result(
+                "call-close",
+                serde_json::json!({"closed": true}).to_string(),
+            ),
+        ];
+        let state = AgentRunLoopState::new(messages, 2, 4, 10_000);
+
+        let message = state.message_with_cleanup_guidance("agent loop wall-clock budget exhausted");
+
+        assert_eq!(message, "agent loop wall-clock budget exhausted");
     }
 }
