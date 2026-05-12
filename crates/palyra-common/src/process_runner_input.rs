@@ -35,25 +35,49 @@ pub fn parse_process_runner_tool_input(
 }
 
 fn normalize_repeated_command_argument(input: &mut ProcessRunnerToolInput) {
-    if input.args.len() != 1 {
+    let command = input.command.trim();
+    if command.is_empty() || input.args.is_empty() {
         return;
     }
-    let command = input.command.trim();
-    if command.is_empty() {
+
+    if executable_tokens_match(command, input.args[0].as_str()) {
+        input.args.remove(0);
+        return;
+    }
+
+    if input.args.len() != 1 {
         return;
     }
     let argument = input.args[0].trim_start();
     let Some((first_token, rest)) = argument.split_once(char::is_whitespace) else {
-        if argument.eq_ignore_ascii_case(command) {
+        if executable_tokens_match(command, argument) {
             input.args.clear();
         }
         return;
     };
-    if !first_token.eq_ignore_ascii_case(command) {
+    if !executable_tokens_match(command, first_token) {
         return;
     }
     input.args =
         rest.split_whitespace().filter(|arg| !arg.is_empty()).map(ToOwned::to_owned).collect();
+}
+
+fn executable_tokens_match(command: &str, candidate: &str) -> bool {
+    let command = normalize_executable_token(command);
+    let candidate = normalize_executable_token(candidate);
+    !command.is_empty() && command == candidate
+}
+
+fn normalize_executable_token(value: &str) -> String {
+    let trimmed = value.trim().trim_matches('"').trim_matches('\'');
+    let file_name = trimmed
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(trimmed)
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'');
+    file_name.strip_suffix(".exe").unwrap_or(file_name).to_ascii_lowercase()
 }
 
 #[cfg(test)]
@@ -96,12 +120,32 @@ mod tests {
     }
 
     #[test]
-    fn parse_process_runner_tool_input_keeps_literal_command_arg_when_split_already() {
+    fn parse_process_runner_tool_input_normalizes_repeated_command_when_split_already() {
         let input = br#"{"command":"echo","args":["echo","PALYRA_TERMINAL_OK"]}"#;
         let parsed = parse_process_runner_tool_input(input)
             .expect("valid process-runner payload should parse");
 
-        assert_eq!(parsed.args, vec!["echo", "PALYRA_TERMINAL_OK"]);
+        assert_eq!(parsed.args, vec!["PALYRA_TERMINAL_OK"]);
+    }
+
+    #[test]
+    fn parse_process_runner_tool_input_normalizes_repeated_node_command_when_split_already() {
+        let input = br#"{"command":"node","args":["node","e2e-smoke-file-patch/math.test.js"]}"#;
+        let parsed = parse_process_runner_tool_input(input)
+            .expect("valid process-runner payload should parse");
+
+        assert_eq!(parsed.command, "node");
+        assert_eq!(parsed.args, vec!["e2e-smoke-file-patch/math.test.js"]);
+    }
+
+    #[test]
+    fn parse_process_runner_tool_input_normalizes_repeated_windows_exe_command() {
+        let input =
+            br#"{"command":"node.exe","args":["C:\\Tools\\node","e2e-smoke-file-patch/math.test.js"]}"#;
+        let parsed = parse_process_runner_tool_input(input)
+            .expect("valid process-runner payload should parse");
+
+        assert_eq!(parsed.args, vec!["e2e-smoke-file-patch/math.test.js"]);
     }
 
     #[test]

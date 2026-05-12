@@ -348,7 +348,7 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
                             "type":"array",
                             "items":{"type":"string"},
                             "maxItems":64,
-                            "description":"Command arguments only. For `echo hello`, use command='echo' and args=['hello'], not args=['echo hello']. Do not use mkdir, touch, echo redirection, or interpreter eval for file writes; use palyra.fs.apply_patch first, then use this tool only to verify."
+                            "description":"Command arguments only. For `echo hello`, use command='echo' and args=['hello'], not args=['echo hello']. For `node script.js`, use command='node' and args=['script.js'], not args=['node','script.js']; the runtime normalizes a duplicated leading command token, but callers should not rely on that. Do not use mkdir, touch, echo redirection, or interpreter eval for file writes; use palyra.fs.apply_patch first, then use this tool only to verify."
                         }),
                     ),
                     (
@@ -684,6 +684,7 @@ mod tests {
             .expect("args description should be visible to models");
         assert!(args_description.contains("Do not use mkdir, touch"));
         assert!(args_description.contains("palyra.fs.apply_patch first"));
+        assert!(args_description.contains("not args=['node','script.js']"));
 
         let cwd_description = entry
             .input_schema
