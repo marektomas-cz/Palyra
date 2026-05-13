@@ -1327,6 +1327,9 @@ kind = "anthropic"
 
     #[test]
     fn onboarding_signals_accept_inline_minimax_auth() -> Result<()> {
+        let _guard = app::test_env_lock_for_tests().lock().expect("env lock");
+        app::clear_root_context_for_tests();
+
         let temp = tempdir()?;
         let config_path = temp.path().join("config").join("palyra.toml");
         let config = r#"
@@ -1366,6 +1369,8 @@ anthropic_api_key = "sk-inline-minimax"
         assert!(memory_step.optional);
         assert_eq!(memory_step.verification_state.as_deref(), Some("degraded_hash_fallback"));
         assert!(memory_step.summary.contains("palyra memory index --until-complete"));
+
+        app::clear_root_context_for_tests();
         Ok(())
     }
 
