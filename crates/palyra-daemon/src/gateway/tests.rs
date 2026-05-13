@@ -770,7 +770,7 @@ async fn http_fetch_detects_redirect_loop_limit() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn http_fetch_enforces_response_size_cutoff() {
+async fn http_fetch_truncates_response_at_size_cutoff() {
     let state = build_test_runtime_state_with_http_fetch_private_targets(false, true);
     let (url, handle) = spawn_static_http_server(&"X".repeat(256));
     let input = serde_json::to_vec(&json!({
@@ -779,12 +779,13 @@ async fn http_fetch_enforces_response_size_cutoff() {
     }))
     .expect("input should serialize");
     let outcome = execute_http_fetch_tool(&state, "proposal-http-fetch-4", input.as_slice()).await;
-    assert!(!outcome.success, "oversized response should be rejected");
-    assert!(
-        outcome.error.contains("max_response_bytes (64)"),
-        "error should include cutoff details: {}",
-        outcome.error
-    );
+    assert!(outcome.success, "oversized response should return a bounded partial body");
+    let output: serde_json::Value =
+        serde_json::from_slice(&outcome.output_json).expect("output should parse");
+    assert_eq!(output["body_bytes"], 64);
+    assert_eq!(output["max_response_bytes"], 64);
+    assert_eq!(output["truncated"], true);
+    assert_eq!(output["body_text"].as_str().expect("body text should be present").len(), 64);
     handle.join().expect("static server should complete after single request");
 }
 

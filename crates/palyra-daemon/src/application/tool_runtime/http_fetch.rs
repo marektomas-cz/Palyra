@@ -537,6 +537,7 @@ pub(crate) async fn execute_http_fetch_tool(
         }
 
         let mut body_bytes = Vec::new();
+        let mut body_truncated = false;
         if method != "HEAD" {
             loop {
                 let chunk = match response.chunk().await {
@@ -555,15 +556,12 @@ pub(crate) async fn execute_http_fetch_tool(
                     break;
                 };
                 if body_bytes.len().saturating_add(chunk.len()) > max_response_bytes {
-                    return http_fetch_tool_execution_outcome(
-                        proposal_id,
-                        input_json,
-                        false,
-                        b"{}".to_vec(),
-                        format!(
-                            "palyra.http.fetch response exceeds max_response_bytes ({max_response_bytes})"
-                        ),
-                    );
+                    let remaining = max_response_bytes.saturating_sub(body_bytes.len());
+                    if remaining > 0 {
+                        body_bytes.extend_from_slice(&chunk[..remaining]);
+                    }
+                    body_truncated = true;
+                    break;
                 }
                 body_bytes.extend_from_slice(chunk.as_ref());
             }
@@ -580,6 +578,8 @@ pub(crate) async fn execute_http_fetch_tool(
             "redirects_followed": redirects_followed,
             "content_type": content_type,
             "body_bytes": body_bytes.len(),
+            "max_response_bytes": max_response_bytes,
+            "truncated": body_truncated,
             "body_text": body_export.body_text,
             "latency_ms": started_at.elapsed().as_millis() as u64,
             "request_headers": redacted_http_headers(request_headers.as_slice()),

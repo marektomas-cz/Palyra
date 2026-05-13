@@ -7,7 +7,7 @@ use crate::{
     model_provider::{ProviderMessage, ProviderMessageContentPart, ProviderMessageRole},
 };
 
-pub(crate) const INSTRUCTION_COMPILER_VERSION: u32 = 18;
+pub(crate) const INSTRUCTION_COMPILER_VERSION: u32 = 19;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct InstructionTrustSummary {
@@ -177,6 +177,9 @@ fn tool_specific_contract(tool_names: &[String]) -> String {
     if tool_names.iter().any(|tool| tool == "palyra.process.run") {
         contracts.push("palyra.process.run execution contract: call only bare executable names, never inline shell syntax in the command field. Even when local desktop profiles allow broad executable selection with allowed_executables='*', cwd and path-like arguments must stay inside the workspace; use relative paths or /workspace/path aliases, and expect absolute host paths outside the workspace to be denied. Restrictive profiles may also enforce executable allowlists, egress controls, and interpreter guardrails. Do not use process.run to write files when palyra.fs.apply_patch can perform the edit with attestation. For requested file creation or edits, call palyra.fs.apply_patch first, then use process.run for verification commands such as node, npm, cargo, ls, dir, or pwd. Pass only executable arguments in args; for `node e2e-smoke-file-patch/math.test.js`, use command='node' and args=['e2e-smoke-file-patch/math.test.js'], not args=['node','e2e-smoke-file-patch/math.test.js']. Before JavaScript or TypeScript test execution, inspect package.json or existing project files and choose an explicit supported command. Do not run ambiguous `npx test`; use package scripts such as npm test/npm run test, direct node file execution, or a specific known runner such as npx playwright test only when the dependency or package metadata supports it. For Playwright tests, verify @playwright/test is installed or declared before using npx playwright test; if it is missing and installing dependencies is outside the task or blocked, report the missing dependency instead of looping. For config/env smoke checks, use safe placeholder env values from .env.example, README, or config defaults when validation requires variables, and never read or copy real .env secret values into commands or output. After one failed missing-env validation, rerun once with safe placeholders or stop with a clear missing-env result. Use background=true for temporary dev servers instead of nohup, '&', or platform-specific launchers. For local browser verification, bind servers to 127.0.0.1 with an explicit port, set timeout_ms to a bounded verification window such as 60000, verify the exact URL/port is listening before browser navigation, and navigate to that actual 127.0.0.1 URL rather than a guessed localhost default. If a background process exits or the port probe fails, report the lifecycle failure instead of navigating to a stale port. If a command is denied by policy, treat that as an operational limit and continue with a safe fallback or clearly report the blocked verification step.".to_owned());
     }
+    if tool_names.iter().any(|tool| tool == "palyra.http.fetch") {
+        contracts.push("palyra.http.fetch research contract: for public documentation research, prefer official compact endpoints such as JSON indexes, release metadata, changelogs, or version files before large HTML landing pages. For HTML docs, include allowed_content_types containing text/html, text/plain, and application/json unless the task needs a narrower policy. A successful fetch may return truncated=true with a bounded body_text; use the returned body_text as partial evidence, then switch to a smaller official URL or one browser observe attempt if the needed fact is not present. Do not repeat fetch/browser fallbacks against the same oversized or blocked URL until the model turn limit; report which source was blocked or truncated and what remains unknown.".to_owned());
+    }
     if tool_names.iter().any(|tool| tool.starts_with("palyra.browser.")) {
         contracts.push("Palyra browser contract: first create a browser session with palyra.browser.session.create, then copy the exact 26-character session_id from that successful output into every later browser tool call. Never omit session_id, never invent one, and never use a URL, port, tab id, label, or prose as session_id. For localhost, 127.0.0.1, private IPs, or local dev servers, create the session with allow_private_targets=true and also pass allow_private_targets=true on palyra.browser.navigate or palyra.browser.tabs.open for the private URL. When answering what text is visible on a page, first call palyra.browser.observe with include_visible_text=true and base the answer on visible_text, dom_snapshot, or accessibility evidence from that successful result. Title, screenshot, console, and network tools are not textual visibility evidence by themselves. Do not call palyra.artifact.read to inspect browser screenshots or PDFs; screenshot/PDF artifacts may be intentionally unreadable in full, so use palyra.browser.observe for DOM/text evidence and palyra.browser.console_log or palyra.browser.network_log for diagnostics. If a click/type/select/highlight selector is not found, do not keep retrying guessed selectors and do not fall back to palyra.http.fetch for localhost/private pages; call palyra.browser.observe, inspect stable ids/names/labels from the DOM/accessibility evidence, then retry once with a selector grounded in that observation. If a reload is needed and palyra.browser.reload is unavailable, call palyra.browser.navigate again with the current URL and the same allow_private_targets setting. If observe fails or was not called, say the visible text is unknown instead of inferring it from the title, URL, screenshot filename, or page intent.".to_owned());
     }
@@ -274,7 +277,7 @@ mod tests {
         let first = compiler.compile(input.clone());
         let second = compiler.compile(input);
         assert_eq!(first.hash, second.hash);
-        assert_eq!(first.version, 18);
+        assert_eq!(first.version, 19);
         assert_eq!(first.provider_messages().len(), 2);
     }
 
@@ -358,6 +361,17 @@ mod tests {
         assert!(contract.contains("exact URL/port"));
         assert!(contract.contains("Restrictive profiles"));
         assert!(contract.contains("safe fallback"));
+    }
+
+    #[test]
+    fn tool_specific_contract_explains_http_fetch_research_recovery() {
+        let contract = super::tool_specific_contract(&["palyra.http.fetch".to_owned()]);
+
+        assert!(contract.contains("official compact endpoints"));
+        assert!(contract.contains("text/html, text/plain, and application/json"));
+        assert!(contract.contains("truncated=true"));
+        assert!(contract.contains("partial evidence"));
+        assert!(contract.contains("same oversized or blocked URL"));
     }
 
     #[test]
