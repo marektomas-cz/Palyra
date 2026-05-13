@@ -153,7 +153,7 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
         ),
         entry(
             "palyra.routines.control",
-            "Create, update, pause, resume, or manually dispatch routines through the approval-aware runtime. For reminders and monitors, use operation=upsert with trigger_kind=schedule, name, prompt, and natural_language_schedule such as 'every 30 minutes' or 'every 40 seconds'.",
+            "Create, update, pause, resume, or manually dispatch routines through the approval-aware runtime. For new reminders and monitors, omit routine_id and use operation=upsert with trigger_kind=schedule, name, prompt, and natural_language_schedule such as 'every 30 minutes' or 'every 40 seconds'.",
             object_schema(
                 &["operation"],
                 vec![
@@ -161,7 +161,10 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
                         "operation",
                         json!({"type":"string","enum":["upsert","pause","resume","run_now","test_run"]}),
                     ),
-                    ("routine_id", json!({"type":"string"})),
+                    (
+                        "routine_id",
+                        json!({"type":"string","description":"Canonical ULID returned by a previous successful routine operation. Omit this when creating a new routine; do not put human slugs here."}),
+                    ),
                     ("name", json!({"type":"string"})),
                     ("prompt", json!({"type":"string"})),
                     (
@@ -170,7 +173,10 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
                     ),
                     ("natural_language_schedule", json!({"type":"string"})),
                     ("schedule_type", json!({"type":"string","enum":["cron","every","at"]})),
-                    ("every_interval_ms", json!({"type":"integer","minimum":1})),
+                    (
+                        "every_interval_ms",
+                        json!({"type":"integer","minimum":30000,"description":"Minimum 30000 ms for durable routines; use palyra.sleep for shorter bounded in-session polling."}),
+                    ),
                     ("cron_expression", json!({"type":"string"})),
                     ("at_timestamp_rfc3339", json!({"type":"string"})),
                     (

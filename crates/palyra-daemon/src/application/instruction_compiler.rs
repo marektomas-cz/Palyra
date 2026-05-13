@@ -7,7 +7,7 @@ use crate::{
     model_provider::{ProviderMessage, ProviderMessageContentPart, ProviderMessageRole},
 };
 
-pub(crate) const INSTRUCTION_COMPILER_VERSION: u32 = 19;
+pub(crate) const INSTRUCTION_COMPILER_VERSION: u32 = 20;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct InstructionTrustSummary {
@@ -184,7 +184,7 @@ fn tool_specific_contract(tool_names: &[String]) -> String {
         contracts.push("Palyra browser contract: first create a browser session with palyra.browser.session.create, then copy the exact 26-character session_id from that successful output into every later browser tool call. Never omit session_id, never invent one, and never use a URL, port, tab id, label, or prose as session_id. For localhost, 127.0.0.1, private IPs, or local dev servers, create the session with allow_private_targets=true and also pass allow_private_targets=true on palyra.browser.navigate or palyra.browser.tabs.open for the private URL. When answering what text is visible on a page, first call palyra.browser.observe with include_visible_text=true and base the answer on visible_text, dom_snapshot, or accessibility evidence from that successful result. Title, screenshot, console, and network tools are not textual visibility evidence by themselves. Do not call palyra.artifact.read to inspect browser screenshots or PDFs; screenshot/PDF artifacts may be intentionally unreadable in full, so use palyra.browser.observe for DOM/text evidence and palyra.browser.console_log or palyra.browser.network_log for diagnostics. If a click/type/select/highlight selector is not found, do not keep retrying guessed selectors and do not fall back to palyra.http.fetch for localhost/private pages; call palyra.browser.observe, inspect stable ids/names/labels from the DOM/accessibility evidence, then retry once with a selector grounded in that observation. If a reload is needed and palyra.browser.reload is unavailable, call palyra.browser.navigate again with the current URL and the same allow_private_targets setting. If observe fails or was not called, say the visible text is unknown instead of inferring it from the title, URL, screenshot filename, or page intent.".to_owned());
     }
     if tool_names.iter().any(|tool| tool == "palyra.routines.control") {
-        contracts.push("palyra.routines.control automation contract: for user requests to create reminders, monitors, standing orders, or scheduled reports, call operation='upsert'. Use trigger_kind='schedule', a concise name, a self-contained prompt describing the recurring work and output path, and natural_language_schedule for phrases like 'every 40 seconds' or 'every 30 minutes'. Prefer delivery_mode='logs_only' when the user asks to write a report file instead of announcing to a channel. Return the routine_id from the successful tool result.".to_owned());
+        contracts.push("palyra.routines.control automation contract: for user requests to create reminders, monitors, standing orders, or scheduled reports, call operation='upsert'. For new routines, omit routine_id; provide a human name/session label in name, because routine_id is only for updating or dispatching an existing canonical ULID returned by a previous successful tool result. Use trigger_kind='schedule', a concise name, a self-contained prompt describing the recurring work and output path, and natural_language_schedule for phrases like 'every 40 seconds' or 'every 30 minutes'. Do not create sub-30-second schedule loops; for bounded in-session polling use palyra.sleep and normal tools, then create a routine only if the user wants durable automation. Prefer delivery_mode='logs_only' when the user asks to write a report file instead of announcing to a channel. Return the routine_id from the successful tool result.".to_owned());
     }
     if tool_names.iter().any(|tool| tool == "palyra.memory.retain") {
         contracts.push("palyra.memory.retain lifecycle contract: source must be one of manual, summary, import, tape:user_message, or tape:tool_result; use manual for user-stated preferences, corrections, and directives. A successful retain output is authoritative: if durable_memory_write=true and review_state=written, the memory is stored; if durable_memory_write=false, say it was not written and needs review only when review_state says so. If the output includes review.completion_commands, surface those commands as the manual operator completion path. Do not claim an approval is queued or pending unless a tool output includes an explicit approval or review identifier.".to_owned());
@@ -277,7 +277,7 @@ mod tests {
         let first = compiler.compile(input.clone());
         let second = compiler.compile(input);
         assert_eq!(first.hash, second.hash);
-        assert_eq!(first.version, 19);
+        assert_eq!(first.version, 20);
         assert_eq!(first.provider_messages().len(), 2);
     }
 
@@ -399,8 +399,10 @@ mod tests {
         let contract = super::tool_specific_contract(&["palyra.routines.control".to_owned()]);
 
         assert!(contract.contains("operation='upsert'"));
+        assert!(contract.contains("For new routines, omit routine_id"));
         assert!(contract.contains("natural_language_schedule"));
         assert!(contract.contains("every 40 seconds"));
+        assert!(contract.contains("Do not create sub-30-second schedule loops"));
         assert!(contract.contains("routine_id"));
     }
 

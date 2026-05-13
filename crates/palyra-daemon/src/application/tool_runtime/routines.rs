@@ -36,6 +36,7 @@ use crate::{
 const DEFAULT_ROUTINE_CHANNEL: &str = "system:routines";
 const DEFAULT_ROUTINE_PAGE_LIMIT: usize = 100;
 const MAX_ROUTINE_PAGE_LIMIT: usize = 500;
+const MIN_ROUTINES_CONTROL_EVERY_INTERVAL_MS: u64 = 30_000;
 const ROUTINE_APPROVAL_TIMEOUT_SECONDS: u32 = 900;
 const ROUTINE_APPROVAL_DEVICE_ID: &str = "system:routines";
 const MAX_ROUTINES_QUERY_TOOL_INPUT_BYTES: usize = 64 * 1024;
@@ -1464,6 +1465,12 @@ fn build_schedule(payload: &Map<String, Value>) -> Result<cron_v1::Schedule, Str
                 .ok_or_else(|| {
                     "every_interval_ms must be greater than zero for schedule_type=every".to_owned()
                 })?;
+            if interval_ms < MIN_ROUTINES_CONTROL_EVERY_INTERVAL_MS {
+                return Err(format!(
+                    "every_interval_ms must be at least {} for palyra.routines.control schedule_type=every; use natural_language_schedule like 'every 40 seconds' or palyra.sleep for bounded in-session polling",
+                    MIN_ROUTINES_CONTROL_EVERY_INTERVAL_MS
+                ));
+            }
             Ok(cron_v1::Schedule {
                 r#type: cron_v1::ScheduleType::Every as i32,
                 spec: Some(cron_v1::schedule::Spec::Every(cron_v1::EverySchedule { interval_ms })),
@@ -1477,6 +1484,47 @@ fn build_schedule(payload: &Map<String, Value>) -> Result<cron_v1::Schedule, Str
             })
         }
         _ => Err("schedule_type must be one of cron|every|at".to_owned()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    #[test]
+    fn build_schedule_rejects_too_short_routines_control_every_interval() {
+        let payload = json!({
+            "schedule_type": "every",
+            "every_interval_ms": 3_000
+        })
+        .as_object()
+        .expect("payload should be an object")
+        .clone();
+
+        let error = super::build_schedule(&payload)
+            .expect_err("short routines.control interval should be rejected");
+        assert!(
+            error.contains("at least 30000"),
+            "error should explain minimum routine interval: {error}"
+        );
+        assert!(
+            error.contains("palyra.sleep"),
+            "error should suggest bounded in-session polling: {error}"
+        );
+    }
+
+    #[test]
+    fn build_schedule_accepts_routines_control_every_interval_at_minimum() {
+        let payload = json!({
+            "schedule_type": "every",
+            "every_interval_ms": 30_000
+        })
+        .as_object()
+        .expect("payload should be an object")
+        .clone();
+
+        super::build_schedule(&payload)
+            .expect("minimum routines.control interval should be accepted");
     }
 }
 

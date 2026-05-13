@@ -170,6 +170,25 @@ fn browser_observe_schema_exposes_visible_text_default() {
 }
 
 #[test]
+fn routines_control_schema_discourages_slug_ids_and_short_intervals() {
+    let entry = registry_entry("palyra.routines.control").expect("routines control tool entry");
+
+    assert!(
+        entry.description.contains("omit routine_id"),
+        "description should tell models not to invent human routine ids"
+    );
+    assert!(entry.input_schema["properties"]["routine_id"]["description"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("do not put human slugs here"));
+    assert_eq!(entry.input_schema["properties"]["every_interval_ms"]["minimum"], 30_000);
+    assert!(entry.input_schema["properties"]["every_interval_ms"]["description"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("palyra.sleep"));
+}
+
+#[test]
 fn intake_normalizes_safe_scalar_arguments() {
     let config = config(&["palyra.sleep"]);
     let snapshot = build_model_visible_tool_catalog_snapshot(ToolCatalogBuildRequest {
