@@ -137,6 +137,7 @@ fn run_onboarding_status(
     let first_success_completed = onboarding_step_done(&steps, "first_success");
     let ready_for_first_success = onboarding_prerequisites_ready(&steps);
     let status = derive_posture_status(&steps, ready_for_first_success, first_success_completed);
+    let recommended_step_id = recommended_onboarding_step_id(&steps);
     let payload = control_plane::OnboardingPostureEnvelope {
         contract: cli_contract_descriptor(),
         flow: variant.flow(),
@@ -145,10 +146,7 @@ fn run_onboarding_status(
         config_path: signals.config_path.clone(),
         resume_supported: true,
         ready_for_first_success,
-        recommended_step_id: steps
-            .iter()
-            .find(|step| step.status != control_plane::OnboardingStepStatus::Done)
-            .map(|step| step.step_id.clone()),
+        recommended_step_id,
         first_success_hint: (ready_for_first_success && !first_success_completed).then(|| {
             "Open the dashboard or chat workspace and send a real first request to complete onboarding."
                 .to_owned()
@@ -442,11 +440,16 @@ fn build_onboarding_steps(
             Some(run_cli_action("Inspect memory status", "palyra memory status".to_owned())),
         )
     } else {
+        let status = if signals.first_success_completed {
+            control_plane::OnboardingStepStatus::Skipped
+        } else {
+            control_plane::OnboardingStepStatus::InProgress
+        };
         actionable_step(
             "memory_embeddings",
             "Memory embeddings",
             signals.memory_embeddings_message.clone(),
-            control_plane::OnboardingStepStatus::InProgress,
+            status,
             Some(run_cli_action(
                 "Configure embeddings",
                 format!("palyra models status --path {}", signals.config_path),
@@ -699,6 +702,20 @@ fn build_onboarding_counts(
         }
     }
     counts
+}
+
+fn recommended_onboarding_step_id(steps: &[control_plane::OnboardingStepView]) -> Option<String> {
+    steps
+        .iter()
+        .find(|step| {
+            !step.optional
+                && !matches!(
+                    step.status,
+                    control_plane::OnboardingStepStatus::Done
+                        | control_plane::OnboardingStepStatus::Skipped
+                )
+        })
+        .map(|step| step.step_id.clone())
 }
 
 fn derive_posture_status(
@@ -1107,9 +1124,10 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        build_onboarding_steps, collect_onboarding_signals, default_agent_create_command,
-        derive_posture_status, load_onboarding_document, onboarding_prerequisites_ready,
-        record_cli_first_success, OnboardingSignals, OnboardingVariant,
+        build_onboarding_counts, build_onboarding_steps, collect_onboarding_signals,
+        default_agent_create_command, derive_posture_status, load_onboarding_document,
+        onboarding_prerequisites_ready, recommended_onboarding_step_id, record_cli_first_success,
+        OnboardingSignals, OnboardingVariant,
     };
     use crate::{app, args::RootOptions};
 
@@ -1393,8 +1411,17 @@ agent_id = "local-default"
         let steps = build_onboarding_steps(OnboardingVariant::Quickstart, &signals);
         let first_success =
             steps.iter().find(|step| step.step_id == "first_success").expect("first_success step");
+        let memory_step = steps
+            .iter()
+            .find(|step| step.step_id == "memory_embeddings")
+            .expect("memory embeddings step");
+        let counts = build_onboarding_counts(&steps);
 
         assert_eq!(first_success.status, control_plane::OnboardingStepStatus::Done);
+        assert_eq!(memory_step.status, control_plane::OnboardingStepStatus::Skipped);
+        assert!(memory_step.optional);
+        assert_eq!(counts.in_progress, 0);
+        assert_eq!(recommended_onboarding_step_id(&steps), None);
         assert_eq!(
             derive_posture_status(&steps, onboarding_prerequisites_ready(&steps), true),
             control_plane::OnboardingPostureState::Complete
