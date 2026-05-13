@@ -2276,18 +2276,13 @@ async fn run_browser_console(session_id: String, output: Option<String>, json: b
     let written =
         write_optional_json_output(output.as_deref(), session_id.as_str(), "console", &value)?;
     maybe_attach_output_path(&mut value, written.as_ref());
-    emit_browser_value_with_json(
-        &value,
-        format!(
-            "browser.console session_id={} entries={} truncated={} output={}",
-            browser_session_handle_text(Some(session_id.as_str())),
-            value.get("entries").and_then(Value::as_array).map_or(0, Vec::len),
-            value.get("truncated").and_then(Value::as_bool).unwrap_or(false),
-            written.as_deref().unwrap_or("-"),
-        ),
-        "failed to encode browser console output",
-        json,
-    )
+    let text = format_browser_console_text(
+        session_id.as_str(),
+        response.entries.as_slice(),
+        response.truncated,
+        written.as_deref(),
+    );
+    emit_browser_value_with_json(&value, text, "failed to encode browser console output", json)
 }
 
 async fn run_browser_pdf(session_id: String, output: Option<String>) -> Result<()> {
@@ -3887,6 +3882,46 @@ fn format_browser_session_summary_text(session: &browser_v1::BrowserSessionSumma
     )
 }
 
+fn format_browser_console_text(
+    session_id: &str,
+    entries: &[browser_v1::BrowserConsoleEntry],
+    truncated: bool,
+    output_path: Option<&str>,
+) -> String {
+    let mut text = format!(
+        "browser.console session_id={} entries={} truncated={} output={}",
+        browser_session_handle_text(Some(session_id)),
+        entries.len(),
+        truncated,
+        output_path.unwrap_or("-"),
+    );
+    for (index, entry) in entries.iter().enumerate() {
+        text.push('\n');
+        text.push_str(
+            format!(
+                "browser.console.entry index={} severity={} kind={} source={} message={} page_url={}",
+                index + 1,
+                proto_console_severity_text(entry.severity),
+                quoted_browser_text_field(entry.kind.as_str()),
+                quoted_browser_text_field(entry.source.as_str()),
+                quoted_browser_text_field(entry.message.as_str()),
+                quoted_browser_text_field(entry.page_url.as_str()),
+            )
+            .as_str(),
+        );
+    }
+    text
+}
+
+fn quoted_browser_text_field(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        "-".to_owned()
+    } else {
+        serde_json::to_string(trimmed).unwrap_or_else(|_| "\"<invalid>\"".to_owned())
+    }
+}
+
 fn browser_identifier_kind_for_key(key: &str) -> Option<&'static str> {
     match key {
         "runtime_session_id" => Some("session"),
@@ -4195,10 +4230,10 @@ mod tests {
         browser_status_warnings, effective_browser_lifecycle_running,
         ensure_browser_command_success, ensure_browser_gateway_auth_token_alignment,
         ensure_browser_service_enabled, ensure_browser_start_preflight,
-        format_browser_session_summary_text, normalize_session_scoped_output,
-        redact_browser_output_value, session_summary_value, BrowserControlPlaneSnapshot,
-        BrowserOutputMode, BrowserPolicySnapshot, BrowserResolvedConfig, BrowserServiceConnection,
-        BrowserServiceMetadata,
+        format_browser_console_text, format_browser_session_summary_text,
+        normalize_session_scoped_output, redact_browser_output_value, session_summary_value,
+        BrowserControlPlaneSnapshot, BrowserOutputMode, BrowserPolicySnapshot,
+        BrowserResolvedConfig, BrowserServiceConnection, BrowserServiceMetadata,
     };
     use crate::{args::BrowserCommand, browser_v1, common_v1};
     use palyra_control_plane as control_plane;
@@ -4549,6 +4584,42 @@ mod tests {
             line.contains("session_id=01ARZ3NDEKTSV4RRFFQ69G5FAV"),
             "session list text should preserve the canonical reusable session handle: {line}"
         );
+    }
+
+    #[test]
+    fn browser_console_text_includes_entry_messages() {
+        let session_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        let text = format_browser_console_text(
+            session_id,
+            &[
+                browser_v1::BrowserConsoleEntry {
+                    severity: browser_v1::BrowserDiagnosticSeverity::Info as i32,
+                    kind: "console".to_owned(),
+                    source: "console.log".to_owned(),
+                    message: "local page loaded".to_owned(),
+                    page_url: "http://127.0.0.1:5177/".to_owned(),
+                    ..Default::default()
+                },
+                browser_v1::BrowserConsoleEntry {
+                    severity: browser_v1::BrowserDiagnosticSeverity::Warn as i32,
+                    kind: "console".to_owned(),
+                    source: "console.warn".to_owned(),
+                    message: "clicked Palyra".to_owned(),
+                    page_url: "http://127.0.0.1:5177/".to_owned(),
+                    ..Default::default()
+                },
+            ],
+            false,
+            None,
+        );
+
+        assert!(text.contains("browser.console session_id=01ARZ3NDEKTSV4RRFFQ69G5FAV"));
+        assert!(text.contains("entries=2"));
+        assert!(text.contains("severity=info"));
+        assert!(text.contains("source=\"console.log\""));
+        assert!(text.contains("message=\"local page loaded\""));
+        assert!(text.contains("severity=warn"));
+        assert!(text.contains("message=\"clicked Palyra\""));
     }
 
     #[test]
