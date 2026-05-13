@@ -18680,7 +18680,7 @@ fn build_relaxed_memory_fts_queries(query: &str) -> Vec<String> {
                 }
             })
             .collect::<Vec<_>>();
-        if relaxed.iter().any(|term| *term == preference_term) {
+        if relaxed.contains(&preference_term) {
             let query = relaxed.join(" ");
             if !variants.iter().any(|existing| existing == &query) {
                 variants.push(query);

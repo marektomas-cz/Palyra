@@ -1487,47 +1487,6 @@ fn build_schedule(payload: &Map<String, Value>) -> Result<cron_v1::Schedule, Str
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    #[test]
-    fn build_schedule_rejects_too_short_routines_control_every_interval() {
-        let payload = json!({
-            "schedule_type": "every",
-            "every_interval_ms": 3_000
-        })
-        .as_object()
-        .expect("payload should be an object")
-        .clone();
-
-        let error = super::build_schedule(&payload)
-            .expect_err("short routines.control interval should be rejected");
-        assert!(
-            error.contains("at least 30000"),
-            "error should explain minimum routine interval: {error}"
-        );
-        assert!(
-            error.contains("palyra.sleep"),
-            "error should suggest bounded in-session polling: {error}"
-        );
-    }
-
-    #[test]
-    fn build_schedule_accepts_routines_control_every_interval_at_minimum() {
-        let payload = json!({
-            "schedule_type": "every",
-            "every_interval_ms": 30_000
-        })
-        .as_object()
-        .expect("payload should be an object")
-        .clone();
-
-        super::build_schedule(&payload)
-            .expect("minimum routines.control interval should be accepted");
-    }
-}
-
 fn build_schedule_trigger_payload(job: &CronJobRecord) -> String {
     json!({
         "schedule_type": job.schedule_type.as_str(),
@@ -1939,5 +1898,46 @@ fn routines_tool_execution_outcome(
             executor: "routines_runtime".to_owned(),
             sandbox_enforcement: "none".to_owned(),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    #[test]
+    fn build_schedule_rejects_too_short_routines_control_every_interval() {
+        let payload = json!({
+            "schedule_type": "every",
+            "every_interval_ms": 3_000
+        })
+        .as_object()
+        .expect("payload should be an object")
+        .clone();
+
+        let error = super::build_schedule(&payload)
+            .expect_err("short routines.control interval should be rejected");
+        assert!(
+            error.contains("at least 30000"),
+            "error should explain minimum routine interval: {error}"
+        );
+        assert!(
+            error.contains("palyra.sleep"),
+            "error should suggest bounded in-session polling: {error}"
+        );
+    }
+
+    #[test]
+    fn build_schedule_accepts_routines_control_every_interval_at_minimum() {
+        let payload = json!({
+            "schedule_type": "every",
+            "every_interval_ms": 30_000
+        })
+        .as_object()
+        .expect("payload should be an object")
+        .clone();
+
+        super::build_schedule(&payload)
+            .expect("minimum routines.control interval should be accepted");
     }
 }
