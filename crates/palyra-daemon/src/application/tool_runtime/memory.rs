@@ -9,9 +9,9 @@ use crate::{
         memory::{
             normalize_lifecycle_content, redact_memory_text_for_output, reflect_memory_candidates,
             ttl_unix_ms_from_input, MemoryLifecycleProvider, MemoryLifecycleRetainOutcome,
-            MemoryLifecycleRetainRequest, MemoryLifecycleScope, MemoryReflectionCategory,
-            MemoryReflectionOutcome, MemoryReflectionRequest, MEMORY_CONTEXT_FENCE_VERSION,
-            MEMORY_TRUST_LABEL_RETRIEVED,
+            MemoryLifecycleRetainRequest, MemoryLifecycleScope, MemoryLifecycleStatus,
+            MemoryReflectionCategory, MemoryReflectionOutcome, MemoryReflectionRequest,
+            MEMORY_CONTEXT_FENCE_VERSION, MEMORY_TRUST_LABEL_RETRIEVED,
         },
         recall::{preview_recall, RecallPreviewEnvelope, RecallRequest},
         service_authorization::authorize_memory_action,
@@ -957,12 +957,14 @@ fn serialize_memory_lifecycle_outcome(
     outcome: &MemoryLifecycleRetainOutcome,
     source_normalization: Option<Value>,
 ) -> ToolExecutionOutcome {
+    let review_state = memory_lifecycle_review_state(outcome);
+    let review_required = review_state == "not_written_requires_review";
     let mut payload = json!({
         "status": outcome.status.as_str(),
         "reason": outcome.reason.as_str(),
         "scope": outcome.scope.as_str(),
-        "review_state": memory_lifecycle_review_state(outcome),
-        "approval_required": false,
+        "review_state": review_state,
+        "approval_required": review_required,
         "trust_label": outcome.trust_label.as_str(),
         "durable_memory_write": outcome.durable_memory_write,
         "matched_memory_id": outcome.matched_memory_id.as_deref(),
@@ -970,6 +972,11 @@ fn serialize_memory_lifecycle_outcome(
         "provenance": outcome.provenance.clone(),
         "item": outcome.item.as_ref().map(memory_item_output_payload),
     });
+    if let Some(review) = memory_lifecycle_review_payload(outcome) {
+        if let Some(fields) = payload.as_object_mut() {
+            fields.insert("review".to_owned(), review);
+        }
+    }
     if let Some(normalization) = source_normalization {
         if let Some(fields) = payload.as_object_mut() {
             fields.insert("source_normalization".to_owned(), normalization);
@@ -998,11 +1005,44 @@ fn serialize_memory_lifecycle_outcome(
 fn memory_lifecycle_review_state(outcome: &MemoryLifecycleRetainOutcome) -> &'static str {
     if outcome.durable_memory_write {
         "written"
-    } else if outcome.status == crate::application::memory::MemoryLifecycleStatus::NeedsReview {
+    } else if outcome.status == MemoryLifecycleStatus::NeedsReview {
         "not_written_requires_review"
     } else {
         "not_written"
     }
+}
+
+fn memory_lifecycle_review_payload(outcome: &MemoryLifecycleRetainOutcome) -> Option<Value> {
+    if outcome.status != MemoryLifecycleStatus::NeedsReview {
+        return None;
+    }
+    Some(json!({
+        "state": "requires_manual_operator_review",
+        "queue": "not_queued",
+        "review_identifier": Value::Null,
+        "completion_kind": "manual_memory_ingest",
+        "completion_commands": [memory_lifecycle_review_command(outcome)],
+        "operator_note": "No durable memory was written. Review the original retained content, then either run the ingest command with approved content or leave the memory unwritten.",
+    }))
+}
+
+fn memory_lifecycle_review_command(outcome: &MemoryLifecycleRetainOutcome) -> String {
+    let mut command =
+        "palyra memory ingest \"<reviewed memory content>\" --source manual --confidence 1.0"
+            .to_owned();
+    if outcome.scope == MemoryLifecycleScope::Session {
+        if let Some(session_id) = outcome.provenance.get("session_id").and_then(Value::as_str) {
+            command.push_str(" --session ");
+            command.push_str(session_id);
+        }
+    }
+    if outcome.scope == MemoryLifecycleScope::Channel {
+        if let Some(channel) = outcome.provenance.get("channel").and_then(Value::as_str) {
+            command.push_str(" --channel ");
+            command.push_str(channel);
+        }
+    }
+    command
 }
 
 fn memory_item_output_payload(item: &crate::journal::MemoryItemRecord) -> Value {

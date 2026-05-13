@@ -3773,7 +3773,26 @@ async fn memory_retain_tool_principal_scope_requires_review_for_high_risk_conten
         payload.get("review_state").and_then(Value::as_str),
         Some("not_written_requires_review")
     );
-    assert_eq!(payload.get("approval_required").and_then(Value::as_bool), Some(false));
+    assert_eq!(payload.get("approval_required").and_then(Value::as_bool), Some(true));
+    assert_eq!(
+        payload.pointer("/review/state").and_then(Value::as_str),
+        Some("requires_manual_operator_review")
+    );
+    assert_eq!(
+        payload.pointer("/review/completion_kind").and_then(Value::as_str),
+        Some("manual_memory_ingest")
+    );
+    let completion_commands = payload
+        .pointer("/review/completion_commands")
+        .and_then(Value::as_array)
+        .expect("needs-review retain should include completion commands");
+    assert!(
+        completion_commands
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|command| command.contains("palyra memory ingest")),
+        "review payload should include an actionable CLI ingest path: {payload}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -7,7 +7,7 @@ use crate::{
     model_provider::{ProviderMessage, ProviderMessageContentPart, ProviderMessageRole},
 };
 
-pub(crate) const INSTRUCTION_COMPILER_VERSION: u32 = 14;
+pub(crate) const INSTRUCTION_COMPILER_VERSION: u32 = 15;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct InstructionTrustSummary {
@@ -184,7 +184,7 @@ fn tool_specific_contract(tool_names: &[String]) -> String {
         contracts.push("palyra.routines.control automation contract: for user requests to create reminders, monitors, standing orders, or scheduled reports, call operation='upsert'. Use trigger_kind='schedule', a concise name, a self-contained prompt describing the recurring work and output path, and natural_language_schedule for phrases like 'every 40 seconds' or 'every 30 minutes'. Prefer delivery_mode='logs_only' when the user asks to write a report file instead of announcing to a channel. Return the routine_id from the successful tool result.".to_owned());
     }
     if tool_names.iter().any(|tool| tool == "palyra.memory.retain") {
-        contracts.push("palyra.memory.retain lifecycle contract: source must be one of manual, summary, import, tape:user_message, or tape:tool_result; use manual for user-stated preferences, corrections, and directives. A successful retain output is authoritative: if durable_memory_write=true and review_state=written, the memory is stored; if durable_memory_write=false, say it was not written and needs review only when review_state says so. Do not claim an approval is pending unless a tool output includes an explicit approval or review identifier.".to_owned());
+        contracts.push("palyra.memory.retain lifecycle contract: source must be one of manual, summary, import, tape:user_message, or tape:tool_result; use manual for user-stated preferences, corrections, and directives. A successful retain output is authoritative: if durable_memory_write=true and review_state=written, the memory is stored; if durable_memory_write=false, say it was not written and needs review only when review_state says so. If the output includes review.completion_commands, surface those commands as the manual operator completion path. Do not claim an approval is queued or pending unless a tool output includes an explicit approval or review identifier.".to_owned());
     }
     if tool_names.iter().any(|tool| tool == "palyra.memory.search")
         || tool_names.iter().any(|tool| tool == "palyra.memory.recall")
@@ -274,7 +274,7 @@ mod tests {
         let first = compiler.compile(input.clone());
         let second = compiler.compile(input);
         assert_eq!(first.hash, second.hash);
-        assert_eq!(first.version, 14);
+        assert_eq!(first.version, 15);
         assert_eq!(first.provider_messages().len(), 2);
     }
 
@@ -392,7 +392,8 @@ mod tests {
         assert!(contract.contains("source must be one of"));
         assert!(contract.contains("durable_memory_write=true"));
         assert!(contract.contains("review_state=written"));
-        assert!(contract.contains("approval"));
+        assert!(contract.contains("review.completion_commands"));
+        assert!(contract.contains("approval is queued or pending"));
     }
 
     #[test]
