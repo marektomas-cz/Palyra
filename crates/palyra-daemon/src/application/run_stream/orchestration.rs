@@ -856,24 +856,22 @@ pub(crate) async fn process_run_stream_message(
                 let should_refeed_tool_results = !tool_result_messages.is_empty()
                     && provider_output.finish_reason == ProviderFinishReason::ToolCalls;
                 if !should_refeed_tool_results {
-                    if loop_state.completed_tool_calls() == 0 && tool_result_messages.is_empty() {
-                        if let Some(message) =
-                            incomplete_final_answer_without_tools(final_reply_text.as_deref())
-                        {
-                            terminate_run_stream_with_agent_loop_reason(
-                                sender,
-                                runtime_state,
-                                run_state,
-                                run_id.as_str(),
-                                tape_seq,
-                                &loop_state,
-                                AgentLoopTerminationReason::IncompleteFinalAnswer,
-                                message.as_str(),
-                                provider_trace_ref,
-                            )
-                            .await?;
-                            return Ok(RunStreamMessageProcessingOutcome::Terminate);
-                        }
+                    if let Some(message) =
+                        incomplete_terminal_final_answer(final_reply_text.as_deref(), &loop_state)
+                    {
+                        terminate_run_stream_with_agent_loop_reason(
+                            sender,
+                            runtime_state,
+                            run_state,
+                            run_id.as_str(),
+                            tape_seq,
+                            &loop_state,
+                            AgentLoopTerminationReason::IncompleteFinalAnswer,
+                            message.as_str(),
+                            provider_trace_ref,
+                        )
+                        .await?;
+                        return Ok(RunStreamMessageProcessingOutcome::Terminate);
                     }
                     append_agent_loop_tape_event(
                         runtime_state,
@@ -1192,6 +1190,45 @@ fn incomplete_final_answer_without_tools(text: Option<&str>) -> Option<String> {
     None
 }
 
+fn incomplete_terminal_final_answer(
+    text: Option<&str>,
+    loop_state: &AgentRunLoopState,
+) -> Option<String> {
+    if loop_state.completed_tool_calls() == 0 {
+        return incomplete_final_answer_without_tools(text);
+    }
+
+    let text = text.unwrap_or_default().trim();
+    if text.is_empty() {
+        return Some("model returned an empty final answer after tool execution".to_owned());
+    }
+    if final_answer_is_deferred_tool_work(text) {
+        return Some(
+            "model returned a planning or intent statement as the final answer after tool execution"
+                .to_owned(),
+        );
+    }
+
+    let messages = loop_state.messages();
+    if final_answer_is_minimal_ack(text)
+        && latest_user_request_requires_tool_work(messages.as_slice())
+    {
+        return Some(
+            "model returned a bare acknowledgement instead of completing the requested tool workflow"
+                .to_owned(),
+        );
+    }
+    if final_answer_claims_tool_work_without_evidence(text)
+        && !final_answer_has_matching_tool_evidence(text, messages.as_slice())
+    {
+        return Some(
+            "model claimed file, process, browser, or verification work without matching tool evidence"
+                .to_owned(),
+        );
+    }
+    None
+}
+
 fn final_answer_is_deferred_tool_work(text: &str) -> bool {
     let normalized = normalize_final_answer_text(text);
     let has_deferred_marker =
@@ -1210,6 +1247,80 @@ fn normalize_final_answer_text(text: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn final_answer_is_minimal_ack(text: &str) -> bool {
+    matches!(
+        normalize_final_answer_text(text).as_str(),
+        "ack" | "ok" | "okay" | "done" | "complete" | "completed"
+    )
+}
+
+fn latest_user_request_requires_tool_work(messages: &[ProviderMessage]) -> bool {
+    messages
+        .iter()
+        .rev()
+        .find(|message| message.role == crate::model_provider::ProviderMessageRole::User)
+        .map(ProviderMessage::text_content)
+        .is_some_and(|text| {
+            let normalized = normalize_final_answer_text(text.as_str());
+            USER_REQUEST_TOOL_WORK_MARKERS.iter().any(|marker| normalized.contains(marker))
+        })
+}
+
+fn has_action_tool_evidence(messages: &[ProviderMessage]) -> bool {
+    messages.iter().flat_map(|message| message.tool_calls.iter()).any(|call| {
+        !matches!(
+            call.tool_name.as_str(),
+            "palyra.fs.list_dir"
+                | "palyra.fs.read_file"
+                | "palyra.memory.search"
+                | "palyra.memory.recall"
+        )
+    })
+}
+
+fn final_answer_has_matching_tool_evidence(text: &str, messages: &[ProviderMessage]) -> bool {
+    let normalized = normalize_final_answer_text(text);
+    if normalized.contains("i read the file") {
+        return has_tool_name(messages, "palyra.fs.read_file");
+    }
+    if normalized.contains("i navigated") || normalized.contains("i opened the browser") {
+        return has_tool_name_prefix(messages, "palyra.browser.");
+    }
+    if normalized.contains("i ran the test")
+        || normalized.contains("i ran tests")
+        || normalized.contains("test passed")
+        || normalized.contains("tests passed")
+    {
+        return has_tool_name(messages, "palyra.process.run");
+    }
+    if normalized.contains("i applied the patch")
+        || normalized.contains("i created")
+        || normalized.contains("i edited")
+        || normalized.contains("i fixed")
+        || normalized.contains("i implemented")
+        || normalized.contains("i modified")
+        || normalized.contains("i updated")
+        || normalized.contains("i wrote")
+    {
+        return has_tool_name(messages, "palyra.fs.apply_patch");
+    }
+    has_action_tool_evidence(messages)
+}
+
+fn has_tool_name(messages: &[ProviderMessage], tool_name: &str) -> bool {
+    messages
+        .iter()
+        .flat_map(|message| message.tool_calls.iter())
+        .any(|call| call.tool_name == tool_name)
+}
+
+fn has_tool_name_prefix(messages: &[ProviderMessage], prefix: &str) -> bool {
+    messages
+        .iter()
+        .flat_map(|message| message.tool_calls.iter())
+        .any(|call| call.tool_name.starts_with(prefix))
 }
 
 const DEFERRED_TOOL_WORK_MARKERS: &[&str] = &[
@@ -1266,6 +1377,28 @@ const UNSUPPORTED_TOOL_WORK_CLAIMS: &[&str] = &[
     "i wrote the file",
     "test passed",
     "tests passed",
+];
+
+const USER_REQUEST_TOOL_WORK_MARKERS: &[&str] = &[
+    "add ",
+    "browser",
+    "build",
+    "click",
+    "create",
+    "edit",
+    "fix",
+    "generate",
+    "implement",
+    "navigate",
+    "patch",
+    "refactor",
+    "run ",
+    "scrape",
+    "test",
+    "type ",
+    "update",
+    "verify",
+    "write",
 ];
 
 const TERMINAL_TOOL_AUTHORIZATION_ERROR_MARKERS: &[&str] = &[
@@ -1343,13 +1476,39 @@ async fn persist_run_stream_provider_turn_output(
 
 #[cfg(test)]
 mod tests {
+    use super::AgentRunLoopState;
     use super::{
         contains_raw_provider_tool_call_markup, incomplete_final_answer_without_tools,
-        terminal_tool_authorization_failure, tool_result_to_provider_message,
-        RunStreamToolResultForModel,
+        incomplete_terminal_final_answer, terminal_tool_authorization_failure,
+        tool_result_to_provider_message, RunStreamToolResultForModel,
     };
-    use crate::model_provider::ProviderMessageContentPart;
-    use serde_json::Value;
+    use crate::model_provider::{
+        ProviderFinishReason, ProviderMessage, ProviderMessageContentPart,
+        ProviderOutputContentPart, ProviderRawProviderRefs, ProviderTurnOutput, ProviderUsage,
+    };
+    use serde_json::{json, Value};
+
+    fn loop_state_after_tool(prompt: &str, tool_name: &str) -> AgentRunLoopState {
+        let mut state =
+            AgentRunLoopState::new(vec![ProviderMessage::user_text(prompt)], 4, 8, 10_000);
+        state.append_assistant_turn(&ProviderTurnOutput {
+            full_text: String::new(),
+            content_parts: vec![ProviderOutputContentPart::ToolCall {
+                proposal_id: "toolu_test_01".to_owned(),
+                tool_name: tool_name.to_owned(),
+                input_json: json!({}),
+            }],
+            finish_reason: ProviderFinishReason::ToolCalls,
+            usage: ProviderUsage::new(0, 0, "test"),
+            raw_provider_refs: ProviderRawProviderRefs::default(),
+            redaction_state: Default::default(),
+        });
+        state.append_tool_result_messages(vec![ProviderMessage::tool_result(
+            "toolu_test_01",
+            r#"{"success":true}"#,
+        )]);
+        state
+    }
 
     #[test]
     fn terminal_tool_authorization_failure_detects_approval_errors() {
@@ -1532,6 +1691,57 @@ mod tests {
         assert!(incomplete_final_answer_without_tools(Some(
             "Use `cargo test -p palyra-daemon` to run the daemon tests."
         ))
+        .is_none());
+    }
+
+    #[test]
+    fn incomplete_terminal_final_answer_rejects_deferred_work_after_read_only_tool() {
+        let state =
+            loop_state_after_tool("Create fixtures/cz-validator with tests.", "palyra.fs.list_dir");
+        let message = incomplete_terminal_final_answer(
+            Some("Good, the directory is absent. I'll create the files next."),
+            &state,
+        )
+        .expect("deferred work after read-only discovery must not complete the run");
+
+        assert!(message.contains("planning or intent statement"));
+    }
+
+    #[test]
+    fn incomplete_terminal_final_answer_rejects_ack_for_requested_tool_work() {
+        let state = loop_state_after_tool(
+            "Create fixtures/landing-page and verify it.",
+            "palyra.fs.list_dir",
+        );
+        let message = incomplete_terminal_final_answer(Some("ack"), &state)
+            .expect("bare ack must not complete a requested tool workflow");
+
+        assert!(message.contains("bare acknowledgement"));
+    }
+
+    #[test]
+    fn incomplete_terminal_final_answer_allows_concrete_summary_after_action_tool() {
+        let state = loop_state_after_tool(
+            "Create fixtures/notes-api and run tests.",
+            "palyra.fs.apply_patch",
+        );
+
+        assert!(incomplete_terminal_final_answer(
+            Some("Created fixtures/notes-api and summarized the changed files."),
+            &state,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn incomplete_terminal_final_answer_allows_read_claim_after_read_tool() {
+        let state =
+            loop_state_after_tool("Read README.md and summarize it.", "palyra.fs.read_file");
+
+        assert!(incomplete_terminal_final_answer(
+            Some("I read the file. It describes the local development workflow."),
+            &state,
+        )
         .is_none());
     }
 }
