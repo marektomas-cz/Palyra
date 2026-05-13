@@ -856,6 +856,25 @@ pub(crate) async fn process_run_stream_message(
                 let should_refeed_tool_results = !tool_result_messages.is_empty()
                     && provider_output.finish_reason == ProviderFinishReason::ToolCalls;
                 if !should_refeed_tool_results {
+                    if loop_state.completed_tool_calls() == 0 && tool_result_messages.is_empty() {
+                        if let Some(message) =
+                            incomplete_final_answer_without_tools(final_reply_text.as_deref())
+                        {
+                            terminate_run_stream_with_agent_loop_reason(
+                                sender,
+                                runtime_state,
+                                run_state,
+                                run_id.as_str(),
+                                tape_seq,
+                                &loop_state,
+                                AgentLoopTerminationReason::IncompleteFinalAnswer,
+                                message.as_str(),
+                                provider_trace_ref,
+                            )
+                            .await?;
+                            return Ok(RunStreamMessageProcessingOutcome::Terminate);
+                        }
+                    }
                     append_agent_loop_tape_event(
                         runtime_state,
                         run_id.as_str(),
@@ -1151,6 +1170,104 @@ fn contains_raw_provider_tool_call_markup(text: &str) -> bool {
         || (normalized.contains("<tool_call") && normalized.contains("<invoke name="))
 }
 
+fn incomplete_final_answer_without_tools(text: Option<&str>) -> Option<String> {
+    let text = text.unwrap_or_default().trim();
+    if text.is_empty() {
+        return Some(
+            "model returned an empty final answer without executing any requested tools".to_owned(),
+        );
+    }
+    if final_answer_is_deferred_tool_work(text) {
+        return Some(
+            "model returned a planning or intent statement as the final answer without executing any tools"
+                .to_owned(),
+        );
+    }
+    if final_answer_claims_tool_work_without_evidence(text) {
+        return Some(
+            "model claimed file, process, browser, or verification work without any successful tool results"
+                .to_owned(),
+        );
+    }
+    None
+}
+
+fn final_answer_is_deferred_tool_work(text: &str) -> bool {
+    let normalized = normalize_final_answer_text(text);
+    let has_deferred_marker =
+        DEFERRED_TOOL_WORK_MARKERS.iter().any(|marker| normalized.contains(marker));
+    has_deferred_marker && TOOL_WORK_ACTION_MARKERS.iter().any(|marker| normalized.contains(marker))
+}
+
+fn final_answer_claims_tool_work_without_evidence(text: &str) -> bool {
+    let normalized = normalize_final_answer_text(text);
+    UNSUPPORTED_TOOL_WORK_CLAIMS.iter().any(|marker| normalized.contains(marker))
+}
+
+fn normalize_final_answer_text(text: &str) -> String {
+    text.to_ascii_lowercase()
+        .replace(['\u{2018}', '\u{2019}'], "'")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+const DEFERRED_TOOL_WORK_MARKERS: &[&str] = &[
+    "let me ",
+    "i will ",
+    "i'll ",
+    "i need to ",
+    "i should ",
+    "i am going to ",
+    "i'm going to ",
+    "next, i ",
+];
+
+const TOOL_WORK_ACTION_MARKERS: &[&str] = &[
+    "apply_patch",
+    "browse",
+    "browser",
+    "build",
+    "check",
+    "create",
+    "edit",
+    "fix",
+    "implement",
+    "inspect",
+    "list",
+    "navigate",
+    "open",
+    "patch",
+    "read",
+    "research",
+    "run",
+    "search",
+    "test",
+    "update",
+    "verify",
+    "write",
+];
+
+const UNSUPPORTED_TOOL_WORK_CLAIMS: &[&str] = &[
+    "i applied the patch",
+    "i created the file",
+    "i created files",
+    "i edited the file",
+    "i fixed the file",
+    "i implemented",
+    "i modified the file",
+    "i navigated",
+    "i opened the browser",
+    "i ran the test",
+    "i ran tests",
+    "i read the file",
+    "i updated the file",
+    "i verified",
+    "i wrote the file",
+    "test passed",
+    "tests passed",
+];
+
 const TERMINAL_TOOL_AUTHORIZATION_ERROR_MARKERS: &[&str] = &[
     "approval_response_error",
     "approval_response_timeout",
@@ -1227,8 +1344,9 @@ async fn persist_run_stream_provider_turn_output(
 #[cfg(test)]
 mod tests {
     use super::{
-        contains_raw_provider_tool_call_markup, terminal_tool_authorization_failure,
-        tool_result_to_provider_message, RunStreamToolResultForModel,
+        contains_raw_provider_tool_call_markup, incomplete_final_answer_without_tools,
+        terminal_tool_authorization_failure, tool_result_to_provider_message,
+        RunStreamToolResultForModel,
     };
     use crate::model_provider::ProviderMessageContentPart;
     use serde_json::Value;
@@ -1388,5 +1506,32 @@ mod tests {
         assert!(!contains_raw_provider_tool_call_markup(
             "The page had no tool calls and the final answer is complete."
         ));
+    }
+
+    #[test]
+    fn incomplete_final_answer_without_tools_detects_deferred_work() {
+        let message = incomplete_final_answer_without_tools(Some(
+            "The workspace is empty. I\u{2019}ll create the todo app files and run the tests.",
+        ))
+        .expect("deferred tool work must not be accepted as a final answer");
+
+        assert!(message.contains("planning or intent statement"));
+    }
+
+    #[test]
+    fn incomplete_final_answer_without_tools_detects_unsupported_work_claims() {
+        let message =
+            incomplete_final_answer_without_tools(Some("I created the file and tests passed."))
+                .expect("tool-work claims need tool evidence");
+
+        assert!(message.contains("without any successful tool results"));
+    }
+
+    #[test]
+    fn incomplete_final_answer_without_tools_allows_plain_answers() {
+        assert!(incomplete_final_answer_without_tools(Some(
+            "Use `cargo test -p palyra-daemon` to run the daemon tests."
+        ))
+        .is_none());
     }
 }

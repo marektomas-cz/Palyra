@@ -28,6 +28,7 @@ pub(crate) enum AgentLoopTerminationReason {
     ApprovalDenied,
     ProviderError,
     ContextBudgetExhausted,
+    IncompleteFinalAnswer,
 }
 
 impl AgentLoopTerminationReason {
@@ -41,6 +42,7 @@ impl AgentLoopTerminationReason {
             Self::ApprovalDenied => "approval_denied",
             Self::ProviderError => "provider_error",
             Self::ContextBudgetExhausted => "context_budget_exhausted",
+            Self::IncompleteFinalAnswer => "incomplete_final_answer",
         }
     }
 
@@ -165,6 +167,10 @@ impl AgentRunLoopState {
 
     pub(crate) fn remaining_tool_calls(&self) -> u32 {
         self.remaining_tool_calls
+    }
+
+    pub(crate) fn completed_tool_calls(&self) -> u32 {
+        self.completed_tool_calls
     }
 
     pub(crate) fn sync_remaining_tool_calls(&mut self, remaining_tool_calls: u32) {
