@@ -2181,10 +2181,14 @@ async fn execute_single_job_attempt(
     let mut saw_failed = false;
     let mut tool_calls = 0_u64;
     let mut tool_denies = 0_u64;
+    let mut final_output = String::new();
     while let Some(event) = stream.next().await {
         let event =
             event.map_err(|error| Status::internal(format!("run stream read failed: {error}")))?;
         match event.body {
+            Some(common_v1::run_stream_event::Body::ModelToken(token)) => {
+                final_output.push_str(token.token.as_str());
+            }
             Some(common_v1::run_stream_event::Body::ToolResult(_)) => {
                 tool_calls = tool_calls.saturating_add(1);
             }
@@ -2212,7 +2216,11 @@ async fn execute_single_job_attempt(
         .await?
         .unwrap_or_else(|| fallback_usage_snapshot(&orchestrator_run_id, &session_id, job));
 
-    let terminal_status = if saw_done {
+    let done_but_policy_blocked =
+        saw_done && cron_done_output_indicates_policy_blocked(final_output.as_str(), tool_denies);
+    let terminal_status = if done_but_policy_blocked {
+        CronRunStatus::Denied
+    } else if saw_done {
         CronRunStatus::Succeeded
     } else if saw_failed && tool_denies > 0 {
         CronRunStatus::Denied
@@ -2227,10 +2235,12 @@ async fn execute_single_job_attempt(
     } else {
         Some("run_failed".to_owned())
     };
-    let error_message = if terminal_status == CronRunStatus::Succeeded {
-        None
-    } else {
-        Some(format!("cron attempt {attempt} failed"))
+    let error_message = match terminal_status {
+        CronRunStatus::Succeeded => None,
+        CronRunStatus::Denied if done_but_policy_blocked => Some(format!(
+            "cron attempt {attempt} was policy-blocked after {tool_denies} denied tool calls"
+        )),
+        _ => Some(format!("cron attempt {attempt} failed")),
     };
 
     state
@@ -2310,6 +2320,24 @@ fn scheduled_routine_trigger_payload(job: &CronJobRecord) -> Value {
         "schedule_payload": serde_json::from_str::<Value>(job.schedule_payload_json.as_str())
             .unwrap_or_else(|_| json!({ "raw": job.schedule_payload_json.as_str() })),
     })
+}
+
+fn cron_done_output_indicates_policy_blocked(output: &str, tool_denies: u64) -> bool {
+    if tool_denies == 0 {
+        return false;
+    }
+    let normalized = output.to_ascii_lowercase();
+    [
+        "status: blocked",
+        "blocked by policy",
+        "blocked by your security policy",
+        "all significant tools are blocked",
+        "all filesystem and process tools remain blocked",
+        "policy0 blocks",
+        "tools are blocked by policy",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker))
 }
 
 fn fallback_usage_snapshot(
@@ -2418,7 +2446,8 @@ mod tests {
 
     use super::{
         budgeted_objective_run_count, build_scheduler_health_snapshot,
-        compute_misfire_recovery_plan, compute_next_run_after, cron_misfire_audit_payload,
+        compute_misfire_recovery_plan, compute_next_run_after,
+        cron_done_output_indicates_policy_blocked, cron_misfire_audit_payload,
         decide_concurrency_policy, load_periodic_reaudit_skills_index, normalize_schedule,
         now_unix_ms_or_fallback, parse_skill_reaudit_interval, periodic_reaudit_targets,
         scheduled_routine_run_metadata_upsert, should_repair_stale_cron_run, ConcurrencyDecision,
@@ -2545,6 +2574,26 @@ mod tests {
         assert_eq!(trigger_payload["source"], "cron");
         assert_eq!(trigger_payload["schedule_type"], "every");
         assert_eq!(trigger_payload["schedule_payload"]["interval_ms"], 1_000);
+    }
+
+    #[test]
+    fn cron_done_output_policy_blocked_requires_denies_and_blocked_text() {
+        assert!(cron_done_output_indicates_policy_blocked(
+            "**S028 Smoke Test - Status: BLOCKED**\nAll significant tools are blocked by policy0.",
+            5,
+        ));
+        assert!(cron_done_output_indicates_policy_blocked(
+            "All filesystem and process tools remain blocked by your security policy.",
+            1,
+        ));
+        assert!(!cron_done_output_indicates_policy_blocked(
+            "A non-critical diagnostic was denied, but the report was created and tests passed.",
+            1,
+        ));
+        assert!(!cron_done_output_indicates_policy_blocked(
+            "**Status: BLOCKED**\nNo tool deny events were observed.",
+            0,
+        ));
     }
 
     #[test]
