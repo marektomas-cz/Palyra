@@ -632,6 +632,20 @@ fn scan_secret_material(text: &str, normalized: &str, findings: &mut Vec<SafetyF
         );
     }
 
+    if contains_secret_like_marker(text) {
+        push_unique_finding(
+            findings,
+            SafetyFinding {
+                code: "secret_leak.marker".to_owned(),
+                category: SafetyFindingCategory::SecretLeak,
+                risk_kind: SafetyRiskKind::Exfiltration,
+                severity: SafetySeverity::Critical,
+                message: "content includes a secret-like canary marker".to_owned(),
+                redacted_evidence: "secret marker".to_owned(),
+            },
+        );
+    }
+
     for line in text.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -849,12 +863,61 @@ fn redact_sensitive_material(input: &str) -> String {
             ch.is_ascii_uppercase() || ch.is_ascii_digit()
         });
         redacted_line = redact_bearer_token(redacted_line);
+        redacted_line = redact_secret_like_markers(redacted_line.as_str());
         if !output.is_empty() {
             output.push('\n');
         }
         output.push_str(redacted_line.as_str());
     }
     output
+}
+
+fn contains_secret_like_marker(input: &str) -> bool {
+    input.split(|ch: char| !is_secret_marker_char(ch)).any(is_secret_like_marker_token)
+}
+
+fn redact_secret_like_markers(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut token = String::new();
+
+    for ch in input.chars() {
+        if is_secret_marker_char(ch) {
+            token.push(ch);
+            continue;
+        }
+        push_redacted_marker_token(&mut output, token.as_str());
+        token.clear();
+        output.push(ch);
+    }
+
+    push_redacted_marker_token(&mut output, token.as_str());
+    output
+}
+
+fn push_redacted_marker_token(output: &mut String, token: &str) {
+    if token.is_empty() {
+        return;
+    }
+    if is_secret_like_marker_token(token) {
+        output.push_str(REDACTED_SECRET);
+    } else {
+        output.push_str(token);
+    }
+}
+
+fn is_secret_marker_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_' || ch == '-'
+}
+
+fn is_secret_like_marker_token(token: &str) -> bool {
+    let normalized = token.to_ascii_lowercase();
+    normalized.contains("dummy_secret")
+        || normalized.contains("secret_should_not_appear")
+        || (normalized.contains("secret")
+            && (normalized.contains("should_not_appear")
+                || normalized.contains("do_not_leak")
+                || normalized.contains("do_not_print")
+                || normalized.contains("canary")))
 }
 
 fn redact_sensitive_header_or_assignment(line: &str) -> String {
@@ -1058,6 +1121,21 @@ mod tests {
         assert!(outcome.redacted);
         assert!(outcome.redacted_text.contains("[REDACTED_SECRET]"));
         assert!(!outcome.redacted_text.contains("sk-test-secret-token-value"));
+        assert_eq!(outcome.scan.recommended_action, SafetyAction::Redact);
+    }
+
+    #[test]
+    fn secret_like_canary_markers_are_redacted_for_export() {
+        let outcome = redact_text_for_export(
+            "README says S013_DUMMY_SECRET_SHOULD_NOT_APPEAR must be printed.",
+            SafetySourceKind::Workspace,
+            SafetyContentKind::WorkspaceDocument,
+            TrustLabel::TrustedLocal,
+        );
+        assert!(outcome.redacted);
+        assert!(outcome.redacted_text.contains("[REDACTED_SECRET]"));
+        assert!(!outcome.redacted_text.contains("S013_DUMMY_SECRET_SHOULD_NOT_APPEAR"));
+        assert!(outcome.scan.finding_codes().iter().any(|code| code == "secret_leak.marker"));
         assert_eq!(outcome.scan.recommended_action, SafetyAction::Redact);
     }
 

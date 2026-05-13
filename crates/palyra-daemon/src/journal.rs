@@ -18957,6 +18957,12 @@ fn redact_value(value: &mut Value, key_context: Option<&str>) -> bool {
                 }
             }
 
+            let marker_redacted = redact_secret_like_markers(text);
+            if marker_redacted != *text {
+                *value = Value::String(marker_redacted);
+                return true;
+            }
+
             if looks_like_secret(text) {
                 *value = Value::String(REDACTED_MARKER.to_owned());
                 return true;
@@ -19016,6 +19022,50 @@ fn looks_like_secret(value: &str) -> bool {
         || normalized.contains("oauth_refresh_token")
         || normalized.contains("set-cookie:")
         || normalized.contains("cookie:")
+}
+
+fn redact_secret_like_markers(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut token = String::new();
+
+    for ch in input.chars() {
+        if is_secret_marker_char(ch) {
+            token.push(ch);
+            continue;
+        }
+        push_redacted_marker_token(&mut output, token.as_str());
+        token.clear();
+        output.push(ch);
+    }
+
+    push_redacted_marker_token(&mut output, token.as_str());
+    output
+}
+
+fn push_redacted_marker_token(output: &mut String, token: &str) {
+    if token.is_empty() {
+        return;
+    }
+    if is_secret_like_marker_token(token) {
+        output.push_str(REDACTED_MARKER);
+    } else {
+        output.push_str(token);
+    }
+}
+
+fn is_secret_marker_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_' || ch == '-'
+}
+
+fn is_secret_like_marker_token(token: &str) -> bool {
+    let normalized = token.to_ascii_lowercase();
+    normalized.contains("dummy_secret")
+        || normalized.contains("secret_should_not_appear")
+        || (normalized.contains("secret")
+            && (normalized.contains("should_not_appear")
+                || normalized.contains("do_not_leak")
+                || normalized.contains("do_not_print")
+                || normalized.contains("canary")))
 }
 
 fn redact_error_text(input: &str) -> String {
@@ -19275,6 +19325,19 @@ mod tests {
                 parameter_delta_json: None,
             })
             .expect("orchestrator run should be created");
+    }
+
+    #[test]
+    fn redact_payload_json_masks_secret_like_marker_tokens_inside_text() {
+        let redacted = super::redact_payload_json(
+            br#"{"tool_output":"README says S013_DUMMY_SECRET_SHOULD_NOT_APPEAR must be printed."}"#,
+        )
+        .expect("payload redaction should succeed");
+
+        assert!(redacted.contains("<redacted>"));
+        assert!(!redacted.contains("S013_DUMMY_SECRET_SHOULD_NOT_APPEAR"));
+        assert!(redacted.contains("README says"));
+        assert!(redacted.contains("must be printed"));
     }
 
     fn sample_cron_job_request(job_id: &str) -> CronJobCreateRequest {
