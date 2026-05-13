@@ -18567,6 +18567,12 @@ fn build_memory_fts_queries(query: &str) -> Vec<String> {
         queries.push(primary.clone());
     }
 
+    for relaxed in build_relaxed_memory_fts_queries(query) {
+        if relaxed != primary && !queries.iter().any(|query| query == &relaxed) {
+            queries.push(relaxed);
+        }
+    }
+
     for term in normalized_fts_terms(query)
         .into_iter()
         .filter(|term| {
@@ -18580,6 +18586,64 @@ fn build_memory_fts_queries(query: &str) -> Vec<String> {
     }
 
     queries
+}
+
+fn build_relaxed_memory_fts_queries(query: &str) -> Vec<String> {
+    let terms = normalized_fts_terms(query)
+        .into_iter()
+        .filter(|term| !relaxed_memory_query_stopword(term.as_str()))
+        .collect::<Vec<_>>();
+    if terms.len() < 2 {
+        return Vec::new();
+    }
+
+    let mut variants = Vec::new();
+    for preference_term in ["prefer", "preference"] {
+        let relaxed = terms
+            .iter()
+            .map(|term| {
+                if is_preference_query_term(term.as_str()) {
+                    preference_term
+                } else {
+                    term.as_str()
+                }
+            })
+            .collect::<Vec<_>>();
+        if relaxed.iter().any(|term| *term == preference_term) {
+            let query = relaxed.join(" ");
+            if !variants.iter().any(|existing| existing == &query) {
+                variants.push(query);
+            }
+        }
+    }
+    variants
+}
+
+fn relaxed_memory_query_stopword(term: &str) -> bool {
+    matches!(
+        term,
+        "a" | "an"
+            | "are"
+            | "about"
+            | "for"
+            | "in"
+            | "is"
+            | "me"
+            | "my"
+            | "of"
+            | "our"
+            | "project"
+            | "stored"
+            | "the"
+            | "to"
+            | "what"
+            | "which"
+            | "your"
+    )
+}
+
+fn is_preference_query_term(term: &str) -> bool {
+    matches!(term, "prefer" | "prefers" | "preferred" | "preference" | "preferences")
 }
 
 fn memory_source_matches(source: MemorySource, filter_sources: &[MemorySource]) -> bool {
@@ -21932,6 +21996,20 @@ mod tests {
     }
 
     #[test]
+    fn build_memory_fts_queries_relaxes_preference_morphology() {
+        let queries = build_memory_fts_queries("What are the E2E project preferences?");
+
+        assert!(
+            queries.iter().any(|query| query == "e2e prefer"),
+            "preference queries should match memories phrased with 'prefer': {queries:?}"
+        );
+        assert!(
+            queries.iter().any(|query| query == "e2e preference"),
+            "preference queries should still match memories phrased as a preference: {queries:?}"
+        );
+    }
+
+    #[test]
     fn memory_search_handles_operator_like_query_tokens_without_sql_errors() {
         let db_path = temp_db_path();
         let store = JournalStore::open(test_journal_config(db_path, false))
@@ -22026,6 +22104,53 @@ mod tests {
         assert!(
             hits.first().map(|hit| hit.item.content_text.contains(marker)).unwrap_or(false),
             "exact marker memory should be top hit: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn memory_search_matches_preference_from_natural_language_without_marker() {
+        let db_path = temp_db_path();
+        let store = JournalStore::open(test_journal_config(db_path, false))
+            .expect("journal store should open");
+        let memory_id = "01ARZ3NDEKTSV4RRFFQ69G5FCI";
+        store
+            .create_memory_item(&sample_memory_request(
+                memory_id,
+                "user:ops",
+                None,
+                None,
+                MemorySource::Manual,
+                "For this E2E harness, prefer TypeScript and Playwright for UI smoke tests, and write the final report in Czech.",
+            ))
+            .expect("manual preference memory should be created");
+        store
+            .create_memory_item(&sample_memory_request(
+                "01ARZ3NDEKTSV4RRFFQ69G5FCJ",
+                "user:ops",
+                None,
+                None,
+                MemorySource::TapeToolResult,
+                "terminal tool result for an E2E project setup command failed with a package error",
+            ))
+            .expect("tool-result noise memory should be created");
+
+        let hits = store
+            .search_memory(&MemorySearchRequest {
+                principal: "user:ops".to_owned(),
+                channel: None,
+                session_id: None,
+                query: "What are the E2E project preferences?".to_owned(),
+                top_k: 5,
+                min_score: 0.0,
+                tags: Vec::new(),
+                sources: Vec::new(),
+            })
+            .expect("natural-language preference query should search memory");
+
+        assert_eq!(hits.first().map(|hit| hit.item.memory_id.as_str()), Some(memory_id));
+        assert!(
+            hits.first().map(|hit| hit.item.content_text.contains("Playwright")).unwrap_or(false),
+            "manual preference should be the top hit: {hits:?}"
         );
     }
 
