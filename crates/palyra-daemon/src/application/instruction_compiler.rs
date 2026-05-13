@@ -7,7 +7,7 @@ use crate::{
     model_provider::{ProviderMessage, ProviderMessageContentPart, ProviderMessageRole},
 };
 
-pub(crate) const INSTRUCTION_COMPILER_VERSION: u32 = 13;
+pub(crate) const INSTRUCTION_COMPILER_VERSION: u32 = 14;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct InstructionTrustSummary {
@@ -178,7 +178,7 @@ fn tool_specific_contract(tool_names: &[String]) -> String {
         contracts.push("palyra.process.run execution contract: call only bare executable names, never inline shell syntax in the command field. Even when local desktop profiles allow broad executable selection with allowed_executables='*', cwd and path-like arguments must stay inside the workspace; use relative paths or /workspace/path aliases, and expect absolute host paths outside the workspace to be denied. Restrictive profiles may also enforce executable allowlists, egress controls, and interpreter guardrails. Do not use process.run to write files when palyra.fs.apply_patch can perform the edit with attestation. For requested file creation or edits, call palyra.fs.apply_patch first, then use process.run for verification commands such as node, npm, cargo, ls, dir, or pwd. Pass only executable arguments in args; for `node e2e-smoke-file-patch/math.test.js`, use command='node' and args=['e2e-smoke-file-patch/math.test.js'], not args=['node','e2e-smoke-file-patch/math.test.js']. Use background=true for temporary dev servers instead of nohup, '&', or platform-specific launchers. For local browser verification, bind servers to 127.0.0.1 with an explicit port, set timeout_ms to a bounded verification window such as 60000, verify the exact URL/port is listening before browser navigation, and navigate to that actual 127.0.0.1 URL rather than a guessed localhost default. If a background process exits or the port probe fails, report the lifecycle failure instead of navigating to a stale port. If a command is denied by policy, treat that as an operational limit and continue with a safe fallback or clearly report the blocked verification step.".to_owned());
     }
     if tool_names.iter().any(|tool| tool.starts_with("palyra.browser.")) {
-        contracts.push("Palyra browser contract: first create a browser session with palyra.browser.session.create, then copy the exact 26-character session_id from that successful output into every later browser tool call. Never omit session_id, never invent one, and never use a URL, port, tab id, label, or prose as session_id. For localhost, 127.0.0.1, private IPs, or local dev servers, create the session with allow_private_targets=true and also pass allow_private_targets=true on palyra.browser.navigate or palyra.browser.tabs.open for the private URL. When answering what text is visible on a page, first call palyra.browser.observe with include_visible_text=true and base the answer on visible_text, dom_snapshot, or accessibility evidence from that successful result. Title, screenshot, console, and network tools are not textual visibility evidence by themselves. If observe fails or was not called, say the visible text is unknown instead of inferring it from the title, URL, screenshot filename, or page intent.".to_owned());
+        contracts.push("Palyra browser contract: first create a browser session with palyra.browser.session.create, then copy the exact 26-character session_id from that successful output into every later browser tool call. Never omit session_id, never invent one, and never use a URL, port, tab id, label, or prose as session_id. For localhost, 127.0.0.1, private IPs, or local dev servers, create the session with allow_private_targets=true and also pass allow_private_targets=true on palyra.browser.navigate or palyra.browser.tabs.open for the private URL. When answering what text is visible on a page, first call palyra.browser.observe with include_visible_text=true and base the answer on visible_text, dom_snapshot, or accessibility evidence from that successful result. Title, screenshot, console, and network tools are not textual visibility evidence by themselves. Do not call palyra.artifact.read to inspect browser screenshots or PDFs; screenshot/PDF artifacts may be intentionally unreadable in full, so use palyra.browser.observe for DOM/text evidence and palyra.browser.console_log or palyra.browser.network_log for diagnostics. If a click/type/select/highlight selector is not found, do not keep retrying guessed selectors and do not fall back to palyra.http.fetch for localhost/private pages; call palyra.browser.observe, inspect stable ids/names/labels from the DOM/accessibility evidence, then retry once with a selector grounded in that observation. If a reload is needed and palyra.browser.reload is unavailable, call palyra.browser.navigate again with the current URL and the same allow_private_targets setting. If observe fails or was not called, say the visible text is unknown instead of inferring it from the title, URL, screenshot filename, or page intent.".to_owned());
     }
     if tool_names.iter().any(|tool| tool == "palyra.routines.control") {
         contracts.push("palyra.routines.control automation contract: for user requests to create reminders, monitors, standing orders, or scheduled reports, call operation='upsert'. Use trigger_kind='schedule', a concise name, a self-contained prompt describing the recurring work and output path, and natural_language_schedule for phrases like 'every 40 seconds' or 'every 30 minutes'. Prefer delivery_mode='logs_only' when the user asks to write a report file instead of announcing to a channel. Return the routine_id from the successful tool result.".to_owned());
@@ -274,7 +274,7 @@ mod tests {
         let first = compiler.compile(input.clone());
         let second = compiler.compile(input);
         assert_eq!(first.hash, second.hash);
-        assert_eq!(first.version, 13);
+        assert_eq!(first.version, 14);
         assert_eq!(first.provider_messages().len(), 2);
     }
 
@@ -368,6 +368,10 @@ mod tests {
         assert!(contract.contains("include_visible_text=true"));
         assert!(contract.contains("visible_text"));
         assert!(contract.contains("not textual visibility evidence"));
+        assert!(contract.contains("Do not call palyra.artifact.read"));
+        assert!(contract.contains("selector is not found"));
+        assert!(contract.contains("do not fall back to palyra.http.fetch"));
+        assert!(contract.contains("palyra.browser.reload is unavailable"));
         assert!(contract.contains("visible text is unknown"));
     }
 
