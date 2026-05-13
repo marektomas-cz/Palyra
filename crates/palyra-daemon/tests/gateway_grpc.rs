@@ -4737,12 +4737,29 @@ async fn grpc_route_message_pending_approval_records_execution_gate_report_when_
 
 #[tokio::test(flavor = "multi_thread")]
 async fn grpc_run_stream_executes_allowlisted_tool_and_emits_attestation() -> Result<()> {
-    let (openai_base_url, _request_count, server_handle) =
-        spawn_scripted_openai_server(vec![ScriptedOpenAiResponse::immediate(
-            200,
-            r#"{"choices":[{"message":{"tool_calls":[{"function":{"name":"palyra.echo","arguments":"{\"text\":\"hello tool\"}"}}]}}]}"#
-                .to_owned(),
-        )])?;
+    let tool_response = serde_json::json!({
+        "choices": [{
+            "finish_reason": "tool_calls",
+            "message": {
+                "tool_calls": [{
+                    "id": "call_echo_attest_01",
+                    "type": "function",
+                    "function": {
+                        "name": "palyra.echo",
+                        "arguments": "{\"text\":\"hello tool\"}"
+                    }
+                }]
+            }
+        }]
+    })
+    .to_string();
+    let final_response =
+        r#"{"choices":[{"finish_reason":"stop","message":{"content":"tool call complete"}}]}"#
+            .to_owned();
+    let (openai_base_url, request_count, server_handle) = spawn_scripted_openai_server(vec![
+        ScriptedOpenAiResponse::immediate(200, tool_response),
+        ScriptedOpenAiResponse::immediate(200, final_response),
+    ])?;
     let (child, admin_port, grpc_port, _journal_db_path) =
         spawn_palyrad_with_openai_provider_and_tool_policy(
             openai_base_url.as_str(),
@@ -4815,6 +4832,7 @@ async fn grpc_run_stream_executes_allowlisted_tool_and_emits_attestation() -> Re
         run_snapshot.get("state").and_then(Value::as_str).context("run snapshot missing state")?,
         "done"
     );
+    assert_eq!(request_count.load(Ordering::Relaxed), 2);
 
     server_handle.join().expect("scripted openai server thread should exit");
     Ok(())
