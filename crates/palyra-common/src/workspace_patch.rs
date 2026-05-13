@@ -605,6 +605,7 @@ fn parse_patch_document(patch: &str) -> Result<Vec<PatchOperation>, WorkspacePat
         }
 
         if let Some(path) = control_line.strip_prefix("*** Add File: ") {
+            let header_line = index;
             index = index.saturating_add(1);
             let mut add_lines = Vec::new();
             while index < lines.len() {
@@ -616,11 +617,19 @@ fn parse_patch_document(patch: &str) -> Result<Vec<PatchOperation>, WorkspacePat
                 add_lines.push(content.to_owned());
                 index = index.saturating_add(1);
             }
+            if add_lines.is_empty() {
+                return Err(parse_error(
+                    header_line + 1,
+                    1,
+                    "add-file operation must include at least one content line; zero-byte placeholder files are not allowed",
+                ));
+            }
             operations.push(PatchOperation::Add { path: path.to_owned(), lines: add_lines });
             continue;
         }
 
         if let Some(path) = control_line.strip_prefix("*** Replace File: ") {
+            let header_line = index;
             index = index.saturating_add(1);
             let mut replace_lines = Vec::new();
             while index < lines.len() {
@@ -631,6 +640,13 @@ fn parse_patch_document(patch: &str) -> Result<Vec<PatchOperation>, WorkspacePat
                 let content = body_line.strip_prefix('+').unwrap_or(body_line);
                 replace_lines.push(content.to_owned());
                 index = index.saturating_add(1);
+            }
+            if replace_lines.is_empty() {
+                return Err(parse_error(
+                    header_line + 1,
+                    1,
+                    "replace-file operation must include at least one content line; zero-byte replacements are not allowed",
+                ));
             }
             operations
                 .push(PatchOperation::Replace { path: path.to_owned(), lines: replace_lines });
@@ -1434,6 +1450,55 @@ mod tests {
         assert_eq!(
             fs::read_to_string(workspace.join("notes.txt")).expect("updated file should read"),
             "alpha\nbeta-updated\n"
+        );
+    }
+
+    #[test]
+    fn apply_workspace_patch_rejects_zero_byte_add_file_placeholders() {
+        let temp = tempdir().expect("tempdir should be created");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace should exist");
+
+        let patch = "*** Begin Patch\n*** Add File: index.html\n*** End Patch\n";
+        let error = apply_workspace_patch(
+            std::slice::from_ref(&workspace),
+            &default_request(patch, false),
+            &default_limits(),
+        )
+        .expect_err("empty add-file operations should be rejected");
+
+        assert!(matches!(error, WorkspacePatchError::Parse { .. }));
+        assert!(
+            error.to_string().contains("zero-byte placeholder files"),
+            "error should explain zero-byte placeholder rejection: {error}"
+        );
+        assert!(!workspace.join("index.html").exists(), "rejected patch must not create a file");
+    }
+
+    #[test]
+    fn apply_workspace_patch_rejects_zero_byte_replace_file_placeholders() {
+        let temp = tempdir().expect("tempdir should be created");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace should exist");
+        fs::write(workspace.join("server.js"), "console.log('ok');\n")
+            .expect("seed file should exist");
+
+        let patch = "*** Begin Patch\n*** Replace File: server.js\n*** End Patch\n";
+        let error = apply_workspace_patch(
+            std::slice::from_ref(&workspace),
+            &default_request(patch, false),
+            &default_limits(),
+        )
+        .expect_err("empty replace-file operations should be rejected");
+
+        assert!(matches!(error, WorkspacePatchError::Parse { .. }));
+        assert!(
+            error.to_string().contains("zero-byte replacements"),
+            "error should explain zero-byte replacement rejection: {error}"
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.join("server.js")).expect("seed file should remain"),
+            "console.log('ok');\n"
         );
     }
 

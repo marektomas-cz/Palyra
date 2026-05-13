@@ -7,7 +7,7 @@ use crate::{
     model_provider::{ProviderMessage, ProviderMessageContentPart, ProviderMessageRole},
 };
 
-pub(crate) const INSTRUCTION_COMPILER_VERSION: u32 = 16;
+pub(crate) const INSTRUCTION_COMPILER_VERSION: u32 = 17;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct InstructionTrustSummary {
@@ -167,7 +167,7 @@ impl InstructionCompiler {
 fn tool_specific_contract(tool_names: &[String]) -> String {
     let mut contracts = Vec::new();
     if tool_names.iter().any(|tool| tool == "palyra.fs.apply_patch") {
-        contracts.push("palyra.fs.apply_patch patch grammar and write contract: use this tool as the primary path for requested workspace file creation, updates, and deletes; do not use process.run, mkdir, touch, echo redirection, or interpreter eval to write files. The patch string must be a complete Palyra patch document, not raw file contents and not prose. Start with '*** Begin Patch' on its own line, then one or more operation headers ('*** Add File: path', '*** Replace File: path', '*** Update File: path', or '*** Delete File: path'), then '*** End Patch'. Do not emit partial or truncated patch documents; before calling the tool, verify the final non-whitespace line is exactly '*** End Patch'. For large file creation or multi-file changes, split work into multiple smaller complete apply_patch calls instead of one long patch that may be truncated. For Add File, body lines may start with '+', and missing parent directories are created by the patch tool. Use Add File only for paths that do not already exist. For Update File, add '@@' before each hunk and make every hunk line start with one of space, '+', or '-'. If an Update File hunk fails with context not found, read the current file and retry with Replace File containing the full intended file content. Replace File requires the file to exist and is the safe full-file fallback after reading. Paths are forward-slash relative paths inside the workspace, for example reports/report.md. If the user asks for an outside-workspace write plus a workspace fallback, treat the outside path as denied by sandbox policy and apply only the relative in-workspace fallback. On a parse error, retry once with this exact wrapper and corrected prefixes.".to_owned());
+        contracts.push("palyra.fs.apply_patch patch grammar and write contract: use this tool as the primary path for requested workspace file creation, updates, and deletes; do not use process.run, mkdir, touch, echo redirection, or interpreter eval to write files. The patch string must be a complete Palyra patch document, not raw file contents and not prose. Start with '*** Begin Patch' on its own line, then one or more operation headers ('*** Add File: path', '*** Replace File: path', '*** Update File: path', or '*** Delete File: path'), then '*** End Patch'. Do not emit partial or truncated patch documents; before calling the tool, verify the final non-whitespace line is exactly '*** End Patch'. For large file creation or multi-file changes, split work into multiple smaller complete apply_patch calls instead of one long patch that may be truncated. For Add File and Replace File, include at least one body line; zero-byte placeholder files are rejected and must not be used as progress markers. Add/replace body lines may start with '+', and missing parent directories are created by the patch tool. Use Add File only for paths that do not already exist. For Update File, add '@@' before each hunk and make every hunk line start with one of space, '+', or '-'. If an Update File hunk fails with context not found, read the current file and retry with Replace File containing the full intended file content. Replace File requires the file to exist and is the safe full-file fallback after reading. Paths are forward-slash relative paths inside the workspace, for example reports/report.md. If the user asks for an outside-workspace write plus a workspace fallback, treat the outside path as denied by sandbox policy and apply only the relative in-workspace fallback. On a parse error, retry once with this exact wrapper and corrected prefixes.".to_owned());
     }
     if tool_names.iter().any(|tool| tool == "palyra.fs.read_file")
         || tool_names.iter().any(|tool| tool == "palyra.fs.list_dir")
@@ -274,7 +274,7 @@ mod tests {
         let first = compiler.compile(input.clone());
         let second = compiler.compile(input);
         assert_eq!(first.hash, second.hash);
-        assert_eq!(first.version, 16);
+        assert_eq!(first.version, 17);
         assert_eq!(first.provider_messages().len(), 2);
     }
 
@@ -324,6 +324,7 @@ mod tests {
         assert!(contract.contains("*** Add File: path"));
         assert!(contract.contains("*** Replace File: path"));
         assert!(contract.contains("primary path for requested workspace file creation"));
+        assert!(contract.contains("zero-byte placeholder files are rejected"));
         assert!(contract.contains("missing parent directories are created"));
         assert!(contract.contains("final non-whitespace line is exactly '*** End Patch'"));
         assert!(contract.contains("split work into multiple smaller complete apply_patch calls"));
