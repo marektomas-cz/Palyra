@@ -16,7 +16,6 @@ use crate::{
         MAX_WORKSPACE_READ_FILE_BYTES, MAX_WORKSPACE_READ_FILE_TOOL_INPUT_BYTES,
         WORKSPACE_LIST_DIR_TOOL_NAME, WORKSPACE_READ_FILE_TOOL_NAME,
     },
-    sandbox_runner::process_runner_allows_host_access,
     tool_protocol::{build_tool_execution_outcome, ToolExecutionOutcome},
 };
 
@@ -118,10 +117,7 @@ pub(crate) async fn execute_workspace_read_file_tool(
 
     let workspace_roots =
         agent_outcome.agent.workspace_roots.iter().map(PathBuf::from).collect::<Vec<_>>();
-    let host_root =
-        process_runner_allows_host_access(&runtime_state.config.tool_call.process_runner)
-            .then_some(runtime_state.config.tool_call.process_runner.workspace_root.as_path());
-    let read = match read_workspace_file_from_roots(workspace_roots.as_slice(), &input, host_root) {
+    let read = match read_workspace_file_from_roots(workspace_roots.as_slice(), &input) {
         Ok(read) => read,
         Err(error) => {
             return workspace_read_file_outcome(
@@ -194,11 +190,7 @@ pub(crate) async fn execute_workspace_list_dir_tool(
 
     let workspace_roots =
         agent_outcome.agent.workspace_roots.iter().map(PathBuf::from).collect::<Vec<_>>();
-    let host_root =
-        process_runner_allows_host_access(&runtime_state.config.tool_call.process_runner)
-            .then_some(runtime_state.config.tool_call.process_runner.workspace_root.as_path());
-    let listing = match list_workspace_dir_from_roots(workspace_roots.as_slice(), &input, host_root)
-    {
+    let listing = match list_workspace_dir_from_roots(workspace_roots.as_slice(), &input) {
         Ok(listing) => listing,
         Err(error) => {
             return workspace_list_dir_outcome(
@@ -318,12 +310,10 @@ fn looks_like_windows_drive_path(path: &str) -> bool {
 fn read_workspace_file_from_roots(
     workspace_roots: &[PathBuf],
     input: &WorkspaceReadFileInput,
-    host_root: Option<&Path>,
 ) -> Result<WorkspaceReadFileOutput, String> {
     let canonical_roots =
         canonicalize_workspace_roots(workspace_roots, WORKSPACE_READ_FILE_TOOL_NAME)?;
-    let canonical_host_root = canonicalize_host_root(host_root, WORKSPACE_READ_FILE_TOOL_NAME)?;
-    if canonical_roots.is_empty() && canonical_host_root.is_none() {
+    if canonical_roots.is_empty() {
         return Err(format!(
             "{WORKSPACE_READ_FILE_TOOL_NAME} agent has no accessible workspace roots"
         ));
@@ -331,9 +321,6 @@ fn read_workspace_file_from_roots(
 
     let requested = Path::new(input.path.as_str());
     if requested.is_absolute() {
-        if canonical_host_root.is_some() {
-            return read_absolute_host_file(requested, input);
-        }
         let (workspace_root_index, canonical_target, display_path) =
             resolve_absolute_workspace_file(canonical_roots.as_slice(), requested, input)?;
         return read_workspace_file_chunk(
@@ -376,17 +363,6 @@ fn read_workspace_file_from_roots(
         );
     }
 
-    if let Some(host_root) = canonical_host_root.as_ref() {
-        let candidate = host_root.join(Path::new(input.path.as_str()));
-        if let Ok(canonical_target) = fs::canonicalize(candidate.as_path()) {
-            if !canonical_target.is_file() {
-                return Err(read_file_not_regular_file_error(input.path.as_str()));
-            }
-            let display_path = canonical_target.to_string_lossy().into_owned();
-            return read_workspace_file_chunk(0, canonical_target, display_path, input);
-        }
-    }
-
     Err(format!(
         "{WORKSPACE_READ_FILE_TOOL_NAME} file not found in agent workspace roots: {}",
         display_requested_path(input.path.as_str())
@@ -411,29 +387,6 @@ fn canonicalize_workspace_roots(
         }
     }
     Ok(canonical_roots)
-}
-
-fn canonicalize_host_root(
-    host_root: Option<&Path>,
-    tool_name: &str,
-) -> Result<Option<PathBuf>, String> {
-    let Some(host_root) = host_root else {
-        return Ok(None);
-    };
-    if host_root.as_os_str().is_empty() {
-        return std::env::current_dir().map(Some).map_err(|error| {
-            format!("{tool_name} failed to resolve host current directory: {error}")
-        });
-    }
-    match fs::canonicalize(host_root) {
-        Ok(path) if path.is_dir() => Ok(Some(path)),
-        Ok(_) => std::env::current_dir().map(Some).map_err(|error| {
-            format!("{tool_name} failed to resolve host current directory: {error}")
-        }),
-        Err(_) => std::env::current_dir().map(Some).map_err(|error| {
-            format!("{tool_name} failed to resolve host current directory: {error}")
-        }),
-    }
 }
 
 fn resolve_absolute_workspace_file(
@@ -466,31 +419,6 @@ fn resolve_absolute_workspace_file(
     Err(format!("{WORKSPACE_READ_FILE_TOOL_NAME} path escapes agent workspace roots"))
 }
 
-fn read_absolute_host_file(
-    requested: &Path,
-    input: &WorkspaceReadFileInput,
-) -> Result<WorkspaceReadFileOutput, String> {
-    let canonical_target = fs::canonicalize(requested).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::NotFound {
-            format!(
-                "{WORKSPACE_READ_FILE_TOOL_NAME} host file not found: {}",
-                display_requested_path(input.path.as_str())
-            )
-        } else {
-            format!("{WORKSPACE_READ_FILE_TOOL_NAME} failed to resolve host path: {error}")
-        }
-    })?;
-    if !canonical_target.is_file() {
-        return Err(read_file_not_regular_file_error(input.path.as_str()));
-    }
-    read_workspace_file_chunk(
-        0,
-        canonical_target.clone(),
-        canonical_target.to_string_lossy().into_owned(),
-        input,
-    )
-}
-
 fn read_file_not_regular_file_error(path: &str) -> String {
     format!(
         "{WORKSPACE_READ_FILE_TOOL_NAME} target is not a regular file: {}; use {WORKSPACE_LIST_DIR_TOOL_NAME} to inspect workspace directories",
@@ -501,12 +429,10 @@ fn read_file_not_regular_file_error(path: &str) -> String {
 fn list_workspace_dir_from_roots(
     workspace_roots: &[PathBuf],
     input: &WorkspaceListDirInput,
-    host_root: Option<&Path>,
 ) -> Result<WorkspaceListDirOutput, String> {
     let canonical_roots =
         canonicalize_workspace_roots(workspace_roots, WORKSPACE_LIST_DIR_TOOL_NAME)?;
-    let canonical_host_root = canonicalize_host_root(host_root, WORKSPACE_LIST_DIR_TOOL_NAME)?;
-    if canonical_roots.is_empty() && canonical_host_root.is_none() {
+    if canonical_roots.is_empty() {
         return Err(format!(
             "{WORKSPACE_LIST_DIR_TOOL_NAME} agent has no accessible workspace roots"
         ));
@@ -514,9 +440,6 @@ fn list_workspace_dir_from_roots(
 
     let requested = Path::new(input.path.as_str());
     if requested.is_absolute() {
-        if canonical_host_root.is_some() {
-            return list_absolute_host_dir(requested, input);
-        }
         let (workspace_root_index, canonical_target, display_path) =
             resolve_absolute_workspace_dir(canonical_roots.as_slice(), requested, input)?;
         return list_workspace_directory(
@@ -573,60 +496,10 @@ fn list_workspace_dir_from_roots(
         );
     }
 
-    if let Some(host_root) = canonical_host_root.as_ref() {
-        let candidate = host_root.join(Path::new(input.path.as_str()));
-        if let Ok(canonical_target) = fs::canonicalize(candidate.as_path()) {
-            if !canonical_target.is_dir() {
-                return Err(format!(
-                    "{WORKSPACE_LIST_DIR_TOOL_NAME} target is not a directory: {}",
-                    display_requested_path(input.path.as_str())
-                ));
-            }
-            let display_path = canonical_target.to_string_lossy().into_owned();
-            return list_workspace_directory(
-                0,
-                host_root.as_path(),
-                canonical_target,
-                display_path,
-                input,
-            );
-        }
-    }
-
     Err(format!(
         "{WORKSPACE_LIST_DIR_TOOL_NAME} directory not found in agent workspace roots: {}",
         display_requested_path(input.path.as_str())
     ))
-}
-
-fn list_absolute_host_dir(
-    requested: &Path,
-    input: &WorkspaceListDirInput,
-) -> Result<WorkspaceListDirOutput, String> {
-    let canonical_target = fs::canonicalize(requested).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::NotFound {
-            format!(
-                "{WORKSPACE_LIST_DIR_TOOL_NAME} host directory not found: {}",
-                display_requested_path(input.path.as_str())
-            )
-        } else {
-            format!("{WORKSPACE_LIST_DIR_TOOL_NAME} failed to resolve host path: {error}")
-        }
-    })?;
-    if !canonical_target.is_dir() {
-        return Err(format!(
-            "{WORKSPACE_LIST_DIR_TOOL_NAME} target is not a directory: {}",
-            display_requested_path(input.path.as_str())
-        ));
-    }
-    let parent_root = canonical_target.parent().unwrap_or(canonical_target.as_path());
-    list_workspace_directory(
-        0,
-        parent_root,
-        canonical_target.clone(),
-        canonical_target.to_string_lossy().into_owned(),
-        input,
-    )
 }
 
 fn resolve_absolute_workspace_dir(
@@ -867,7 +740,7 @@ mod tests {
             max_bytes: None,
         };
 
-        let output = read_workspace_file_from_roots(&[tempdir.path().to_path_buf()], &input, None)
+        let output = read_workspace_file_from_roots(&[tempdir.path().to_path_buf()], &input)
             .expect("workspace file should be readable");
 
         assert_eq!(output.text.as_deref(), Some(contents));
@@ -888,7 +761,7 @@ mod tests {
             max_bytes: Some(3),
         };
 
-        let output = read_workspace_file_from_roots(&[tempdir.path().to_path_buf()], &input, None)
+        let output = read_workspace_file_from_roots(&[tempdir.path().to_path_buf()], &input)
             .expect("workspace file chunk should be readable");
 
         assert_eq!(output.text.as_deref(), Some("cde"));
@@ -910,7 +783,7 @@ mod tests {
             max_bytes: None,
         };
 
-        let output = read_workspace_file_from_roots(&[workspace], &input, None)
+        let output = read_workspace_file_from_roots(&[workspace], &input)
             .expect("absolute workspace file should be readable");
 
         assert_eq!(output.path, "nested/calc.js");
@@ -930,7 +803,7 @@ mod tests {
 
         assert_eq!(input.path, "nested/calc.js");
         input.max_bytes = None;
-        let output = read_workspace_file_from_roots(&[tempdir.path().to_path_buf()], &input, None)
+        let output = read_workspace_file_from_roots(&[tempdir.path().to_path_buf()], &input)
             .expect("virtual workspace path should be readable");
 
         assert_eq!(output.path, "nested/calc.js");
@@ -946,7 +819,7 @@ mod tests {
         let input = parse_workspace_read_file_input(br#"{"path":"workspace/scenarios/app.js"}"#)
             .expect("workspace alias path should parse");
 
-        let output = read_workspace_file_from_roots(&[tempdir.path().to_path_buf()], &input, None)
+        let output = read_workspace_file_from_roots(&[tempdir.path().to_path_buf()], &input)
             .expect("workspace alias path should be readable");
 
         assert_eq!(output.path, "scenarios/app.js");
@@ -968,14 +841,14 @@ mod tests {
             max_bytes: None,
         };
 
-        let error = read_workspace_file_from_roots(&[workspace], &input, None)
+        let error = read_workspace_file_from_roots(&[workspace], &input)
             .expect_err("outside absolute path should be rejected");
 
         assert!(error.contains("escapes agent workspace roots"), "unexpected error: {error}");
     }
 
     #[test]
-    fn read_workspace_file_allows_absolute_host_path_when_host_access_enabled() {
+    fn read_workspace_file_rejects_absolute_host_path_even_when_near_workspace_root() {
         let tempdir = tempfile::tempdir().expect("tempdir should be created");
         let workspace = tempdir.path().join("workspace");
         let outside = tempdir.path().join("outside");
@@ -989,14 +862,10 @@ mod tests {
             max_bytes: None,
         };
 
-        let output = read_workspace_file_from_roots(&[workspace], &input, Some(tempdir.path()))
-            .expect("host access should allow absolute file reads outside workspace roots");
+        let error = read_workspace_file_from_roots(&[workspace], &input)
+            .expect_err("host file reads outside workspace roots should be rejected");
 
-        assert_eq!(output.text.as_deref(), Some("host note\n"));
-        assert_eq!(
-            output.path,
-            outside_file.canonicalize().expect("file should resolve").display().to_string()
-        );
+        assert!(error.contains("escapes agent workspace roots"), "unexpected error: {error}");
     }
 
     #[test]
@@ -1014,7 +883,7 @@ mod tests {
         let input = parse_workspace_read_file_input(br#"{"path":"workspace/scenarios"}"#)
             .expect("workspace alias directory should parse");
 
-        let error = read_workspace_file_from_roots(&[tempdir.path().to_path_buf()], &input, None)
+        let error = read_workspace_file_from_roots(&[tempdir.path().to_path_buf()], &input)
             .expect_err("directory read should fail");
 
         assert!(error.contains(WORKSPACE_LIST_DIR_TOOL_NAME), "unexpected error: {error}");
@@ -1033,7 +902,7 @@ mod tests {
             parse_workspace_list_dir_input(br#"{"path":"/workspace/scenarios","max_entries":10}"#)
                 .expect("workspace alias list input should parse");
 
-        let output = list_workspace_dir_from_roots(&[tempdir.path().to_path_buf()], &input, None)
+        let output = list_workspace_dir_from_roots(&[tempdir.path().to_path_buf()], &input)
             .expect("workspace directory should be listed");
 
         assert_eq!(output.path, "scenarios");
@@ -1050,7 +919,7 @@ mod tests {
     }
 
     #[test]
-    fn list_workspace_dir_allows_absolute_host_path_when_host_access_enabled() {
+    fn list_workspace_dir_rejects_absolute_host_path_even_when_near_workspace_root() {
         let tempdir = tempfile::tempdir().expect("tempdir should be created");
         let workspace = tempdir.path().join("workspace");
         let outside = tempdir.path().join("outside");
@@ -1063,12 +932,10 @@ mod tests {
             max_entries: None,
         };
 
-        let output = list_workspace_dir_from_roots(&[workspace], &input, Some(tempdir.path()))
-            .expect("host access should allow absolute directory listings outside workspace roots");
+        let error = list_workspace_dir_from_roots(&[workspace], &input)
+            .expect_err("host directory listings outside workspace roots should be rejected");
 
-        assert_eq!(output.entries.len(), 1);
-        assert_eq!(output.entries[0].name, "notes.txt");
-        assert_eq!(output.entries[0].kind, "file");
+        assert!(error.contains("escapes agent workspace roots"), "unexpected error: {error}");
     }
 
     #[test]

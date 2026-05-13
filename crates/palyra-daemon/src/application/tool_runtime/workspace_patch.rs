@@ -23,7 +23,6 @@ use crate::{
         MAX_PATCH_TOOL_PATTERN_BYTES, MAX_PATCH_TOOL_REDACTION_PATTERNS,
         MAX_PATCH_TOOL_SECRET_FILE_MARKERS, MAX_WORKSPACE_PATCH_TOOL_INPUT_BYTES,
     },
-    sandbox_runner::process_runner_allows_host_access,
     tool_protocol::{ToolAttestation, ToolExecutionOutcome},
 };
 
@@ -201,27 +200,19 @@ pub(crate) async fn execute_workspace_patch_tool(
     };
     let agent_workspace_roots =
         agent_outcome.agent.workspace_roots.iter().map(PathBuf::from).collect::<Vec<_>>();
-    let allow_host_access =
-        process_runner_allows_host_access(&runtime_state.config.tool_call.process_runner);
-    let host_base_root = allow_host_access
-        .then_some(runtime_state.config.tool_call.process_runner.workspace_root.as_path());
-    let workspace_roots = match resolve_workspace_patch_roots(
-        &parsed,
-        agent_workspace_roots.as_slice(),
-        allow_host_access,
-        host_base_root,
-    ) {
-        Ok(workspace_roots) => workspace_roots,
-        Err(message) => {
-            return workspace_patch_tool_execution_outcome(
-                proposal_id,
-                input_json,
-                false,
-                b"{}".to_vec(),
-                message,
-            );
-        }
-    };
+    let workspace_roots =
+        match resolve_workspace_patch_roots(&parsed, agent_workspace_roots.as_slice()) {
+            Ok(workspace_roots) => workspace_roots,
+            Err(message) => {
+                return workspace_patch_tool_execution_outcome(
+                    proposal_id,
+                    input_json,
+                    false,
+                    b"{}".to_vec(),
+                    message,
+                );
+            }
+        };
     let limits = WorkspacePatchLimits::default();
     let planning_request = WorkspacePatchRequest {
         patch: patch.clone(),
@@ -272,13 +263,8 @@ pub(crate) async fn execute_workspace_patch_tool(
 fn resolve_workspace_patch_roots(
     parsed: &serde_json::Map<String, Value>,
     agent_workspace_roots: &[PathBuf],
-    allow_host_access: bool,
-    host_base_root: Option<&Path>,
 ) -> Result<Vec<PathBuf>, String> {
     let Some(value) = parsed.get("workspace_root") else {
-        if allow_host_access {
-            return Ok(vec![canonicalize_host_patch_root(host_base_root)?]);
-        }
         return Ok(agent_workspace_roots.to_vec());
     };
     let Some(raw_workspace_root) = value.as_str() else {
@@ -286,65 +272,9 @@ fn resolve_workspace_patch_roots(
     };
     let workspace_root = raw_workspace_root.trim();
     if workspace_root.is_empty() {
-        if allow_host_access {
-            return Ok(vec![canonicalize_host_patch_root(host_base_root)?]);
-        }
         return Ok(agent_workspace_roots.to_vec());
     }
-    if allow_host_access {
-        return resolve_host_workspace_root_override(host_base_root, workspace_root)
-            .map(|root| vec![root]);
-    }
     resolve_workspace_root_override(agent_workspace_roots, workspace_root).map(|root| vec![root])
-}
-
-fn canonicalize_host_patch_root(host_base_root: Option<&Path>) -> Result<PathBuf, String> {
-    let Some(host_base_root) = host_base_root else {
-        return std::env::current_dir().map_err(|error| {
-            format!("palyra.fs.apply_patch failed to resolve current directory: {error}")
-        });
-    };
-    if host_base_root.as_os_str().is_empty() {
-        return std::env::current_dir().map_err(|error| {
-            format!("palyra.fs.apply_patch failed to resolve current directory: {error}")
-        });
-    }
-    match fs::canonicalize(host_base_root) {
-        Ok(path) if path.is_dir() => Ok(path),
-        _ => std::env::current_dir().map_err(|error| {
-            format!("palyra.fs.apply_patch failed to resolve current directory: {error}")
-        }),
-    }
-}
-
-fn resolve_host_workspace_root_override(
-    host_base_root: Option<&Path>,
-    workspace_root: &str,
-) -> Result<PathBuf, String> {
-    if workspace_root.chars().any(char::is_control) {
-        return Err(
-            "palyra.fs.apply_patch workspace_root contains unsupported characters".to_owned()
-        );
-    }
-    let requested = Path::new(workspace_root);
-    let base = canonicalize_host_patch_root(host_base_root)?;
-    let candidate =
-        if requested.is_absolute() { requested.to_path_buf() } else { base.join(requested) };
-    let canonical_candidate = fs::canonicalize(candidate.as_path()).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::NotFound {
-            format!("palyra.fs.apply_patch workspace_root does not exist: {workspace_root}")
-        } else {
-            format!(
-                "palyra.fs.apply_patch failed to resolve workspace_root {workspace_root}: {error}"
-            )
-        }
-    })?;
-    if !canonical_candidate.is_dir() {
-        return Err(format!(
-            "palyra.fs.apply_patch workspace_root is not a directory: {workspace_root}"
-        ));
-    }
-    Ok(canonical_candidate)
 }
 
 fn resolve_workspace_root_override(
@@ -621,9 +551,8 @@ mod tests {
             .as_object()
             .expect("json object")
             .clone();
-        let roots =
-            resolve_workspace_patch_roots(&parsed, std::slice::from_ref(&workspace), false, None)
-                .expect("workspace root override should resolve");
+        let roots = resolve_workspace_patch_roots(&parsed, std::slice::from_ref(&workspace))
+            .expect("workspace root override should resolve");
         let patch = "*** Begin Patch\n*** Add File: calc.js\n+export const add = (a, b) => a + b;\n*** End Patch\n";
 
         apply_workspace_patch(
@@ -653,14 +582,14 @@ mod tests {
             .as_object()
             .expect("json object")
             .clone();
-        let error = resolve_workspace_patch_roots(&parsed, &[workspace], false, None)
+        let error = resolve_workspace_patch_roots(&parsed, &[workspace])
             .expect_err("outside workspace_root should be rejected");
 
         assert!(error.contains("escapes agent workspace roots"), "unexpected error: {error}");
     }
 
     #[test]
-    fn workspace_root_override_allows_host_directory_when_host_access_enabled() {
+    fn workspace_root_override_rejects_host_directory_even_when_near_workspace_root() {
         let tempdir = tempfile::tempdir().expect("tempdir should be created");
         let workspace = tempdir.path().join("workspace");
         let outside = tempdir.path().join("outside");
@@ -671,11 +600,10 @@ mod tests {
             .as_object()
             .expect("json object")
             .clone();
-        let roots =
-            resolve_workspace_patch_roots(&parsed, &[workspace], true, Some(tempdir.path()))
-                .expect("host workspace_root should resolve");
+        let error = resolve_workspace_patch_roots(&parsed, &[workspace])
+            .expect_err("host workspace_root should be rejected");
 
-        assert_eq!(roots, vec![outside.canonicalize().expect("outside should resolve")]);
+        assert!(error.contains("escapes agent workspace roots"), "unexpected error: {error}");
     }
 
     #[test]
