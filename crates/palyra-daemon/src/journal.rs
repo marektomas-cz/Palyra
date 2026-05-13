@@ -431,6 +431,7 @@ pub struct MemoryItemLifecycleUpdateRequest {
     pub principal: String,
     pub channel: Option<String>,
     pub session_id: Option<String>,
+    pub content_text: Option<String>,
     pub tags: Vec<String>,
     pub confidence: Option<f64>,
     pub ttl_unix_ms: Option<i64>,
@@ -12709,24 +12710,46 @@ impl JournalStore {
         request: &MemoryItemLifecycleUpdateRequest,
     ) -> Result<Option<MemoryItemRecord>, JournalError> {
         let now = current_unix_ms()?;
+        let embedding_dims = self.memory_embedding_provider.dimensions();
+        let content_text = request
+            .content_text
+            .as_ref()
+            .map(|raw| {
+                let normalized_content = normalize_memory_text(raw.as_str());
+                sanitize_object_text_field("content_text", normalized_content.as_str())
+            })
+            .transpose()?;
+        let content_hash = content_text.as_ref().map(|value| sha256_hex(value.as_bytes()));
+        let vector_blob = content_text.as_ref().map(|value| {
+            let vector = normalize_embedding_dimensions(
+                self.memory_embedding_provider.embed_text(value.as_str()),
+                embedding_dims,
+            );
+            encode_vector_blob(vector.as_slice())
+        });
         let tags = normalize_memory_tags(request.tags.as_slice());
         let tags_json = serde_json::to_string(&tags)?;
-        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
-        let updated = guard.execute(
+        let mut guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        let transaction = guard.transaction()?;
+        let updated = transaction.execute(
             r#"
                 UPDATE memory_items
                 SET
-                    tags_json = ?2,
-                    confidence = COALESCE(?3, confidence),
-                    ttl_unix_ms = COALESCE(?4, ttl_unix_ms),
-                    updated_at_unix_ms = ?5
+                    content_text = COALESCE(?2, content_text),
+                    content_hash = COALESCE(?3, content_hash),
+                    tags_json = ?4,
+                    confidence = COALESCE(?5, confidence),
+                    ttl_unix_ms = COALESCE(?6, ttl_unix_ms),
+                    updated_at_unix_ms = ?7
                 WHERE memory_ulid = ?1
-                  AND principal = ?6
-                  AND ((?7 IS NULL AND channel IS NULL) OR channel = ?7)
-                  AND ((?8 IS NULL AND session_ulid IS NULL) OR session_ulid = ?8)
+                  AND principal = ?8
+                  AND ((?9 IS NULL AND channel IS NULL) OR channel = ?9)
+                  AND ((?10 IS NULL AND session_ulid IS NULL) OR session_ulid = ?10)
             "#,
             params![
                 request.memory_id.as_str(),
+                content_text.as_deref(),
+                content_hash.as_deref(),
                 tags_json,
                 request.confidence,
                 request.ttl_unix_ms,
@@ -12739,6 +12762,54 @@ impl JournalStore {
         if updated == 0 {
             return Ok(None);
         }
+        if let (Some(content_text), Some(vector_blob)) =
+            (content_text.as_ref(), vector_blob.as_ref())
+        {
+            transaction.execute(
+                "DELETE FROM memory_items_fts WHERE memory_ulid = ?1",
+                params![request.memory_id.as_str()],
+            )?;
+            transaction.execute(
+                "INSERT INTO memory_items_fts(memory_ulid, content_text) VALUES (?1, ?2)",
+                params![request.memory_id.as_str(), content_text.as_str()],
+            )?;
+            transaction.execute(
+                r#"
+                    INSERT INTO memory_vectors (
+                        memory_ulid,
+                        embedding_model,
+                        dims,
+                        vector_blob,
+                        created_at_unix_ms,
+                        embedding_model_id,
+                        embedding_dims,
+                        embedding_version,
+                        embedding_vector,
+                        embedded_at_unix_ms
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?2, ?3, ?6, ?4, ?5)
+                    ON CONFLICT(memory_ulid) DO UPDATE SET
+                        embedding_model = excluded.embedding_model,
+                        dims = excluded.dims,
+                        vector_blob = excluded.vector_blob,
+                        embedding_model_id = excluded.embedding_model_id,
+                        embedding_dims = excluded.embedding_dims,
+                        embedding_version = excluded.embedding_version,
+                        embedding_vector = excluded.embedding_vector,
+                        embedded_at_unix_ms = excluded.embedded_at_unix_ms
+                "#,
+                params![
+                    request.memory_id.as_str(),
+                    self.memory_embedding_provider.model_name(),
+                    embedding_dims as i64,
+                    vector_blob,
+                    now,
+                    CURRENT_MEMORY_EMBEDDING_VERSION,
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        drop(guard);
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
         load_memory_item_by_id(&guard, request.memory_id.as_str(), now)
     }
 

@@ -406,6 +406,8 @@ async fn retain_memory_candidate(
     )
     .await?
     {
+        let replace_duplicate_content =
+            should_replace_lifecycle_duplicate_content(&classification, &duplicate);
         let merged_tags =
             merge_memory_tags(duplicate.item.tags.as_slice(), request.tags.as_slice());
         let updated = runtime_state
@@ -414,6 +416,7 @@ async fn retain_memory_candidate(
                 principal: request.principal.clone(),
                 channel: duplicate.item.channel.clone(),
                 session_id: duplicate.item.session_id.clone(),
+                content_text: replace_duplicate_content.then(|| request.content_text.clone()),
                 tags: merged_tags,
                 confidence: Some(
                     duplicate.item.confidence.unwrap_or(0.0).max(confidence).clamp(0.0, 1.0),
@@ -429,6 +432,8 @@ async fn retain_memory_candidate(
             };
             let reason = if duplicate.exact {
                 "exact duplicate memory updated with lifecycle metadata"
+            } else if replace_duplicate_content {
+                "near-duplicate memory updated with replacement lifecycle content"
             } else {
                 "near-duplicate memory merged into existing lifecycle record"
             };
@@ -483,26 +488,109 @@ async fn find_lifecycle_duplicate(
     channel_scope: Option<String>,
     session_scope: Option<String>,
 ) -> Result<Option<LifecycleDuplicate>, Status> {
-    let hits = runtime_state
-        .search_memory(MemorySearchRequest {
-            principal: request.principal.clone(),
-            channel: channel_scope,
-            session_id: session_scope,
-            query: request.content_text.clone(),
-            top_k: 8.min(MAX_MEMORY_SEARCH_TOP_K),
-            min_score: MEMORY_RETAIN_DEDUPE_MIN_SCORE,
-            tags: Vec::new(),
-            sources: Vec::new(),
-        })
-        .await?;
-    for hit in hits {
-        let exact =
-            normalize_lifecycle_content(hit.item.content_text.as_str()) == request.content_text;
-        if exact || hit.score >= MEMORY_RETAIN_NEAR_DUPLICATE_SCORE {
-            return Ok(Some(LifecycleDuplicate { item: hit.item, exact }));
+    for query in lifecycle_duplicate_search_queries(request.content_text.as_str()) {
+        let hits = runtime_state
+            .search_memory(MemorySearchRequest {
+                principal: request.principal.clone(),
+                channel: channel_scope.clone(),
+                session_id: session_scope.clone(),
+                query,
+                top_k: 8.min(MAX_MEMORY_SEARCH_TOP_K),
+                min_score: MEMORY_RETAIN_DEDUPE_MIN_SCORE,
+                tags: Vec::new(),
+                sources: Vec::new(),
+            })
+            .await?;
+        for hit in hits {
+            let exact =
+                normalize_lifecycle_content(hit.item.content_text.as_str()) == request.content_text;
+            if exact || hit.score >= MEMORY_RETAIN_NEAR_DUPLICATE_SCORE {
+                return Ok(Some(LifecycleDuplicate { item: hit.item, exact }));
+            }
         }
     }
     Ok(None)
+}
+
+fn lifecycle_duplicate_search_queries(content_text: &str) -> Vec<String> {
+    let mut queries = vec![content_text.to_owned()];
+    if let Some(preference_context) = lifecycle_preference_context_query(content_text) {
+        if !queries.iter().any(|query| query == &preference_context) {
+            queries.push(preference_context);
+        }
+    }
+    queries
+}
+
+fn lifecycle_preference_context_query(content_text: &str) -> Option<String> {
+    let terms = lifecycle_duplicate_terms(content_text);
+    let preference_index =
+        terms.iter().position(|term| lifecycle_preference_term(term.as_str()))?;
+    let mut context = terms[..preference_index]
+        .iter()
+        .filter(|term| !lifecycle_duplicate_stopword(term.as_str()))
+        .rev()
+        .take(4)
+        .cloned()
+        .collect::<Vec<_>>();
+    context.reverse();
+    context.push("prefer".to_owned());
+    if context.len() >= 2 {
+        Some(context.join(" "))
+    } else {
+        None
+    }
+}
+
+fn lifecycle_duplicate_terms(input: &str) -> Vec<String> {
+    input
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '_' {
+                character.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn lifecycle_preference_term(term: &str) -> bool {
+    matches!(term, "prefer" | "prefers" | "preferred" | "preference" | "preferences")
+}
+
+fn lifecycle_duplicate_stopword(term: &str) -> bool {
+    matches!(
+        term,
+        "a" | "an"
+            | "actually"
+            | "correction"
+            | "for"
+            | "instead"
+            | "memory"
+            | "of"
+            | "project"
+            | "rather"
+            | "replace"
+            | "that"
+            | "the"
+            | "this"
+            | "to"
+    )
+}
+
+fn should_replace_lifecycle_duplicate_content(
+    classification: &MemoryWriteClassification,
+    duplicate: &LifecycleDuplicate,
+) -> bool {
+    !duplicate.exact
+        && matches!(
+            classification.category,
+            MemoryWriteCategory::Correction | MemoryWriteCategory::Preference
+        )
 }
 
 fn resolve_lifecycle_write_scope(

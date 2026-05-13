@@ -3691,6 +3691,49 @@ async fn memory_retain_tool_updates_exact_duplicate_instead_of_writing_twice() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn memory_retain_tool_replaces_near_duplicate_preference_content() {
+    let state = build_test_runtime_state(false);
+    let context = routines_tool_test_context();
+    let first = br#"{"content_text":"Project UI smoke tests prefer Vitest, not Playwright","scope":"principal","confidence":0.9}"#;
+    let initial =
+        execute_memory_retain_tool(&state, context, "01ARZ3NDEKTSV4RRFFQ69G5FC6", first).await;
+    assert!(initial.success, "initial preference retain should succeed: {}", initial.error);
+
+    let correction = br#"{"content_text":"Correction: project UI smoke tests prefer Playwright, not Vitest","scope":"principal","confidence":0.9}"#;
+    let updated =
+        execute_memory_retain_tool(&state, context, "01ARZ3NDEKTSV4RRFFQ69G5FC7", correction).await;
+    assert!(updated.success, "correction retain should succeed: {}", updated.error);
+    let payload = parse_tool_output_json(&updated);
+    assert_eq!(payload.get("status").and_then(Value::as_str), Some("merged"));
+    assert_eq!(
+        payload.pointer("/item/content_text").and_then(Value::as_str),
+        Some("Correction: project UI smoke tests prefer Playwright, not Vitest")
+    );
+
+    let hits = state
+        .search_memory(MemorySearchRequest {
+            principal: context.principal.to_owned(),
+            channel: None,
+            session_id: None,
+            query: "What framework should project UI smoke tests prefer?".to_owned(),
+            top_k: 4,
+            min_score: 0.0,
+            tags: Vec::new(),
+            sources: Vec::new(),
+        })
+        .await
+        .expect("corrected memory should be searchable");
+    let top_content = hits
+        .first()
+        .map(|hit| hit.item.content_text.as_str())
+        .expect("corrected preference should be the top search hit");
+    assert!(
+        top_content.contains("prefer Playwright, not Vitest"),
+        "corrected canonical memory should be top search hit: {hits:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn memory_retain_tool_principal_scope_writes_normal_preferences() {
     let state = build_test_runtime_state(false);
     let input_json =
