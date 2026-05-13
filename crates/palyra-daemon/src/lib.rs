@@ -2543,6 +2543,14 @@ pub async fn run() -> Result<()> {
         )
         .context("failed to initialize channel connector platform")?,
     );
+    runtime.configure_routines_runtime(RoutinesRuntimeConfig {
+        registry: Arc::clone(&routine_registry),
+        objectives: Arc::clone(&objective_registry),
+        auth: auth.clone(),
+        grpc_url: grpc_url.clone(),
+        scheduler_wake: Arc::clone(&scheduler_wake),
+        timezone_mode: loaded.cron.timezone,
+    });
     let _cron_scheduler_task = spawn_scheduler_loop(
         runtime.clone(),
         auth.clone(),
@@ -2550,13 +2558,6 @@ pub async fn run() -> Result<()> {
         Arc::clone(&scheduler_wake),
         loaded.memory.retention.clone(),
     );
-    runtime.configure_routines_runtime(RoutinesRuntimeConfig {
-        registry: Arc::clone(&routine_registry),
-        auth: auth.clone(),
-        grpc_url: grpc_url.clone(),
-        scheduler_wake: Arc::clone(&scheduler_wake),
-        timezone_mode: loaded.cron.timezone,
-    });
 
     let state = build_app_state(
         &loaded,

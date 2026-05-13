@@ -346,8 +346,14 @@ fn configure_test_routines_runtime(
         crate::routines::RoutineRegistry::open(registry_root.as_path())
             .expect("routine registry should initialize"),
     );
+    let objectives_root = unique_temp_test_root("palyra-objectives-runtime");
+    let objectives = std::sync::Arc::new(
+        crate::objectives::ObjectiveRegistry::open(objectives_root.as_path())
+            .expect("objective registry should initialize"),
+    );
     state.configure_routines_runtime(super::RoutinesRuntimeConfig {
         registry: std::sync::Arc::clone(&registry),
+        objectives,
         auth: routines_tool_test_auth(),
         grpc_url,
         scheduler_wake: std::sync::Arc::new(Notify::new()),

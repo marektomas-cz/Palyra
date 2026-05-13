@@ -37,12 +37,13 @@ use crate::{
         HEADER_PRINCIPAL,
     },
     journal::{
-        CronConcurrencyPolicy, CronJobRecord, CronMisfirePolicy, CronRunFinalizeRequest,
-        CronRunRecord, CronRunStartRequest, CronRunStatus, CronScheduleType, MemoryRetentionPolicy,
-        OrchestratorCancelRequest, OrchestratorRunStatusSnapshot,
-        OrchestratorSessionQuickControlsUpdateRequest, SkillExecutionStatus,
-        SkillStatusUpsertRequest,
+        CronConcurrencyPolicy, CronJobRecord, CronJobUpdatePatch, CronMisfirePolicy,
+        CronRunFinalizeRequest, CronRunRecord, CronRunStartRequest, CronRunStatus,
+        CronScheduleType, MemoryRetentionPolicy, OrchestratorCancelRequest,
+        OrchestratorRunStatusSnapshot, OrchestratorSessionQuickControlsUpdateRequest,
+        SkillExecutionStatus, SkillStatusUpsertRequest,
     },
+    objectives::{ObjectiveLifecycleRecord, ObjectiveRecord, ObjectiveState, ObjectiveUpsert},
     routines::{
         RoutineDispatchMode, RoutineExecutionPosture, RoutineMetadataRecord,
         RoutineRunMetadataUpsert, RoutineRunMode, RoutineTriggerKind,
@@ -71,6 +72,8 @@ const SYSTEM_DAEMON_PRINCIPAL: &str = "system:daemon";
 pub const MEMORY_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 pub const MEMORY_EMBEDDINGS_BACKFILL_INTERVAL: Duration = Duration::from_secs(10 * 60);
 const MEMORY_EMBEDDINGS_BACKFILL_BATCH_SIZE: usize = 64;
+const OBJECTIVE_BUDGET_EXHAUSTED_ERROR_KIND: &str = "objective_budget_exhausted";
+const OBJECTIVE_BUDGET_EXHAUSTED_ACTION: &str = "budget_exhausted";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum CronTimezoneMode {
@@ -191,6 +194,13 @@ pub struct TriggerJobOptions {
     pub model_profile_override: Option<String>,
     pub parameter_delta_json: Option<String>,
     pub origin_kind: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ObjectiveBudgetExhaustion {
+    objective: ObjectiveRecord,
+    max_runs: u32,
+    completed_runs: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -1509,6 +1519,150 @@ fn decide_concurrency_policy(
     }
 }
 
+async fn disable_objective_if_budget_exhausted(
+    state: Arc<GatewayRuntimeState>,
+    job: &CronJobRecord,
+) -> Result<Option<ObjectiveBudgetExhaustion>, Status> {
+    let Some(exhaustion) =
+        objective_budget_exhaustion_for_job(Arc::clone(&state), job.job_id.as_str()).await?
+    else {
+        return Ok(None);
+    };
+    apply_objective_budget_exhaustion(Arc::clone(&state), job, &exhaustion).await?;
+    Ok(Some(exhaustion))
+}
+
+async fn objective_budget_exhaustion_for_job(
+    state: Arc<GatewayRuntimeState>,
+    job_id: &str,
+) -> Result<Option<ObjectiveBudgetExhaustion>, Status> {
+    let Some(objective) = linked_objective_for_job(state.as_ref(), job_id)? else {
+        return Ok(None);
+    };
+    let Some(max_runs) = objective.budget.max_runs else {
+        return Ok(None);
+    };
+    let completed_runs =
+        count_budgeted_objective_runs_for_job(Arc::clone(&state), job_id, max_runs).await?;
+    if completed_runs < max_runs {
+        return Ok(None);
+    }
+    Ok(Some(ObjectiveBudgetExhaustion { objective, max_runs, completed_runs }))
+}
+
+fn linked_objective_for_job(
+    state: &GatewayRuntimeState,
+    job_id: &str,
+) -> Result<Option<ObjectiveRecord>, Status> {
+    let Ok(runtime) = state.routines_runtime_config() else {
+        return Ok(None);
+    };
+    runtime
+        .objectives
+        .list_objectives()
+        .map_err(|error| {
+            Status::internal(format!("failed to list objectives for budget check: {error}"))
+        })
+        .map(|objectives| {
+            objectives
+                .into_iter()
+                .find(|objective| objective.automation.routine_id.as_deref() == Some(job_id))
+        })
+}
+
+async fn count_budgeted_objective_runs_for_job(
+    state: Arc<GatewayRuntimeState>,
+    job_id: &str,
+    stop_after: u32,
+) -> Result<u32, Status> {
+    if stop_after == 0 {
+        return Ok(0);
+    }
+    let mut after_run_id = None::<String>;
+    let mut count = 0_u32;
+    loop {
+        let (runs, next_after_run_id) =
+            state.list_cron_runs(Some(job_id.to_owned()), after_run_id.clone(), Some(500)).await?;
+        count = count.saturating_add(budgeted_objective_run_count(&runs));
+        if count >= stop_after {
+            return Ok(count);
+        }
+        let Some(next_after_run_id) = next_after_run_id else {
+            return Ok(count);
+        };
+        after_run_id = Some(next_after_run_id);
+    }
+}
+
+fn budgeted_objective_run_count(runs: &[CronRunRecord]) -> u32 {
+    runs.iter()
+        .filter(|run| is_budgeted_objective_run(run))
+        .fold(0_u32, |count, _| count.saturating_add(1))
+}
+
+fn is_budgeted_objective_run(run: &CronRunRecord) -> bool {
+    !run.status.is_active()
+        && run.orchestrator_run_id.is_some()
+        && run.error_kind.as_deref() != Some(OBJECTIVE_BUDGET_EXHAUSTED_ERROR_KIND)
+}
+
+async fn apply_objective_budget_exhaustion(
+    state: Arc<GatewayRuntimeState>,
+    job: &CronJobRecord,
+    exhaustion: &ObjectiveBudgetExhaustion,
+) -> Result<(), Status> {
+    let now = now_unix_ms()?;
+    state.set_cron_job_next_run(job.job_id.clone(), None, Some(now)).await?;
+    state
+        .update_cron_job(
+            job.job_id.clone(),
+            CronJobUpdatePatch {
+                enabled: Some(false),
+                next_run_at_unix_ms: Some(None),
+                queued_run: Some(false),
+                ..CronJobUpdatePatch::default()
+            },
+        )
+        .await?;
+
+    let mut objective = exhaustion.objective.clone();
+    let from_state = objective.state;
+    let to_state = if matches!(from_state, ObjectiveState::Archived | ObjectiveState::Cancelled) {
+        from_state
+    } else {
+        ObjectiveState::Paused
+    };
+    let should_update_objective = objective.automation.enabled || objective.state != to_state;
+    if !should_update_objective {
+        return Ok(());
+    }
+
+    objective.state = to_state;
+    objective.automation.enabled = false;
+    objective.lifecycle_history.push(ObjectiveLifecycleRecord {
+        event_id: Ulid::new().to_string(),
+        action: OBJECTIVE_BUDGET_EXHAUSTED_ACTION.to_owned(),
+        from_state: Some(from_state),
+        to_state,
+        reason: Some(objective_budget_exhausted_message(exhaustion)),
+        run_id: None,
+        occurred_at_unix_ms: now,
+    });
+
+    let runtime = state.routines_runtime_config()?;
+    runtime.objectives.upsert_objective(ObjectiveUpsert { record: objective }).map_err(
+        |error| Status::internal(format!("failed to persist objective budget exhaustion: {error}")),
+    )?;
+    Ok(())
+}
+
+fn objective_budget_exhausted_message(exhaustion: &ObjectiveBudgetExhaustion) -> String {
+    format!(
+        "objective {} max_runs budget exhausted ({}/{})",
+        exhaustion.objective.objective_id, exhaustion.completed_runs, exhaustion.max_runs
+    )
+}
+
 async fn dispatch_job(
     state: Arc<GatewayRuntimeState>,
     auth: GatewayAuthConfig,
@@ -1518,6 +1672,20 @@ async fn dispatch_job(
     manual_trigger: bool,
     options: TriggerJobOptions,
 ) -> Result<DispatchOutcome, Status> {
+    if let Some(exhaustion) =
+        disable_objective_if_budget_exhausted(Arc::clone(&state), &job).await?
+    {
+        let message = objective_budget_exhausted_message(&exhaustion);
+        return register_terminal(
+            Arc::clone(&state),
+            &job.job_id,
+            CronRunStatus::Skipped,
+            OBJECTIVE_BUDGET_EXHAUSTED_ERROR_KIND,
+            message.as_str(),
+        )
+        .await;
+    }
+
     let policy = evaluate_with_context(
         &PolicyRequest {
             principal: job.owner_principal.clone(),
@@ -1724,12 +1892,19 @@ async fn run_job_with_retries(
         .await;
 
         match result {
-            Ok(CronRunStatus::Succeeded) => {
-                wake_signal.notify_one();
-                return Ok(());
-            }
             Ok(terminal_status) => {
-                if attempt >= max_attempts || terminal_status == CronRunStatus::Denied {
+                let budget_exhausted =
+                    disable_objective_if_budget_exhausted(Arc::clone(&state), &job)
+                        .await?
+                        .is_some();
+                if terminal_status == CronRunStatus::Succeeded {
+                    wake_signal.notify_one();
+                    return Ok(());
+                }
+                if budget_exhausted
+                    || attempt >= max_attempts
+                    || terminal_status == CronRunStatus::Denied
+                {
                     wake_signal.notify_one();
                     return Ok(());
                 }
@@ -2242,12 +2417,13 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        build_scheduler_health_snapshot, compute_misfire_recovery_plan, compute_next_run_after,
-        cron_misfire_audit_payload, decide_concurrency_policy, load_periodic_reaudit_skills_index,
-        normalize_schedule, now_unix_ms_or_fallback, parse_skill_reaudit_interval,
-        periodic_reaudit_targets, scheduled_routine_run_metadata_upsert,
-        should_repair_stale_cron_run, ConcurrencyDecision, CronMatcher, CronMisfireRecoveryAction,
-        CronTimezoneMode, InstalledSkillRecord, InstalledSkillsIndex, SchedulerHealthInput,
+        budgeted_objective_run_count, build_scheduler_health_snapshot,
+        compute_misfire_recovery_plan, compute_next_run_after, cron_misfire_audit_payload,
+        decide_concurrency_policy, load_periodic_reaudit_skills_index, normalize_schedule,
+        now_unix_ms_or_fallback, parse_skill_reaudit_interval, periodic_reaudit_targets,
+        scheduled_routine_run_metadata_upsert, should_repair_stale_cron_run, ConcurrencyDecision,
+        CronMatcher, CronMisfireRecoveryAction, CronTimezoneMode, InstalledSkillRecord,
+        InstalledSkillsIndex, SchedulerHealthInput, OBJECTIVE_BUDGET_EXHAUSTED_ERROR_KIND,
         SCHEDULER_STALE_RUN_AFTER_MS, SKILLS_INDEX_FILE_NAME, SKILLS_LAYOUT_VERSION,
     };
     use crate::gateway::proto::palyra::cron::v1 as cron_v1;
@@ -2309,6 +2485,23 @@ mod tests {
             created_at_unix_ms: 0,
             updated_at_unix_ms,
         }
+    }
+
+    #[test]
+    fn budgeted_objective_run_count_only_counts_terminal_orchestrator_runs() {
+        let mut succeeded = sample_cron_run(CronRunStatus::Succeeded, 10);
+        succeeded.orchestrator_run_id = Some("orch-1".to_owned());
+        let mut failed = sample_cron_run(CronRunStatus::Failed, 20);
+        failed.orchestrator_run_id = Some("orch-2".to_owned());
+        let active = sample_cron_run(CronRunStatus::Running, 30);
+        let skipped_without_orchestrator = sample_cron_run(CronRunStatus::Skipped, 40);
+        let mut budget_skip = sample_cron_run(CronRunStatus::Skipped, 50);
+        budget_skip.orchestrator_run_id = Some("orch-3".to_owned());
+        budget_skip.error_kind = Some(OBJECTIVE_BUDGET_EXHAUSTED_ERROR_KIND.to_owned());
+
+        let runs = vec![succeeded, failed, active, skipped_without_orchestrator, budget_skip];
+
+        assert_eq!(budgeted_objective_run_count(&runs), 2);
     }
 
     fn sample_routine_metadata(routine_id: &str) -> RoutineMetadataRecord {

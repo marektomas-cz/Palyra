@@ -454,6 +454,7 @@ fn provider_lease_timeout_status(
 #[derive(Clone)]
 pub(crate) struct RoutinesRuntimeConfig {
     pub registry: Arc<crate::routines::RoutineRegistry>,
+    pub objectives: Arc<crate::objectives::ObjectiveRegistry>,
     pub auth: GatewayAuthConfig,
     pub grpc_url: String,
     pub scheduler_wake: Arc<Notify>,
