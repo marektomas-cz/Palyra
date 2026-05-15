@@ -20,6 +20,7 @@ use crate::{
         current_unix_ms, CachedHttpFetchEntry, GatewayRuntimeState, MAX_HTTP_FETCH_BODY_BYTES,
         MAX_HTTP_FETCH_CACHE_KEY_BYTES, MAX_HTTP_FETCH_REDIRECTS, MAX_HTTP_FETCH_TOOL_INPUT_BYTES,
     },
+    sandbox_runner::{process_runner_allows_host_access, SandboxProcessRunnerPolicy},
     tool_protocol::{ToolAttestation, ToolExecutionOutcome},
 };
 
@@ -196,8 +197,6 @@ pub(crate) async fn execute_http_fetch_tool(
         .map(|value| value as usize)
         .unwrap_or(runtime_state.config.http_fetch.max_redirects)
         .clamp(1, MAX_HTTP_FETCH_REDIRECTS);
-    let allow_private_targets = runtime_state.config.http_fetch.allow_private_targets
-        && payload.get("allow_private_targets").and_then(Value::as_bool).unwrap_or(true);
     let max_response_bytes = payload
         .get("max_response_bytes")
         .and_then(Value::as_u64)
@@ -301,6 +300,12 @@ pub(crate) async fn execute_http_fetch_tool(
             "palyra.http.fetch URL credentials are not allowed".to_owned(),
         );
     }
+    let allow_private_targets = http_fetch_allows_private_targets_for_url(
+        runtime_state.config.http_fetch.allow_private_targets,
+        &runtime_state.config.tool_call.process_runner,
+        payload.get("allow_private_targets").and_then(Value::as_bool),
+        &url,
+    );
 
     let initial_egress_verdict = match evaluate_http_fetch_egress(
         runtime_state,
@@ -785,6 +790,37 @@ fn resolve_credential_bindings(
         resolved.push((binding.header_name.trim().to_ascii_lowercase(), value));
     }
     Ok(resolved)
+}
+
+pub(crate) fn http_fetch_allows_private_targets_for_url(
+    config_allow_private_targets: bool,
+    process_runner_policy: &SandboxProcessRunnerPolicy,
+    requested_allow_private_targets: Option<bool>,
+    url: &Url,
+) -> bool {
+    if config_allow_private_targets {
+        return requested_allow_private_targets.unwrap_or(true);
+    }
+    requested_allow_private_targets.unwrap_or(false)
+        && process_runner_allows_host_access(process_runner_policy)
+        && http_fetch_url_targets_loopback(url)
+}
+
+fn http_fetch_url_targets_loopback(url: &Url) -> bool {
+    if !matches!(url.scheme(), "http" | "https") {
+        return false;
+    }
+    let Some(host) = url.host_str().map(str::trim).filter(|host| !host.is_empty()) else {
+        return false;
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
 }
 
 fn redacted_http_headers(headers: &[(String, String)]) -> Vec<serde_json::Value> {

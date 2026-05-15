@@ -13,6 +13,7 @@ use std::{
 
 use axum::http::{header::AUTHORIZATION, HeaderMap, HeaderValue};
 use palyra_common::workspace_patch::WorkspacePatchRedactionPolicy;
+use reqwest::Url;
 use serde_json::{json, Value};
 use tokio::{
     net::TcpListener as TokioTcpListener,
@@ -68,7 +69,8 @@ use crate::application::{
     },
     tool_runtime::{
         http_fetch::{
-            execute_http_fetch_tool, http_fetch_cache_key, resolve_fetch_target_addresses,
+            execute_http_fetch_tool, http_fetch_allows_private_targets_for_url,
+            http_fetch_cache_key, resolve_fetch_target_addresses,
             validate_resolved_fetch_addresses, HttpFetchCachePolicy,
         },
         memory::{
@@ -85,6 +87,9 @@ use crate::application::{
 use crate::execution_backends::{ExecutionBackendPreference, ExecutionBackendResolution};
 use crate::media::MediaRuntimeConfig;
 use crate::model_provider::ProviderImageInput;
+use crate::sandbox_runner::{
+    EgressEnforcementMode, SandboxProcessRunnerPolicy, SandboxProcessRunnerTier,
+};
 use crate::transport::grpc::auth::{
     authorize_headers, authorize_metadata, request_context_from_headers, AuthError,
 };
@@ -183,6 +188,38 @@ fn build_test_runtime_state_with_http_fetch_private_targets(
         allow_private_targets,
         crate::config::FeatureRolloutsConfig::default(),
     )
+}
+
+fn process_runner_policy_with_host_access() -> SandboxProcessRunnerPolicy {
+    SandboxProcessRunnerPolicy {
+        enabled: true,
+        tier: SandboxProcessRunnerTier::B,
+        workspace_root: PathBuf::from("."),
+        allowed_executables: vec!["*".to_owned()],
+        allow_interpreters: true,
+        egress_enforcement_mode: EgressEnforcementMode::None,
+        allowed_egress_hosts: Vec::new(),
+        allowed_dns_suffixes: Vec::new(),
+        cpu_time_limit_ms: 2_000,
+        memory_limit_bytes: 256 * 1024 * 1024,
+        max_output_bytes: 64 * 1024,
+    }
+}
+
+fn strict_process_runner_policy() -> SandboxProcessRunnerPolicy {
+    SandboxProcessRunnerPolicy {
+        enabled: false,
+        tier: SandboxProcessRunnerTier::B,
+        workspace_root: PathBuf::from("."),
+        allowed_executables: Vec::new(),
+        allow_interpreters: false,
+        egress_enforcement_mode: EgressEnforcementMode::Strict,
+        allowed_egress_hosts: Vec::new(),
+        allowed_dns_suffixes: Vec::new(),
+        cpu_time_limit_ms: 2_000,
+        memory_limit_bytes: 256 * 1024 * 1024,
+        max_output_bytes: 64 * 1024,
+    }
 }
 
 fn build_test_runtime_state_with_runtime_overrides(
@@ -679,6 +716,65 @@ async fn http_fetch_rejects_private_targets_by_default() {
         outcome.error.contains("target blocked") && outcome.error.contains("private/local"),
         "error should explain private target block: {}",
         outcome.error
+    );
+}
+
+#[test]
+fn http_fetch_payload_can_allow_loopback_only_for_local_host_process_runtime() {
+    let host_access_policy = process_runner_policy_with_host_access();
+    let strict_policy = strict_process_runner_policy();
+    let loopback_url =
+        Url::parse("http://127.0.0.1:8780/health").expect("loopback URL should parse");
+    let localhost_url =
+        Url::parse("http://localhost:8780/health").expect("localhost URL should parse");
+    let private_lan_url =
+        Url::parse("http://192.168.1.10:8780/health").expect("private LAN URL should parse");
+
+    assert!(
+        http_fetch_allows_private_targets_for_url(
+            false,
+            &host_access_policy,
+            Some(true),
+            &loopback_url,
+        ),
+        "local host-process runtime should permit explicit loopback fetches for dev servers"
+    );
+    assert!(http_fetch_allows_private_targets_for_url(
+        false,
+        &host_access_policy,
+        Some(true),
+        &localhost_url,
+    ));
+    assert!(
+        !http_fetch_allows_private_targets_for_url(
+            false,
+            &host_access_policy,
+            Some(true),
+            &private_lan_url,
+        ),
+        "payload override must not open private LAN targets"
+    );
+    assert!(
+        !http_fetch_allows_private_targets_for_url(
+            false,
+            &strict_policy,
+            Some(true),
+            &loopback_url,
+        ),
+        "strict runtime policy must still block payload-only private target overrides"
+    );
+    assert!(
+        !http_fetch_allows_private_targets_for_url(
+            false,
+            &host_access_policy,
+            Some(false),
+            &loopback_url,
+        ),
+        "explicit false should keep private targets blocked"
+    );
+    assert!(
+        http_fetch_allows_private_targets_for_url(true, &strict_policy, None, &private_lan_url),
+        "global http_fetch.allow_private_targets remains the broad opt-in"
     );
 }
 
