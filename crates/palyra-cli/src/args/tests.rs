@@ -2196,6 +2196,62 @@ fn parse_memory_search_all_accepts_query_and_limit_aliases() {
 }
 
 #[test]
+fn parse_memory_get_delete_replace() {
+    let get = Cli::parse_from(["palyra", "memory", "get", "01ARZ3NDEKTSV4RRFFQ69G5FAV", "--json"]);
+    assert_eq!(
+        get.command,
+        Command::Memory {
+            command: MemoryCommand::Get {
+                memory_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+                json: true,
+            }
+        }
+    );
+
+    let delete = Cli::parse_from(["palyra", "memory", "delete", "01ARZ3NDEKTSV4RRFFQ69G5FAW"]);
+    assert_eq!(
+        delete.command,
+        Command::Memory {
+            command: MemoryCommand::Delete {
+                memory_id: "01ARZ3NDEKTSV4RRFFQ69G5FAW".to_owned(),
+                json: false,
+            }
+        }
+    );
+
+    let replace = Cli::parse_from([
+        "palyra",
+        "memory",
+        "replace",
+        "01ARZ3NDEKTSV4RRFFQ69G5FAX",
+        "Use Playwright for browser E2E tests.",
+        "--source",
+        "manual",
+        "--tag",
+        "preference",
+        "--confidence",
+        "0.95",
+        "--ttl-unix-ms",
+        "1770000000000",
+        "--json",
+    ]);
+    assert_eq!(
+        replace.command,
+        Command::Memory {
+            command: MemoryCommand::Replace {
+                memory_id: "01ARZ3NDEKTSV4RRFFQ69G5FAX".to_owned(),
+                content: "Use Playwright for browser E2E tests.".to_owned(),
+                source: Some(MemorySourceArg::Manual),
+                tag: vec!["preference".to_owned()],
+                confidence: Some("0.95".to_owned()),
+                ttl_unix_ms: Some(1_770_000_000_000),
+                json: true,
+            }
+        }
+    );
+}
+
+#[test]
 fn parse_memory_session_search() {
     let parsed = Cli::parse_from([
         "palyra",

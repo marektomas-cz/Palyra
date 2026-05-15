@@ -53,6 +53,34 @@ pub enum MemoryCommand {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    Get {
+        memory_id: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Delete {
+        memory_id: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Replace {
+        memory_id: String,
+        content: String,
+        #[arg(long, value_enum)]
+        source: Option<MemorySourceArg>,
+        #[arg(long)]
+        tag: Vec<String>,
+        #[arg(
+            long,
+            value_name = "0.0..1.0",
+            help = "Confidence score in the inclusive range 0.0..1.0"
+        )]
+        confidence: Option<String>,
+        #[arg(long)]
+        ttl_unix_ms: Option<i64>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     Purge {
         #[arg(long)]
         session: Option<String>,

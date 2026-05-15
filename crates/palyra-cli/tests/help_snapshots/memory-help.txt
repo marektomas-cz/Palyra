@@ -8,6 +8,9 @@ Commands:
   index-drift
   index-reconcile
   search
+  get
+  delete
+  replace
   purge
   ingest
   workspace

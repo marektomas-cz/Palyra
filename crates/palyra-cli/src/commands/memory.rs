@@ -160,6 +160,168 @@ pub(crate) async fn run_memory_async(
                 }
             }
         }
+        MemoryCommand::Get { memory_id, json } => {
+            let memory_id = resolve_required_canonical_id(memory_id)
+                .context("memory get memory_id must be a canonical ULID")?;
+            let mut request = Request::new(memory_v1::GetMemoryItemRequest {
+                v: CANONICAL_PROTOCOL_MAJOR,
+                memory_id: Some(memory_id.clone()),
+            });
+            inject_run_stream_metadata(request.metadata_mut(), &connection)?;
+            let response = client
+                .get_memory_item(request)
+                .await
+                .context("failed to call memory GetMemoryItem")?
+                .into_inner();
+            let item = response.item.context("memory GetMemoryItem returned empty item payload")?;
+            if output::preferred_json(json) {
+                output::print_json_pretty(
+                    &memory_item_to_json(&item),
+                    "failed to encode memory get output as JSON",
+                )?;
+            } else if output::preferred_ndjson(json, false) {
+                output::print_json_line(
+                    &memory_item_to_json(&item),
+                    "failed to encode memory get output as NDJSON",
+                )?;
+            } else {
+                println!(
+                    "memory.get id={} source={} created_at_ms={} content={}",
+                    item.memory_id.map(|value| value.ulid).unwrap_or_default(),
+                    memory_source_to_text(item.source),
+                    item.created_at_unix_ms,
+                    item.content_text
+                );
+            }
+        }
+        MemoryCommand::Delete { memory_id, json } => {
+            let memory_id = resolve_required_canonical_id(memory_id)
+                .context("memory delete memory_id must be a canonical ULID")?;
+            let memory_ulid = memory_id.ulid.clone();
+            let mut request = Request::new(memory_v1::DeleteMemoryItemRequest {
+                v: CANONICAL_PROTOCOL_MAJOR,
+                memory_id: Some(memory_id),
+            });
+            inject_run_stream_metadata(request.metadata_mut(), &connection)?;
+            let response = client
+                .delete_memory_item(request)
+                .await
+                .context("failed to call memory DeleteMemoryItem")?
+                .into_inner();
+            let payload = json!({
+                "memory_id": memory_ulid,
+                "deleted": response.deleted,
+            });
+            if output::preferred_json(json) {
+                output::print_json_pretty(
+                    &payload,
+                    "failed to encode memory delete output as JSON",
+                )?;
+            } else if output::preferred_ndjson(json, false) {
+                output::print_json_line(
+                    &payload,
+                    "failed to encode memory delete output as NDJSON",
+                )?;
+            } else {
+                println!(
+                    "memory.delete id={} deleted={}",
+                    payload.get("memory_id").and_then(Value::as_str).unwrap_or_default(),
+                    response.deleted
+                );
+            }
+        }
+        MemoryCommand::Replace {
+            memory_id,
+            content,
+            source,
+            tag,
+            confidence,
+            ttl_unix_ms,
+            json,
+        } => {
+            if content.trim().is_empty() {
+                return Err(anyhow!("memory replace content cannot be empty"));
+            }
+            let replacement_confidence = confidence
+                .map(|raw| {
+                    parse_float_arg(Some(raw), "memory replace --confidence", 0.0, 1.0, None)
+                })
+                .transpose()?;
+            let memory_id = resolve_required_canonical_id(memory_id)
+                .context("memory replace memory_id must be a canonical ULID")?;
+            let replaced_memory_ulid = memory_id.ulid.clone();
+
+            let mut get_request = Request::new(memory_v1::GetMemoryItemRequest {
+                v: CANONICAL_PROTOCOL_MAJOR,
+                memory_id: Some(memory_id.clone()),
+            });
+            inject_run_stream_metadata(get_request.metadata_mut(), &connection)?;
+            let existing = client
+                .get_memory_item(get_request)
+                .await
+                .context("failed to call memory GetMemoryItem before replace")?
+                .into_inner()
+                .item
+                .context("memory GetMemoryItem returned empty item payload before replace")?;
+
+            let replacement_tags = if tag.is_empty() { existing.tags.clone() } else { tag };
+            let mut ingest_request = Request::new(memory_v1::IngestMemoryRequest {
+                v: CANONICAL_PROTOCOL_MAJOR,
+                source: source.map(memory_source_to_proto).unwrap_or(existing.source),
+                content_text: content,
+                channel: existing.channel.clone(),
+                session_id: existing.session_id.clone(),
+                tags: replacement_tags,
+                confidence: replacement_confidence.unwrap_or(existing.confidence),
+                ttl_unix_ms: ttl_unix_ms.unwrap_or(existing.ttl_unix_ms),
+            });
+            inject_run_stream_metadata(ingest_request.metadata_mut(), &connection)?;
+            let replacement = client
+                .ingest_memory(ingest_request)
+                .await
+                .context("failed to call memory IngestMemory for replacement")?
+                .into_inner()
+                .item
+                .context("memory IngestMemory returned empty replacement item payload")?;
+
+            let mut delete_request = Request::new(memory_v1::DeleteMemoryItemRequest {
+                v: CANONICAL_PROTOCOL_MAJOR,
+                memory_id: Some(memory_id),
+            });
+            inject_run_stream_metadata(delete_request.metadata_mut(), &connection)?;
+            let delete_response = client
+                .delete_memory_item(delete_request)
+                .await
+                .context("failed to call memory DeleteMemoryItem after replacement ingest")?
+                .into_inner();
+
+            let payload = json!({
+                "replaced_memory_id": replaced_memory_ulid,
+                "replacement": memory_item_to_json(&replacement),
+                "deleted_original": delete_response.deleted,
+            });
+            if output::preferred_json(json) {
+                output::print_json_pretty(
+                    &payload,
+                    "failed to encode memory replace output as JSON",
+                )?;
+            } else if output::preferred_ndjson(json, false) {
+                output::print_json_line(
+                    &payload,
+                    "failed to encode memory replace output as NDJSON",
+                )?;
+            } else {
+                let replacement_id = replacement
+                    .memory_id
+                    .as_ref()
+                    .map(|value| value.ulid.as_str())
+                    .unwrap_or_default();
+                println!(
+                    "memory.replace replaced_id={} replacement_id={} deleted_original={}",
+                    replaced_memory_ulid, replacement_id, delete_response.deleted
+                );
+            }
+        }
         MemoryCommand::Purge { session, channel, principal, json } => {
             if !principal && session.is_none() && channel.is_none() {
                 return Err(anyhow!(
