@@ -613,6 +613,7 @@ fn parse_patch_document(patch: &str) -> Result<Vec<PatchOperation>, WorkspacePat
                 if is_patch_header_or_end(body_line) {
                     break;
                 }
+                reject_structural_marker_in_full_file_body(body_line, index + 1, "add-file")?;
                 let content = body_line.strip_prefix('+').unwrap_or(body_line);
                 add_lines.push(content.to_owned());
                 index = index.saturating_add(1);
@@ -637,6 +638,7 @@ fn parse_patch_document(patch: &str) -> Result<Vec<PatchOperation>, WorkspacePat
                 if is_patch_header_or_end(body_line) {
                     break;
                 }
+                reject_structural_marker_in_full_file_body(body_line, index + 1, "replace-file")?;
                 let content = body_line.strip_prefix('+').unwrap_or(body_line);
                 replace_lines.push(content.to_owned());
                 index = index.saturating_add(1);
@@ -754,6 +756,29 @@ fn parse_patch_document(patch: &str) -> Result<Vec<PatchOperation>, WorkspacePat
     }
 
     Ok(operations)
+}
+
+fn reject_structural_marker_in_full_file_body(
+    line: &str,
+    line_number: usize,
+    operation: &str,
+) -> Result<(), WorkspacePatchError> {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with("diff --git ")
+        || trimmed.starts_with("index ")
+        || trimmed.starts_with("--- ")
+        || trimmed.starts_with("+++ ")
+        || trimmed.starts_with("@@")
+        || trimmed.starts_with("<<<<<<<")
+        || trimmed.starts_with("=======")
+        || trimmed.starts_with(">>>>>>>")
+    {
+        let message = format!(
+            "{operation} body contains a diff or conflict marker; use an Update File hunk for diffs or provide only final file contents"
+        );
+        return Err(parse_error(line_number, 1, message.as_str()));
+    }
+    Ok(())
 }
 
 fn is_patch_header_or_end(line: &str) -> bool {
@@ -1526,6 +1551,32 @@ mod tests {
         assert_eq!(attestation.operation, "replace");
         assert!(attestation.before_sha256.is_some());
         assert!(attestation.after_sha256.is_some());
+    }
+
+    #[test]
+    fn apply_workspace_patch_rejects_diff_markers_in_replace_file_body() {
+        let temp = tempdir().expect("tempdir should be created");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace should exist");
+        fs::write(workspace.join("public.txt"), "alpha beta\n").expect("seed file should exist");
+
+        let patch = "*** Begin Patch\n*** Replace File: public.txt\n--- old\n+++ new\n@@\n-alpha beta\n+alpha preview\n*** End Patch\n";
+        let error = apply_workspace_patch(
+            std::slice::from_ref(&workspace),
+            &default_request(patch, false),
+            &default_limits(),
+        )
+        .expect_err("replace-file bodies must reject embedded diff syntax");
+
+        assert!(matches!(error, WorkspacePatchError::Parse { .. }));
+        assert!(
+            error.to_string().contains("diff or conflict marker"),
+            "error should explain malformed replace body rejection: {error}"
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.join("public.txt")).expect("seed file should remain"),
+            "alpha beta\n"
+        );
     }
 
     #[test]
