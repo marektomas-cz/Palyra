@@ -413,7 +413,7 @@ impl MemoryProviderRuntime for BuiltinJournalMemoryProvider {
                 top_k: MEMORY_PROVIDER_SYSTEM_PROMPT_TOP_K,
                 min_score: MEMORY_PROVIDER_PREFETCH_MIN_SCORE,
                 tags: Vec::new(),
-                sources: Vec::new(),
+                sources: curated_memory_sources_for_provider_prompt(),
             })
             .await?;
         let blocks = hits
@@ -898,6 +898,10 @@ fn stable_memory_hit_for_system_prompt(hit: &MemorySearchHit) -> bool {
     }
 }
 
+fn curated_memory_sources_for_provider_prompt() -> Vec<MemorySource> {
+    vec![MemorySource::Manual, MemorySource::Import]
+}
+
 fn workspace_document_visible_in_system_prompt(document: &WorkspaceDocumentRecord) -> bool {
     document.state == "active"
         && document.risk_state == "clean"
@@ -960,5 +964,14 @@ mod tests {
         assert_eq!(exact_phrase_match("auth workflow", "The auth workflow is documented."), 1.0);
         assert_eq!(exact_phrase_match("missing", "The auth workflow is documented."), 0.0);
         assert!(sensitivity_penalty("contains api key material") > 0.0);
+    }
+
+    #[test]
+    fn provider_prompt_sources_exclude_transient_tape_entries() {
+        let sources = curated_memory_sources_for_provider_prompt();
+        assert_eq!(sources, vec![MemorySource::Manual, MemorySource::Import]);
+        assert!(!sources.contains(&MemorySource::TapeUserMessage));
+        assert!(!sources.contains(&MemorySource::TapeToolResult));
+        assert!(!sources.contains(&MemorySource::Summary));
     }
 }

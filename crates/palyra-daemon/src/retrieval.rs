@@ -236,10 +236,10 @@ impl Default for RetrievalScoringConfig {
         Self {
             phrase_match_bonus_bps: DEFAULT_RECALL_PHRASE_MATCH_BONUS_BPS,
             memory: RetrievalSourceScoringProfile {
-                lexical_bps: 5_500,
-                vector_bps: 3_500,
-                recency_bps: 1_000,
-                source_quality_bps: 0,
+                lexical_bps: 4_900,
+                vector_bps: 3_200,
+                recency_bps: 700,
+                source_quality_bps: 1_200,
                 min_recency_bps: DEFAULT_LEGACY_MIN_RECENCY_BPS,
                 min_source_quality_bps: DEFAULT_LEGACY_MIN_SOURCE_QUALITY_BPS,
                 pinned_bonus_bps: 0,
@@ -1119,12 +1119,19 @@ pub(crate) fn memory_source_quality(
     let confidence = confidence.unwrap_or(0.75).clamp(0.0, 1.0);
     let source_bias = match source {
         MemorySource::Manual => 0.94,
-        MemorySource::Summary => 0.88,
+        MemorySource::Summary => 0.62,
         MemorySource::Import => 0.84,
-        MemorySource::TapeUserMessage => 0.78,
-        MemorySource::TapeToolResult => 0.74,
+        MemorySource::TapeUserMessage => 0.42,
+        MemorySource::TapeToolResult => 0.32,
     };
-    ((confidence * 0.6) + (source_bias * 0.4))
+    let quality_cap = match source {
+        MemorySource::Manual | MemorySource::Import => 1.0,
+        MemorySource::Summary => 0.66,
+        MemorySource::TapeUserMessage => 0.46,
+        MemorySource::TapeToolResult => 0.36,
+    };
+    ((confidence * 0.45) + (source_bias * 0.55))
+        .min(quality_cap)
         .clamp(f64::from(profile.min_source_quality_bps) / 10_000.0, 1.0)
 }
 
@@ -1474,6 +1481,32 @@ mod tests {
         RetrievalRuntimeConfig::default()
             .validate()
             .expect("default retrieval scoring should validate");
+    }
+
+    #[test]
+    fn default_memory_scoring_accounts_for_source_quality() {
+        let config = RetrievalRuntimeConfig::default();
+        let profile = config.scoring.profile_for(RetrievalSourceProfileKind::Memory);
+        assert!(
+            profile.source_quality_bps > 0,
+            "memory scoring should account for source quality so transient transcript artifacts do not tie curated memories"
+        );
+    }
+
+    #[test]
+    fn memory_source_quality_downranks_transient_tape_entries() {
+        let config = RetrievalRuntimeConfig::default();
+        let profile = config.scoring.profile_for(RetrievalSourceProfileKind::Memory);
+        let manual = memory_source_quality(MemorySource::Manual, Some(0.95), profile);
+        let summary = memory_source_quality(MemorySource::Summary, Some(0.95), profile);
+        let tape_user = memory_source_quality(MemorySource::TapeUserMessage, Some(0.95), profile);
+        let tape_tool = memory_source_quality(MemorySource::TapeToolResult, Some(0.95), profile);
+
+        assert!(manual > summary);
+        assert!(summary > tape_user);
+        assert!(tape_user > tape_tool);
+        assert!(tape_user <= 0.46);
+        assert!(tape_tool <= 0.36);
     }
 
     #[test]

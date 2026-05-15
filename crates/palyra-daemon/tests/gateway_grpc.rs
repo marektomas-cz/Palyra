@@ -1612,6 +1612,10 @@ async fn grpc_route_message_followup_reuses_session_memory_and_agent_binding() -
     wait_for_health(admin_port, daemon.child_mut())?;
 
     let endpoint = format!("http://127.0.0.1:{grpc_port}");
+    let mut memory_client =
+        memory_v1::memory_service_client::MemoryServiceClient::connect(endpoint.clone())
+            .await
+            .context("failed to connect memory gRPC client")?;
     let mut client = gateway_v1::gateway_service_client::GatewayServiceClient::connect(endpoint)
         .await
         .context("failed to connect gRPC client")?;
@@ -1626,6 +1630,26 @@ async fn grpc_route_message_followup_reuses_session_memory_and_agent_binding() -
         )
         .await?;
     assert!(first_response.accepted, "first route should be accepted");
+    let route_session_id = first_response
+        .session_id
+        .as_ref()
+        .map(|value| value.ulid.clone())
+        .context("first route response must include session_id")?;
+    let mut ingest_request = tonic::Request::new(memory_v1::IngestMemoryRequest {
+        v: 1,
+        source: memory_v1::MemorySource::Manual as i32,
+        content_text: "release rollback checklist from routed session".to_owned(),
+        channel: "cli".to_owned(),
+        session_id: Some(common_v1::CanonicalId { ulid: route_session_id }),
+        tags: vec!["category:workflow_rules".to_owned()],
+        confidence: 0.95,
+        ttl_unix_ms: 0,
+    });
+    authorize_metadata(ingest_request.metadata_mut())?;
+    memory_client
+        .ingest_memory(ingest_request)
+        .await
+        .context("failed to seed curated route-session memory")?;
 
     let second_response = adapter
         .inject_message_with_envelope_id(
@@ -1669,9 +1693,8 @@ async fn grpc_route_message_followup_reuses_session_memory_and_agent_binding() -
         .and_then(Value::as_array)
         .context("memory_auto_inject payload must include hits array")?;
     assert!(
-        hits.iter()
-            .any(|hit| hit.get("source").and_then(Value::as_str) == Some("tape:user_message")),
-        "follow-up route should see scoped tape:user_message memories"
+        hits.iter().any(|hit| hit.get("source").and_then(Value::as_str) == Some("manual")),
+        "follow-up route should see scoped curated memories"
     );
 
     let route_received_event = events
@@ -5615,6 +5638,26 @@ async fn grpc_run_stream_records_memory_auto_inject_tape_event() -> Result<()> {
     wait_for_health(admin_port, daemon.child_mut())?;
 
     let endpoint = format!("http://127.0.0.1:{grpc_port}");
+    let mut memory_client =
+        memory_v1::memory_service_client::MemoryServiceClient::connect(endpoint.clone())
+            .await
+            .context("failed to connect memory gRPC client")?;
+    let mut ingest_request = tonic::Request::new(memory_v1::IngestMemoryRequest {
+        v: 1,
+        source: memory_v1::MemorySource::Manual as i32,
+        content_text: "release rollback checklist for run stream auto inject".to_owned(),
+        channel: "cli".to_owned(),
+        session_id: Some(common_v1::CanonicalId { ulid: SESSION_ID.to_owned() }),
+        tags: vec!["category:workflow_rules".to_owned()],
+        confidence: 0.95,
+        ttl_unix_ms: 0,
+    });
+    authorize_metadata(ingest_request.metadata_mut())?;
+    memory_client
+        .ingest_memory(ingest_request)
+        .await
+        .context("failed to seed curated run-stream memory")?;
+
     let mut gateway_client =
         gateway_v1::gateway_service_client::GatewayServiceClient::connect(endpoint)
             .await
@@ -5660,12 +5703,11 @@ async fn grpc_run_stream_records_memory_auto_inject_tape_event() -> Result<()> {
         .get("hits")
         .and_then(Value::as_array)
         .context("memory_auto_inject payload must include hits array")?;
-    let contains_user_memory_hit = hits
-        .iter()
-        .any(|hit| hit.get("source").and_then(Value::as_str) == Some("tape:user_message"));
+    let contains_curated_memory_hit =
+        hits.iter().any(|hit| hit.get("source").and_then(Value::as_str) == Some("manual"));
     assert!(
-        contains_user_memory_hit,
-        "memory_auto_inject should be able to reuse scoped user-message memories"
+        contains_curated_memory_hit,
+        "memory_auto_inject should be able to reuse scoped curated memories"
     );
 
     let status_snapshot = admin_get_json_async(admin_port, "/admin/v1/status".to_owned()).await?;

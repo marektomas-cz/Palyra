@@ -235,6 +235,9 @@ pub(crate) async fn ingest_memory_best_effort(
     if content_text.trim().is_empty() {
         return;
     }
+    if !best_effort_memory_ingest_allowed(source, tags.as_slice()) {
+        return;
+    }
     if let Err(error) = crate::application::service_authorization::authorize_memory_action(
         principal,
         "memory.ingest",
@@ -270,6 +273,18 @@ pub(crate) async fn ingest_memory_best_effort(
             status_message = %error.message(),
             "memory ingest best-effort path rejected candidate"
         );
+    }
+}
+
+pub(crate) fn best_effort_memory_ingest_allowed(source: MemorySource, tags: &[String]) -> bool {
+    match source {
+        MemorySource::Manual | MemorySource::Import => true,
+        MemorySource::Summary | MemorySource::TapeUserMessage | MemorySource::TapeToolResult => {
+            tags.iter().any(|tag| {
+                matches!(tag.as_str(), "memory:promoted" | "memory:lifecycle")
+                    || tag.starts_with("lifecycle:")
+            })
+        }
     }
 }
 

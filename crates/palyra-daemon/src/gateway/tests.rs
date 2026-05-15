@@ -1648,6 +1648,65 @@ async fn memory_auto_inject_searches_principal_scope_across_sessions() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn memory_auto_inject_excludes_transient_tape_memory_sources() {
+    let state = build_test_runtime_state(false);
+    let context = RequestContext {
+        principal: "user:ops".to_owned(),
+        device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+        channel: Some("cli".to_owned()),
+    };
+    let session_id = "01ARZ3NDEKTSV4RRFFQ69G5FC5";
+    let run_id = "01ARZ3NDEKTSV4RRFFQ69G5FC6";
+    upsert_test_orchestrator_session(&state, &context, session_id);
+    state
+        .start_orchestrator_run(OrchestratorRunStartRequest {
+            run_id: run_id.to_owned(),
+            session_id: session_id.to_owned(),
+            origin_kind: "memory_auto_inject_source_filter_test".to_owned(),
+            origin_run_id: None,
+            triggered_by_principal: Some(context.principal.clone()),
+            parameter_delta_json: None,
+        })
+        .await
+        .expect("test run should start");
+
+    state
+        .ingest_memory_item(MemoryItemCreateRequest {
+            memory_id: "01ARZ3NDEKTSV4RRFFQ69G5FC7".to_owned(),
+            principal: context.principal.clone(),
+            channel: context.channel.clone(),
+            session_id: Some(session_id.to_owned()),
+            source: MemorySource::TapeUserMessage,
+            content_text: "transient prompt should not be injected into future context".to_owned(),
+            tags: Vec::new(),
+            confidence: Some(0.95),
+            ttl_unix_ms: None,
+        })
+        .await
+        .expect("memory ingest should seed transient memory");
+
+    let mut tape_seq = 1_i64;
+    let prompt = build_memory_augmented_prompt(
+        &state,
+        &context,
+        run_id,
+        &mut tape_seq,
+        session_id,
+        "transient prompt future context",
+        "Continue the active task.",
+    )
+    .await
+    .expect("memory auto-inject should succeed");
+
+    assert_eq!(prompt, "Continue the active task.");
+    let tape = state.journal_store.orchestrator_tape(run_id).expect("test tape should load");
+    assert!(
+        tape.iter().all(|event| event.event_type != "memory_auto_inject"),
+        "transient tape memory should not trigger a memory_auto_inject event"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn ingest_memory_best_effort_persists_memory_for_authorized_principal() {
     let state = build_test_runtime_state(false);
     let context = RequestContext {
@@ -1666,9 +1725,9 @@ async fn ingest_memory_best_effort_persists_memory_for_authorized_principal() {
         context.principal.as_str(),
         context.channel.as_deref(),
         Some(session_id.as_str()),
-        MemorySource::Summary,
-        "unauthorized route summary",
-        vec!["summary:route_message".to_owned()],
+        MemorySource::Manual,
+        "curated operator memory",
+        vec!["category:preferences".to_owned()],
         Some(0.75),
         "ingest_memory_best_effort_policy_test",
     )
@@ -1687,9 +1746,58 @@ async fn ingest_memory_best_effort_persists_memory_for_authorized_principal() {
         .await
         .expect("memory listing should succeed");
     assert_eq!(items.len(), 1, "authorized best-effort ingest should persist a memory item");
-    assert_eq!(items[0].content_text, "unauthorized route summary");
-    assert_eq!(items[0].source, MemorySource::Summary);
+    assert_eq!(items[0].content_text, "curated operator memory");
+    assert_eq!(items[0].source, MemorySource::Manual);
     assert!(next_after.is_none(), "single-page listing must not report pagination state");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ingest_memory_best_effort_skips_transient_tape_sources() {
+    let state = build_test_runtime_state(false);
+    let context = RequestContext {
+        principal: "user:ops".to_owned(),
+        device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+        channel: Some("cli".to_owned()),
+    };
+    let session_id = "01ARZ3NDEKTSV4RRFFQ69G5FB8".to_owned();
+    upsert_test_orchestrator_session(&state, &context, session_id.as_str());
+
+    for (source, content, tags) in [
+        (MemorySource::TapeUserMessage, "raw user prompt", Vec::new()),
+        (
+            MemorySource::TapeToolResult,
+            "tool=palyra.fs.read_file success=true output=...",
+            vec!["tool:palyra.fs.read_file".to_owned()],
+        ),
+        (MemorySource::Summary, "model output summary", vec!["summary:model_output".to_owned()]),
+    ] {
+        ingest_memory_best_effort(
+            &state,
+            context.principal.as_str(),
+            context.channel.as_deref(),
+            Some(session_id.as_str()),
+            source,
+            content,
+            tags,
+            Some(0.95),
+            "ingest_memory_best_effort_transient_skip_test",
+        )
+        .await;
+    }
+
+    let (items, _) = state
+        .list_memory_items(
+            None,
+            Some(10),
+            context.principal.clone(),
+            context.channel.clone(),
+            Some(session_id),
+            Vec::new(),
+            Vec::new(),
+        )
+        .await
+        .expect("memory listing should succeed");
+    assert!(items.is_empty(), "transient tape artifacts must not become durable memory");
 }
 
 #[test]
