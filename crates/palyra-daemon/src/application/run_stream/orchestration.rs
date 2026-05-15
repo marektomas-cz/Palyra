@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Duration};
 use serde_json::{json, Value};
 use tokio::{
     sync::mpsc,
-    time::{interval, MissedTickBehavior},
+    time::{interval, interval_at, Instant as TokioInstant, MissedTickBehavior},
 };
 use tonic::{Status, Streaming};
 use tracing::{warn, Instrument};
@@ -56,6 +56,8 @@ use super::{
     cancellation::transition_run_stream_to_cancelled,
     tape::{maybe_compact_context_after_tool_results, send_status_with_tape},
 };
+
+const PROVIDER_PROGRESS_HEARTBEAT_MS: u64 = 20_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RunStreamPostProviderOutcome {
@@ -268,6 +270,11 @@ async fn execute_run_stream_provider_request(
     );
     let mut cancel_poll = interval(Duration::from_millis(100));
     cancel_poll.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut progress_heartbeat = interval_at(
+        TokioInstant::now() + Duration::from_millis(PROVIDER_PROGRESS_HEARTBEAT_MS),
+        Duration::from_millis(PROVIDER_PROGRESS_HEARTBEAT_MS),
+    );
+    progress_heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     loop {
         tokio::select! {
@@ -291,6 +298,19 @@ async fn execute_run_stream_provider_request(
                     }
                     Ok(false) => {}
                     Err(error) => return Err(error),
+                }
+            }
+            _ = progress_heartbeat.tick() => {
+                if run_state.state() == RunLifecycleState::InProgress {
+                    send_status_with_tape(
+                        sender,
+                        runtime_state,
+                        run_id,
+                        tape_seq,
+                        common_v1::stream_status::StatusKind::InProgress,
+                        "streaming heartbeat",
+                    )
+                    .await?;
                 }
             }
         }
