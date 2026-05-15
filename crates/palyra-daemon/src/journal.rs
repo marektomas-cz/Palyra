@@ -5166,6 +5166,30 @@ fn truncate_utf8_bytes_from_end(value: &str, max_bytes: usize) -> String {
     value[start..].to_owned()
 }
 
+fn utf8_slice_by_byte_range(value: &str, offset: usize, max_bytes: usize) -> (String, usize, bool) {
+    let mut start = offset.min(value.len());
+    while start < value.len() && !value.is_char_boundary(start) {
+        start += 1;
+    }
+
+    let mut end = start.saturating_add(max_bytes).min(value.len());
+    while end > start && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+
+    let slice = value[start..end].to_owned();
+    let returned_bytes = slice.len();
+    (slice, returned_bytes, end >= value.len())
+}
+
+fn can_read_redacted_text_preview(sensitivity: ToolResultSensitivity, text_preview: bool) -> bool {
+    text_preview && matches!(sensitivity, ToolResultSensitivity::ProviderRawPayload)
+}
+
+fn redact_artifact_content_for_text_preview(content: &[u8]) -> Result<String, JournalError> {
+    sanitize_payload(content).map(|(payload, _)| payload)
+}
+
 fn redact_tool_job_tail_chunk(chunk: &str) -> String {
     let redacted = redact_error_text(chunk);
     truncate_utf8_bytes(redacted.as_str(), MAX_TOOL_JOB_TAIL_CHUNK_BYTES)
@@ -7468,7 +7492,9 @@ impl JournalStore {
             Some("purge_requested")
         } else if !legal_hold && expires_at_unix_ms.is_some_and(|expires_at| expires_at <= now) {
             Some("expired")
-        } else if artifact.sensitivity.requires_full_read_gate() {
+        } else if artifact.sensitivity.requires_full_read_gate()
+            && !can_read_redacted_text_preview(artifact.sensitivity, request.text_preview)
+        {
             Some("sensitive_full_read_denied")
         } else {
             None
@@ -7488,6 +7514,31 @@ impl JournalStore {
                     reason: other.to_owned(),
                 }),
             };
+        }
+
+        if artifact.sensitivity.requires_full_read_gate() {
+            let redacted_text = redact_artifact_content_for_text_preview(content.as_slice())?;
+            let offset = usize::try_from(request.offset_bytes).unwrap_or(usize::MAX);
+            let max_bytes = request.max_bytes.max(1);
+            let (text, returned_bytes, eof) =
+                utf8_slice_by_byte_range(redacted_text.as_str(), offset, max_bytes);
+            record_tool_result_artifact_read(
+                &guard,
+                request,
+                u64::try_from(returned_bytes).unwrap_or(u64::MAX),
+                false,
+                "redacted_text_preview",
+                now,
+            )?;
+            return Ok(ArtifactReadResponse {
+                artifact,
+                offset_bytes: request.offset_bytes,
+                returned_bytes: u64::try_from(returned_bytes).unwrap_or(u64::MAX),
+                eof,
+                visibility: ToolResultVisibility::RedactedPreview,
+                bytes_base64: None,
+                text: Some(text),
+            });
         }
 
         let offset = usize::try_from(request.offset_bytes).unwrap_or(usize::MAX);
@@ -19168,7 +19219,7 @@ mod tests {
 
     use palyra_common::runtime_contracts::{
         ArtifactRetentionPolicy, IdempotencyOperationState, IdempotencyReplayDecision,
-        RunLifecyclePhase, ToolResultSensitivity,
+        RunLifecyclePhase, ToolResultSensitivity, ToolResultVisibility,
     };
     use rusqlite::{params, Connection};
     use serde_json::json;
@@ -19713,6 +19764,65 @@ mod tests {
                 content: br#"{"token":"raw"}"#.to_vec(),
             })
             .expect("secret artifact should be stored");
+
+        let provider_raw = store
+            .create_tool_result_artifact(&ToolResultArtifactCreateRequest {
+                artifact_id: "01ARZ3NDEKTSV4RRFFQ69G5P18".to_owned(),
+                session_id: session_id.to_owned(),
+                run_id: run_id.to_owned(),
+                proposal_id: "01ARZ3NDEKTSV4RRFFQ69G5P19".to_owned(),
+                tool_name: "palyra.http.fetch".to_owned(),
+                mime_type: "application/json".to_owned(),
+                sensitivity: ToolResultSensitivity::ProviderRawPayload,
+                retention: ArtifactRetentionPolicy::keep(),
+                redacted_preview: "{\"body\":\"public docs\"}".to_owned(),
+                content: serde_json::to_vec(&json!({
+                    "url": "https://example.test/docs?token=raw-token",
+                    "headers": {
+                        "authorization": "Bearer raw-token"
+                    },
+                    "body_text": "public documentation text DUMMY_SECRET_SHOULD_NOT_APPEAR"
+                }))
+                .expect("provider payload should serialize"),
+            })
+            .expect("provider raw artifact should be stored");
+        let provider_preview = store
+            .read_tool_result_artifact(&ToolResultArtifactReadRequest {
+                artifact_id: provider_raw.artifact_id.clone(),
+                session_id: session_id.to_owned(),
+                run_id: run_id.to_owned(),
+                principal: "user:ops".to_owned(),
+                device_id: "device:local".to_owned(),
+                channel: Some("cli".to_owned()),
+                expected_digest_sha256: None,
+                offset_bytes: 0,
+                max_bytes: 4096,
+                text_preview: true,
+            })
+            .expect("provider raw artifacts should allow redacted text preview");
+        assert_eq!(provider_preview.visibility, ToolResultVisibility::RedactedPreview);
+        let preview_text = provider_preview.text.as_deref().expect("preview text should exist");
+        assert!(preview_text.contains("public documentation text"));
+        assert!(!preview_text.contains("raw-token"));
+        assert!(!preview_text.contains("DUMMY_SECRET_SHOULD_NOT_APPEAR"));
+        assert!(provider_preview.bytes_base64.is_none());
+
+        let provider_full_read = store
+            .read_tool_result_artifact(&ToolResultArtifactReadRequest {
+                artifact_id: provider_raw.artifact_id,
+                session_id: session_id.to_owned(),
+                run_id: run_id.to_owned(),
+                principal: "user:ops".to_owned(),
+                device_id: "device:local".to_owned(),
+                channel: Some("cli".to_owned()),
+                expected_digest_sha256: None,
+                offset_bytes: 0,
+                max_bytes: 4096,
+                text_preview: false,
+            })
+            .expect_err("provider raw full read should stay gated");
+        assert!(matches!(provider_full_read, JournalError::ToolResultArtifactReadDenied { .. }));
+
         let secret_read = store
             .read_tool_result_artifact(&ToolResultArtifactReadRequest {
                 artifact_id: secret.artifact_id,
@@ -19732,7 +19842,7 @@ mod tests {
         let artifacts = store
             .list_tool_result_artifacts_for_run(run_id)
             .expect("artifact refs should be listable for replay");
-        assert_eq!(artifacts.len(), 2);
+        assert_eq!(artifacts.len(), 3);
     }
 
     #[test]
