@@ -11,7 +11,7 @@ use crate::{
     model_provider::{ProviderMessage, ProviderResponse, ProviderTurnOutput},
 };
 
-pub(crate) const DEFAULT_AGENT_LOOP_MAX_MODEL_TURNS: u32 = 8;
+pub(crate) const DEFAULT_AGENT_LOOP_MAX_MODEL_TURNS: u32 = 12;
 pub(crate) const DEFAULT_AGENT_LOOP_WALL_CLOCK_BUDGET_MS: u64 = 300_000;
 
 const BROWSER_SESSION_CREATE_TOOL_NAME: &str = "palyra.browser.session.create";
@@ -367,6 +367,20 @@ mod tests {
         assert_eq!(parsed["state"]["termination_reason"], "max_turns");
         assert_eq!(parsed["finalization"]["status"], "failed");
         assert_eq!(parsed["finalization"]["provider_trace_ref"], "provider-trace");
+    }
+
+    #[test]
+    fn default_turn_budget_preserves_recovery_headroom() {
+        assert_eq!(
+            AgentRunLoopState::default_model_turn_budget(64),
+            DEFAULT_AGENT_LOOP_MAX_MODEL_TURNS
+        );
+
+        let state =
+            AgentRunLoopState::new(vec![ProviderMessage::user_text("hello")], 64, 2, 10_000);
+        let snapshot = state.snapshot("run-01", None);
+
+        assert_eq!(snapshot.remaining_model_turns, DEFAULT_AGENT_LOOP_MAX_MODEL_TURNS);
     }
 
     #[test]

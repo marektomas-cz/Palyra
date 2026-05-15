@@ -1175,11 +1175,8 @@ fn incomplete_final_answer_without_tools(text: Option<&str>) -> Option<String> {
             "model returned an empty final answer without executing any requested tools".to_owned(),
         );
     }
-    if final_answer_is_deferred_tool_work(text) {
-        return Some(
-            "model returned a planning or intent statement as the final answer without executing any tools"
-                .to_owned(),
-        );
+    if final_answer_is_minimal_ack(text) {
+        return Some("model returned a bare acknowledgement as the final answer".to_owned());
     }
     if final_answer_claims_tool_work_without_evidence(text) {
         return Some(
@@ -1202,19 +1199,11 @@ fn incomplete_terminal_final_answer(
     if text.is_empty() {
         return Some("model returned an empty final answer after tool execution".to_owned());
     }
-    if final_answer_is_deferred_tool_work(text) {
-        return Some(
-            "model returned a planning or intent statement as the final answer after tool execution"
-                .to_owned(),
-        );
-    }
 
     let messages = loop_state.messages();
-    if final_answer_is_minimal_ack(text)
-        && latest_user_request_requires_tool_work(messages.as_slice())
-    {
+    if final_answer_is_minimal_ack(text) {
         return Some(
-            "model returned a bare acknowledgement instead of completing the requested tool workflow"
+            "model returned a bare acknowledgement instead of a final answer with tool evidence"
                 .to_owned(),
         );
     }
@@ -1227,13 +1216,6 @@ fn incomplete_terminal_final_answer(
         );
     }
     None
-}
-
-fn final_answer_is_deferred_tool_work(text: &str) -> bool {
-    let normalized = normalize_final_answer_text(text);
-    let has_deferred_marker =
-        DEFERRED_TOOL_WORK_MARKERS.iter().any(|marker| normalized.contains(marker));
-    has_deferred_marker && TOOL_WORK_ACTION_MARKERS.iter().any(|marker| normalized.contains(marker))
 }
 
 fn final_answer_claims_tool_work_without_evidence(text: &str) -> bool {
@@ -1254,18 +1236,6 @@ fn final_answer_is_minimal_ack(text: &str) -> bool {
         normalize_final_answer_text(text).as_str(),
         "ack" | "ok" | "okay" | "done" | "complete" | "completed"
     )
-}
-
-fn latest_user_request_requires_tool_work(messages: &[ProviderMessage]) -> bool {
-    messages
-        .iter()
-        .rev()
-        .find(|message| message.role == crate::model_provider::ProviderMessageRole::User)
-        .map(ProviderMessage::text_content)
-        .is_some_and(|text| {
-            let normalized = normalize_final_answer_text(text.as_str());
-            USER_REQUEST_TOOL_WORK_MARKERS.iter().any(|marker| normalized.contains(marker))
-        })
 }
 
 fn has_action_tool_evidence(messages: &[ProviderMessage]) -> bool {
@@ -1323,42 +1293,6 @@ fn has_tool_name_prefix(messages: &[ProviderMessage], prefix: &str) -> bool {
         .any(|call| call.tool_name.starts_with(prefix))
 }
 
-const DEFERRED_TOOL_WORK_MARKERS: &[&str] = &[
-    "let me ",
-    "i will ",
-    "i'll ",
-    "i need to ",
-    "i should ",
-    "i am going to ",
-    "i'm going to ",
-    "next, i ",
-];
-
-const TOOL_WORK_ACTION_MARKERS: &[&str] = &[
-    "apply_patch",
-    "browse",
-    "browser",
-    "build",
-    "check",
-    "create",
-    "edit",
-    "fix",
-    "implement",
-    "inspect",
-    "list",
-    "navigate",
-    "open",
-    "patch",
-    "read",
-    "research",
-    "run",
-    "search",
-    "test",
-    "update",
-    "verify",
-    "write",
-];
-
 const UNSUPPORTED_TOOL_WORK_CLAIMS: &[&str] = &[
     "i applied the patch",
     "i created the file",
@@ -1377,28 +1311,6 @@ const UNSUPPORTED_TOOL_WORK_CLAIMS: &[&str] = &[
     "i wrote the file",
     "test passed",
     "tests passed",
-];
-
-const USER_REQUEST_TOOL_WORK_MARKERS: &[&str] = &[
-    "add ",
-    "browser",
-    "build",
-    "click",
-    "create",
-    "edit",
-    "fix",
-    "generate",
-    "implement",
-    "navigate",
-    "patch",
-    "refactor",
-    "run ",
-    "scrape",
-    "test",
-    "type ",
-    "update",
-    "verify",
-    "write",
 ];
 
 const TERMINAL_TOOL_AUTHORIZATION_ERROR_MARKERS: &[&str] = &[
@@ -1668,13 +1580,11 @@ mod tests {
     }
 
     #[test]
-    fn incomplete_final_answer_without_tools_detects_deferred_work() {
-        let message = incomplete_final_answer_without_tools(Some(
-            "The workspace is empty. I\u{2019}ll create the todo app files and run the tests.",
-        ))
-        .expect("deferred tool work must not be accepted as a final answer");
+    fn incomplete_final_answer_without_tools_detects_bare_ack() {
+        let message = incomplete_final_answer_without_tools(Some("done"))
+            .expect("bare acknowledgement must not be accepted as a final answer");
 
-        assert!(message.contains("planning or intent statement"));
+        assert!(message.contains("bare acknowledgement"));
     }
 
     #[test]
@@ -1692,19 +1602,6 @@ mod tests {
             "Use `cargo test -p palyra-daemon` to run the daemon tests."
         ))
         .is_none());
-    }
-
-    #[test]
-    fn incomplete_terminal_final_answer_rejects_deferred_work_after_read_only_tool() {
-        let state =
-            loop_state_after_tool("Create fixtures/cz-validator with tests.", "palyra.fs.list_dir");
-        let message = incomplete_terminal_final_answer(
-            Some("Good, the directory is absent. I'll create the files next."),
-            &state,
-        )
-        .expect("deferred work after read-only discovery must not complete the run");
-
-        assert!(message.contains("planning or intent statement"));
     }
 
     #[test]
