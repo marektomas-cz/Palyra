@@ -2132,7 +2132,8 @@ async fn execute_single_job_attempt(
         .await
         .map_err(|error| Status::internal(format!("AppendEvent failed: {error}")))?;
 
-    let prompt = format!("[cron job {}] {}", job.name, job.prompt);
+    let message_timestamp_unix_ms = now_unix_ms()?;
+    let prompt = build_cron_prompt(job, message_timestamp_unix_ms);
     let mut stream_request = Request::new(tokio_stream::iter(vec![common_v1::RunStreamRequest {
         v: 1,
         session_id: Some(common_v1::CanonicalId { ulid: session_id.clone() }),
@@ -2140,7 +2141,7 @@ async fn execute_single_job_attempt(
         input: Some(common_v1::MessageEnvelope {
             v: 1,
             envelope_id: Some(common_v1::CanonicalId { ulid: Ulid::new().to_string() }),
-            timestamp_unix_ms: now_unix_ms()?,
+            timestamp_unix_ms: message_timestamp_unix_ms,
             origin: Some(common_v1::EnvelopeOrigin {
                 r#type: common_v1::envelope_origin::OriginType::System as i32,
                 channel: job.channel.clone(),
@@ -2259,6 +2260,24 @@ async fn execute_single_job_attempt(
         .await?;
 
     Ok(terminal_status)
+}
+
+fn build_cron_prompt(job: &CronJobRecord, triggered_at_unix_ms: i64) -> String {
+    let triggered_at_utc = Utc
+        .timestamp_millis_opt(triggered_at_unix_ms)
+        .single()
+        .map(|timestamp| timestamp.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+        .unwrap_or_else(|| "unavailable".to_owned());
+    format!(
+        "[cron job {name}]\n\
+         Scheduled trigger metadata:\n\
+         - triggered_at_utc: {triggered_at_utc}\n\
+         - triggered_at_unix_ms: {triggered_at_unix_ms}\n\n\
+         Use the trigger metadata as the current time for this scheduled run when the routine asks for dates or timestamps.\n\n\
+         {prompt}",
+        name = job.name,
+        prompt = job.prompt,
+    )
 }
 
 async fn record_scheduled_routine_run_metadata(
@@ -2445,7 +2464,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        budgeted_objective_run_count, build_scheduler_health_snapshot,
+        budgeted_objective_run_count, build_cron_prompt, build_scheduler_health_snapshot,
         compute_misfire_recovery_plan, compute_next_run_after,
         cron_done_output_indicates_policy_blocked, cron_misfire_audit_payload,
         decide_concurrency_policy, load_periodic_reaudit_skills_index, normalize_schedule,
@@ -2574,6 +2593,25 @@ mod tests {
         assert_eq!(trigger_payload["source"], "cron");
         assert_eq!(trigger_payload["schedule_type"], "every");
         assert_eq!(trigger_payload["schedule_payload"]["interval_ms"], 1_000);
+    }
+
+    #[test]
+    fn build_cron_prompt_includes_trigger_timestamp() {
+        let job =
+            sample_every_job("01ARZ3NDEKTSV4RRFFQ69G5FAV", Some(1_000), CronMisfirePolicy::Skip);
+        let triggered_at_unix_ms = chrono::Utc
+            .with_ymd_and_hms(2026, 5, 15, 10, 30, 45)
+            .single()
+            .expect("timestamp should build")
+            .timestamp_millis()
+            + 123;
+
+        let prompt = build_cron_prompt(&job, triggered_at_unix_ms);
+
+        assert!(prompt.contains("[cron job health-check]"));
+        assert!(prompt.contains("triggered_at_utc: 2026-05-15T10:30:45.123Z"));
+        assert!(prompt.contains(format!("triggered_at_unix_ms: {triggered_at_unix_ms}").as_str()));
+        assert!(prompt.ends_with("test"));
     }
 
     #[test]

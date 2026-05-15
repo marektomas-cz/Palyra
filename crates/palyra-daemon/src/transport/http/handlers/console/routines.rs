@@ -431,6 +431,7 @@ pub(crate) async fn console_routine_upsert_handler(
     let schedule = resolve_routine_schedule(&payload, trigger_kind, state.cron_timezone_mode)?;
     let execution = parse_execution_config(
         payload.run_mode.as_deref(),
+        default_run_mode_for_trigger_kind(trigger_kind),
         payload.procedure_profile_id.clone(),
         payload.skill_profile_id.clone(),
         payload.provider_profile_id.clone(),
@@ -710,6 +711,12 @@ async fn enrich_routine_run_output_fields(
     owner_principal: &str,
     run: &mut Value,
 ) -> Result<(), Response> {
+    let orchestrator_run_id = run
+        .pointer("/orchestrator_run_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
     let Some(session_id) = run
         .pointer("/session_id")
         .and_then(Value::as_str)
@@ -726,8 +733,15 @@ async fn enrich_routine_run_output_fields(
     else {
         return Ok(());
     };
-    let Some(fields) = routine_output_fields_from_session(session_id, owner_principal, &session)
-    else {
+    let tape_output =
+        routine_output_text_from_run_tape(state, orchestrator_run_id.as_deref()).await?;
+    let Some(fields) = routine_output_fields_from_session(
+        session_id,
+        owner_principal,
+        orchestrator_run_id.as_deref(),
+        tape_output.as_deref(),
+        &session,
+    ) else {
         return Ok(());
     };
     if let Some(object) = run.as_object_mut() {
@@ -738,25 +752,50 @@ async fn enrich_routine_run_output_fields(
     Ok(())
 }
 
+async fn routine_output_text_from_run_tape(
+    state: &AppState,
+    orchestrator_run_id: Option<&str>,
+) -> Result<Option<String>, Response> {
+    let Some(run_id) = orchestrator_run_id else {
+        return Ok(None);
+    };
+    let tape =
+        match state.runtime.orchestrator_tape_snapshot(run_id.to_owned(), None, Some(128)).await {
+            Ok(tape) => tape,
+            Err(error) if error.code() == tonic::Code::NotFound => return Ok(None),
+            Err(error) => return Err(runtime_status_response(error)),
+        };
+    Ok(routine_output_text_from_tape_events(tape.events.as_slice()))
+}
+
+fn routine_output_text_from_tape_events(
+    events: &[crate::journal::OrchestratorTapeRecord],
+) -> Option<String> {
+    events
+        .iter()
+        .rev()
+        .find(|event| event.event_type == "message.replied")
+        .and_then(|event| routine_output_text_from_replied_payload(event.payload_json.as_str()))
+}
+
+fn routine_output_text_from_replied_payload(payload_json: &str) -> Option<String> {
+    let payload = serde_json::from_str::<Value>(payload_json).ok()?;
+    let reply_text = payload.get("reply_text").and_then(Value::as_str)?;
+    normalize_routine_output_text(Some(reply_text))
+}
+
 fn routine_output_fields_from_session(
     session_id: &str,
     owner_principal: &str,
+    orchestrator_run_id: Option<&str>,
+    tape_output: Option<&str>,
     session: &crate::journal::OrchestratorSessionRecord,
 ) -> Option<Map<String, Value>> {
     if session.principal != owner_principal {
         return None;
     }
 
-    let preview = normalize_routine_output_text(session.preview.as_deref());
-    let summary = normalize_routine_output_text(session.last_summary.as_deref());
     let mut fields = Map::new();
-    if let Some(output_preview) = preview.clone().or_else(|| summary.clone()) {
-        fields.insert("output_preview".to_owned(), json!(output_preview));
-    }
-    if let Some(output_summary) = summary {
-        fields.insert("output_summary".to_owned(), json!(output_summary));
-    }
-    fields.insert("output_source".to_owned(), json!("session_preview"));
     fields.insert(
         "output_lookup".to_owned(),
         json!({
@@ -764,6 +803,30 @@ fn routine_output_fields_from_session(
             "command": format!("palyra sessions show --session-id {session_id} --json"),
         }),
     );
+    if let Some(output_preview) =
+        tape_output.and_then(|value| normalize_routine_output_text(Some(value)))
+    {
+        fields.insert("output_preview".to_owned(), json!(output_preview));
+        fields.insert("output_source".to_owned(), json!("run_tape"));
+        return Some(fields);
+    }
+
+    let session_matches_run =
+        orchestrator_run_id.is_some_and(|run_id| session.last_run_id.as_deref() == Some(run_id));
+    if !session_matches_run {
+        fields.insert("output_source".to_owned(), json!("session_lookup"));
+        return Some(fields);
+    }
+
+    let preview = normalize_routine_output_text(session.preview.as_deref());
+    let summary = normalize_routine_output_text(session.last_summary.as_deref());
+    if let Some(output_preview) = preview.clone().or_else(|| summary.clone()) {
+        fields.insert("output_preview".to_owned(), json!(output_preview));
+    }
+    if let Some(output_summary) = summary {
+        fields.insert("output_summary".to_owned(), json!(output_summary));
+    }
+    fields.insert("output_source".to_owned(), json!("session_preview"));
     Some(fields)
 }
 
@@ -2068,6 +2131,16 @@ fn parse_routine_trigger_kind(value: &str) -> Result<RoutineTriggerKind, tonic::
     })
 }
 
+fn default_run_mode_for_trigger_kind(trigger_kind: RoutineTriggerKind) -> RoutineRunMode {
+    match trigger_kind {
+        RoutineTriggerKind::Schedule => RoutineRunMode::FreshSession,
+        RoutineTriggerKind::Hook
+        | RoutineTriggerKind::Webhook
+        | RoutineTriggerKind::SystemEvent
+        | RoutineTriggerKind::Manual => RoutineRunMode::SameSession,
+    }
+}
+
 #[allow(clippy::result_large_err)]
 fn parse_schedule_type(value: &str) -> Result<CronScheduleType, Response> {
     CronScheduleType::from_str(value).ok_or_else(|| {
@@ -2111,6 +2184,7 @@ fn parse_misfire_policy(value: Option<&str>) -> Result<CronMisfirePolicy, Respon
 #[allow(clippy::result_large_err)]
 fn parse_execution_config(
     run_mode: Option<&str>,
+    default_run_mode: RoutineRunMode,
     procedure_profile_id: Option<String>,
     skill_profile_id: Option<String>,
     provider_profile_id: Option<String>,
@@ -2122,7 +2196,7 @@ fn parse_execution_config(
                 "run_mode must be one of same_session|fresh_session",
             ))
         })?,
-        None => RoutineRunMode::SameSession,
+        None => default_run_mode,
     };
     let execution_posture = match execution_posture.map(str::trim).filter(|value| !value.is_empty())
     {
@@ -2385,11 +2459,12 @@ mod tests {
     use super::{
         compare_optional_matchers, is_in_quiet_hours, parse_delivery, parse_execution_config,
         parse_quiet_hours, routine_matches_trigger, routine_output_fields_from_session,
+        routine_output_text_from_tape_events,
     };
-    use crate::journal::OrchestratorSessionRecord;
+    use crate::journal::{OrchestratorSessionRecord, OrchestratorTapeRecord};
     use crate::routines::{
         RoutineApprovalPolicy, RoutineDeliveryMode, RoutineExecutionConfig, RoutineMetadataRecord,
-        RoutineSilentPolicy, RoutineTriggerKind,
+        RoutineRunMode, RoutineSilentPolicy, RoutineTriggerKind,
     };
     use chrono::{TimeZone, Utc};
     use serde_json::json;
@@ -2446,6 +2521,7 @@ mod tests {
     fn parse_execution_config_accepts_fresh_sensitive_profiled_runs() {
         let execution = parse_execution_config(
             Some("fresh_session"),
+            RoutineRunMode::SameSession,
             Some("01ARZ3NDEKTSV4RRFFQ69G5FC0".to_owned()),
             Some("01ARZ3NDEKTSV4RRFFQ69G5FC1".to_owned()),
             Some("01ARZ3NDEKTSV4RRFFQ69G5FC2".to_owned()),
@@ -2455,6 +2531,30 @@ mod tests {
         assert_eq!(execution.run_mode.as_str(), "fresh_session");
         assert_eq!(execution.execution_posture.as_str(), "sensitive_tools");
         assert_eq!(execution.provider_profile_id.as_deref(), Some("01ARZ3NDEKTSV4RRFFQ69G5FC2"));
+    }
+
+    #[test]
+    fn parse_execution_config_uses_schedule_fresh_session_default() {
+        let execution =
+            parse_execution_config(None, RoutineRunMode::FreshSession, None, None, None, None)
+                .expect("execution config should parse");
+
+        assert_eq!(execution.run_mode, RoutineRunMode::FreshSession);
+    }
+
+    #[test]
+    fn parse_execution_config_preserves_explicit_same_session() {
+        let execution = parse_execution_config(
+            Some("same_session"),
+            RoutineRunMode::FreshSession,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("execution config should parse");
+
+        assert_eq!(execution.run_mode, RoutineRunMode::SameSession);
     }
 
     #[test]
@@ -2529,9 +2629,14 @@ mod tests {
             last_run_state: Some("succeeded".to_owned()),
         };
 
-        let fields =
-            routine_output_fields_from_session("01ARZ3NDEKTSV4RRFFQ69G5FAW", "operator", &session)
-                .expect("owner session output should be visible");
+        let fields = routine_output_fields_from_session(
+            "01ARZ3NDEKTSV4RRFFQ69G5FAW",
+            "operator",
+            Some("01ARZ3NDEKTSV4RRFFQ69G5FB0"),
+            None,
+            &session,
+        )
+        .expect("owner session output should be visible");
 
         assert_eq!(
             fields.get("output_preview").and_then(|value| value.as_str()),
@@ -2558,9 +2663,78 @@ mod tests {
             .and_then(|value| value.as_str())
             .is_some_and(|command| command.contains("sessions show --session-id")));
         assert!(
-            routine_output_fields_from_session("01ARZ3NDEKTSV4RRFFQ69G5FAW", "other", &session)
-                .is_none(),
+            routine_output_fields_from_session(
+                "01ARZ3NDEKTSV4RRFFQ69G5FAW",
+                "other",
+                Some("01ARZ3NDEKTSV4RRFFQ69G5FB0"),
+                None,
+                &session,
+            )
+            .is_none(),
             "routine logs must not expose output from another principal"
+        );
+
+        let mut stale_session = session.clone();
+        stale_session.last_run_id = Some("01ARZ3NDEKTSV4RRFFQ69G5FC0".to_owned());
+        let stale_fields = routine_output_fields_from_session(
+            "01ARZ3NDEKTSV4RRFFQ69G5FAW",
+            "operator",
+            Some("01ARZ3NDEKTSV4RRFFQ69G5FB0"),
+            None,
+            &stale_session,
+        )
+        .expect("owner lookup should still be visible");
+
+        assert!(
+            stale_fields.get("output_preview").is_none(),
+            "stale same-session previews must not be copied onto older routine runs"
+        );
+        assert_eq!(
+            stale_fields.get("output_source").and_then(|value| value.as_str()),
+            Some("session_lookup")
+        );
+
+        let tape_fields = routine_output_fields_from_session(
+            "01ARZ3NDEKTSV4RRFFQ69G5FAW",
+            "operator",
+            Some("01ARZ3NDEKTSV4RRFFQ69G5FB0"),
+            Some("IMMUTABLE_RUN_OUTPUT"),
+            &stale_session,
+        )
+        .expect("owner tape output should be visible");
+        assert_eq!(
+            tape_fields.get("output_preview").and_then(|value| value.as_str()),
+            Some("IMMUTABLE_RUN_OUTPUT")
+        );
+        assert_eq!(
+            tape_fields.get("output_source").and_then(|value| value.as_str()),
+            Some("run_tape")
+        );
+    }
+
+    #[test]
+    fn routine_output_text_from_tape_events_uses_latest_run_reply() {
+        let events = vec![
+            OrchestratorTapeRecord {
+                seq: 1,
+                event_type: "message.replied".to_owned(),
+                payload_json: r#"{"reply_text":"FIRST"}"#.to_owned(),
+            },
+            OrchestratorTapeRecord {
+                seq: 2,
+                event_type: "tool_result".to_owned(),
+                payload_json: r#"{"text":"ignored"}"#.to_owned(),
+            },
+            OrchestratorTapeRecord {
+                seq: 3,
+                event_type: "message.replied".to_owned(),
+                payload_json: r#"{"reply_text":"SECOND"}"#.to_owned(),
+            },
+        ];
+
+        assert_eq!(
+            routine_output_text_from_tape_events(events.as_slice()).as_deref(),
+            Some("SECOND")
         );
     }
 }

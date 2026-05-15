@@ -430,6 +430,7 @@ async fn upsert_routine(
     let prompt = required_string_field(payload, "prompt")?;
     let execution = parse_execution_config(
         optional_string_field(payload, "run_mode").as_deref(),
+        default_run_mode_for_trigger_kind(trigger_kind),
         optional_string_field(payload, "procedure_profile_id"),
         optional_string_field(payload, "skill_profile_id"),
         optional_string_field(payload, "provider_profile_id"),
@@ -1583,6 +1584,16 @@ fn parse_trigger_kind(value: &str) -> Result<RoutineTriggerKind, String> {
     })
 }
 
+fn default_run_mode_for_trigger_kind(trigger_kind: RoutineTriggerKind) -> RoutineRunMode {
+    match trigger_kind {
+        RoutineTriggerKind::Schedule => RoutineRunMode::FreshSession,
+        RoutineTriggerKind::Hook
+        | RoutineTriggerKind::Webhook
+        | RoutineTriggerKind::SystemEvent
+        | RoutineTriggerKind::Manual => RoutineRunMode::SameSession,
+    }
+}
+
 fn parse_schedule_type(value: &str) -> Result<crate::journal::CronScheduleType, String> {
     crate::journal::CronScheduleType::from_str(value)
         .ok_or_else(|| "schedule type must be one of cron|every|at".to_owned())
@@ -1612,6 +1623,7 @@ fn parse_misfire_policy(value: Option<&str>) -> Result<CronMisfirePolicy, String
 
 fn parse_execution_config(
     run_mode: Option<&str>,
+    default_run_mode: RoutineRunMode,
     procedure_profile_id: Option<String>,
     skill_profile_id: Option<String>,
     provider_profile_id: Option<String>,
@@ -1620,7 +1632,7 @@ fn parse_execution_config(
     let run_mode = match run_mode.filter(|value| !value.is_empty()) {
         Some(value) => RoutineRunMode::from_str(value)
             .ok_or_else(|| "run_mode must be one of same_session|fresh_session".to_owned())?,
-        None => RoutineRunMode::SameSession,
+        None => default_run_mode,
     };
     let execution_posture = match execution_posture.filter(|value| !value.is_empty()) {
         Some(value) => RoutineExecutionPosture::from_str(value).ok_or_else(|| {
@@ -1903,6 +1915,7 @@ fn routines_tool_execution_outcome(
 
 #[cfg(test)]
 mod tests {
+    use crate::routines::RoutineRunMode;
     use serde_json::json;
 
     #[test]
@@ -1939,5 +1952,35 @@ mod tests {
 
         super::build_schedule(&payload)
             .expect("minimum routines.control interval should be accepted");
+    }
+
+    #[test]
+    fn parse_execution_config_uses_schedule_fresh_session_default() {
+        let execution = super::parse_execution_config(
+            None,
+            RoutineRunMode::FreshSession,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("execution config should parse");
+
+        assert_eq!(execution.run_mode, RoutineRunMode::FreshSession);
+    }
+
+    #[test]
+    fn parse_execution_config_preserves_explicit_same_session() {
+        let execution = super::parse_execution_config(
+            Some("same_session"),
+            RoutineRunMode::FreshSession,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("execution config should parse");
+
+        assert_eq!(execution.run_mode, RoutineRunMode::SameSession);
     }
 }
