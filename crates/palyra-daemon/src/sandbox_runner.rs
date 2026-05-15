@@ -1463,10 +1463,10 @@ fn background_cleanup_metadata(pid: u32, lifetime_ms: u64) -> serde_json::Value 
 fn background_cleanup_command(pid: u32) -> serde_json::Value {
     #[cfg(windows)]
     {
-        return json!({
+        json!({
             "command": "taskkill",
             "args": ["/PID", pid.to_string(), "/T", "/F"],
-        });
+        })
     }
     #[cfg(not(windows))]
     {

@@ -171,7 +171,7 @@ fn read_policy_tool_allowlist_from_document(document: &toml::Value) -> Vec<Strin
             values
                 .iter()
                 .filter_map(|value| value.as_str())
-                .flat_map(|value| parse_policy_tool_allowlist(value))
+                .flat_map(parse_policy_tool_allowlist)
                 .collect()
         })
         .unwrap_or_default()
