@@ -72,11 +72,11 @@
           "snippet": "Release deploy checklist with rollback rehearsal and staged verification.",
           "branch_contribution": "hybrid",
           "explainability_complete": true,
-          "final_score": 1.0,
+          "final_score": 0.9939,
           "lexical_score": 1.0,
           "vector_score": 1.0,
           "recency_score": 1.0,
-          "source_quality_score": 0.952
+          "source_quality_score": 0.949
         },
         {
           "candidate_id": "memory.summary_followup",
@@ -85,11 +85,11 @@
           "snippet": "Summary mentioning deploy guardrails and rollout follow-up.",
           "branch_contribution": "hybrid",
           "explainability_complete": true,
-          "final_score": 0.4051,
+          "final_score": 0.4238,
           "lexical_score": 0.3333,
           "vector_score": 0.3478,
           "recency_score": 1.0,
-          "source_quality_score": 0.844
+          "source_quality_score": 0.66
         },
         {
           "candidate_id": "memory.browser_artifact",
@@ -98,11 +98,11 @@
           "snippet": "Browser artifact inventory and trace bundle.",
           "branch_contribution": "source_quality",
           "explainability_complete": true,
-          "final_score": 0.1152,
+          "final_score": 0.1271,
           "lexical_score": 0.0,
           "vector_score": 0.0435,
           "recency_score": 1.0,
-          "source_quality_score": 0.74
+          "source_quality_score": 0.36
         }
       ]
     },
@@ -229,11 +229,11 @@
           "snippet": "Operator prefers concise answers for paired sender follow-up.",
           "branch_contribution": "hybrid",
           "explainability_complete": true,
-          "final_score": 0.7588,
+          "final_score": 0.7722,
           "lexical_score": 0.75,
           "vector_score": 0.7037,
           "recency_score": 1.0,
-          "source_quality_score": 0.904
+          "source_quality_score": 0.913
         },
         {
           "candidate_id": "transcript.received.verbose",
@@ -447,11 +447,11 @@
           "snippet": "Ops owns release preflight; web lead owns rollback validation.",
           "branch_contribution": "vector",
           "explainability_complete": true,
-          "final_score": 0.6025,
+          "final_score": 0.6342,
           "lexical_score": 0.5,
           "vector_score": 0.65,
           "recency_score": 1.0,
-          "source_quality_score": 0.922
+          "source_quality_score": 0.9265
         },
         {
           "candidate_id": "checkpoint.release_gate",
@@ -473,11 +473,11 @@
           "snippet": "Browser download artifact review.",
           "branch_contribution": "source_quality",
           "explainability_complete": true,
-          "final_score": 0.1087,
+          "final_score": 0.1212,
           "lexical_score": 0.0,
           "vector_score": 0.025,
           "recency_score": 1.0,
-          "source_quality_score": 0.716
+          "source_quality_score": 0.36
         }
       ]
     },
@@ -547,11 +547,11 @@
           "snippet": "Operator asked for dead-letter replay status after Discord onboarding.",
           "branch_contribution": "hybrid",
           "explainability_complete": true,
-          "final_score": 0.6937,
+          "final_score": 0.6834,
           "lexical_score": 0.6667,
           "vector_score": 0.6486,
           "recency_score": 1.0,
-          "source_quality_score": 0.856
+          "source_quality_score": 0.66
         },
         {
           "candidate_id": "workspace.router_docs",
@@ -617,11 +617,11 @@
           "snippet": "Release checklist and rollback rehearsal.",
           "branch_contribution": "source_quality",
           "explainability_complete": true,
-          "final_score": 0.1,
+          "final_score": 0.1492,
           "lexical_score": 0.0,
           "vector_score": 0.0,
           "recency_score": 1.0,
-          "source_quality_score": 0.832
+          "source_quality_score": 0.66
         },
         {
           "candidate_id": "workspace.browser_doc",
