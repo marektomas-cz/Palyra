@@ -172,6 +172,47 @@ fn admin_policy_explain_requires_token_and_returns_decision_payload() -> Result<
 }
 
 #[test]
+fn admin_policy_explain_uses_runtime_tool_allowlist() -> Result<()> {
+    let (child, admin_port) = spawn_palyrad_with_config_and_env(
+        r#"
+version = 1
+
+[tool_call]
+allowed_tools = ["palyra.fs.apply_patch"]
+"#,
+        &[],
+    )?;
+    let mut daemon = ChildGuard::new(child);
+    wait_for_health(admin_port, daemon.child_mut())?;
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .context("failed to build HTTP client")?;
+    let body = client
+        .get(format!(
+            "http://127.0.0.1:{admin_port}/admin/v1/policy/explain?principal=admin%3Alocal&action=tool.execute&resource=tool%3Apalyra.fs.apply_patch&channel=cli"
+        ))
+        .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
+        .header("x-palyra-principal", "admin:local")
+        .header("x-palyra-device-id", DEVICE_ID)
+        .header("x-palyra-channel", "cli")
+        .send()
+        .context("failed to call admin policy explain with runtime allowlist")?
+        .error_for_status()
+        .context("admin policy explain returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse admin policy explain response body")?;
+
+    assert_eq!(body.get("decision").and_then(Value::as_str), Some("allow"));
+    assert_eq!(
+        body.pointer("/diagnostics/reason_code").and_then(Value::as_str),
+        Some("policy.allow")
+    );
+    Ok(())
+}
+
+#[test]
 fn admin_status_bruteforce_attempts_are_rate_limited() -> Result<()> {
     let (child, admin_port) = spawn_palyrad_with_dynamic_ports()?;
     let mut daemon = ChildGuard::new(child);

@@ -181,12 +181,26 @@ pub(crate) async fn admin_policy_explain_handler(
         action: query.action,
         resource: query.resource,
     };
+    let request_context = palyra_policy::PolicyRequestContext {
+        device_id: query.device_id,
+        channel: query.channel,
+        session_id: query.session_id,
+        run_id: query.run_id,
+        tool_name: None,
+        skill_id: None,
+        capabilities: Vec::new(),
+    };
+    let evaluation_config = PolicyEvaluationConfig {
+        allowlisted_tools: state.runtime.config.tool_call.allowed_tools.clone(),
+        ..PolicyEvaluationConfig::default()
+    };
     let evaluation =
-        evaluate_with_config(&request, &PolicyEvaluationConfig::default()).map_err(|error| {
-            runtime_status_response(tonic::Status::internal(format!(
-                "failed to evaluate policy with Cedar engine: {error}"
-            )))
-        })?;
+        palyra_policy::evaluate_with_context(&request, &request_context, &evaluation_config)
+            .map_err(|error| {
+                runtime_status_response(tonic::Status::internal(format!(
+                    "failed to evaluate policy with Cedar engine: {error}"
+                )))
+            })?;
     let diagnostics = palyra_policy::policy_explain_diagnostics_value(&request, &evaluation);
     let (decision, approval_required, reason) = match &evaluation.decision {
         PolicyDecision::Allow => ("allow".to_owned(), false, evaluation.explanation.reason.clone()),

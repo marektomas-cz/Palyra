@@ -126,7 +126,7 @@ use palyra_common::{
 use palyra_identity::{
     DeviceIdentity, FilesystemSecretStore, PairingClientKind, PairingMethod, SecretStore,
 };
-use palyra_policy::{evaluate_with_config, PolicyDecision, PolicyEvaluationConfig, PolicyRequest};
+use palyra_policy::{PolicyDecision, PolicyEvaluationConfig, PolicyRequest};
 use palyra_skills::{
     audit_skill_artifact_security, build_signed_skill_artifact, inspect_skill_artifact,
     parse_ed25519_signing_key, verify_skill_artifact, ArtifactFile, SkillArtifactBuildRequest,

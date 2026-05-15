@@ -1913,6 +1913,10 @@ struct PolicyExplainQuery {
     principal: String,
     action: String,
     resource: String,
+    channel: Option<String>,
+    session_id: Option<String>,
+    run_id: Option<String>,
+    device_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
