@@ -163,7 +163,7 @@ const MAX_BROWSER_TOOL_INPUT_BYTES: usize = 128 * 1024;
 const MAX_ARTIFACT_READ_TOOL_INPUT_BYTES: usize = 16 * 1024;
 const MAX_WASM_PLUGIN_TOOL_INPUT_BYTES: usize = 448 * 1024;
 const SENSITIVE_CAPABILITY_POLICY_NAMES: &[&str] =
-    &["process_exec", "network", "secrets_read", "filesystem_read", "filesystem_write"];
+    &["process_exec", "network", "secrets_read", "filesystem_write"];
 
 pub fn tool_policy_snapshot(config: &ToolCallConfig) -> ToolCallPolicySnapshot {
     ToolCallPolicySnapshot {
@@ -340,11 +340,11 @@ pub fn tool_metadata(tool_name: &str) -> Option<ToolMetadata> {
         }
         "palyra.fs.read_file" => Some(ToolMetadata {
             capabilities: WORKSPACE_FILE_READ_CAPABILITIES,
-            default_sensitive: true,
+            default_sensitive: false,
         }),
         "palyra.fs.list_dir" => Some(ToolMetadata {
             capabilities: WORKSPACE_FILE_READ_CAPABILITIES,
-            default_sensitive: true,
+            default_sensitive: false,
         }),
         "palyra.fs.apply_patch" => Some(ToolMetadata {
             capabilities: WORKSPACE_PATCH_CAPABILITIES,
@@ -438,7 +438,6 @@ pub fn tool_requires_approval(tool_name: &str) -> bool {
                 ToolCapability::ProcessExec
                     | ToolCapability::Network
                     | ToolCapability::SecretsRead
-                    | ToolCapability::FilesystemRead
                     | ToolCapability::FilesystemWrite
             )
         })
@@ -1329,6 +1328,29 @@ mod tests {
     }
 
     #[test]
+    fn decide_tool_call_allows_workspace_read_tools_without_interactive_approval() {
+        for tool_name in ["palyra.fs.read_file", "palyra.fs.list_dir"] {
+            let config = ToolCallConfig {
+                allowed_tools: vec![tool_name.to_owned()],
+                max_calls_per_run: 1,
+                execution_timeout_ms: 250,
+                process_runner: default_process_runner_policy(),
+                wasm_runtime: default_wasm_runtime_policy(),
+            };
+            let mut budget = 1;
+            let request_context = tool_request_context("user:ops");
+            let decision =
+                decide_tool_call(&config, &mut budget, &request_context, tool_name, false);
+            assert!(decision.allowed, "allowlisted {tool_name} should be executable");
+            assert!(
+                !decision.approval_required,
+                "{tool_name} is workspace-scoped read-only inspection and should not require approval"
+            );
+            assert_eq!(budget, 0, "allowed tool should consume budget");
+        }
+    }
+
+    #[test]
     fn decide_tool_call_denies_allowlisted_unsupported_runtime_tool() {
         let config = ToolCallConfig {
             allowed_tools: vec!["custom.noop".to_owned()],
@@ -1454,11 +1476,11 @@ mod tests {
         assert!(!tool_requires_approval("palyra.memory.reflect"));
         assert!(!tool_requires_approval("palyra.routines.query"));
         assert!(!tool_requires_approval("palyra.artifact.read"));
+        assert!(!tool_requires_approval("palyra.fs.read_file"));
+        assert!(!tool_requires_approval("palyra.fs.list_dir"));
         assert!(tool_requires_approval("palyra.routines.control"));
         assert!(tool_requires_approval("palyra.http.fetch"));
         assert!(tool_requires_approval("palyra.process.run"));
-        assert!(tool_requires_approval("palyra.fs.read_file"));
-        assert!(tool_requires_approval("palyra.fs.list_dir"));
         assert!(tool_requires_approval("palyra.fs.apply_patch"));
         assert!(tool_requires_approval("palyra.tool_program.run"));
         assert!(tool_requires_approval("palyra.browser.session.create"));
@@ -1499,16 +1521,16 @@ mod tests {
     }
 
     #[test]
-    fn workspace_read_file_tool_exposes_sensitive_filesystem_read_capability() {
+    fn workspace_read_tools_expose_filesystem_read_without_default_approval() {
         let metadata = tool_metadata("palyra.fs.read_file").expect("workspace read metadata");
         assert_eq!(metadata.capabilities, &[ToolCapability::FilesystemRead]);
-        assert!(metadata.default_sensitive);
-        assert!(tool_requires_approval("palyra.fs.read_file"));
+        assert!(!metadata.default_sensitive);
+        assert!(!tool_requires_approval("palyra.fs.read_file"));
 
         let metadata = tool_metadata("palyra.fs.list_dir").expect("workspace list metadata");
         assert_eq!(metadata.capabilities, &[ToolCapability::FilesystemRead]);
-        assert!(metadata.default_sensitive);
-        assert!(tool_requires_approval("palyra.fs.list_dir"));
+        assert!(!metadata.default_sensitive);
+        assert!(!tool_requires_approval("palyra.fs.list_dir"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
