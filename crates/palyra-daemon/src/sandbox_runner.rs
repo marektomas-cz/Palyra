@@ -13,6 +13,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(windows)]
+use std::io;
+
 use palyra_common::{
     process_runner_input::{parse_process_runner_tool_input, ProcessRunnerToolInput},
     redaction::{redact_auth_error, redact_url_segments_in_text, REDACTED},
@@ -1376,15 +1379,16 @@ fn spawn_background_process(
         attach_resource_limits_unix(&mut command, policy);
     }
 
-    let mut child = command.spawn().map_err(|error| SandboxProcessRunError {
+    let child = command.spawn().map_err(|error| SandboxProcessRunError {
         kind: SandboxProcessRunErrorKind::SpawnFailed,
         message: format!("sandbox process spawn failed for command '{}': {error}", input.command),
     })?;
     let pid = child.id();
+    let lifetime_ms = lifetime.as_millis() as u64;
+    let cleanup = background_cleanup_metadata(pid, lifetime_ms);
     thread::spawn(move || {
         thread::sleep(lifetime);
-        let _ = child.kill();
-        let _ = child.wait();
+        terminate_background_child(child);
     });
 
     let output_json = serde_json::to_vec(&json!({
@@ -1396,7 +1400,14 @@ fn spawn_background_process(
         "duration_ms": 0,
         "background": true,
         "pid": pid,
-        "lifetime_ms": lifetime.as_millis() as u64,
+        "lifetime_ms": lifetime_ms,
+        "process_handle": {
+            "kind": "pid",
+            "direct_process_pid": pid,
+            "process_tree": cfg!(windows),
+            "identity_note": "pid is the direct process spawned by palyra.process.run; a descendant process may own listening sockets"
+        },
+        "cleanup": cleanup,
         "tier": policy.tier.as_str(),
         "sandbox_backend": process_runner_executor_name(policy),
     }))
@@ -1405,6 +1416,76 @@ fn spawn_background_process(
         message: format!("failed to serialize sandbox background process output JSON: {error}"),
     })?;
     Ok(SandboxProcessRunSuccess { output_json })
+}
+
+fn terminate_background_child(mut child: Child) {
+    #[cfg(windows)]
+    {
+        let pid = child.id();
+        if terminate_windows_process_tree(pid).is_err() {
+            let _ = child.kill();
+        }
+        let _ = child.wait();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+#[cfg(windows)]
+fn terminate_windows_process_tree(pid: u32) -> io::Result<()> {
+    let pid_arg = pid.to_string();
+    let status = Command::new("taskkill")
+        .args(["/PID", pid_arg.as_str(), "/T", "/F"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if status.success() {
+        return Ok(());
+    }
+    Err(io::Error::other(format!(
+        "taskkill failed for background process tree rooted at pid {pid}: {status}"
+    )))
+}
+
+fn background_cleanup_metadata(pid: u32, lifetime_ms: u64) -> serde_json::Value {
+    json!({
+        "auto_kill_after_ms": lifetime_ms,
+        "process_tree": cfg!(windows),
+        "manual_command": background_cleanup_command(pid),
+        "note": background_cleanup_note(),
+    })
+}
+
+fn background_cleanup_command(pid: u32) -> serde_json::Value {
+    #[cfg(windows)]
+    {
+        return json!({
+            "command": "taskkill",
+            "args": ["/PID", pid.to_string(), "/T", "/F"],
+        });
+    }
+    #[cfg(not(windows))]
+    {
+        json!({
+            "command": "kill",
+            "args": ["-TERM", pid.to_string()],
+        })
+    }
+}
+
+fn background_cleanup_note() -> &'static str {
+    #[cfg(windows)]
+    {
+        "Use the manual command to terminate the direct process and its descendants if the run fails before the automatic lifetime cleanup runs."
+    }
+    #[cfg(not(windows))]
+    {
+        "Use the manual command to terminate the direct process if the run fails before the automatic lifetime cleanup runs."
+    }
 }
 
 fn background_process_lifetime(timeout_ms: Option<u64>, execution_timeout: Duration) -> Duration {
@@ -2383,8 +2464,55 @@ mod tests {
         assert_eq!(output.get("background").and_then(serde_json::Value::as_bool), Some(true));
         assert_eq!(output.get("lifetime_ms").and_then(serde_json::Value::as_u64), Some(100));
         assert!(output.get("pid").and_then(serde_json::Value::as_u64).is_some());
+        assert_eq!(
+            output
+                .pointer("/process_handle/direct_process_pid")
+                .and_then(serde_json::Value::as_u64),
+            output.get("pid").and_then(serde_json::Value::as_u64)
+        );
+        assert!(output.pointer("/cleanup/manual_command/command").is_some());
 
         let _ = fs::remove_dir_all(workspace.as_path());
+    }
+
+    #[test]
+    fn background_cleanup_metadata_exposes_platform_cleanup_command() {
+        let metadata = super::background_cleanup_metadata(1234, 60_000);
+
+        assert_eq!(
+            metadata.get("auto_kill_after_ms").and_then(serde_json::Value::as_u64),
+            Some(60_000)
+        );
+        assert_eq!(
+            metadata.pointer("/manual_command/args/1").and_then(serde_json::Value::as_str),
+            Some("1234")
+        );
+        #[cfg(windows)]
+        {
+            assert_eq!(
+                metadata.pointer("/manual_command/command").and_then(serde_json::Value::as_str),
+                Some("taskkill")
+            );
+            assert_eq!(
+                metadata.pointer("/manual_command/args/2").and_then(serde_json::Value::as_str),
+                Some("/T")
+            );
+            assert_eq!(
+                metadata.get("process_tree").and_then(serde_json::Value::as_bool),
+                Some(true)
+            );
+        }
+        #[cfg(not(windows))]
+        {
+            assert_eq!(
+                metadata.pointer("/manual_command/command").and_then(serde_json::Value::as_str),
+                Some("kill")
+            );
+            assert_eq!(
+                metadata.get("process_tree").and_then(serde_json::Value::as_bool),
+                Some(false)
+            );
+        }
     }
 
     #[test]
