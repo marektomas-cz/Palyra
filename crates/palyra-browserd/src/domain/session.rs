@@ -671,17 +671,103 @@ fn html_tag_matches_selector(tag: &str, selector: &str, selector_lower: &str) ->
             .split_ascii_whitespace()
             .any(|token| token.eq_ignore_ascii_case(class.as_str()));
     }
-    if selector.starts_with('[') && selector.ends_with(']') {
-        let inner = selector[1..selector.len().saturating_sub(1)].trim();
-        if let Some(value) = inner.strip_prefix("name=") {
-            let value = value.trim().trim_matches('"').trim_matches('\'').to_ascii_lowercase();
-            return has_attr_value(tag_lower.as_str(), "name", value.as_str());
+    if let Some(attribute_selector) = parse_simple_attribute_selector(selector) {
+        if let Some(expected_tag) = attribute_selector.tag_name {
+            let Some(actual_tag) = html_tag_name(tag_lower.as_str()) else {
+                return false;
+            };
+            if !actual_tag.eq_ignore_ascii_case(expected_tag) {
+                return false;
+            }
         }
-        return false;
+        if let Some(expected_value) = attribute_selector.value {
+            return has_attr_value(
+                tag_lower.as_str(),
+                attribute_selector.name.to_ascii_lowercase().as_str(),
+                expected_value.to_ascii_lowercase().as_str(),
+            );
+        }
+        return has_attr(tag_lower.as_str(), attribute_selector.name.to_ascii_lowercase().as_str());
     }
     html_tag_name(tag_lower.as_str())
         .map(|name| name.eq_ignore_ascii_case(selector_lower))
         .unwrap_or(false)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SimpleAttributeSelector<'a> {
+    tag_name: Option<&'a str>,
+    name: &'a str,
+    value: Option<&'a str>,
+}
+
+fn parse_simple_attribute_selector(selector: &str) -> Option<SimpleAttributeSelector<'_>> {
+    let selector = selector.trim();
+    let open_bracket = selector.find('[')?;
+    if !selector.ends_with(']') {
+        return None;
+    }
+    let tag_name = selector[..open_bracket].trim();
+    if !tag_name.is_empty() && !tag_name.chars().all(is_selector_identifier_char) {
+        return None;
+    }
+    let inner = selector[open_bracket + 1..selector.len().saturating_sub(1)].trim();
+    if inner.is_empty() || inner.contains('[') || inner.contains(']') {
+        return None;
+    }
+    let (name, value) = match inner.split_once('=') {
+        Some((raw_name, raw_value)) => {
+            let name = raw_name.trim();
+            let value = unquote_attribute_selector_value(raw_value.trim());
+            (name, Some(value))
+        }
+        None => (inner, None),
+    };
+    if name.is_empty() || !name.chars().all(is_selector_identifier_char) {
+        return None;
+    }
+    Some(SimpleAttributeSelector {
+        tag_name: (!tag_name.is_empty()).then_some(tag_name),
+        name,
+        value,
+    })
+}
+
+fn is_selector_identifier_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | ':')
+}
+
+fn unquote_attribute_selector_value(value: &str) -> &str {
+    if value.len() >= 2 {
+        let bytes = value.as_bytes();
+        if (bytes[0] == b'"' && bytes[value.len() - 1] == b'"')
+            || (bytes[0] == b'\'' && bytes[value.len() - 1] == b'\'')
+        {
+            return &value[1..value.len() - 1];
+        }
+    }
+    value
+}
+
+fn has_attr(tag_lower: &str, attr_name_lower: &str) -> bool {
+    if extract_attr_value(tag_lower, attr_name_lower).is_some() {
+        return true;
+    }
+    let mut cursor = 0usize;
+    while let Some(relative_start) = tag_lower[cursor..].find(attr_name_lower) {
+        let start = cursor + relative_start;
+        let end = start + attr_name_lower.len();
+        let before = tag_lower[..start].chars().next_back();
+        let after = tag_lower[end..].chars().next();
+        let before_is_boundary = before.is_some_and(|ch| ch == '<' || ch.is_ascii_whitespace());
+        let after_is_boundary =
+            after.is_some_and(|ch| ch == '=' || ch == '>' || ch == '/' || ch.is_ascii_whitespace());
+        if before_is_boundary && after_is_boundary {
+            return true;
+        }
+        cursor = end;
+    }
+    false
 }
 
 fn has_attr_value(tag_lower: &str, attr_name: &str, expected_value_lower: &str) -> bool {
@@ -758,4 +844,42 @@ pub(crate) fn is_download_like_tag(tag: &str) -> bool {
     ]
     .iter()
     .any(|suffix| href.ends_with(suffix))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find_matching_html_tag;
+
+    #[test]
+    fn find_matching_html_tag_supports_css_attribute_selectors() {
+        let html = r#"
+            <input type="checkbox" data-testid="toggle">
+            <button data-filter=completed aria-label="Done filter">Done</button>
+        "#;
+
+        let checkbox = find_matching_html_tag("input[type=checkbox]", html)
+            .expect("tag-qualified attribute selector should match");
+        assert!(checkbox.contains("checkbox"));
+
+        let filter = find_matching_html_tag("[data-filter=completed]", html)
+            .expect("attribute-only selector should match");
+        assert!(filter.contains("data-filter=completed"));
+
+        let aria = find_matching_html_tag("button[aria-label='Done filter']", html)
+            .expect("quoted attribute selector should match");
+        assert!(aria.contains("Done filter"));
+    }
+
+    #[test]
+    fn find_matching_html_tag_supports_attribute_existence_selectors() {
+        let html = r#"<button data-testid="save" disabled>Save</button>"#;
+
+        let by_data = find_matching_html_tag("[data-testid]", html)
+            .expect("attribute existence selector should match assigned attribute");
+        assert!(by_data.contains("data-testid"));
+
+        let by_boolean = find_matching_html_tag("button[disabled]", html)
+            .expect("attribute existence selector should match boolean attribute");
+        assert!(by_boolean.contains("disabled"));
+    }
 }
