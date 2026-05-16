@@ -4660,6 +4660,15 @@ mod agent_stream_output_tests {
     }
 
     #[test]
+    fn unterminated_stream_outcome_is_command_error() {
+        let outcome = AgentStreamOutcome { completed: false, failed_message: None };
+
+        let error =
+            outcome.ensure_success().expect_err("unterminated run stream must fail the command");
+        assert!(error.to_string().contains("terminal status"), "unexpected error: {error}");
+    }
+
+    #[test]
     fn tool_stream_labels_preserve_safe_diagnostics() {
         assert_eq!(safe_stream_label_for_output("palyra.fs.apply_patch"), "palyra.fs.apply_patch");
         assert_eq!(
@@ -5188,6 +5197,11 @@ impl AgentStreamOutcome {
     fn ensure_success(&self) -> Result<()> {
         if let Some(message) = self.failed_message.as_ref() {
             anyhow::bail!("agent run failed: {message}");
+        }
+        if !self.completed {
+            anyhow::bail!(
+                "agent run stream ended before a terminal status was received; the run may still be in progress"
+            );
         }
         Ok(())
     }

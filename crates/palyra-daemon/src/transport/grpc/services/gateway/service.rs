@@ -23,7 +23,7 @@ use crate::{
         route_message::orchestration::handle_routed_route_message,
         run_stream::orchestration::{
             finalize_run_stream_after_provider_response, process_run_stream_message,
-            RunStreamMessageProcessingOutcome, RunStreamPostProviderOutcome,
+            RunStreamPostProviderOutcome,
         },
         service_authorization::{authorize_agent_management_action, authorize_message_action},
     },
@@ -1490,7 +1490,7 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                     let _ = sender.send(Err(status)).await;
                     return;
                 }
-                match process_run_stream_message(
+                if let Err(error) = process_run_stream_message(
                     &sender,
                     &mut stream,
                     &state_for_stream,
@@ -1508,26 +1508,21 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                 )
                 .await
                 {
-                    Ok(RunStreamMessageProcessingOutcome::Continue) => {}
-                    Ok(RunStreamMessageProcessingOutcome::Terminate) => {
-                        return;
-                    }
-                    Err(error) => {
-                        finalize_run_failure(RunFailureFinalization {
-                            sender: &sender,
-                            runtime_state: &state_for_stream,
-                            request_context: Some(&context_for_stream),
-                            active_session_id: active_session_id.as_deref(),
-                            run_state: &mut run_state,
-                            active_run_id: active_run_id.as_deref(),
-                            tape_seq: &mut tape_seq,
-                            reason: error.message(),
-                        })
-                        .await;
-                        let _ = sender.send(Err(error)).await;
-                        return;
-                    }
+                    finalize_run_failure(RunFailureFinalization {
+                        sender: &sender,
+                        runtime_state: &state_for_stream,
+                        request_context: Some(&context_for_stream),
+                        active_session_id: active_session_id.as_deref(),
+                        run_state: &mut run_state,
+                        active_run_id: active_run_id.as_deref(),
+                        tape_seq: &mut tape_seq,
+                        reason: error.message(),
+                    })
+                    .await;
+                    let _ = sender.send(Err(error)).await;
+                    return;
                 }
+                return;
             }
 
             if let Some(run_id) = active_run_id {

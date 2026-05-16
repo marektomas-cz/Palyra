@@ -86,12 +86,6 @@ pub(crate) enum RunStreamProviderResponseOutcome {
     Cancelled,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RunStreamMessageProcessingOutcome {
-    Continue,
-    Terminate,
-}
-
 fn run_stream_attachment_metadata(attachments: &[common_v1::MessageAttachment]) -> Vec<Value> {
     attachments
         .iter()
@@ -470,7 +464,7 @@ pub(crate) async fn process_run_stream_message(
     remaining_tool_budget: &mut u32,
     previous_session_run_id: &mut Option<String>,
     message: common_v1::RunStreamRequest,
-) -> Result<RunStreamMessageProcessingOutcome, Status> {
+) -> Result<(), Status> {
     let session_id = canonical_id(message.session_id, "session_id")?;
     let run_id = canonical_id(message.run_id, "run_id")?;
 
@@ -594,7 +588,7 @@ pub(crate) async fn process_run_stream_message(
                 tape_seq,
             )
             .await?;
-            return Ok(RunStreamMessageProcessingOutcome::Terminate);
+            return Ok(());
         }
         Ok(false) => {}
         Err(error) => return Err(error),
@@ -761,7 +755,7 @@ pub(crate) async fn process_run_stream_message(
                     None,
                 )
                 .await?;
-                return Ok(RunStreamMessageProcessingOutcome::Terminate);
+                return Ok(());
             }
         };
         append_agent_loop_tape_event(
@@ -824,7 +818,7 @@ pub(crate) async fn process_run_stream_message(
         {
             Ok(RunStreamProviderRequestOutcome::Completed(response)) => *response,
             Ok(RunStreamProviderRequestOutcome::Cancelled) => {
-                return Ok(RunStreamMessageProcessingOutcome::Terminate);
+                return Ok(());
             }
             Err(error) => {
                 terminate_run_stream_with_agent_loop_reason(
@@ -891,7 +885,7 @@ pub(crate) async fn process_run_stream_message(
                             provider_trace_ref,
                         )
                         .await?;
-                        return Ok(RunStreamMessageProcessingOutcome::Terminate);
+                        return Ok(());
                     }
                     append_agent_loop_tape_event(
                         runtime_state,
@@ -906,7 +900,15 @@ pub(crate) async fn process_run_stream_message(
                         ),
                     )
                     .await?;
-                    return Ok(RunStreamMessageProcessingOutcome::Continue);
+                    finalize_run_stream_after_provider_response(
+                        sender,
+                        runtime_state,
+                        run_state,
+                        run_id.as_str(),
+                        tape_seq,
+                    )
+                    .await?;
+                    return Ok(());
                 }
 
                 let tool_result_count = tool_result_messages.len();
@@ -942,10 +944,10 @@ pub(crate) async fn process_run_stream_message(
                     provider_trace_ref,
                 )
                 .await?;
-                return Ok(RunStreamMessageProcessingOutcome::Terminate);
+                return Ok(());
             }
             RunStreamProviderResponseOutcome::Cancelled => {
-                return Ok(RunStreamMessageProcessingOutcome::Terminate);
+                return Ok(());
             }
         }
     }
