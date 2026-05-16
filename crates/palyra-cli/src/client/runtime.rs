@@ -37,10 +37,11 @@ impl GatewayRunStream {
     }
 
     pub(crate) async fn close_request_stream(&self) -> Result<()> {
-        self.request_sender
-            .send(RunStreamRequestEnvelope::Close)
-            .await
-            .context("failed to close RunStream request stream")
+        match self.request_sender.send(RunStreamRequestEnvelope::Close).await {
+            Ok(()) => Ok(()),
+            Err(error) if matches!(error.0, RunStreamRequestEnvelope::Close) => Ok(()),
+            Err(error) => Err(error).context("failed to close RunStream request stream"),
+        }
     }
 
     pub(crate) async fn send_tool_approval_response(
