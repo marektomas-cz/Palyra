@@ -10,7 +10,8 @@ use thiserror::Error;
 use ulid::Ulid;
 
 use crate::routines::{
-    RoutineApprovalPolicy, RoutineDeliveryConfig, RoutineQuietHours, RoutineTriggerKind,
+    RoutineApprovalPolicy, RoutineDeliveryConfig, RoutineExecutionConfig, RoutineQuietHours,
+    RoutineTriggerKind,
 };
 
 const OBJECTIVES_DIRECTORY: &str = "objectives";
@@ -147,6 +148,8 @@ pub struct ObjectiveAutomationBinding {
     pub trigger_kind: RoutineTriggerKind,
     pub schedule_type: String,
     pub schedule_payload_json: String,
+    #[serde(default)]
+    pub execution: RoutineExecutionConfig,
     #[serde(default)]
     pub delivery: RoutineDeliveryConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -643,7 +646,7 @@ mod tests {
     };
     use crate::routines::{
         shadow_manual_schedule_payload_json, RoutineApprovalPolicy, RoutineDeliveryConfig,
-        RoutineTriggerKind,
+        RoutineExecutionConfig, RoutineTriggerKind,
     };
     use std::{env, fs, path::PathBuf};
     use ulid::Ulid;
@@ -688,6 +691,7 @@ mod tests {
                 trigger_kind: RoutineTriggerKind::Manual,
                 schedule_type: "at".to_owned(),
                 schedule_payload_json: shadow_manual_schedule_payload_json(),
+                execution: RoutineExecutionConfig::default(),
                 delivery: RoutineDeliveryConfig::default(),
                 quiet_hours: None,
                 cooldown_ms: 0,

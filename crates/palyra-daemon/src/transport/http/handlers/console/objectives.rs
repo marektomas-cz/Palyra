@@ -26,7 +26,8 @@ use crate::{
         default_outcome_from_cron_status, join_run_metadata, natural_language_schedule_preview,
         shadow_manual_schedule_payload_json, RoutineApprovalMode, RoutineApprovalPolicy,
         RoutineDeliveryConfig, RoutineDeliveryMode, RoutineDispatchMode, RoutineExecutionConfig,
-        RoutineQuietHours, RoutineRunMetadataUpsert, RoutineSilentPolicy, RoutineTriggerKind,
+        RoutineExecutionPosture, RoutineQuietHours, RoutineRunMetadataUpsert, RoutineSilentPolicy,
+        RoutineTriggerKind,
     },
     *,
 };
@@ -115,6 +116,8 @@ pub(crate) struct ConsoleObjectiveUpsertRequest {
     delivery_mode: Option<String>,
     #[serde(default)]
     delivery_channel: Option<String>,
+    #[serde(default)]
+    execution_posture: Option<String>,
     #[serde(default)]
     quiet_hours_start: Option<String>,
     #[serde(default)]
@@ -265,6 +268,11 @@ pub(crate) async fn console_objective_upsert_handler(
                 .expect("objective workspace path should normalize")
         });
     let schedule = resolve_objective_schedule(&payload, kind, state.cron_timezone_mode)?;
+    let execution = parse_objective_execution_config(
+        payload.execution_posture.as_deref(),
+        kind,
+        existing.as_ref(),
+    )?;
     let automation = ObjectiveAutomationBinding {
         routine_id: Some(
             existing
@@ -281,6 +289,7 @@ pub(crate) async fn console_objective_upsert_handler(
         trigger_kind: schedule.trigger_kind,
         schedule_type: schedule.schedule_type.as_str().to_owned(),
         schedule_payload_json: schedule.schedule_payload_json.clone(),
+        execution,
         delivery: parse_delivery(
             payload.delivery_mode.as_deref(),
             payload.delivery_channel.clone(),
@@ -691,6 +700,11 @@ async fn build_objective_view(
                 .unwrap_or_else(|_| json!({ "raw": objective.automation.schedule_payload_json })),
             "delivery_mode": objective.automation.delivery.mode.as_str(),
             "delivery_channel": objective.automation.delivery.channel,
+            "run_mode": objective.automation.execution.run_mode.as_str(),
+            "execution_posture": objective.automation.execution.execution_posture.as_str(),
+            "procedure_profile_id": objective.automation.execution.procedure_profile_id.clone(),
+            "skill_profile_id": objective.automation.execution.skill_profile_id.clone(),
+            "provider_profile_id": objective.automation.execution.provider_profile_id.clone(),
             "cooldown_ms": objective.automation.cooldown_ms,
             "approval_mode": objective.automation.approval_policy.mode.as_str(),
             "template_id": objective.automation.template_id,
@@ -961,7 +975,7 @@ fn persist_objective_routine_metadata(
         routine_id,
         trigger_kind: automation.trigger_kind,
         trigger_payload_json: automation.schedule_payload_json.clone(),
-        execution: RoutineExecutionConfig::default(),
+        execution: automation.execution.clone(),
         delivery: automation.delivery.clone(),
         quiet_hours: automation.quiet_hours.clone(),
         cooldown_ms: automation.cooldown_ms,
@@ -1058,7 +1072,7 @@ async fn trigger_objective_now(
                 trigger_reason: Some("objective fire".to_owned()),
                 trigger_payload_json: json!({ "source": "objective" }).to_string(),
                 trigger_dedupe_key: None,
-                execution: RoutineExecutionConfig::default(),
+                execution: objective.automation.execution.clone(),
                 delivery: objective.automation.delivery.clone(),
                 dispatch_mode: RoutineDispatchMode::Normal,
                 source_run_id: None,
@@ -1656,6 +1670,40 @@ fn parse_objective_priority(value: Option<&str>) -> Result<ObjectivePriority, Re
 }
 
 #[allow(clippy::result_large_err)]
+fn parse_objective_execution_config(
+    execution_posture: Option<&str>,
+    kind: ObjectiveKind,
+    existing: Option<&ObjectiveRecord>,
+) -> Result<RoutineExecutionConfig, Response> {
+    let mut execution =
+        existing.map(|entry| entry.automation.execution.clone()).unwrap_or_else(|| {
+            RoutineExecutionConfig {
+                execution_posture: default_objective_execution_posture(kind),
+                ..RoutineExecutionConfig::default()
+            }
+        });
+    execution.execution_posture =
+        match execution_posture.map(str::trim).filter(|value| !value.is_empty()) {
+            Some(value) => RoutineExecutionPosture::from_str(value).ok_or_else(|| {
+                runtime_status_response(tonic::Status::invalid_argument(
+                    "execution_posture must be one of standard|sensitive_tools",
+                ))
+            })?,
+            None => execution.execution_posture,
+        };
+    Ok(execution)
+}
+
+fn default_objective_execution_posture(kind: ObjectiveKind) -> RoutineExecutionPosture {
+    match kind {
+        ObjectiveKind::Heartbeat | ObjectiveKind::StandingOrder => {
+            RoutineExecutionPosture::SensitiveTools
+        }
+        ObjectiveKind::Objective | ObjectiveKind::Program => RoutineExecutionPosture::Standard,
+    }
+}
+
+#[allow(clippy::result_large_err)]
 fn parse_approach_kind(value: &str) -> Result<ObjectiveApproachKind, Response> {
     match value.trim().to_ascii_lowercase().as_str() {
         "attempted" => Ok(ObjectiveApproachKind::Attempted),
@@ -2008,10 +2056,11 @@ fn internal_console_error(error: anyhow::Error) -> Response {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_lifecycle_workspace_projection, compute_objective_health, initial_objective_state,
-        managed_entry, normalize_budget, normalize_lifecycle_reason, objective_attempts_for_view,
-        objective_record_block, owner_objective_block_updates, parse_objective_kind,
-        parse_objective_priority, preserved_run_from_objective_attempt,
+        apply_lifecycle_workspace_projection, compute_objective_health,
+        default_objective_execution_posture, initial_objective_state, managed_entry,
+        normalize_budget, normalize_lifecycle_reason, objective_attempts_for_view,
+        objective_record_block, owner_objective_block_updates, parse_objective_execution_config,
+        parse_objective_kind, parse_objective_priority, preserved_run_from_objective_attempt,
         reconcile_objective_attempts_with_latest_run, render_objective_summary_markdown,
         ConsoleObjectiveBudgetPayload,
     };
@@ -2024,7 +2073,7 @@ mod tests {
     };
     use crate::routines::{
         shadow_manual_schedule_payload_json, RoutineApprovalPolicy, RoutineDeliveryConfig,
-        RoutineTriggerKind,
+        RoutineExecutionConfig, RoutineExecutionPosture, RoutineTriggerKind,
     };
     use serde_json::json;
     use ulid::Ulid;
@@ -2059,6 +2108,7 @@ mod tests {
                 trigger_kind: RoutineTriggerKind::Schedule,
                 schedule_type: "every".to_owned(),
                 schedule_payload_json: shadow_manual_schedule_payload_json(),
+                execution: RoutineExecutionConfig::default(),
                 delivery: RoutineDeliveryConfig::default(),
                 quiet_hours: None,
                 cooldown_ms: 0,
@@ -2091,6 +2141,43 @@ mod tests {
             parse_objective_priority(None).expect("priority should default"),
             ObjectivePriority::Normal
         );
+    }
+
+    #[test]
+    fn heartbeat_and_standing_order_objectives_default_to_sensitive_tools() {
+        assert_eq!(
+            default_objective_execution_posture(ObjectiveKind::Heartbeat),
+            RoutineExecutionPosture::SensitiveTools
+        );
+        assert_eq!(
+            default_objective_execution_posture(ObjectiveKind::StandingOrder),
+            RoutineExecutionPosture::SensitiveTools
+        );
+        assert_eq!(
+            default_objective_execution_posture(ObjectiveKind::Objective),
+            RoutineExecutionPosture::Standard
+        );
+    }
+
+    #[test]
+    fn objective_execution_posture_can_be_explicitly_standard() {
+        let execution =
+            parse_objective_execution_config(Some("standard"), ObjectiveKind::Heartbeat, None)
+                .expect("explicit standard posture should parse");
+
+        assert_eq!(execution.execution_posture, RoutineExecutionPosture::Standard);
+    }
+
+    #[test]
+    fn objective_execution_posture_preserves_existing_value_when_omitted() {
+        let mut existing = sample_objective();
+        existing.automation.execution.execution_posture = RoutineExecutionPosture::Standard;
+
+        let execution =
+            parse_objective_execution_config(None, ObjectiveKind::Heartbeat, Some(&existing))
+                .expect("omitted posture should preserve existing value");
+
+        assert_eq!(execution.execution_posture, RoutineExecutionPosture::Standard);
     }
 
     #[test]

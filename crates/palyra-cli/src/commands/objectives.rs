@@ -4,7 +4,7 @@ use serde_json::{json, Map, Value};
 use crate::cli::{
     ObjectiveKindArg, ObjectivePriorityArg, ObjectiveScheduleTypeArg, ObjectiveStateArg,
     ObjectiveUpsertCommandArgs, ObjectivesCommand, RoutineApprovalModeArg, RoutineDeliveryModeArg,
-    RoutinePreviewTimezoneArg,
+    RoutineExecutionPostureArg, RoutinePreviewTimezoneArg,
 };
 use crate::commands::routines::json_optional_string_at;
 use crate::*;
@@ -74,6 +74,7 @@ pub(crate) async fn run_objectives_async(command: ObjectivesCommand) -> Result<(
                 schedule,
                 delivery_mode,
                 delivery_channel,
+                execution_posture,
                 quiet_hours_start,
                 quiet_hours_end,
                 quiet_hours_timezone,
@@ -105,6 +106,7 @@ pub(crate) async fn run_objectives_async(command: ObjectivesCommand) -> Result<(
                 schedule,
                 delivery_mode,
                 delivery_channel,
+                execution_posture,
                 quiet_hours_start,
                 quiet_hours_end,
                 quiet_hours_timezone,
@@ -233,6 +235,7 @@ struct ObjectiveUpsertArgs {
     schedule: Option<String>,
     delivery_mode: RoutineDeliveryModeArg,
     delivery_channel: Option<String>,
+    execution_posture: Option<RoutineExecutionPostureArg>,
     quiet_hours_start: Option<String>,
     quiet_hours_end: Option<String>,
     quiet_hours_timezone: Option<RoutinePreviewTimezoneArg>,
@@ -296,6 +299,11 @@ fn build_objective_upsert_payload(args: ObjectiveUpsertArgs) -> Result<Map<Strin
     payload
         .insert("delivery_mode".to_owned(), Value::String(args.delivery_mode.as_str().to_owned()));
     insert_optional_string(&mut payload, "delivery_channel", args.delivery_channel);
+    insert_optional_string(
+        &mut payload,
+        "execution_posture",
+        args.execution_posture.map(|value| value.as_str().to_owned()),
+    );
     insert_optional_string(&mut payload, "quiet_hours_start", args.quiet_hours_start);
     insert_optional_string(&mut payload, "quiet_hours_end", args.quiet_hours_end);
     insert_optional_string(
@@ -453,6 +461,7 @@ mod tests {
             schedule: Some("15m".to_owned()),
             delivery_mode: RoutineDeliveryModeArg::SameChannel,
             delivery_channel: None,
+            execution_posture: Some(RoutineExecutionPostureArg::SensitiveTools),
             quiet_hours_start: None,
             quiet_hours_end: None,
             quiet_hours_timezone: None,
@@ -462,6 +471,10 @@ mod tests {
         .expect("duration schedule should be accepted");
 
         assert_eq!(payload.get("every_interval_ms").and_then(Value::as_u64), Some(900_000));
+        assert_eq!(
+            payload.get("execution_posture").and_then(Value::as_str),
+            Some("sensitive_tools")
+        );
     }
 
     #[test]

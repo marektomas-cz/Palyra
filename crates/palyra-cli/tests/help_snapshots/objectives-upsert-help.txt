@@ -47,6 +47,8 @@ Options:
           [default: same-channel] [possible values: same-channel, specific-channel, local-only, logs-only]
       --delivery-channel <DELIVERY_CHANNEL>
 
+      --execution-posture <EXECUTION_POSTURE>
+          [possible values: standard, sensitive-tools]
       --quiet-hours-start <QUIET_HOURS_START>
 
       --quiet-hours-end <QUIET_HOURS_END>

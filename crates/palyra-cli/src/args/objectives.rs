@@ -1,6 +1,9 @@
 use clap::{Args, Subcommand, ValueEnum};
 
-use super::routines::{RoutineApprovalModeArg, RoutineDeliveryModeArg, RoutinePreviewTimezoneArg};
+use super::routines::{
+    RoutineApprovalModeArg, RoutineDeliveryModeArg, RoutineExecutionPostureArg,
+    RoutinePreviewTimezoneArg,
+};
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum ObjectivesCommand {
@@ -136,6 +139,8 @@ pub struct ObjectiveUpsertCommandArgs {
     pub delivery_mode: RoutineDeliveryModeArg,
     #[arg(long)]
     pub delivery_channel: Option<String>,
+    #[arg(long, value_enum)]
+    pub execution_posture: Option<RoutineExecutionPostureArg>,
     #[arg(long)]
     pub quiet_hours_start: Option<String>,
     #[arg(long)]
