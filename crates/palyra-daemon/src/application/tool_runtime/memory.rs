@@ -1088,84 +1088,6 @@ fn parse_optional_session_search_limit(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_session_search_limits_match_schema_bounds() {
-        assert_eq!(
-            parse_optional_session_search_limit(
-                Some(&serde_json::json!(0)),
-                "window_before",
-                0,
-                8,
-            )
-            .expect("zero window should be valid"),
-            Some(0)
-        );
-        assert_eq!(
-            parse_optional_session_search_limit(Some(&serde_json::json!(0)), "top_k", 1, 24)
-                .expect("top_k should clamp to minimum"),
-            Some(1)
-        );
-        assert_eq!(
-            parse_optional_session_search_limit(
-                Some(&serde_json::json!(99)),
-                "window_after",
-                0,
-                8,
-            )
-            .expect("window should clamp to maximum"),
-            Some(8)
-        );
-        assert_eq!(
-            parse_optional_session_search_limit(None, "top_k", 1, 24)
-                .expect("absent limit should use caller default"),
-            None
-        );
-        let error = parse_optional_session_search_limit(
-            Some(&serde_json::json!("2")),
-            "window_before",
-            0,
-            8,
-        )
-        .expect_err("string limits should be rejected");
-
-        assert!(error.contains("window_before must be an integer"));
-    }
-
-    #[test]
-    fn retain_visibility_distinguishes_session_from_principal_scope() {
-        let mut outcome = MemoryLifecycleRetainOutcome {
-            status: MemoryLifecycleStatus::Retained,
-            reason: "memory retained in lifecycle store".to_owned(),
-            scope: MemoryLifecycleScope::Session,
-            trust_label: "retrieved_memory".to_owned(),
-            durable_memory_write: true,
-            item: None,
-            matched_memory_id: None,
-            write_classification: None,
-            provenance: serde_json::json!({}),
-        };
-
-        let session_visibility = memory_lifecycle_visibility_payload(&outcome);
-        assert_eq!(session_visibility["cross_session"], false);
-        assert!(session_visibility["claim_boundary"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("do not claim"));
-
-        outcome.scope = MemoryLifecycleScope::Principal;
-        let principal_visibility = memory_lifecycle_visibility_payload(&outcome);
-        assert_eq!(principal_visibility["cross_session"], true);
-        assert!(principal_visibility["claim_boundary"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("future sessions"));
-    }
-}
-
 fn required_string_field(parsed: &Map<String, Value>, field: &str) -> Result<String, String> {
     parsed
         .get(field)
@@ -1541,4 +1463,82 @@ fn optional_trimmed_string(value: Option<&Value>) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_session_search_limits_match_schema_bounds() {
+        assert_eq!(
+            parse_optional_session_search_limit(
+                Some(&serde_json::json!(0)),
+                "window_before",
+                0,
+                8,
+            )
+            .expect("zero window should be valid"),
+            Some(0)
+        );
+        assert_eq!(
+            parse_optional_session_search_limit(Some(&serde_json::json!(0)), "top_k", 1, 24)
+                .expect("top_k should clamp to minimum"),
+            Some(1)
+        );
+        assert_eq!(
+            parse_optional_session_search_limit(
+                Some(&serde_json::json!(99)),
+                "window_after",
+                0,
+                8,
+            )
+            .expect("window should clamp to maximum"),
+            Some(8)
+        );
+        assert_eq!(
+            parse_optional_session_search_limit(None, "top_k", 1, 24)
+                .expect("absent limit should use caller default"),
+            None
+        );
+        let error = parse_optional_session_search_limit(
+            Some(&serde_json::json!("2")),
+            "window_before",
+            0,
+            8,
+        )
+        .expect_err("string limits should be rejected");
+
+        assert!(error.contains("window_before must be an integer"));
+    }
+
+    #[test]
+    fn retain_visibility_distinguishes_session_from_principal_scope() {
+        let mut outcome = MemoryLifecycleRetainOutcome {
+            status: MemoryLifecycleStatus::Retained,
+            reason: "memory retained in lifecycle store".to_owned(),
+            scope: MemoryLifecycleScope::Session,
+            trust_label: "retrieved_memory".to_owned(),
+            durable_memory_write: true,
+            item: None,
+            matched_memory_id: None,
+            write_classification: None,
+            provenance: serde_json::json!({}),
+        };
+
+        let session_visibility = memory_lifecycle_visibility_payload(&outcome);
+        assert_eq!(session_visibility["cross_session"], false);
+        assert!(session_visibility["claim_boundary"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("do not claim"));
+
+        outcome.scope = MemoryLifecycleScope::Principal;
+        let principal_visibility = memory_lifecycle_visibility_payload(&outcome);
+        assert_eq!(principal_visibility["cross_session"], true);
+        assert!(principal_visibility["claim_boundary"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("future sessions"));
+    }
 }
