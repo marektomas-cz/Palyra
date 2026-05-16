@@ -3893,14 +3893,13 @@ fn resolve_prompt_input(prompt: Option<String>, prompt_stdin: bool) -> Result<St
         let mut input = Vec::new();
         std::io::stdin()
             .lock()
-            .read_until(b'\n', &mut input)
+            .read_to_end(&mut input)
             .context("failed to read prompt from stdin")?;
-        let input = decode_prompt_stdin_bytes(input.as_slice())?;
-        let prompt = input.trim_end_matches(['\r', '\n']).trim();
+        let prompt = normalize_prompt_stdin_bytes(input.as_slice())?;
         if prompt.is_empty() {
             anyhow::bail!("prompt from stdin is empty; pipe text into stdin or use --prompt");
         }
-        return Ok(prompt.to_owned());
+        return Ok(prompt);
     }
 
     let prompt = prompt.context("missing prompt: use --prompt or --prompt-stdin")?;
@@ -3909,6 +3908,11 @@ fn resolve_prompt_input(prompt: Option<String>, prompt_stdin: bool) -> Result<St
         anyhow::bail!("prompt cannot be empty");
     }
     Ok(prompt.to_owned())
+}
+
+fn normalize_prompt_stdin_bytes(input: &[u8]) -> Result<String> {
+    let input = decode_prompt_stdin_bytes(input)?;
+    Ok(input.trim_end_matches(['\r', '\n']).trim().to_owned())
 }
 
 fn decode_prompt_stdin_bytes(input: &[u8]) -> Result<String> {
@@ -4005,7 +4009,7 @@ fn decode_windows_code_page(code_page: u32, input: &[u8]) -> Option<String> {
 
 #[cfg(test)]
 mod prompt_stdin_decode_tests {
-    use super::decode_prompt_stdin_bytes;
+    use super::{decode_prompt_stdin_bytes, normalize_prompt_stdin_bytes};
 
     #[test]
     fn prompt_stdin_decode_accepts_utf8_czech_text() {
@@ -4013,6 +4017,16 @@ mod prompt_stdin_decode_tests {
             .expect("UTF-8 prompt should decode");
 
         assert_eq!(decoded, "Nastav proveď\n");
+    }
+
+    #[test]
+    fn prompt_stdin_normalization_preserves_multiline_instructions() {
+        let prompt = normalize_prompt_stdin_bytes(
+            "Intro line\r\n1. Preserve this rule\r\n2. Preserve this rule too\r\n".as_bytes(),
+        )
+        .expect("multiline prompt should normalize");
+
+        assert_eq!(prompt, "Intro line\r\n1. Preserve this rule\r\n2. Preserve this rule too");
     }
 
     #[cfg(windows)]
