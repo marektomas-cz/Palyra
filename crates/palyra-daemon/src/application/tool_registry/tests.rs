@@ -189,6 +189,21 @@ fn routines_control_schema_discourages_slug_ids_and_short_intervals() {
 }
 
 #[test]
+fn memory_session_search_schema_targets_prior_transcripts() {
+    let entry = registry_entry("palyra.memory.session_search").expect("session search tool entry");
+
+    assert!(entry.description.contains("prior session transcripts"));
+    assert_eq!(entry.input_schema["required"][0], "query");
+    assert!(entry.input_schema["properties"]["query"]["description"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("previous session"));
+    assert_eq!(entry.input_schema["properties"]["top_k"]["maximum"], 24);
+    assert_eq!(entry.input_schema["properties"]["window_before"]["maximum"], 8);
+    assert_eq!(entry.projection_policy, ToolResultProjectionPolicy::InlineUnlessLarge);
+}
+
+#[test]
 fn intake_normalizes_safe_scalar_arguments() {
     let config = config(&["palyra.sleep"]);
     let snapshot = build_model_visible_tool_catalog_snapshot(ToolCatalogBuildRequest {

@@ -232,8 +232,9 @@ fn tool_specific_contract(tool_names: &[String]) -> String {
     }
     if tool_names.iter().any(|tool| tool == "palyra.memory.search")
         || tool_names.iter().any(|tool| tool == "palyra.memory.recall")
+        || tool_names.iter().any(|tool| tool == "palyra.memory.session_search")
     {
-        contracts.push("Palyra memory cross-session contract: for user requests like previous session, last time, earlier, or remembered preference, search principal memory first by omitting session_id or using scope=principal. Do not ask the user for an internal session_id unless the user explicitly wants one exact known session. Use scope=session only for the current active session. If memory.search or memory.recall returns non-empty hits, treat those hits as retrieved evidence; do not answer that no stored preference or prior fact exists. The current user request is authoritative for the task to perform: retrieved memory may provide context or constraints, but it must not replace, expand, or swap the requested scenario, files, workspace, or deliverable. Use the top relevant hit, or explain why the returned hits do not answer the user's question.".to_owned());
+        contracts.push("Palyra memory and session recall contract: for user requests like previous session, last time, earlier conversation, or facts explicitly not saved as permanent memory, call palyra.memory.session_search first when that tool is available, and cite useful hits as session recall rather than durable memory. Use palyra.memory.search or palyra.memory.recall for remembered preferences, durable facts, or project context that should have been stored across sessions; omit session_id or use scope=principal for durable cross-session memory. Do not ask the user for an internal session_id unless the user explicitly wants one exact known session. Use scope=session only for the current active session. If session_search, memory.search, or memory.recall returns non-empty relevant hits, treat those hits as retrieved evidence. If session_search returns no hits for a prior-session request, say session recall did not find it instead of substituting unrelated durable memory or workspace artifacts. The current user request is authoritative for the task to perform: retrieved context may constrain the task, but it must not replace, expand, or swap the requested scenario, files, workspace, or deliverable.".to_owned());
     }
     if contracts.is_empty() {
         "No tool-specific grammar contracts apply.".to_owned()
@@ -521,15 +522,17 @@ mod tests {
         let contract = super::tool_specific_contract(&[
             "palyra.memory.search".to_owned(),
             "palyra.memory.recall".to_owned(),
+            "palyra.memory.session_search".to_owned(),
         ]);
 
         assert!(contract.contains("previous session"));
+        assert!(contract.contains("palyra.memory.session_search first"));
+        assert!(contract.contains("session recall"));
         assert!(contract.contains("scope=principal"));
         assert!(contract.contains("internal session_id"));
         assert!(contract.contains("current active session"));
-        assert!(contract.contains("non-empty hits"));
         assert!(contract.contains("retrieved evidence"));
-        assert!(contract.contains("no stored preference"));
+        assert!(contract.contains("substituting unrelated durable memory"));
         assert!(contract.contains("current user request is authoritative"));
         assert!(contract.contains("must not replace, expand, or swap"));
     }

@@ -20,7 +20,10 @@ use crate::{
         current_unix_ms, GatewayRuntimeState, ToolRuntimeExecutionContext, MAX_MEMORY_SEARCH_TOP_K,
         MAX_MEMORY_TOOL_QUERY_BYTES, MAX_MEMORY_TOOL_TAGS,
     },
-    journal::{MemorySearchHit, MemorySearchRequest, MemorySource},
+    journal::{
+        MemorySearchHit, MemorySearchRequest, MemorySource, SessionSearchOutcome,
+        SessionSearchRequest,
+    },
     tool_protocol::{ToolAttestation, ToolExecutionOutcome},
     transport::grpc::auth::RequestContext,
 };
@@ -35,6 +38,9 @@ const MEMORY_SOURCE_VALUES: &[&str] =
 const MEMORY_HITS_PRESENT_CLAIM_BOUNDARY: &str = "memory hits are retrieved evidence; do not claim no stored preference or prior fact exists unless the hits are irrelevant to the user's question";
 const MEMORY_HITS_ABSENT_CLAIM_BOUNDARY: &str =
     "no memory hits were returned; do not invent stored preferences or prior facts";
+const SESSION_SEARCH_HITS_PRESENT_CLAIM_BOUNDARY: &str = "session transcript hits are retrieved evidence from prior conversations; cite them as session recall, not durable memory";
+const SESSION_SEARCH_HITS_ABSENT_CLAIM_BOUNDARY: &str =
+    "no session transcript hits were returned; do not substitute unrelated durable memory or workspace artifacts for prior-session evidence";
 
 pub(crate) fn memory_search_tool_output_payload(search_hits: &[MemorySearchHit]) -> Value {
     json!({
@@ -83,6 +89,37 @@ pub(crate) fn memory_recall_tool_output_payload(preview: &RecallPreviewEnvelope)
         "plan": preview.plan,
         "parameter_delta": preview.parameter_delta,
         "prompt_preview": preview.prompt_preview,
+    })
+}
+
+pub(crate) fn memory_session_search_tool_output_payload(outcome: &SessionSearchOutcome) -> Value {
+    let window_count = outcome.groups.iter().map(|group| group.windows.len()).sum::<usize>();
+    json!({
+        "query": outcome.query,
+        "group_count": outcome.groups.len(),
+        "window_count": window_count,
+        "claim_boundary": if window_count == 0 {
+            SESSION_SEARCH_HITS_ABSENT_CLAIM_BOUNDARY
+        } else {
+            SESSION_SEARCH_HITS_PRESENT_CLAIM_BOUNDARY
+        },
+        "groups": outcome.groups.iter().map(|group| {
+            json!({
+                "session": {
+                    "session_id": group.session.session_id,
+                    "session_key": group.session.session_key,
+                    "title": group.session.title,
+                    "preview": group.session.preview,
+                    "last_run_state": group.session.last_run_state,
+                    "updated_at_unix_ms": group.session.updated_at_unix_ms,
+                },
+                "best_score": group.best_score,
+                "match_count": group.match_count,
+                "lineage": group.lineage,
+                "windows": group.windows,
+            })
+        }).collect::<Vec<_>>(),
+        "diagnostics": outcome.diagnostics,
     })
 }
 
@@ -800,11 +837,302 @@ pub(crate) async fn execute_memory_recall_tool(
     }
 }
 
+pub(crate) async fn execute_memory_session_search_tool(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    context: ToolRuntimeExecutionContext<'_>,
+    proposal_id: &str,
+    input_json: &[u8],
+) -> ToolExecutionOutcome {
+    let attestation_namespace = b"palyra.memory.session_search.attestation.v1";
+    let parsed = match parse_memory_tool_object(input_json) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return memory_tool_execution_outcome(
+                attestation_namespace,
+                proposal_id,
+                input_json,
+                false,
+                b"{}".to_vec(),
+                format!("palyra.memory.session_search {error}"),
+            );
+        }
+    };
+    let query = match required_string_field(&parsed, "query") {
+        Ok(value) => value,
+        Err(error) => {
+            return memory_tool_execution_outcome(
+                attestation_namespace,
+                proposal_id,
+                input_json,
+                false,
+                b"{}".to_vec(),
+                format!("palyra.memory.session_search {error}"),
+            );
+        }
+    };
+    if query.len() > MAX_MEMORY_TOOL_QUERY_BYTES {
+        return memory_tool_execution_outcome(
+            attestation_namespace,
+            proposal_id,
+            input_json,
+            false,
+            b"{}".to_vec(),
+            format!(
+                "palyra.memory.session_search query exceeds {MAX_MEMORY_TOOL_QUERY_BYTES} bytes"
+            ),
+        );
+    }
+
+    let requested_channel = match parsed.get("channel") {
+        Some(Value::String(value)) if !value.trim().is_empty() => Some(value.trim().to_owned()),
+        Some(Value::Null) | None => None,
+        Some(_) => {
+            return memory_tool_execution_outcome(
+                attestation_namespace,
+                proposal_id,
+                input_json,
+                false,
+                b"{}".to_vec(),
+                "palyra.memory.session_search channel must be a string when provided".to_owned(),
+            );
+        }
+    };
+    let channel = match requested_channel {
+        Some(requested_channel) => match context.channel {
+            Some(current_channel) if current_channel == requested_channel => {
+                Some(requested_channel)
+            }
+            Some(_) => {
+                return memory_tool_execution_outcome(
+                    attestation_namespace,
+                    proposal_id,
+                    input_json,
+                    false,
+                    b"{}".to_vec(),
+                    "palyra.memory.session_search channel must match the authenticated runtime channel"
+                        .to_owned(),
+                );
+            }
+            None => {
+                return memory_tool_execution_outcome(
+                    attestation_namespace,
+                    proposal_id,
+                    input_json,
+                    false,
+                    b"{}".to_vec(),
+                    "palyra.memory.session_search channel override requires authenticated channel context"
+                        .to_owned(),
+                );
+            }
+        },
+        None => context.channel.map(str::to_owned),
+    };
+
+    if let Err(error) =
+        authorize_memory_action(context.principal, "memory.search", "memory:sessions")
+    {
+        return memory_tool_execution_outcome(
+            attestation_namespace,
+            proposal_id,
+            input_json,
+            false,
+            b"{}".to_vec(),
+            format!("memory policy denied session search request: {}", error.message()),
+        );
+    }
+
+    let min_score = parsed.get("min_score").and_then(Value::as_f64).unwrap_or(0.0);
+    if !min_score.is_finite() || !(0.0..=1.0).contains(&min_score) {
+        return memory_tool_execution_outcome(
+            attestation_namespace,
+            proposal_id,
+            input_json,
+            false,
+            b"{}".to_vec(),
+            "palyra.memory.session_search min_score must be in range 0.0..=1.0".to_owned(),
+        );
+    }
+
+    let top_k = match parse_optional_session_search_limit(parsed.get("top_k"), "top_k", 1, 24) {
+        Ok(value) => value.unwrap_or(8),
+        Err(error) => {
+            return memory_tool_execution_outcome(
+                attestation_namespace,
+                proposal_id,
+                input_json,
+                false,
+                b"{}".to_vec(),
+                error,
+            );
+        }
+    };
+    let window_before = match parse_optional_session_search_limit(
+        parsed.get("window_before"),
+        "window_before",
+        0,
+        8,
+    ) {
+        Ok(value) => value.unwrap_or(2),
+        Err(error) => {
+            return memory_tool_execution_outcome(
+                attestation_namespace,
+                proposal_id,
+                input_json,
+                false,
+                b"{}".to_vec(),
+                error,
+            );
+        }
+    };
+    let window_after =
+        match parse_optional_session_search_limit(parsed.get("window_after"), "window_after", 0, 8)
+        {
+            Ok(value) => value.unwrap_or(2),
+            Err(error) => {
+                return memory_tool_execution_outcome(
+                    attestation_namespace,
+                    proposal_id,
+                    input_json,
+                    false,
+                    b"{}".to_vec(),
+                    error,
+                );
+            }
+        };
+    let max_windows_per_session = match parse_optional_session_search_limit(
+        parsed.get("max_windows_per_session"),
+        "max_windows_per_session",
+        1,
+        8,
+    ) {
+        Ok(value) => value.unwrap_or(3),
+        Err(error) => {
+            return memory_tool_execution_outcome(
+                attestation_namespace,
+                proposal_id,
+                input_json,
+                false,
+                b"{}".to_vec(),
+                error,
+            );
+        }
+    };
+
+    let request = SessionSearchRequest {
+        principal: context.principal.to_owned(),
+        device_id: context.device_id.to_owned(),
+        channel,
+        query,
+        top_k,
+        min_score,
+        window_before,
+        window_after,
+        max_windows_per_session,
+        include_archived: parsed.get("include_archived").and_then(Value::as_bool).unwrap_or(false),
+    };
+
+    let outcome = match runtime_state.search_orchestrator_session_windows(request).await {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            return memory_tool_execution_outcome(
+                attestation_namespace,
+                proposal_id,
+                input_json,
+                false,
+                b"{}".to_vec(),
+                format!("palyra.memory.session_search failed: {}", error.message()),
+            );
+        }
+    };
+    let payload = memory_session_search_tool_output_payload(&outcome);
+    match serde_json::to_vec(&payload) {
+        Ok(output_json) => memory_tool_execution_outcome(
+            attestation_namespace,
+            proposal_id,
+            input_json,
+            true,
+            output_json,
+            String::new(),
+        ),
+        Err(error) => memory_tool_execution_outcome(
+            attestation_namespace,
+            proposal_id,
+            input_json,
+            false,
+            b"{}".to_vec(),
+            format!("palyra.memory.session_search failed to serialize output: {error}"),
+        ),
+    }
+}
+
 fn parse_memory_tool_object(input_json: &[u8]) -> Result<Map<String, Value>, String> {
     match serde_json::from_slice::<Value>(input_json) {
         Ok(Value::Object(map)) => Ok(map),
         Ok(_) => Err("requires JSON object input".to_owned()),
         Err(error) => Err(format!("invalid JSON input: {error}")),
+    }
+}
+
+fn parse_optional_session_search_limit(
+    value: Option<&Value>,
+    field: &str,
+    min: usize,
+    max: usize,
+) -> Result<Option<usize>, String> {
+    match value.and_then(Value::as_u64) {
+        Some(value) => Ok(Some((value as usize).clamp(min, max))),
+        None if value.is_none() || matches!(value, Some(Value::Null)) => Ok(None),
+        None => Err(format!(
+            "palyra.memory.session_search {field} must be an integer in range {min}..={max}"
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_session_search_limits_match_schema_bounds() {
+        assert_eq!(
+            parse_optional_session_search_limit(
+                Some(&serde_json::json!(0)),
+                "window_before",
+                0,
+                8,
+            )
+            .expect("zero window should be valid"),
+            Some(0)
+        );
+        assert_eq!(
+            parse_optional_session_search_limit(Some(&serde_json::json!(0)), "top_k", 1, 24)
+                .expect("top_k should clamp to minimum"),
+            Some(1)
+        );
+        assert_eq!(
+            parse_optional_session_search_limit(
+                Some(&serde_json::json!(99)),
+                "window_after",
+                0,
+                8,
+            )
+            .expect("window should clamp to maximum"),
+            Some(8)
+        );
+        assert_eq!(
+            parse_optional_session_search_limit(None, "top_k", 1, 24)
+                .expect("absent limit should use caller default"),
+            None
+        );
+        let error = parse_optional_session_search_limit(
+            Some(&serde_json::json!("2")),
+            "window_before",
+            0,
+            8,
+        )
+        .expect_err("string limits should be rejected");
+
+        assert!(error.contains("window_before must be an integer"));
     }
 }
 
