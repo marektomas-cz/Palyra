@@ -1588,7 +1588,7 @@ pub fn natural_language_schedule_preview(
 
     Err(RoutineRegistryError::InvalidField {
         field: "phrase",
-        message: "supported phrases include 'in 30 minutes', 'za 30 minut', 'every 40 seconds', 'every 2h', 'every weekday at 9', 'každý pracovní den v 9', or an RFC3339 timestamp".to_owned(),
+        message: "supported phrases include 'in 30 minutes', 'za 30 minut', 'every 40 seconds', 'every 2h', 'každých 30 sekund', 'every weekday at 9', 'každý pracovní den v 9', or an RFC3339 timestamp".to_owned(),
     })
 }
 
@@ -2199,7 +2199,8 @@ fn parse_interval_phrase(
     phrase: &str,
 ) -> Result<Option<ParsedNaturalLanguageSchedule>, RoutineRegistryError> {
     let normalized = normalize_phrase(phrase);
-    let tokens = normalized.split_whitespace().collect::<Vec<_>>();
+    let (interval_phrase, bounded_suffix) = split_bounded_duration_suffix(normalized.as_str());
+    let tokens = interval_phrase.split_whitespace().collect::<Vec<_>>();
     let (quantity, unit) = match tokens.as_slice() {
         ["every", unit @ ("minute" | "minutes")] => ("1", *unit),
         ["every", compact] => split_compact_duration(compact).unwrap_or(("", "")),
@@ -2211,12 +2212,25 @@ fn parse_interval_phrase(
             split_compact_duration(compact).unwrap_or(("", ""))
         }
         ["každé", quantity, unit] | ["kazde", quantity, unit] => (*quantity, *unit),
+        ["každých", compact] | ["kazdych", compact] => {
+            split_compact_duration(compact).unwrap_or(("", ""))
+        }
+        ["každých", quantity, unit] | ["kazdych", quantity, unit] => (*quantity, *unit),
         _ => return Ok(None),
     };
     if quantity.is_empty() || unit.is_empty() {
         return Ok(None);
     }
     let interval_ms = parse_duration_to_ms(quantity, unit, "phrase")?;
+    if let Some(suffix) = bounded_suffix {
+        return Err(RoutineRegistryError::InvalidField {
+            field: "phrase",
+            message: format!(
+                "bounded recurring duration '{suffix}' is not supported; parsed the interval part as every {}. Use 'každých 30 sekund' or 'every 30 seconds' for an unbounded repeating schedule, then disable or delete the job after the desired duration.",
+                humanize_duration(interval_ms)
+            ),
+        });
+    }
     if interval_ms < MIN_EVERY_INTERVAL_MS {
         return Err(RoutineRegistryError::InvalidField {
             field: "phrase",
@@ -2237,6 +2251,16 @@ fn parse_interval_phrase(
             spec: Some(cron_v1::schedule::Spec::Every(cron_v1::EverySchedule { interval_ms })),
         },
     }))
+}
+
+fn split_bounded_duration_suffix(normalized: &str) -> (&str, Option<&str>) {
+    for marker in [" po dobu ", " for "] {
+        if let Some(index) = normalized.find(marker) {
+            let suffix_start = index.saturating_add(1);
+            return (normalized[..index].trim_end(), Some(normalized[suffix_start..].trim()));
+        }
+    }
+    (normalized, None)
 }
 
 fn parse_weekday_phrase(
@@ -2384,6 +2408,8 @@ fn humanize_duration(duration_ms: u64) -> String {
         format!("{} hour(s)", duration_ms / (60 * 60 * 1_000))
     } else if duration_ms.is_multiple_of(60 * 1_000) {
         format!("{} minute(s)", duration_ms / (60 * 1_000))
+    } else if duration_ms.is_multiple_of(1_000) {
+        format!("{} second(s)", duration_ms / 1_000)
     } else {
         format!("{} ms", duration_ms)
     }
@@ -2684,6 +2710,13 @@ mod tests {
                 .expect("czech minute interval schedule preview should parse");
         assert_eq!(czech_minute.schedule_payload["interval_ms"], json!(60_000_u64));
 
+        let czech_plural_seconds =
+            natural_language_schedule_preview("každých 30 sekund", CronTimezoneMode::Utc, now)
+                .expect("czech plural second interval schedule preview should parse");
+        assert_eq!(czech_plural_seconds.schedule_type, "every");
+        assert_eq!(czech_plural_seconds.normalized_text, "every 30 second(s)");
+        assert_eq!(czech_plural_seconds.schedule_payload["interval_ms"], json!(30_000_u64));
+
         let czech =
             natural_language_schedule_preview("každý pracovní den v 9", CronTimezoneMode::Utc, now)
                 .expect("czech weekday schedule preview should parse");
@@ -2699,6 +2732,22 @@ mod tests {
             error.to_string().contains("greater than zero"),
             "error should explain minimum repeat interval"
         );
+    }
+
+    #[test]
+    fn natural_language_preview_rejects_bounded_recurring_suffix_with_specific_hint() {
+        let error = natural_language_schedule_preview(
+            "každých 30 sekund po dobu 2 minut",
+            CronTimezoneMode::Utc,
+            0,
+        )
+        .expect_err("bounded recurring schedules should require an explicit lifecycle");
+        let rendered = error.to_string();
+
+        assert!(rendered.contains("bounded recurring duration"), "{rendered}");
+        assert!(rendered.contains("po dobu 2 minut"), "{rendered}");
+        assert!(rendered.contains("every 30 second(s)"), "{rendered}");
+        assert!(rendered.contains("každých 30 sekund"), "{rendered}");
     }
 
     #[test]
