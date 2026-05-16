@@ -1916,6 +1916,7 @@ async fn run_job_with_retries(
                 }
             }
             Err(error) => {
+                let failure = scheduler_attempt_failure(&error, attempt);
                 warn!(
                     job_id = %job.job_id,
                     run_id = %run_id,
@@ -1927,8 +1928,8 @@ async fn run_job_with_retries(
                     .finalize_cron_run(CronRunFinalizeRequest {
                         run_id: run_id.clone(),
                         status: CronRunStatus::Failed,
-                        error_kind: Some("scheduler_internal".to_owned()),
-                        error_message_redacted: Some(format!("cron attempt {attempt} failed")),
+                        error_kind: Some(failure.error_kind),
+                        error_message_redacted: Some(failure.error_message_redacted),
                         model_tokens_in: 0,
                         model_tokens_out: 0,
                         tool_calls: 0,
@@ -1949,6 +1950,41 @@ async fn run_job_with_retries(
         tokio::time::sleep(Duration::from_millis(delay)).await;
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SchedulerAttemptFailure {
+    error_kind: String,
+    error_message_redacted: String,
+}
+
+fn scheduler_attempt_failure(error: &Status, attempt: u32) -> SchedulerAttemptFailure {
+    let raw_message = error.message();
+    let normalized = raw_message.to_ascii_lowercase();
+    let error_kind = if matches!(
+        error.code(),
+        tonic::Code::Unavailable | tonic::Code::DeadlineExceeded | tonic::Code::ResourceExhausted
+    ) || normalized.contains("http 529")
+        || normalized.contains("status 529")
+        || normalized.contains("overload")
+        || normalized.contains("overloaded")
+        || normalized.contains("rate limit")
+        || normalized.contains("resource exhausted")
+    {
+        "provider_unavailable"
+    } else if normalized.contains("finish_reason=length")
+        || normalized.contains("output token limit")
+        || normalized.contains("max output tokens")
+    {
+        "provider_output_limited"
+    } else {
+        "scheduler_internal"
+    };
+    let sanitized = crate::model_provider::sanitize_remote_error(raw_message);
+    SchedulerAttemptFailure {
+        error_kind: error_kind.to_owned(),
+        error_message_redacted: format!("cron attempt {attempt} failed: {sanitized}"),
+    }
 }
 
 fn should_pause_recurring_cron_after_policy_denied(
@@ -2550,10 +2586,11 @@ mod tests {
         cron_successful_completion_tool, cron_terminal_status_from_stream,
         decide_concurrency_policy, load_periodic_reaudit_skills_index, normalize_schedule,
         now_unix_ms_or_fallback, parse_skill_reaudit_interval, periodic_reaudit_targets,
-        scheduled_routine_run_metadata_upsert, should_pause_recurring_cron_after_policy_denied,
-        should_repair_stale_cron_run, ConcurrencyDecision, CronMatcher, CronMisfireRecoveryAction,
-        CronTimezoneMode, InstalledSkillRecord, InstalledSkillsIndex, SchedulerHealthInput,
-        TriggerJobOptions, OBJECTIVE_BUDGET_EXHAUSTED_ERROR_KIND, SCHEDULER_STALE_RUN_AFTER_MS,
+        scheduled_routine_run_metadata_upsert, scheduler_attempt_failure,
+        should_pause_recurring_cron_after_policy_denied, should_repair_stale_cron_run,
+        ConcurrencyDecision, CronMatcher, CronMisfireRecoveryAction, CronTimezoneMode,
+        InstalledSkillRecord, InstalledSkillsIndex, SchedulerHealthInput, TriggerJobOptions,
+        OBJECTIVE_BUDGET_EXHAUSTED_ERROR_KIND, SCHEDULER_STALE_RUN_AFTER_MS,
         SKILLS_INDEX_FILE_NAME, SKILLS_LAYOUT_VERSION,
     };
     use crate::gateway::proto::palyra::cron::v1 as cron_v1;
@@ -2567,6 +2604,7 @@ mod tests {
     };
     use chrono::TimeZone;
     use serde_json::json;
+    use tonic::{Code, Status};
 
     fn sample_every_job(
         job_id: &str,
@@ -2632,6 +2670,33 @@ mod tests {
         let runs = vec![succeeded, failed, active, skipped_without_orchestrator, budget_skip];
 
         assert_eq!(budgeted_objective_run_count(&runs), 2);
+    }
+
+    #[test]
+    fn scheduler_attempt_failure_surfaces_provider_overload() {
+        let failure = scheduler_attempt_failure(
+            &Status::new(
+                Code::ResourceExhausted,
+                "upstream provider returned HTTP 529 overloaded_error",
+            ),
+            1,
+        );
+
+        assert_eq!(failure.error_kind, "provider_unavailable");
+        assert!(failure.error_message_redacted.contains("HTTP 529"));
+    }
+
+    #[test]
+    fn scheduler_attempt_failure_surfaces_output_limit() {
+        let failure = scheduler_attempt_failure(
+            &Status::internal(
+                "model provider stopped because of an output token limit (finish_reason=length)",
+            ),
+            2,
+        );
+
+        assert_eq!(failure.error_kind, "provider_output_limited");
+        assert!(failure.error_message_redacted.contains("finish_reason=length"));
     }
 
     fn sample_routine_metadata(routine_id: &str) -> RoutineMetadataRecord {
