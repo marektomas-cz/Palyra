@@ -112,12 +112,12 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
         ),
         entry(
             "palyra.memory.retain",
-            "Write a reviewable scoped memory item with provenance.",
+            "Write a reviewable scoped memory item with provenance. Use scope=principal for preferences or corrections that must affect future sessions.",
             object_schema(
                 &["content_text"],
                 vec![
-                    ("content_text", json!({"type":"string","maxLength":8192})),
-                    ("scope", json!({"type":"string","enum":["session","principal","workspace"]})),
+                    ("content_text", json!({"type":"string","maxLength":8192,"description":"Memory content to retain. For corrections, include the corrected preference and the old value being replaced."})),
+                    ("scope", json!({"type":"string","enum":["session","channel","principal"],"description":"Defaults to session. Use principal for remembered preferences, corrections, and facts that should be available in future sessions."})),
                     (
                         "source",
                         json!({"type":"string","enum":["manual","summary","import","tape:user_message","tape:tool_result"]}),

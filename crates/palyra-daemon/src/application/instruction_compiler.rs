@@ -228,7 +228,7 @@ fn tool_specific_contract(tool_names: &[String]) -> String {
         contracts.push("palyra.routines.control automation contract: for user requests to create reminders, monitors, standing orders, or scheduled reports, call operation='upsert'. For new routines, omit routine_id; provide a human name/session label in name, because routine_id is only for updating or dispatching an existing canonical ULID returned by a previous successful tool result. Use trigger_kind='schedule', a concise name, a self-contained prompt describing the recurring work and output path, and natural_language_schedule for phrases like 'every 40 seconds' or 'every 30 minutes'. Do not create sub-30-second schedule loops; for bounded in-session polling use palyra.sleep and normal tools, then create a routine only if the user wants durable automation. Prefer delivery_mode='logs_only' when the user asks to write a report file instead of announcing to a channel. Return the routine_id from the successful tool result.".to_owned());
     }
     if tool_names.iter().any(|tool| tool == "palyra.memory.retain") {
-        contracts.push("palyra.memory.retain lifecycle contract: source must be one of manual, summary, import, tape:user_message, or tape:tool_result; use manual for user-stated preferences, corrections, and directives. When the user asks to remember, save, store, retain, or consolidate information present in the current request, call palyra.memory.retain with that current request content; do not search memory first for content that is already in the prompt, and do not claim the current request content is unavailable. A successful retain output is authoritative: if durable_memory_write=true and review_state=written, the memory is stored; if durable_memory_write=false, say it was not written and needs review only when review_state says so. If the output includes review.completion_commands, surface those commands as the manual operator completion path. Do not claim an approval is queued or pending unless a tool output includes an explicit approval or review identifier.".to_owned());
+        contracts.push("palyra.memory.retain lifecycle contract: source must be one of manual, summary, import, tape:user_message, or tape:tool_result; use manual for user-stated preferences, corrections, and directives. When the user asks to remember, save, store, retain, or consolidate information present in the current request, call palyra.memory.retain with that current request content; do not search memory first for content that is already in the prompt, and do not claim the current request content is unavailable. For preferences, corrections, replacements, or facts that should affect later or future sessions, set scope=principal; scope=session is only for current-session scratch memory. For corrections, include the corrected durable statement and the old value being replaced. A successful retain output is authoritative: if durable_memory_write=true and review_state=written, the memory is stored at the returned scope; only claim future-session availability when visibility.cross_session=true or scope=principal. If durable_memory_write=false, say it was not written and needs review only when review_state says so. If the output includes review.completion_commands, surface those commands as the manual operator completion path. Do not claim an approval is queued or pending unless a tool output includes an explicit approval or review identifier.".to_owned());
     }
     if tool_names.iter().any(|tool| tool == "palyra.memory.search")
         || tool_names.iter().any(|tool| tool == "palyra.memory.recall")
@@ -511,8 +511,12 @@ mod tests {
         assert!(contract.contains("current request content"));
         assert!(contract.contains("do not search memory first"));
         assert!(contract.contains("current request content is unavailable"));
+        assert!(contract.contains("scope=principal"));
+        assert!(contract.contains("future sessions"));
+        assert!(contract.contains("old value being replaced"));
         assert!(contract.contains("durable_memory_write=true"));
         assert!(contract.contains("review_state=written"));
+        assert!(contract.contains("visibility.cross_session=true"));
         assert!(contract.contains("review.completion_commands"));
         assert!(contract.contains("approval is queued or pending"));
     }

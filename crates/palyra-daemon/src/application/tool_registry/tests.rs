@@ -204,6 +204,25 @@ fn memory_session_search_schema_targets_prior_transcripts() {
 }
 
 #[test]
+fn memory_retain_schema_explains_principal_scope_for_corrections() {
+    let entry = registry_entry("palyra.memory.retain").expect("retain tool entry");
+
+    assert!(entry.description.contains("scope=principal"));
+    assert_eq!(
+        entry.input_schema["properties"]["scope"]["enum"],
+        serde_json::json!(["session", "channel", "principal"])
+    );
+    assert!(entry.input_schema["properties"]["scope"]["description"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("future sessions"));
+    assert!(entry.input_schema["properties"]["content_text"]["description"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("old value"));
+}
+
+#[test]
 fn intake_normalizes_safe_scalar_arguments() {
     let config = config(&["palyra.sleep"]);
     let snapshot = build_model_visible_tool_catalog_snapshot(ToolCatalogBuildRequest {

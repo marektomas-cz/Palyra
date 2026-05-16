@@ -1134,6 +1134,36 @@ mod tests {
 
         assert!(error.contains("window_before must be an integer"));
     }
+
+    #[test]
+    fn retain_visibility_distinguishes_session_from_principal_scope() {
+        let mut outcome = MemoryLifecycleRetainOutcome {
+            status: MemoryLifecycleStatus::Retained,
+            reason: "memory retained in lifecycle store".to_owned(),
+            scope: MemoryLifecycleScope::Session,
+            trust_label: "retrieved_memory".to_owned(),
+            durable_memory_write: true,
+            item: None,
+            matched_memory_id: None,
+            write_classification: None,
+            provenance: serde_json::json!({}),
+        };
+
+        let session_visibility = memory_lifecycle_visibility_payload(&outcome);
+        assert_eq!(session_visibility["cross_session"], false);
+        assert!(session_visibility["claim_boundary"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("do not claim"));
+
+        outcome.scope = MemoryLifecycleScope::Principal;
+        let principal_visibility = memory_lifecycle_visibility_payload(&outcome);
+        assert_eq!(principal_visibility["cross_session"], true);
+        assert!(principal_visibility["claim_boundary"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("future sessions"));
+    }
 }
 
 fn required_string_field(parsed: &Map<String, Value>, field: &str) -> Result<String, String> {
@@ -1297,6 +1327,7 @@ fn serialize_memory_lifecycle_outcome(
         "durable_memory_write": outcome.durable_memory_write,
         "matched_memory_id": outcome.matched_memory_id.as_deref(),
         "write_classification": outcome.write_classification.clone(),
+        "visibility": memory_lifecycle_visibility_payload(outcome),
         "provenance": outcome.provenance.clone(),
         "item": outcome.item.as_ref().map(memory_item_output_payload),
     });
@@ -1328,6 +1359,23 @@ fn serialize_memory_lifecycle_outcome(
             format!("palyra.memory.retain failed to serialize output: {error}"),
         ),
     }
+}
+
+fn memory_lifecycle_visibility_payload(outcome: &MemoryLifecycleRetainOutcome) -> Value {
+    let cross_session =
+        outcome.durable_memory_write && outcome.scope == MemoryLifecycleScope::Principal;
+    let claim_boundary = if cross_session {
+        "principal-scoped memory is available to future sessions for this principal"
+    } else if outcome.durable_memory_write {
+        "memory was written, but this scope is not principal-wide; do not claim it will affect future sessions or principal recall"
+    } else {
+        "memory was not written; do not claim it is available for future recall"
+    };
+    json!({
+        "scope": outcome.scope.as_str(),
+        "cross_session": cross_session,
+        "claim_boundary": claim_boundary,
+    })
 }
 
 fn memory_lifecycle_review_state(outcome: &MemoryLifecycleRetainOutcome) -> &'static str {

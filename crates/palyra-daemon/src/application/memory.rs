@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -401,6 +401,7 @@ async fn retain_memory_candidate(
     if let Some(duplicate) = find_lifecycle_duplicate(
         runtime_state,
         &request,
+        &classification,
         channel_scope.clone(),
         session_scope.clone(),
     )
@@ -485,6 +486,7 @@ struct LifecycleDuplicate {
 async fn find_lifecycle_duplicate(
     runtime_state: &Arc<GatewayRuntimeState>,
     request: &MemoryLifecycleRetainRequest,
+    classification: &MemoryWriteClassification,
     channel_scope: Option<String>,
     session_scope: Option<String>,
 ) -> Result<Option<LifecycleDuplicate>, Status> {
@@ -504,7 +506,14 @@ async fn find_lifecycle_duplicate(
         for hit in hits {
             let exact =
                 normalize_lifecycle_content(hit.item.content_text.as_str()) == request.content_text;
-            if exact || hit.score >= MEMORY_RETAIN_NEAR_DUPLICATE_SCORE {
+            if exact
+                || hit.score >= MEMORY_RETAIN_NEAR_DUPLICATE_SCORE
+                || lifecycle_conflict_matches(
+                    classification.category,
+                    request.content_text.as_str(),
+                    hit.item.content_text.as_str(),
+                )
+            {
                 return Ok(Some(LifecycleDuplicate { item: hit.item, exact }));
             }
         }
@@ -517,6 +526,11 @@ fn lifecycle_duplicate_search_queries(content_text: &str) -> Vec<String> {
     if let Some(preference_context) = lifecycle_preference_context_query(content_text) {
         if !queries.iter().any(|query| query == &preference_context) {
             queries.push(preference_context);
+        }
+    }
+    if let Some(significant_context) = lifecycle_significant_context_query(content_text) {
+        if !queries.iter().any(|query| query == &significant_context) {
+            queries.push(significant_context);
         }
     }
     queries
@@ -559,7 +573,16 @@ fn lifecycle_duplicate_terms(input: &str) -> Vec<String> {
 }
 
 fn lifecycle_preference_term(term: &str) -> bool {
-    matches!(term, "prefer" | "prefers" | "preferred" | "preference" | "preferences")
+    matches!(
+        term,
+        "prefer"
+            | "prefers"
+            | "preferred"
+            | "preference"
+            | "preferences"
+            | "preferuj"
+            | "preferujeme"
+    )
 }
 
 fn lifecycle_duplicate_stopword(term: &str) -> bool {
@@ -571,15 +594,63 @@ fn lifecycle_duplicate_stopword(term: &str) -> bool {
             | "for"
             | "instead"
             | "memory"
+            | "m"
             | "of"
+            | "pou"
+            | "vat"
             | "project"
+            | "pros"
+            | "si"
             | "rather"
             | "replace"
             | "that"
             | "the"
             | "this"
             | "to"
+            | "use"
+            | "used"
+            | "using"
+            | "uz"
     )
+}
+
+fn lifecycle_significant_context_query(content_text: &str) -> Option<String> {
+    let terms = lifecycle_significant_terms(content_text);
+    if terms.len() >= 2 {
+        Some(terms.into_iter().take(12).collect::<Vec<_>>().join(" "))
+    } else {
+        None
+    }
+}
+
+fn lifecycle_significant_terms(content_text: &str) -> Vec<String> {
+    let mut terms = Vec::new();
+    for term in lifecycle_duplicate_terms(content_text) {
+        if term.len() < 3 || lifecycle_duplicate_stopword(term.as_str()) {
+            continue;
+        }
+        if !terms.iter().any(|existing| existing == &term) {
+            terms.push(term);
+        }
+    }
+    terms
+}
+
+fn lifecycle_conflict_matches(
+    category: MemoryWriteCategory,
+    candidate_content: &str,
+    existing_content: &str,
+) -> bool {
+    if !matches!(category, MemoryWriteCategory::Correction | MemoryWriteCategory::Preference) {
+        return false;
+    }
+    let candidate_terms =
+        lifecycle_significant_terms(candidate_content).into_iter().collect::<BTreeSet<_>>();
+    let existing_terms =
+        lifecycle_significant_terms(existing_content).into_iter().collect::<BTreeSet<_>>();
+    let overlap_count = candidate_terms.intersection(&existing_terms).take(3).count();
+
+    overlap_count >= 3
 }
 
 fn should_replace_lifecycle_duplicate_content(
@@ -715,9 +786,34 @@ pub(crate) fn classify_memory_write(
 }
 
 fn classify_memory_write_category(lowered: &str) -> MemoryWriteCategory {
-    if contains_any(lowered, &["correction", "actually", "instead of", "replace "]) {
+    if contains_any(
+        lowered,
+        &[
+            "correction",
+            "actually",
+            "instead of",
+            "replace ",
+            "should not",
+            "do not use",
+            "not use",
+            "not be used",
+            "no longer",
+            "misto",
+            "místo",
+            "nahra",
+            "nechceme",
+            "nepouzivat",
+            "nepoužívat",
+            "oprav",
+            "už ne",
+            "uz ne",
+        ],
+    ) {
         MemoryWriteCategory::Correction
-    } else if contains_any(lowered, &["prefer", "preference", "likes ", "wants "]) {
+    } else if contains_any(
+        lowered,
+        &["prefer", "preference", "likes ", "wants ", "preferuj", "preferujeme"],
+    ) {
         MemoryWriteCategory::Preference
     } else if contains_any(lowered, &["procedure", "runbook", "workflow", "steps:", "checklist"]) {
         MemoryWriteCategory::Procedure
@@ -1111,5 +1207,34 @@ mod tests {
 
         assert_eq!(classification.category, MemoryWriteCategory::TransientRuntimeFact);
         assert_eq!(classification.ttl_unix_ms, Some(1_700_000_000_000 + MEMORY_TRANSIENT_TTL_MS));
+    }
+
+    #[test]
+    fn write_classifier_marks_czech_replacement_as_correction() {
+        let classification = classify_memory_write(classification_input(
+            "E2E testovací projekt má používat TypeScript a Playwright; Vitest už nepoužívat.",
+        ));
+
+        assert_eq!(classification.category, MemoryWriteCategory::Correction);
+    }
+
+    #[test]
+    fn duplicate_queries_include_stable_terms_for_correction_recall() {
+        let queries = lifecycle_duplicate_search_queries(
+            "E2E testovací projekt má používat TypeScript a Playwright; Vitest už nepoužívat.",
+        );
+
+        assert!(queries.iter().any(|query| {
+            query.contains("e2e") && query.contains("typescript") && query.contains("vitest")
+        }));
+    }
+
+    #[test]
+    fn correction_conflict_matches_existing_project_preference() {
+        assert!(lifecycle_conflict_matches(
+            MemoryWriteCategory::Correction,
+            "E2E testovací projekt má používat TypeScript a Playwright; Vitest už nepoužívat.",
+            "E2E preference: for this test project use TypeScript, Vitest, and concise Czech reports.",
+        ));
     }
 }
