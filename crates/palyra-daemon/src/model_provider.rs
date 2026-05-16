@@ -5171,17 +5171,24 @@ fn parse_raw_tool_call_invocations(block: &str) -> Result<Vec<ProviderEvent>, St
         let tool_name = extract_raw_tool_invoke_name(opening_tag)
             .ok_or_else(|| "invoke tag is missing a valid name attribute".to_owned())?;
         let arguments_start = tag_end.saturating_add(1);
-        let close_start = lower[arguments_start..]
-            .find("</invoke>")
-            .map(|offset| arguments_start + offset)
-            .ok_or_else(|| "invoke block is missing </invoke>".to_owned())?;
-        let input_json = normalize_tool_arguments(block[arguments_start..close_start].trim())?;
+        let (arguments, next_cursor) = if let Some(close_start) =
+            lower[arguments_start..].find("</invoke>").map(|offset| arguments_start + offset)
+        {
+            (block[arguments_start..close_start].trim(), close_start + "</invoke>".len())
+        } else {
+            let trailing_arguments = block[arguments_start..].trim();
+            if trailing_arguments.is_empty() {
+                return Err("invoke block is missing </invoke>".to_owned());
+            }
+            (trailing_arguments, block.len())
+        };
+        let input_json = normalize_tool_arguments(arguments)?;
         events.push(ProviderEvent::ToolProposal {
             proposal_id: Ulid::new().to_string(),
             tool_name,
             input_json,
         });
-        cursor = close_start + "</invoke>".len();
+        cursor = next_cursor;
     }
     Ok(events)
 }
@@ -6313,6 +6320,27 @@ mod tests {
     }
 
     #[test]
+    fn raw_tool_call_markup_accepts_valid_json_when_invoke_close_is_missing() {
+        let raw = r#"<tool_call><invoke name="palyra.fs.read_file">{"path":"app.js"}"#;
+
+        let extraction = super::coerce_raw_tool_call_markup(raw)
+            .expect("valid raw invocation should be recoverable without closing invoke")
+            .expect("raw markup should be detected");
+
+        assert!(extraction.cleaned_text.is_empty());
+        assert_eq!(extraction.tool_events.len(), 1);
+        match &extraction.tool_events[0] {
+            ProviderEvent::ToolProposal { tool_name, input_json, .. } => {
+                assert_eq!(tool_name, "palyra.fs.read_file");
+                let input: serde_json::Value =
+                    serde_json::from_slice(input_json).expect("tool input should stay valid JSON");
+                assert_eq!(input["path"], "app.js");
+            }
+            other => panic!("expected tool proposal, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn raw_tool_call_markup_is_removed_from_surrounding_text() {
         let raw = r#"I will inspect it.
 <tool_call>
@@ -6337,7 +6365,7 @@ Then I will continue."#;
         let malformed = serde_json::json!({
             "choices": [{
                 "message": {
-                    "content": "<tool_call><invoke name=\"palyra.fs.read_file\">{\"path\":\"app.js\"}"
+                    "content": "<tool_call><invoke>{\"path\":\"app.js\"}"
                 }
             }]
         })
