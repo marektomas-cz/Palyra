@@ -50,6 +50,36 @@ fn parse_stdout_json(output: Output, label: &str) -> Result<Value> {
     })
 }
 
+fn parse_stderr_json(output: &Output, label: &str) -> Result<Value> {
+    serde_json::from_slice(&output.stderr).with_context(|| {
+        format!(
+            "{label} should emit valid JSON to stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+    })
+}
+
+#[test]
+fn command_level_health_json_reports_unavailable_runtime_as_json() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+    let output = run_cli(
+        &workdir,
+        &["health", "--url", "http://127.0.0.1:1", "--grpc-url", "http://127.0.0.1:1", "--json"],
+    )?;
+
+    assert!(!output.status.success(), "health should fail when runtime is unavailable");
+    let payload = parse_stderr_json(&output, "health --json failure")?;
+    assert_eq!(payload.get("status").and_then(Value::as_str), Some("error"));
+    assert_eq!(payload.get("overall").and_then(Value::as_str), Some("unavailable"));
+    assert_eq!(
+        payload.pointer("/error/kind").and_then(Value::as_str),
+        Some("connectivity_failure")
+    );
+    assert_eq!(payload.pointer("/http/status").and_then(Value::as_str), Some("error"));
+    assert_eq!(payload.pointer("/grpc/status").and_then(Value::as_str), Some("error"));
+    Ok(())
+}
+
 #[test]
 fn global_output_format_json_is_honored_for_core_cli_surfaces() -> Result<()> {
     let workdir = TempDir::new().context("failed to create temporary workdir")?;

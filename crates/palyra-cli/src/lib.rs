@@ -103,8 +103,8 @@ use palyra_common::{
         set_value_at_path, unset_value_at_path, write_document_with_backups, ConfigMigrationInfo,
     },
     daemon_config_schema::{
-        is_secret_config_path, redact_secret_config_values, FileModelProviderConfig,
-        FileModelProviderRegistryEntry, FileModelProviderRegistryModel, RootFileConfig,
+        redact_secret_config_values, FileModelProviderConfig, FileModelProviderRegistryEntry,
+        FileModelProviderRegistryModel, RootFileConfig,
     },
     default_config_search_paths, parse_config_path, parse_daemon_bind_socket,
     redaction::{
@@ -178,6 +178,7 @@ const SUPPORT_BUNDLE_FLOW_EVENT_LIMIT: usize = 64;
 const DEFAULT_BROWSER_URL: &str = "http://127.0.0.1:7143";
 const DEFAULT_CHANNEL: &str = "cli";
 const DEFAULT_DEVICE_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+#[cfg(test)]
 const REDACTED_CONFIG_VALUE: &str = "<redacted>";
 const GATEWAY_CA_STATE_KEY: &str = "identity/ca/state.json";
 const SKILLS_LAYOUT_VERSION: u32 = 1;
@@ -5947,8 +5948,9 @@ fn build_journal_checkpoint_attestation(
     })
 }
 
+#[cfg(test)]
 fn format_config_get_display_value(key: &str, value: &toml::Value, show_secrets: bool) -> String {
-    if show_secrets || !is_secret_config_path(key) {
+    if show_secrets || !palyra_common::daemon_config_schema::is_secret_config_path(key) {
         format_toml_value(value)
     } else {
         format_toml_value(&toml::Value::String(REDACTED_CONFIG_VALUE.to_owned()))

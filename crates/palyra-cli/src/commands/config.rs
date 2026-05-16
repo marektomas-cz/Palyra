@@ -133,13 +133,9 @@ pub(crate) fn run_config(command: Option<ConfigCommand>) -> Result<()> {
             let value = get_value_at_path(&document, key.as_str())
                 .with_context(|| format!("invalid config key path: {}", key))?
                 .with_context(|| format!("config key not found: {}", key))?;
-            let redacted = !show_secrets && is_secret_config_path(key.as_str());
+            let (output_value, redacted) =
+                build_config_get_output_value(&document, key.as_str(), value, show_secrets)?;
             if json {
-                let output_value = if redacted {
-                    toml::Value::String(REDACTED_CONFIG_VALUE.to_owned())
-                } else {
-                    value.clone()
-                };
                 return output::print_json_pretty(
                     &json!({
                         "key": key,
@@ -151,7 +147,7 @@ pub(crate) fn run_config(command: Option<ConfigCommand>) -> Result<()> {
                     "failed to encode config get as JSON",
                 );
             }
-            let display_value = format_config_get_display_value(key.as_str(), value, show_secrets);
+            let display_value = format_toml_value(&output_value);
             println!(
                 "config.get key={} value={} source={} show_secrets={show_secrets}",
                 key, display_value, path
@@ -268,6 +264,26 @@ pub(crate) fn run_config(command: Option<ConfigCommand>) -> Result<()> {
             std::io::stdout().flush().context("stdout flush failed")
         }
     }
+}
+
+fn build_config_get_output_value(
+    document: &toml::Value,
+    key: &str,
+    value: &toml::Value,
+    show_secrets: bool,
+) -> Result<(toml::Value, bool)> {
+    if show_secrets {
+        return Ok((value.clone(), false));
+    }
+
+    let mut redacted_document = document.clone();
+    redact_secret_config_values(&mut redacted_document);
+    let redacted_value = get_value_at_path(&redacted_document, key)
+        .with_context(|| format!("invalid config key path: {key}"))?
+        .with_context(|| format!("config key not found after redaction: {key}"))?
+        .clone();
+    let redacted = &redacted_value != value;
+    Ok((redacted_value, redacted))
 }
 
 #[derive(Debug, Serialize)]

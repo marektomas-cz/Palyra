@@ -17,11 +17,19 @@ pub(crate) fn run_health(url: Option<String>, grpc_url: Option<String>, json: bo
         .timeout(std::time::Duration::from_secs(2))
         .build()
         .context("failed to build HTTP client")?;
-    let http = fetch_health_with_retry(&http_client, &status_url)?;
     let runtime = build_runtime()?;
-    let grpc = runtime.block_on(fetch_grpc_health_with_retry(grpc_connection.grpc_url.clone()))?;
+    let http = fetch_health_with_retry(&http_client, &status_url);
+    let grpc = runtime.block_on(fetch_grpc_health_with_retry(grpc_connection.grpc_url.clone()));
 
     if output::preferred_json(json) {
+        let (Ok(http), Ok(grpc)) = (&http, &grpc) else {
+            return emit_unavailable_health_json(
+                http_connection.base_url.as_str(),
+                grpc_connection.grpc_url.as_str(),
+                &http,
+                &grpc,
+            );
+        };
         return output::print_json_pretty(
             &json!({
                 "overall": "ok",
@@ -45,6 +53,8 @@ pub(crate) fn run_health(url: Option<String>, grpc_url: Option<String>, json: bo
             "failed to encode health output as JSON",
         );
     }
+    let http = http?;
+    let grpc = grpc?;
     if output::preferred_ndjson(json, false) {
         output::print_json_line(
             &json!({
@@ -93,4 +103,82 @@ pub(crate) fn run_health(url: Option<String>, grpc_url: Option<String>, json: bo
         grpc.status, grpc.service, grpc.version, grpc.git_hash, grpc.uptime_seconds
     );
     std::io::stdout().flush().context("stdout flush failed")
+}
+
+fn emit_unavailable_health_json(
+    daemon_url: &str,
+    grpc_url: &str,
+    http: &Result<HealthResponse>,
+    grpc: &Result<gateway_v1::HealthResponse>,
+) -> Result<()> {
+    let primary_error = http.as_ref().err().or_else(|| grpc.as_ref().err());
+    let exit_code =
+        primary_error.map(output::classify_error).unwrap_or(output::CliExitCode::Connectivity);
+    let message = [http.as_ref().err(), grpc.as_ref().err()]
+        .into_iter()
+        .flatten()
+        .map(|error| format!("{error:#}"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let message =
+        if message.trim().is_empty() { "health check failed".to_owned() } else { message };
+    let context = app::current_root_context();
+    let payload = json!({
+        "status": "error",
+        "overall": "unavailable",
+        "daemon_url": daemon_url,
+        "grpc_url": grpc_url,
+        "http": health_probe_result_to_json(http),
+        "grpc": grpc_health_probe_result_to_json(grpc),
+        "error": {
+            "kind": exit_code.kind(),
+            "message": message,
+            "trace_id": context.as_ref().map(|value| value.trace_id()),
+        },
+    });
+
+    eprintln!(
+        "{}",
+        serde_json::to_string_pretty(&payload)
+            .context("failed to encode unavailable health output as JSON")?
+    );
+    Err(output::already_emitted_error(exit_code))
+}
+
+fn health_probe_result_to_json(result: &Result<HealthResponse>) -> Value {
+    match result {
+        Ok(response) => json!({
+            "status": response.status,
+            "service": response.service,
+            "version": response.version,
+            "git_hash": response.git_hash,
+            "uptime_seconds": response.uptime_seconds,
+        }),
+        Err(error) => json!({
+            "status": "error",
+            "error": {
+                "kind": output::classify_error(error).kind(),
+                "message": format!("{error:#}"),
+            },
+        }),
+    }
+}
+
+fn grpc_health_probe_result_to_json(result: &Result<gateway_v1::HealthResponse>) -> Value {
+    match result {
+        Ok(response) => json!({
+            "status": response.status,
+            "service": response.service,
+            "version": response.version,
+            "git_hash": response.git_hash,
+            "uptime_seconds": response.uptime_seconds,
+        }),
+        Err(error) => json!({
+            "status": "error",
+            "error": {
+                "kind": output::classify_error(error).kind(),
+                "message": format!("{error:#}"),
+            },
+        }),
+    }
 }

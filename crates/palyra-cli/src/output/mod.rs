@@ -30,6 +30,20 @@ impl CliExitCode {
     pub(crate) fn as_exit_code(self) -> ExitCode {
         ExitCode::from(self as u8)
     }
+
+    pub(crate) fn kind(self) -> &'static str {
+        match self {
+            CliExitCode::Success => "success",
+            CliExitCode::Validation => "validation_error",
+            CliExitCode::Auth => "auth_failure",
+            CliExitCode::Connectivity => "connectivity_failure",
+            CliExitCode::Unsupported => "unsupported_capability",
+            CliExitCode::Policy => "policy_denial",
+            CliExitCode::Precondition => "precondition_failed",
+            CliExitCode::NotFound => "not_found",
+            CliExitCode::Internal => "internal_error",
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -113,17 +127,7 @@ pub(crate) fn preferred_ndjson(explicit_json: bool, explicit_ndjson: bool) -> bo
 
 pub(crate) fn emit_error(error: &anyhow::Error) -> Result<CliExitCode> {
     let exit_code = classify_error(error);
-    let kind = match exit_code {
-        CliExitCode::Success => "success",
-        CliExitCode::Validation => "validation_error",
-        CliExitCode::Auth => "auth_failure",
-        CliExitCode::Connectivity => "connectivity_failure",
-        CliExitCode::Unsupported => "unsupported_capability",
-        CliExitCode::Policy => "policy_denial",
-        CliExitCode::Precondition => "precondition_failed",
-        CliExitCode::NotFound => "not_found",
-        CliExitCode::Internal => "internal_error",
-    };
+    let kind = exit_code.kind();
     let context = app::current_root_context();
     let trace_id = context.as_ref().map(|value| value.trace_id());
     let profile = context.as_ref().and_then(|value| value.profile_name());
@@ -196,7 +200,8 @@ pub(crate) fn emit_error(error: &anyhow::Error) -> Result<CliExitCode> {
 }
 
 pub(crate) fn classify_error(error: &anyhow::Error) -> CliExitCode {
-    let lower = error.to_string().to_ascii_lowercase();
+    let lower =
+        error.chain().map(ToString::to_string).collect::<Vec<_>>().join(": ").to_ascii_lowercase();
 
     if error.chain().any(|cause| cause.is::<clap::Error>()) {
         return CliExitCode::Validation;
@@ -253,6 +258,7 @@ pub(crate) fn classify_error(error: &anyhow::Error) -> CliExitCode {
     if lower.contains("invalid")
         || lower.contains("must be")
         || lower.contains("cannot be")
+        || lower.contains("cannot set")
         || lower.contains("requires")
         || lower.contains("required")
         || lower.contains("missing prompt")

@@ -6,6 +6,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use serde_json::Value;
 use tempfile::TempDir;
 
 fn run_cli(workdir: &TempDir, args: &[&str]) -> Result<Output> {
@@ -206,6 +207,115 @@ fn config_get_redacts_secret_values_by_default() -> Result<()> {
     assert!(
         unredacted_stdout.contains("value=\"super-secret-token\""),
         "show-secrets should print the actual value: {unredacted_stdout}"
+    );
+    Ok(())
+}
+
+#[test]
+fn config_get_json_redacts_nested_secret_values_by_default() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+    let config_path = workdir.path().join("palyra.toml");
+    fs::write(
+        &config_path,
+        r#"version = 1
+[model_provider]
+kind = "anthropic"
+auth_provider_kind = "minimax"
+anthropic_base_url = "https://api.minimax.io/anthropic"
+anthropic_model = "MiniMax-M2.7"
+anthropic_api_key = "minimax-inline-secret"
+"#,
+    )
+    .with_context(|| format!("failed to write {}", config_path.display()))?;
+
+    let config_path_string = config_path.to_string_lossy().into_owned();
+    let redacted_output = run_cli(
+        &workdir,
+        &["config", "get", "--path", &config_path_string, "--key", "model_provider", "--json"],
+    )?;
+    assert!(redacted_output.status.success(), "config get --json should succeed");
+    let redacted_stdout =
+        String::from_utf8(redacted_output.stdout).context("stdout was not UTF-8")?;
+    assert!(
+        !redacted_stdout.contains("minimax-inline-secret"),
+        "raw nested secret value must not be printed by default: {redacted_stdout}"
+    );
+    let redacted_payload: Value =
+        serde_json::from_str(&redacted_stdout).context("config get stdout was not JSON")?;
+    assert_eq!(
+        redacted_payload.pointer("/value/anthropic_api_key").and_then(Value::as_str),
+        Some("<redacted>")
+    );
+    assert_eq!(redacted_payload.get("redacted").and_then(Value::as_bool), Some(true));
+
+    let unredacted_output = run_cli(
+        &workdir,
+        &[
+            "config",
+            "get",
+            "--path",
+            &config_path_string,
+            "--key",
+            "model_provider",
+            "--show-secrets",
+            "--json",
+        ],
+    )?;
+    assert!(unredacted_output.status.success(), "config get --show-secrets --json should succeed");
+    let unredacted_stdout =
+        String::from_utf8(unredacted_output.stdout).context("stdout was not UTF-8")?;
+    assert!(
+        unredacted_stdout.contains("minimax-inline-secret"),
+        "show-secrets should preserve nested secret values: {unredacted_stdout}"
+    );
+    let unredacted_payload: Value =
+        serde_json::from_str(&unredacted_stdout).context("config get stdout was not JSON")?;
+    assert_eq!(unredacted_payload.get("redacted").and_then(Value::as_bool), Some(false));
+    Ok(())
+}
+
+#[test]
+fn config_set_secret_source_conflict_is_user_correctable_validation_error() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+    let config_path = workdir.path().join("palyra.toml");
+    fs::write(
+        &config_path,
+        r#"version = 1
+[model_provider]
+kind = "anthropic"
+auth_provider_kind = "minimax"
+anthropic_base_url = "https://api.minimax.io/anthropic"
+anthropic_model = "MiniMax-M2.7"
+anthropic_api_key_vault_ref = "global/minimax_api_key"
+"#,
+    )
+    .with_context(|| format!("failed to write {}", config_path.display()))?;
+
+    let config_path_string = config_path.to_string_lossy().into_owned();
+    let output = run_cli(
+        &workdir,
+        &[
+            "config",
+            "set",
+            "--path",
+            &config_path_string,
+            "--key",
+            "model_provider.anthropic_api_key",
+            "--value",
+            "minimax-inline-secret",
+        ],
+    )?;
+    assert!(!output.status.success(), "conflicting secret source should fail");
+    let stderr = String::from_utf8(output.stderr).context("stderr was not UTF-8")?;
+    assert!(
+        stderr.contains("error[validation_error]"),
+        "secret source conflicts should be classified as validation errors: {stderr}"
+    );
+    assert!(
+        stderr.contains(
+            "model_provider.anthropic_api_key cannot set both inline value and legacy vault_ref"
+        ),
+        "error should preserve the actionable conflict cause: {stderr}"
     );
     Ok(())
 }
