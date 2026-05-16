@@ -27,7 +27,7 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
             "Wait for a bounded number of milliseconds.",
             object_schema(
                 &["duration_ms"],
-                vec![("duration_ms", json!({"type":"integer","minimum":0,"maximum":5000}))],
+                vec![("duration_ms", json!({"type":"integer","minimum":0,"maximum":30000}))],
                 false,
             ),
             ToolParallelismPolicy::Idempotent,

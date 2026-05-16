@@ -223,6 +223,12 @@ fn memory_retain_schema_explains_principal_scope_for_corrections() {
 }
 
 #[test]
+fn sleep_schema_allows_short_heartbeat_waits() {
+    let entry = registry_entry("palyra.sleep").expect("sleep should be registered");
+    assert_eq!(entry.input_schema["properties"]["duration_ms"]["maximum"], 30_000);
+}
+
+#[test]
 fn intake_normalizes_safe_scalar_arguments() {
     let config = config(&["palyra.sleep"]);
     let snapshot = build_model_visible_tool_catalog_snapshot(ToolCatalogBuildRequest {

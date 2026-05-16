@@ -133,7 +133,7 @@ pub struct WasmRuntimePolicySnapshot {
 const BUDGET_DENY_REASON: &str = "tool execution budget exhausted for run";
 const UNSUPPORTED_TOOL_DENY_REASON: &str =
     "tool is allowlisted but unsupported by runtime executor";
-const TOOL_MAX_SLEEP_MS: u64 = 5_000;
+const TOOL_MAX_SLEEP_MS: u64 = 30_000;
 const EMPTY_TOOL_CAPABILITIES: &[ToolCapability] = &[];
 const PROCESS_RUNNER_CAPABILITIES: &[ToolCapability] = &[ToolCapability::ProcessExec];
 const WORKSPACE_FILE_READ_CAPABILITIES: &[ToolCapability] = &[ToolCapability::FilesystemRead];
@@ -1946,6 +1946,31 @@ mod tests {
         .await;
         assert!(!outcome.success, "sleep tool should time out under a tiny timeout budget");
         assert!(outcome.attestation.timed_out, "attestation must record timeout");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn execute_sleep_rejects_above_bounded_limit_without_waiting() {
+        let config = ToolCallConfig {
+            allowed_tools: vec!["palyra.sleep".to_owned()],
+            max_calls_per_run: 1,
+            execution_timeout_ms: 1_000,
+            process_runner: default_process_runner_policy(),
+            wasm_runtime: default_wasm_runtime_policy(),
+        };
+        let outcome = execute_tool_call(
+            &config,
+            "01ARZ3NDEKTSV4RRFFQ69G5FA2",
+            "palyra.sleep",
+            br#"{"duration_ms":30001}"#,
+        )
+        .await;
+        assert!(!outcome.success, "sleep above bounded limit must fail fast");
+        assert!(!outcome.attestation.timed_out, "limit rejection should not wait for timeout");
+        assert!(
+            outcome.error.contains("duration_ms must be <= 30000"),
+            "failure should include the bounded sleep limit: {}",
+            outcome.error
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
