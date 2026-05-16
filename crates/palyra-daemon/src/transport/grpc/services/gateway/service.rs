@@ -1,8 +1,11 @@
-use std::sync::{atomic::Ordering, Arc};
+use std::{
+    sync::{atomic::Ordering, Arc},
+    time::Duration,
+};
 
 use palyra_common::{validate_canonical_id, CANONICAL_PROTOCOL_MAJOR};
 use serde_json::json;
-use tokio::sync::mpsc;
+use tokio::{sync::mpsc, time::timeout};
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 use tonic::{metadata::MetadataMap, Request, Response, Status, Streaming};
 use tracing::{info, warn};
@@ -23,7 +26,7 @@ use crate::{
         route_message::orchestration::handle_routed_route_message,
         run_stream::orchestration::{
             finalize_run_stream_after_provider_response, process_run_stream_message,
-            RunStreamPostProviderOutcome,
+            RunStreamMessageProcessingOutcome, RunStreamPostProviderOutcome,
         },
         service_authorization::{authorize_agent_management_action, authorize_message_action},
     },
@@ -57,6 +60,8 @@ use crate::{
         proto::palyra::{common::v1 as common_v1, gateway::v1 as gateway_v1},
     },
 };
+
+const RUN_STREAM_TRAILING_MESSAGE_GRACE: Duration = Duration::from_millis(10);
 
 #[derive(Clone)]
 pub struct GatewayServiceImpl {
@@ -1453,7 +1458,16 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
             let mut remaining_tool_budget = state_for_stream.config.tool_call.max_calls_per_run;
             let mut previous_session_run_id = None::<String>;
 
-            while let Some(item) = stream.next().await {
+            let mut pending_item = None::<Result<common_v1::RunStreamRequest, Status>>;
+            loop {
+                let item = if let Some(item) = pending_item.take() {
+                    item
+                } else {
+                    match stream.next().await {
+                        Some(item) => item,
+                        None => break,
+                    }
+                };
                 let message = match item {
                     Ok(value) => value,
                     Err(error) => {
@@ -1490,7 +1504,7 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                     let _ = sender.send(Err(status)).await;
                     return;
                 }
-                if let Err(error) = process_run_stream_message(
+                let outcome = match process_run_stream_message(
                     &sender,
                     &mut stream,
                     &state_for_stream,
@@ -1508,21 +1522,34 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                 )
                 .await
                 {
-                    finalize_run_failure(RunFailureFinalization {
-                        sender: &sender,
-                        runtime_state: &state_for_stream,
-                        request_context: Some(&context_for_stream),
-                        active_session_id: active_session_id.as_deref(),
-                        run_state: &mut run_state,
-                        active_run_id: active_run_id.as_deref(),
-                        tape_seq: &mut tape_seq,
-                        reason: error.message(),
-                    })
-                    .await;
-                    let _ = sender.send(Err(error)).await;
-                    return;
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        finalize_run_failure(RunFailureFinalization {
+                            sender: &sender,
+                            runtime_state: &state_for_stream,
+                            request_context: Some(&context_for_stream),
+                            active_session_id: active_session_id.as_deref(),
+                            run_state: &mut run_state,
+                            active_run_id: active_run_id.as_deref(),
+                            tape_seq: &mut tape_seq,
+                            reason: error.message(),
+                        })
+                        .await;
+                        let _ = sender.send(Err(error)).await;
+                        return;
+                    }
+                };
+                match outcome {
+                    RunStreamMessageProcessingOutcome::Terminate => return,
+                    RunStreamMessageProcessingOutcome::Continue => {
+                        match timeout(RUN_STREAM_TRAILING_MESSAGE_GRACE, stream.next()).await {
+                            Ok(Some(next_item)) => {
+                                pending_item = Some(next_item);
+                            }
+                            Ok(None) | Err(_) => break,
+                        }
+                    }
                 }
-                return;
             }
 
             if let Some(run_id) = active_run_id {
