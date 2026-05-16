@@ -226,9 +226,16 @@ pub(crate) fn classify_error(error: &anyhow::Error) -> CliExitCode {
     {
         return CliExitCode::Precondition;
     }
+    if is_provider_output_limit_stop(&lower) {
+        return CliExitCode::Precondition;
+    }
     if lower.contains("unauthorized")
         || lower.contains("forbidden")
-        || lower.contains("auth")
+        || lower.contains("authentication")
+        || lower.contains("authorization")
+        || lower.contains("api key")
+        || lower.contains("admin token")
+        || lower.contains("auth token")
         || lower.contains("token")
     {
         return CliExitCode::Auth;
@@ -267,6 +274,13 @@ pub(crate) fn classify_error(error: &anyhow::Error) -> CliExitCode {
         return CliExitCode::Validation;
     }
     CliExitCode::Internal
+}
+
+fn is_provider_output_limit_stop(lower_error: &str) -> bool {
+    lower_error.contains("finish_reason=length")
+        || lower_error.contains("finish reason length")
+        || lower_error.contains("output token limit")
+        || lower_error.contains("max output tokens")
 }
 
 fn classify_control_plane_error(cause: &(dyn std::error::Error + 'static)) -> Option<CliExitCode> {
@@ -350,6 +364,16 @@ mod tests {
         assert_eq!(
             classify_error(&anyhow!("unauthorized admin token rejected")),
             CliExitCode::Auth
+        );
+    }
+
+    #[test]
+    fn classify_error_maps_provider_length_stop_as_precondition() {
+        assert_eq!(
+            classify_error(&anyhow!(
+                "model provider stopped because of an output token limit before returning a complete final answer or structured tool call (finish_reason=length); provider=anthropic"
+            )),
+            CliExitCode::Precondition
         );
     }
 
