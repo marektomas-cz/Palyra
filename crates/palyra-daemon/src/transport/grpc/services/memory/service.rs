@@ -9,7 +9,7 @@ use crate::{
     application::{
         memory::{
             enforce_memory_item_scope, memory_item_message, memory_search_hit_message,
-            memory_source_from_proto, resolve_memory_channel_scope,
+            memory_source_from_proto, resolve_memory_channel_scope, MemoryChannelScopeDefault,
         },
         service_authorization::authorize_memory_action,
     },
@@ -62,8 +62,11 @@ impl memory_v1::memory_service_server::MemoryService for MemoryServiceImpl {
         authorize_memory_action(context.principal.as_str(), "memory.ingest", "memory:item")?;
 
         let source = memory_source_from_proto(payload.source)?;
-        let channel =
-            resolve_memory_channel_scope(context.channel.as_deref(), non_empty(payload.channel))?;
+        let channel = resolve_memory_channel_scope(
+            context.channel.as_deref(),
+            non_empty(payload.channel),
+            MemoryChannelScopeDefault::ContextChannel,
+        )?;
         let session_id = optional_canonical_id(payload.session_id, "session_id")?;
         let confidence = if payload.confidence == 0.0 {
             None
@@ -104,8 +107,11 @@ impl memory_v1::memory_service_server::MemoryService for MemoryServiceImpl {
         let payload = request.into_inner();
         require_supported_version(payload.v)?;
 
-        let channel =
-            resolve_memory_channel_scope(context.channel.as_deref(), non_empty(payload.channel))?;
+        let channel = resolve_memory_channel_scope(
+            context.channel.as_deref(),
+            non_empty(payload.channel),
+            MemoryChannelScopeDefault::Principal,
+        )?;
         let session_id = optional_canonical_id(payload.session_id, "session_id")?;
         let resource = if let Some(session_id) = session_id.as_deref() {
             format!("memory:session:{session_id}")
@@ -221,8 +227,11 @@ impl memory_v1::memory_service_server::MemoryService for MemoryServiceImpl {
                 Status::invalid_argument("after_memory_ulid must be a canonical ULID")
             })?;
         }
-        let channel =
-            resolve_memory_channel_scope(context.channel.as_deref(), non_empty(payload.channel))?;
+        let channel = resolve_memory_channel_scope(
+            context.channel.as_deref(),
+            non_empty(payload.channel),
+            MemoryChannelScopeDefault::Principal,
+        )?;
         let session_id = optional_canonical_id(payload.session_id, "session_id")?;
         let sources = payload
             .sources
@@ -256,8 +265,11 @@ impl memory_v1::memory_service_server::MemoryService for MemoryServiceImpl {
         let payload = request.into_inner();
         require_supported_version(payload.v)?;
         authorize_memory_action(context.principal.as_str(), "memory.purge", "memory:items")?;
-        let channel =
-            resolve_memory_channel_scope(context.channel.as_deref(), non_empty(payload.channel))?;
+        let channel = resolve_memory_channel_scope(
+            context.channel.as_deref(),
+            non_empty(payload.channel),
+            MemoryChannelScopeDefault::Principal,
+        )?;
         let session_id = optional_canonical_id(payload.session_id, "session_id")?;
         if !payload.purge_all_principal && channel.is_none() && session_id.is_none() {
             return Err(Status::invalid_argument(

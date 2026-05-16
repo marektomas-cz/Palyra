@@ -1263,14 +1263,25 @@ fn serialize_memory_lifecycle_outcome(
             fields.insert("source_normalization".to_owned(), normalization);
         }
     }
+    let success = outcome.durable_memory_write;
+    let error = if success {
+        String::new()
+    } else {
+        format!(
+            "palyra.memory.retain did not write memory: status={} review_state={} durable_memory_write=false reason={}; do not claim this memory is stored or available for future recall",
+            outcome.status.as_str(),
+            review_state,
+            outcome.reason
+        )
+    };
     match serde_json::to_vec(&payload) {
         Ok(output_json) => memory_tool_execution_outcome(
             namespace,
             proposal_id,
             input_json,
-            true,
+            success,
             output_json,
-            String::new(),
+            error,
         ),
         Err(error) => memory_tool_execution_outcome(
             namespace,

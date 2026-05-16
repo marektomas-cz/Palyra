@@ -24,6 +24,7 @@ use crate::{
 pub(crate) fn resolve_memory_channel_scope(
     context_channel: Option<&str>,
     requested_channel: Option<String>,
+    default_scope: MemoryChannelScopeDefault,
 ) -> Result<Option<String>, Status> {
     let normalized_requested = requested_channel.and_then(non_empty);
     if let (Some(context_channel), Some(requested_channel)) =
@@ -35,7 +36,16 @@ pub(crate) fn resolve_memory_channel_scope(
             ));
         }
     }
-    Ok(normalized_requested.or_else(|| context_channel.map(str::to_owned)))
+    Ok(normalized_requested.or_else(|| match default_scope {
+        MemoryChannelScopeDefault::ContextChannel => context_channel.map(str::to_owned),
+        MemoryChannelScopeDefault::Principal => None,
+    }))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MemoryChannelScopeDefault {
+    ContextChannel,
+    Principal,
 }
 
 #[allow(clippy::result_large_err)]
@@ -1236,5 +1246,38 @@ mod tests {
             "E2E testovací projekt má používat TypeScript a Playwright; Vitest už nepoužívat.",
             "E2E preference: for this test project use TypeScript, Vitest, and concise Czech reports.",
         ));
+    }
+
+    #[test]
+    fn channel_scope_resolution_can_default_to_principal_memory() {
+        let resolved =
+            resolve_memory_channel_scope(Some("cli"), None, MemoryChannelScopeDefault::Principal)
+                .expect("principal default should be valid");
+
+        assert_eq!(resolved, None);
+    }
+
+    #[test]
+    fn channel_scope_resolution_can_default_to_context_channel() {
+        let resolved = resolve_memory_channel_scope(
+            Some("cli"),
+            None,
+            MemoryChannelScopeDefault::ContextChannel,
+        )
+        .expect("context channel default should be valid");
+
+        assert_eq!(resolved.as_deref(), Some("cli"));
+    }
+
+    #[test]
+    fn channel_scope_resolution_rejects_mismatched_requested_channel() {
+        let error = resolve_memory_channel_scope(
+            Some("cli"),
+            Some("discord:main".to_owned()),
+            MemoryChannelScopeDefault::Principal,
+        )
+        .expect_err("requested channel must match authenticated channel context");
+
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
     }
 }

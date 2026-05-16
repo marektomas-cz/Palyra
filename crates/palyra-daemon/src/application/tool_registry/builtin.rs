@@ -111,6 +111,29 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
             ToolResultProjectionPolicy::InlineUnlessLarge,
         ),
         entry(
+            "palyra.session_search",
+            "Compatibility alias for palyra.memory.session_search; search prior session transcripts for facts that were not stored as durable memory.",
+            object_schema(
+                &["query"],
+                vec![
+                    ("query", json!({"type":"string","maxLength":8192,"description":"Search text for prior-session transcript recall. Use this for previous session, last time, earlier conversation, or temporary facts explicitly not saved as memory."})),
+                    ("channel", json!({"type":"string"})),
+                    ("top_k", json!({"type":"integer","minimum":1,"maximum":24})),
+                    ("min_score", json!({"type":"number","minimum":0.0,"maximum":1.0})),
+                    ("window_before", json!({"type":"integer","minimum":0,"maximum":8})),
+                    ("window_after", json!({"type":"integer","minimum":0,"maximum":8})),
+                    (
+                        "max_windows_per_session",
+                        json!({"type":"integer","minimum":1,"maximum":8}),
+                    ),
+                    ("include_archived", json!({"type":"boolean"})),
+                ],
+                false,
+            ),
+            ToolParallelismPolicy::ReadOnly,
+            ToolResultProjectionPolicy::InlineUnlessLarge,
+        ),
+        entry(
             "palyra.memory.retain",
             "Write a reviewable scoped memory item with provenance. Use scope=principal for preferences or corrections that must affect future sessions.",
             object_schema(

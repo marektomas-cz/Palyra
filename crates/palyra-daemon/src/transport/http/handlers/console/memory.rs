@@ -1121,7 +1121,7 @@ pub(crate) async fn console_search_all_handler(
         })?;
     }
     let top_k = query.top_k.unwrap_or(8).clamp(1, 24);
-    let channel = query.channel.or(session.context.channel.clone());
+    let channel = query.channel.and_then(trim_to_option);
     let memory_hits = state
         .runtime
         .search_memory(journal::MemorySearchRequest {

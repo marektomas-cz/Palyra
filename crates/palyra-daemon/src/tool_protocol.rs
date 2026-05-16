@@ -307,7 +307,7 @@ pub fn tool_metadata(tool_name: &str) -> Option<ToolMetadata> {
         "palyra.memory.recall" => {
             Some(ToolMetadata { capabilities: EMPTY_TOOL_CAPABILITIES, default_sensitive: false })
         }
-        "palyra.memory.session_search" => {
+        "palyra.memory.session_search" | "palyra.session_search" => {
             Some(ToolMetadata { capabilities: EMPTY_TOOL_CAPABILITIES, default_sensitive: false })
         }
         "palyra.memory.retain" => {
@@ -665,11 +665,10 @@ async fn run_allowlisted_tool(
             executor: "gateway_runtime".to_owned(),
             sandbox_enforcement: "none".to_owned(),
         },
-        "palyra.memory.session_search" => ToolExecutionRawResult {
+        "palyra.memory.session_search" | "palyra.session_search" => ToolExecutionRawResult {
             success: false,
             output_json: b"{}".to_vec(),
-            error: "palyra.memory.session_search requires gateway memory runtime context"
-                .to_owned(),
+            error: format!("{tool_name} requires gateway memory runtime context"),
             timed_out: false,
             executor: "gateway_runtime".to_owned(),
             sandbox_enforcement: "none".to_owned(),
@@ -806,6 +805,7 @@ fn is_runtime_supported_tool(tool_name: &str) -> bool {
             | "palyra.memory.search"
             | "palyra.memory.recall"
             | "palyra.memory.session_search"
+            | "palyra.session_search"
             | "palyra.memory.retain"
             | "palyra.memory.reflect"
             | "palyra.routines.query"
@@ -864,6 +864,7 @@ fn tool_executor_name(config: &ToolCallConfig, tool_name: &str) -> String {
         "palyra.memory.search"
             | "palyra.memory.recall"
             | "palyra.memory.session_search"
+            | "palyra.session_search"
             | "palyra.memory.retain"
             | "palyra.memory.reflect"
     ) {
@@ -887,7 +888,9 @@ fn tool_input_limit_bytes(tool_name: &str) -> usize {
         "palyra.sleep" => MAX_SLEEP_TOOL_INPUT_BYTES,
         "palyra.memory.search" => MAX_MEMORY_SEARCH_TOOL_INPUT_BYTES,
         "palyra.memory.recall" => MAX_MEMORY_RECALL_TOOL_INPUT_BYTES,
-        "palyra.memory.session_search" => MAX_MEMORY_SESSION_SEARCH_TOOL_INPUT_BYTES,
+        "palyra.memory.session_search" | "palyra.session_search" => {
+            MAX_MEMORY_SESSION_SEARCH_TOOL_INPUT_BYTES
+        }
         "palyra.memory.retain" => MAX_MEMORY_RETAIN_TOOL_INPUT_BYTES,
         "palyra.memory.reflect" => MAX_MEMORY_REFLECT_TOOL_INPUT_BYTES,
         "palyra.routines.query" => MAX_ROUTINES_QUERY_TOOL_INPUT_BYTES,
@@ -1301,7 +1304,9 @@ mod tests {
 
     #[test]
     fn decide_tool_call_allows_memory_recall_when_allowlisted() {
-        for tool_name in ["palyra.memory.recall", "palyra.memory.session_search"] {
+        for tool_name in
+            ["palyra.memory.recall", "palyra.memory.session_search", "palyra.session_search"]
+        {
             let config = ToolCallConfig {
                 allowed_tools: vec![tool_name.to_owned()],
                 max_calls_per_run: 1,
@@ -1491,6 +1496,7 @@ mod tests {
         assert!(!tool_requires_approval("palyra.memory.search"));
         assert!(!tool_requires_approval("palyra.memory.recall"));
         assert!(!tool_requires_approval("palyra.memory.session_search"));
+        assert!(!tool_requires_approval("palyra.session_search"));
         assert!(!tool_requires_approval("palyra.memory.retain"));
         assert!(!tool_requires_approval("palyra.memory.reflect"));
         assert!(!tool_requires_approval("palyra.routines.query"));
@@ -1671,7 +1677,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn execute_tool_call_memory_recall_requires_gateway_runtime_context() {
-        for tool_name in ["palyra.memory.recall", "palyra.memory.session_search"] {
+        for tool_name in
+            ["palyra.memory.recall", "palyra.memory.session_search", "palyra.session_search"]
+        {
             let config = ToolCallConfig {
                 allowed_tools: vec![tool_name.to_owned()],
                 max_calls_per_run: 1,

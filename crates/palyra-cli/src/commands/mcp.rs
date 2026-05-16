@@ -18,6 +18,10 @@ const TOOL_APPROVALS_LIST: &str = "approvals_list";
 const TOOL_SESSION_CREATE: &str = "session_create";
 const TOOL_SESSION_PROMPT: &str = "session_prompt";
 const TOOL_APPROVAL_DECIDE: &str = "approval_decide";
+const MCP_MEMORY_SEARCH_HITS_PRESENT_CLAIM_BOUNDARY: &str =
+    "durable memory hits were returned; cite them as stored memory evidence";
+const MCP_MEMORY_SEARCH_HITS_ABSENT_CLAIM_BOUNDARY: &str =
+    "no durable memory hits were returned by this memory search; this does not search prior session transcripts";
 
 pub(crate) fn run_mcp(command: McpCommand) -> Result<()> {
     match command.subcommand {
@@ -236,6 +240,9 @@ impl LiveMcpBackend {
                 .map(|value| value.into_inner())
         })?;
         Ok(json!({
+            "memory_store_kind": "durable_memory",
+            "hit_count": response.hits.len(),
+            "claim_boundary": mcp_memory_search_claim_boundary(response.hits.len()),
             "hits": response.hits.iter().map(memory_search_hit_to_json).collect::<Vec<Value>>(),
         }))
     }
@@ -654,7 +661,7 @@ fn tool_definition(name: &str) -> Value {
         TOOL_MEMORY_SEARCH => json!({
             "name": TOOL_MEMORY_SEARCH,
             "title": "Search memory",
-            "description": "Search scoped Palyra memory with the same access controls used by the CLI.",
+            "description": "Search durable Palyra memory with the same access controls used by the CLI. This does not search prior session transcripts.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -759,6 +766,14 @@ fn tool_definition(name: &str) -> Value {
                 "additionalProperties": false,
             },
         }),
+    }
+}
+
+fn mcp_memory_search_claim_boundary(hit_count: usize) -> &'static str {
+    if hit_count == 0 {
+        MCP_MEMORY_SEARCH_HITS_ABSENT_CLAIM_BOUNDARY
+    } else {
+        MCP_MEMORY_SEARCH_HITS_PRESENT_CLAIM_BOUNDARY
     }
 }
 

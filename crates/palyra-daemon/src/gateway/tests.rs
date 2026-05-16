@@ -3970,7 +3970,12 @@ async fn memory_retain_tool_principal_scope_requires_review_for_high_risk_conten
         input_json,
     )
     .await;
-    assert!(outcome.success, "needs-review retain should return structured output");
+    assert!(!outcome.success, "needs-review retain should be a model-visible tool failure");
+    assert!(
+        outcome.error.contains("did not write memory"),
+        "needs-review retain should tell the model not to claim success: {}",
+        outcome.error
+    );
     let payload = parse_tool_output_json(&outcome);
     assert_eq!(payload.get("status").and_then(Value::as_str), Some("needs_review"));
     assert_eq!(payload.get("durable_memory_write").and_then(Value::as_bool), Some(false));

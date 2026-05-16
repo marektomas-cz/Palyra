@@ -1146,6 +1146,9 @@ fn failed_tool_claim_boundary(tool_name: &str) -> Option<&'static str> {
         crate::gateway::BROWSER_CONSOLE_LOG_TOOL_NAME => Some(
             "browser console diagnostics failed; console status is unknown, so do not claim the page has no console errors or that the console is clean unless a later successful console diagnostic verifies it",
         ),
+        crate::gateway::MEMORY_RETAIN_TOOL_NAME => Some(
+            "memory retain did not complete as a durable write; do not claim the memory was stored or will be available for future recall unless a later successful retain or ingest verifies it",
+        ),
         _ => None,
     }
 }
@@ -1601,6 +1604,44 @@ mod tests {
             value.get("claim_boundary").and_then(Value::as_str).is_some_and(
                 |boundary| boundary.contains("do not claim the page has no console errors")
             ),
+            "{value}"
+        );
+    }
+
+    #[test]
+    fn failed_memory_retain_result_warns_model_not_to_claim_storage() {
+        let result = RunStreamToolResultForModel {
+            proposal_id: "toolu_memory_retain_01".to_owned(),
+            tool_name: crate::gateway::MEMORY_RETAIN_TOOL_NAME.to_owned(),
+            outcome: crate::tool_protocol::build_tool_execution_outcome(
+                "toolu_memory_retain_01",
+                crate::gateway::MEMORY_RETAIN_TOOL_NAME,
+                br#"{"content_text":"remember this"}"#,
+                false,
+                br#"{"durable_memory_write":false,"review_state":"not_written_requires_review"}"#
+                    .to_vec(),
+                "palyra.memory.retain did not write memory".to_owned(),
+                false,
+                "gateway_runtime".to_owned(),
+                "none".to_owned(),
+            ),
+        };
+
+        let message = tool_result_to_provider_message(&result)
+            .expect("failed memory retain result should serialize for model");
+        let content = match message.content.first() {
+            Some(ProviderMessageContentPart::Text { text }) => text,
+            _ => panic!("tool result should be serialized as text content"),
+        };
+        let value: Value =
+            serde_json::from_str(content).expect("tool result content should be JSON");
+
+        assert_eq!(value.get("success").and_then(Value::as_bool), Some(false));
+        assert!(
+            value
+                .get("claim_boundary")
+                .and_then(Value::as_str)
+                .is_some_and(|boundary| boundary.contains("do not claim the memory was stored")),
             "{value}"
         );
     }

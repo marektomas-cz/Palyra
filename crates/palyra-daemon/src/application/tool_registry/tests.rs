@@ -191,8 +191,11 @@ fn routines_control_schema_discourages_slug_ids_and_short_intervals() {
 #[test]
 fn memory_session_search_schema_targets_prior_transcripts() {
     let entry = registry_entry("palyra.memory.session_search").expect("session search tool entry");
+    let alias = registry_entry("palyra.session_search").expect("session search alias tool entry");
 
     assert!(entry.description.contains("prior session transcripts"));
+    assert!(alias.description.contains("Compatibility alias"));
+    assert_eq!(alias.input_schema["required"][0], "query");
     assert_eq!(entry.input_schema["required"][0], "query");
     assert!(entry.input_schema["properties"]["query"]["description"]
         .as_str()

@@ -5,6 +5,11 @@ use crate::commands::memory_external_index::{
 };
 use crate::*;
 
+const MEMORY_SEARCH_HITS_PRESENT_CLAIM_BOUNDARY: &str =
+    "durable memory hits were returned; cite them as stored memory evidence";
+const MEMORY_SEARCH_HITS_ABSENT_CLAIM_BOUNDARY: &str =
+    "no durable memory hits were returned by this memory search; this does not search prior session transcripts; use memory search-all or memory session-search for transcript recall";
+
 pub(crate) fn run_memory(command: MemoryCommand) -> Result<()> {
     let root_context = app::current_root_context()
         .ok_or_else(|| anyhow!("CLI root context is unavailable for memory command"))?;
@@ -79,27 +84,25 @@ pub(crate) async fn run_memory_async(
                 .await
                 .context("failed to call memory SearchMemory")?
                 .into_inner();
+            let search_payload = memory_search_output_payload(response.hits.as_slice());
             if output::preferred_json(json) {
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&json!({
-                        "hits": response.hits.iter().map(memory_search_hit_to_json).collect::<Vec<_>>(),
-                    }))
-                    .context("failed to serialize JSON output")?
+                    serde_json::to_string_pretty(&search_payload)
+                        .context("failed to serialize JSON output")?
                 );
             } else if output::preferred_ndjson(json, false) {
                 output::print_json_line(
-                    &json!({
-                        "hits": response
-                            .hits
-                            .iter()
-                            .map(memory_search_hit_to_json)
-                            .collect::<Vec<_>>(),
-                    }),
+                    &search_payload,
                     "failed to encode memory search output as NDJSON",
                 )?;
             } else {
-                println!("memory.search hits={}", response.hits.len());
+                let hit_count = response.hits.len();
+                println!(
+                    "memory.search durable_memory_hits={} claim_boundary={}",
+                    hit_count,
+                    quoted_text_field(memory_search_claim_boundary(hit_count))
+                );
                 for hit in response.hits {
                     let item = hit.item.as_ref();
                     let id = item
@@ -385,7 +388,7 @@ pub(crate) async fn run_memory_async(
                 v: CANONICAL_PROTOCOL_MAJOR,
                 source: memory_source_to_proto(source),
                 content_text: content,
-                channel: channel.unwrap_or(connection.channel.clone()),
+                channel: channel.unwrap_or_default(),
                 session_id,
                 tags: tag,
                 confidence,
@@ -1280,6 +1283,23 @@ fn memory_session_scope_label(has_session_scope: bool) -> &'static str {
     }
 }
 
+fn memory_search_output_payload(hits: &[memory_v1::MemorySearchHit]) -> Value {
+    json!({
+        "memory_store_kind": "durable_memory",
+        "hit_count": hits.len(),
+        "claim_boundary": memory_search_claim_boundary(hits.len()),
+        "hits": hits.iter().map(memory_search_hit_to_json).collect::<Vec<_>>(),
+    })
+}
+
+fn memory_search_claim_boundary(hit_count: usize) -> &'static str {
+    if hit_count == 0 {
+        MEMORY_SEARCH_HITS_ABSENT_CLAIM_BOUNDARY
+    } else {
+        MEMORY_SEARCH_HITS_PRESENT_CLAIM_BOUNDARY
+    }
+}
+
 fn attach_manual_ingest_visibility(payload: &mut Value) {
     let Some(object) = payload.as_object_mut() else {
         return;
@@ -1298,14 +1318,38 @@ fn attach_manual_ingest_visibility(payload: &mut Value) {
 mod tests {
     use super::{
         attach_manual_ingest_visibility, memory_embeddings_degraded_line,
-        memory_session_scope_label, resolve_optional_query_arg,
+        memory_search_claim_boundary, memory_search_output_payload, memory_session_scope_label,
+        resolve_optional_query_arg,
     };
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     #[test]
     fn memory_session_scope_label_redacts_identifier_value() {
         assert_eq!(memory_session_scope_label(false), "none");
         assert_eq!(memory_session_scope_label(true), "present");
+    }
+
+    #[test]
+    fn memory_search_payload_identifies_empty_durable_memory_scope() {
+        let payload = memory_search_output_payload(&[]);
+
+        assert_eq!(
+            payload.get("memory_store_kind").and_then(Value::as_str),
+            Some("durable_memory")
+        );
+        assert_eq!(payload.get("hit_count").and_then(Value::as_u64), Some(0));
+        assert!(
+            payload.get("claim_boundary").and_then(Value::as_str).is_some_and(
+                |boundary| boundary.contains("does not search prior session transcripts")
+            ),
+            "{payload}"
+        );
+    }
+
+    #[test]
+    fn memory_search_claim_boundary_distinguishes_hits_from_absence() {
+        assert!(memory_search_claim_boundary(0).contains("no durable memory hits"));
+        assert!(memory_search_claim_boundary(1).contains("stored memory evidence"));
     }
 
     #[test]
