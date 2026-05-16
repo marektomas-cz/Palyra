@@ -88,7 +88,7 @@ const DEFAULT_HTTP_FETCH_MAX_RESPONSE_BYTES: u64 = 512 * 1024;
 const DEFAULT_HTTP_FETCH_ALLOW_REDIRECTS: bool = true;
 const DEFAULT_HTTP_FETCH_MAX_REDIRECTS: u32 = 3;
 const DEFAULT_HTTP_FETCH_ALLOWED_CONTENT_TYPES: &[&str] =
-    &["text/html", "text/plain", "application/json"];
+    &["text/html", "text/plain", "text/markdown", "application/json"];
 const DEFAULT_HTTP_FETCH_ALLOWED_REQUEST_HEADERS: &[&str] =
     &["accept", "accept-language", "if-none-match", "if-modified-since", "user-agent"];
 const DEFAULT_HTTP_FETCH_CACHE_ENABLED: bool = true;

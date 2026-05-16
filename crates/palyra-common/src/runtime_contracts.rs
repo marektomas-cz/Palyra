@@ -535,8 +535,12 @@ pub struct ArtifactReadRequest {
     pub offset_bytes: u64,
     #[serde(default)]
     pub max_bytes: u64,
-    #[serde(default)]
+    #[serde(default = "default_artifact_text_preview")]
     pub text_preview: bool,
+}
+
+fn default_artifact_text_preview() -> bool {
+    true
 }
 
 /// Response contract for `palyra.artifact.read`.
@@ -1352,16 +1356,16 @@ mod tests {
     use super::{
         AcpBindingConflictKind, AcpBindingRepairActionKind, AcpCapability, AcpClientContext,
         AcpCommand, AcpCommandEnvelope, AcpProtocolVersionRange, AcpScope, AcpSessionBindingRecord,
-        AcpSessionMode, AcpTransportKind, ArtifactRetentionDisposition, ArtifactRetentionPolicy,
-        AuxiliaryTaskKind, AuxiliaryTaskState, DeliveryPolicy, FlowState, FlowStepState,
-        IdempotencyReplayDecision, PruningPolicyClass, QueueDecision, QueueMode, QueuedInputState,
-        RealtimeCapability, RealtimeCommand, RealtimeCommandEnvelope, RealtimeEventSensitivity,
-        RealtimeEventTopic, RealtimeHandshakeRequest, RealtimeProtocolVersionRange, RealtimeRole,
-        RealtimeScope, RealtimeSubscription, RunLifecycleHookDecision,
-        RunLifecycleHookDecisionKind, RunLifecycleHookPhase, RunLifecyclePhase,
-        ToolResultSensitivity, ToolResultVisibility, ToolTurnBudget, WorkerLifecycleState,
-        ACP_PROTOCOL_MAX_VERSION, ACP_PROTOCOL_MIN_VERSION, REALTIME_PROTOCOL_MAX_VERSION,
-        REALTIME_PROTOCOL_MIN_VERSION,
+        AcpSessionMode, AcpTransportKind, ArtifactReadRequest, ArtifactRetentionDisposition,
+        ArtifactRetentionPolicy, AuxiliaryTaskKind, AuxiliaryTaskState, DeliveryPolicy, FlowState,
+        FlowStepState, IdempotencyReplayDecision, PruningPolicyClass, QueueDecision, QueueMode,
+        QueuedInputState, RealtimeCapability, RealtimeCommand, RealtimeCommandEnvelope,
+        RealtimeEventSensitivity, RealtimeEventTopic, RealtimeHandshakeRequest,
+        RealtimeProtocolVersionRange, RealtimeRole, RealtimeScope, RealtimeSubscription,
+        RunLifecycleHookDecision, RunLifecycleHookDecisionKind, RunLifecycleHookPhase,
+        RunLifecyclePhase, ToolResultSensitivity, ToolResultVisibility, ToolTurnBudget,
+        WorkerLifecycleState, ACP_PROTOCOL_MAX_VERSION, ACP_PROTOCOL_MIN_VERSION,
+        REALTIME_PROTOCOL_MAX_VERSION, REALTIME_PROTOCOL_MIN_VERSION,
     };
     use serde_json::json;
 
@@ -1416,6 +1420,16 @@ mod tests {
         assert!(RunLifecyclePhase::WaitingForApproval.is_waiting());
         assert_eq!(ToolResultVisibility::AuditArtifact.as_str(), "audit_artifact");
         assert_eq!(IdempotencyReplayDecision::ConflictingPayload.as_str(), "conflicting_payload");
+    }
+
+    #[test]
+    fn artifact_read_defaults_to_text_preview() {
+        let request: ArtifactReadRequest = serde_json::from_value(json!({
+            "artifact_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        }))
+        .expect("artifact read request should deserialize");
+
+        assert!(request.text_preview);
     }
 
     #[test]

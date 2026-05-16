@@ -12,6 +12,7 @@ use crate::{
 const TOOL_RESULT_ARTIFACT_TRUNCATION_RESERVE_BYTES: usize = 2 * 1024;
 const TOOL_RESULT_ARTIFACT_TRUNCATION_MESSAGE: &str =
     "Original tool output exceeded the journal artifact payload limit; this artifact stores a bounded UTF-8 prefix.";
+const SENSITIVE_FULL_READ_DENIED_REASON: &str = "sensitive_full_read_denied";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BoundedToolResultArtifactContent {
@@ -145,36 +146,74 @@ pub(crate) async fn execute_artifact_read_tool(
         text_preview: request.text_preview,
     };
 
-    match runtime_state.read_tool_result_artifact(read).await {
-        Ok(response) => match serde_json::to_vec(&response) {
-            Ok(output_json) => {
-                artifact_read_outcome(proposal_id, input_json, true, output_json, String::new())
-            }
-            Err(error) => artifact_read_outcome(
-                proposal_id,
-                input_json,
-                false,
-                b"{}".to_vec(),
-                format!("failed to serialize artifact read response: {error}"),
-            ),
-        },
+    match runtime_state.read_tool_result_artifact(read.clone()).await {
+        Ok(response) => serialize_artifact_read_success(proposal_id, input_json, response),
         Err(status) => {
-            let output_json = serde_json::to_vec(&json!({
-                "error": {
-                    "code": format!("{:?}", status.code()).to_ascii_lowercase(),
-                    "message": status.message(),
+            if should_retry_artifact_read_as_text_preview(&read, &status) {
+                let preview_read = ToolResultArtifactReadRequest { text_preview: true, ..read };
+                match runtime_state.read_tool_result_artifact(preview_read).await {
+                    Ok(response) => {
+                        return serialize_artifact_read_success(proposal_id, input_json, response);
+                    }
+                    Err(preview_status) => {
+                        return artifact_read_error_outcome(
+                            proposal_id,
+                            input_json,
+                            &preview_status,
+                        );
+                    }
                 }
-            }))
-            .unwrap_or_else(|_| b"{}".to_vec());
-            artifact_read_outcome(
-                proposal_id,
-                input_json,
-                false,
-                output_json,
-                format!("artifact read failed: {}", status.message()),
-            )
+            }
+            artifact_read_error_outcome(proposal_id, input_json, &status)
         }
     }
+}
+
+fn serialize_artifact_read_success(
+    proposal_id: &str,
+    input_json: &[u8],
+    response: palyra_common::runtime_contracts::ArtifactReadResponse,
+) -> ToolExecutionOutcome {
+    match serde_json::to_vec(&response) {
+        Ok(output_json) => {
+            artifact_read_outcome(proposal_id, input_json, true, output_json, String::new())
+        }
+        Err(error) => artifact_read_outcome(
+            proposal_id,
+            input_json,
+            false,
+            b"{}".to_vec(),
+            format!("failed to serialize artifact read response: {error}"),
+        ),
+    }
+}
+
+fn should_retry_artifact_read_as_text_preview(
+    request: &ToolResultArtifactReadRequest,
+    status: &tonic::Status,
+) -> bool {
+    !request.text_preview && status.message().contains(SENSITIVE_FULL_READ_DENIED_REASON)
+}
+
+fn artifact_read_error_outcome(
+    proposal_id: &str,
+    input_json: &[u8],
+    status: &tonic::Status,
+) -> ToolExecutionOutcome {
+    let output_json = serde_json::to_vec(&json!({
+        "error": {
+            "code": format!("{:?}", status.code()).to_ascii_lowercase(),
+            "message": status.message(),
+        }
+    }))
+    .unwrap_or_else(|_| b"{}".to_vec());
+    artifact_read_outcome(
+        proposal_id,
+        input_json,
+        false,
+        output_json,
+        format!("artifact read failed: {}", status.message()),
+    )
 }
 
 fn artifact_read_outcome(
@@ -199,8 +238,10 @@ fn artifact_read_outcome(
 
 #[cfg(test)]
 mod tests {
-    use super::bounded_tool_result_artifact_content;
+    use super::{bounded_tool_result_artifact_content, should_retry_artifact_read_as_text_preview};
+    use crate::journal::ToolResultArtifactReadRequest;
     use serde_json::{json, Value};
+    use tonic::{Code, Status};
 
     #[test]
     fn bounded_tool_result_artifact_content_keeps_small_payload_raw() {
@@ -247,5 +288,49 @@ mod tests {
             projected.pointer("/stored_output_utf8_prefix").and_then(Value::as_str).is_some(),
             "truncated artifact should retain a bounded useful prefix"
         );
+    }
+
+    #[test]
+    fn artifact_read_retries_sensitive_full_read_as_text_preview() {
+        let request = ToolResultArtifactReadRequest {
+            artifact_id: "artifact-1".to_owned(),
+            session_id: "session-1".to_owned(),
+            run_id: "run-1".to_owned(),
+            principal: "user:test".to_owned(),
+            device_id: "device-1".to_owned(),
+            channel: None,
+            expected_digest_sha256: None,
+            offset_bytes: 0,
+            max_bytes: 4096,
+            text_preview: false,
+        };
+        let status = Status::new(
+            Code::PermissionDenied,
+            "tool result artifact read denied: sensitive_full_read_denied",
+        );
+
+        assert!(should_retry_artifact_read_as_text_preview(&request, &status));
+    }
+
+    #[test]
+    fn artifact_read_does_not_retry_when_preview_was_requested() {
+        let request = ToolResultArtifactReadRequest {
+            artifact_id: "artifact-1".to_owned(),
+            session_id: "session-1".to_owned(),
+            run_id: "run-1".to_owned(),
+            principal: "user:test".to_owned(),
+            device_id: "device-1".to_owned(),
+            channel: None,
+            expected_digest_sha256: None,
+            offset_bytes: 0,
+            max_bytes: 4096,
+            text_preview: true,
+        };
+        let status = Status::new(
+            Code::PermissionDenied,
+            "tool result artifact read denied: sensitive_full_read_denied",
+        );
+
+        assert!(!should_retry_artifact_read_as_text_preview(&request, &status));
     }
 }

@@ -227,7 +227,10 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
                     ("expected_digest_sha256", json!({"type":"string"})),
                     ("offset_bytes", json!({"type":"integer","minimum":0})),
                     ("max_bytes", json!({"type":"integer","minimum":1})),
-                    ("text_preview", json!({"type":"boolean"})),
+                    (
+                        "text_preview",
+                        json!({"type":"boolean","default":true,"description":"Defaults to true so textual tool-result artifacts return a bounded redacted text preview instead of gated full bytes."}),
+                    ),
                 ],
                 false,
             ),

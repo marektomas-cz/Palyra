@@ -229,6 +229,17 @@ fn sleep_schema_allows_short_heartbeat_waits() {
 }
 
 #[test]
+fn artifact_read_schema_defaults_to_text_preview() {
+    let entry = registry_entry("palyra.artifact.read").expect("artifact read should be registered");
+
+    assert_eq!(entry.input_schema["properties"]["text_preview"]["default"], true);
+    assert!(entry.input_schema["properties"]["text_preview"]["description"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("bounded redacted text preview"));
+}
+
+#[test]
 fn intake_normalizes_safe_scalar_arguments() {
     let config = config(&["palyra.sleep"]);
     let snapshot = build_model_visible_tool_catalog_snapshot(ToolCatalogBuildRequest {
