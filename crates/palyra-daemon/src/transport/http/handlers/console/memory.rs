@@ -2,7 +2,7 @@ use crate::gateway::current_unix_ms;
 use crate::gateway::ListOrchestratorSessionsRequest;
 use crate::journal::{
     MemoryRetentionPolicy, RecallArtifactCreateRequest, RecallArtifactListFilter,
-    SessionSearchOutcome, SessionSearchRequest, RECALL_ARTIFACT_KIND_PREVIEW,
+    RecallArtifactRecord, SessionSearchOutcome, SessionSearchRequest, RECALL_ARTIFACT_KIND_PREVIEW,
     RECALL_ARTIFACT_KIND_SESSION_SEARCH,
 };
 use crate::*;
@@ -147,10 +147,45 @@ pub(crate) async fn console_memory_status_handler(
             "recent_documents": workspace_preview,
         },
         "recall_artifacts": {
-            "latest": latest_recall_artifacts,
+            "latest": latest_recall_artifacts
+                .iter()
+                .map(recall_artifact_inventory_json)
+                .collect::<Vec<_>>(),
+            "detail_source": "/console/v1/memory/recall-artifacts",
         },
         "derived": derived,
     })))
+}
+
+fn recall_artifact_inventory_json(artifact: &RecallArtifactRecord) -> Value {
+    json!({
+        "artifact_id": artifact.artifact_id,
+        "artifact_kind": artifact.artifact_kind,
+        "channel": artifact.channel,
+        "session_id": artifact.session_id,
+        "query": truncate_recall_inventory_text(artifact.query.as_str(), 160),
+        "summary": truncate_recall_inventory_text(artifact.summary.as_str(), 320),
+        "created_by_principal": artifact.created_by_principal,
+        "created_at_unix_ms": artifact.created_at_unix_ms,
+        "payload_available": !artifact.payload.is_null(),
+        "diagnostics_available": !artifact.diagnostics.is_null(),
+        "provenance_available": !artifact.provenance.is_null(),
+    })
+}
+
+fn truncate_recall_inventory_text(value: &str, max_chars: usize) -> String {
+    let trimmed = value.trim();
+    let mut output = String::with_capacity(trimmed.len().min(max_chars));
+    let mut count = 0usize;
+    for ch in trimmed.chars() {
+        if count >= max_chars {
+            output.push_str("...");
+            return output;
+        }
+        output.push(ch);
+        count = count.saturating_add(1);
+    }
+    output
 }
 
 pub(crate) async fn console_memory_derived_artifacts_handler(
@@ -1823,4 +1858,56 @@ async fn load_console_learning_candidate(
             runtime_status_response(tonic::Status::not_found("learning candidate not found"))
         })?;
     Ok(candidate)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recall_artifact_inventory_omits_deep_payloads() {
+        let artifact = RecallArtifactRecord {
+            artifact_id: "01ARZ3NDEKTSV4RRFFQ69G5FAW".to_owned(),
+            artifact_kind: RECALL_ARTIFACT_KIND_SESSION_SEARCH.to_owned(),
+            principal: "operator".to_owned(),
+            device_id: "device".to_owned(),
+            channel: Some("cli".to_owned()),
+            session_id: Some("01ARZ3NDEKTSV4RRFFQ69G5FAX".to_owned()),
+            query: "PALYRA_E2E_BETA".to_owned(),
+            summary: "session search matched the feature flag".to_owned(),
+            payload: json!({
+                "groups": [{
+                    "windows": [{
+                        "transcript": "large transcript body should require explicit artifact detail"
+                    }]
+                }]
+            }),
+            diagnostics: json!({
+                "scoring": {
+                    "breakdown": "large diagnostic body should not be in memory status"
+                }
+            }),
+            provenance: json!({
+                "prompt_preview": "large prompt preview should not be in memory status"
+            }),
+            created_by_principal: "operator".to_owned(),
+            created_at_unix_ms: 1_700_000_000_000,
+        };
+
+        let inventory = recall_artifact_inventory_json(&artifact);
+        let encoded = inventory.to_string();
+
+        assert_eq!(inventory["artifact_id"], "01ARZ3NDEKTSV4RRFFQ69G5FAW");
+        assert_eq!(inventory["artifact_kind"], RECALL_ARTIFACT_KIND_SESSION_SEARCH);
+        assert_eq!(inventory["query"], "PALYRA_E2E_BETA");
+        assert_eq!(inventory["payload_available"], true);
+        assert_eq!(inventory["diagnostics_available"], true);
+        assert_eq!(inventory["provenance_available"], true);
+        assert!(!encoded.contains("large transcript body"), "{encoded}");
+        assert!(!encoded.contains("large diagnostic body"), "{encoded}");
+        assert!(!encoded.contains("large prompt preview"), "{encoded}");
+        assert!(inventory.get("payload").is_none());
+        assert!(inventory.get("diagnostics").is_none());
+        assert!(inventory.get("provenance").is_none());
+    }
 }
