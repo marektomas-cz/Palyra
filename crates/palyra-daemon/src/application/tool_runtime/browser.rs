@@ -1147,9 +1147,16 @@ pub(crate) async fn execute_browser_tool(
             match client.screenshot(request).await {
                 Ok(response) => {
                     let response = response.into_inner();
+                    let image_sha256 = if response.success {
+                        hex::encode(Sha256::digest(response.image_bytes.as_slice()))
+                    } else {
+                        String::new()
+                    };
                     let output = json!({
                         "success": response.success,
                         "mime_type": response.mime_type,
+                        "size_bytes": response.image_bytes.len(),
+                        "sha256": image_sha256,
                         "image_base64": STANDARD
                             .encode(response.image_bytes.as_slice()),
                         "error": response.error,

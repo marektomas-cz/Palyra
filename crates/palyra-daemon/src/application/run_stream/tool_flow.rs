@@ -1479,10 +1479,33 @@ fn redact_sensitive_json_object(map: &mut Map<String, Value>) {
     for (key, value) in map.iter_mut() {
         if is_sensitive_key(key.as_str()) {
             *value = Value::String(REDACTED.to_owned());
+        } else if is_stream_binary_payload_key(key.as_str()) {
+            *value = stream_binary_payload_placeholder(value);
         } else {
             redact_sensitive_json_value(value);
         }
     }
+}
+
+fn is_stream_binary_payload_key(key: &str) -> bool {
+    let normalized = key.to_ascii_lowercase().replace(['-', '.'], "_");
+    matches!(
+        normalized.as_str(),
+        "bytes_base64"
+            | "image_base64"
+            | "pdf_base64"
+            | "inline_base64"
+            | "screenshot_base64"
+            | "failure_screenshot_base64"
+            | "failure_image_base64"
+    ) || normalized.ends_with("_image_base64")
+        || normalized.ends_with("_pdf_base64")
+        || normalized.ends_with("_screenshot_base64")
+}
+
+fn stream_binary_payload_placeholder(value: &Value) -> Value {
+    let char_len = value.as_str().map(str::len).unwrap_or_default();
+    Value::String(format!("<redacted:base64 chars={char_len}>"))
 }
 
 fn truncate_utf8(value: &str, max_bytes: usize) -> String {
@@ -1503,6 +1526,7 @@ mod tests {
     };
     use crate::journal::{ApprovalDecision, ApprovalDecisionScope};
     use palyra_common::validate_canonical_id;
+    use serde_json::json;
 
     #[test]
     fn tool_parallelism_classifies_safe_and_unsafe_tools() {
@@ -1554,5 +1578,24 @@ mod tests {
         );
         validate_canonical_id(outcome.approval_id.as_str())
             .expect("auto approval id should be canonical");
+    }
+
+    #[test]
+    fn tool_result_projection_preview_redacts_binary_base64_payloads() {
+        let raw = "A".repeat(4096);
+        let output_json = serde_json::to_vec(&json!({
+            "success": true,
+            "mime_type": "image/png",
+            "size_bytes": 3072,
+            "image_base64": raw,
+        }))
+        .expect("test payload should serialize");
+
+        let preview = super::redacted_tool_result_preview(output_json.as_slice(), 1024);
+
+        assert!(preview.contains("\"mime_type\":\"image/png\""), "{preview}");
+        assert!(preview.contains("\"size_bytes\":3072"), "{preview}");
+        assert!(preview.contains("\"image_base64\":\"<redacted:base64 chars=4096>\""), "{preview}");
+        assert!(!preview.contains("AAAA"), "{preview}");
     }
 }

@@ -4548,6 +4548,8 @@ fn redact_stream_json_value(value: Value, key_context: Option<&str>, depth: usiz
                 }
                 let value = if is_sensitive_key(key.as_str()) {
                     Value::String(REDACTED.to_owned())
+                } else if is_stream_binary_payload_key(key.as_str()) {
+                    stream_binary_payload_placeholder(&entry)
                 } else {
                     redact_stream_json_value(entry, Some(key.as_str()), depth + 1)
                 };
@@ -4590,10 +4592,34 @@ fn redact_stream_json_value(value: Value, key_context: Option<&str>, depth: usiz
             if key_context.is_some_and(is_sensitive_key) {
                 return Value::String(REDACTED.to_owned());
             }
+            if key_context.is_some_and(is_stream_binary_payload_key) {
+                return Value::String(format!("<redacted:base64 chars={}>", raw.len()));
+            }
             Value::String(sanitize_stream_json_string_with_context(raw.as_str(), key_context))
         }
         other => other,
     }
+}
+
+fn is_stream_binary_payload_key(key: &str) -> bool {
+    let normalized = key.to_ascii_lowercase().replace(['-', '.'], "_");
+    matches!(
+        normalized.as_str(),
+        "bytes_base64"
+            | "image_base64"
+            | "pdf_base64"
+            | "inline_base64"
+            | "screenshot_base64"
+            | "failure_screenshot_base64"
+            | "failure_image_base64"
+    ) || normalized.ends_with("_image_base64")
+        || normalized.ends_with("_pdf_base64")
+        || normalized.ends_with("_screenshot_base64")
+}
+
+fn stream_binary_payload_placeholder(value: &Value) -> Value {
+    let char_len = value.as_str().map(str::len).unwrap_or_default();
+    Value::String(format!("<redacted:base64 chars={char_len}>"))
 }
 
 fn sanitize_stream_json_string_with_context(raw: &str, key_context: Option<&str>) -> String {
@@ -4771,6 +4797,35 @@ mod agent_stream_output_tests {
         let encoded = value.to_string();
         assert!(!encoded.contains("browser-secret"), "{encoded}");
         assert!(!encoded.contains("access_token=raw"), "{encoded}");
+    }
+
+    #[test]
+    fn ndjson_tool_results_replace_binary_base64_with_metadata_placeholder() {
+        let raw_image = "A".repeat(4096);
+        let event = common_v1::RunStreamEvent {
+            v: CANONICAL_PROTOCOL_MAJOR,
+            run_id: None,
+            body: Some(common_v1::run_stream_event::Body::ToolResult(common_v1::ToolResult {
+                proposal_id: None,
+                success: true,
+                output_json: serde_json::to_vec(&json!({
+                    "success": true,
+                    "mime_type": "image/png",
+                    "size_bytes": 3072,
+                    "image_base64": raw_image,
+                }))
+                .expect("test payload should serialize"),
+                error: String::new(),
+            })),
+        };
+
+        let value = agent_event_json_value(&event);
+
+        assert_eq!(value["output_json"]["mime_type"], "image/png");
+        assert_eq!(value["output_json"]["size_bytes"], 3072);
+        assert_eq!(value["output_json"]["image_base64"], "<redacted:base64 chars=4096>");
+        let encoded = value.to_string();
+        assert!(!encoded.contains("AAAA"), "{encoded}");
     }
 
     #[test]
