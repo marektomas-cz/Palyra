@@ -2640,10 +2640,13 @@ mod tests {
     #[test]
     #[cfg(not(target_os = "macos"))]
     fn run_constrained_process_starts_allowlisted_python_background_when_available() {
-        let Some(python) = ["python3", "python", "py"]
-            .into_iter()
-            .find(|command| Command::new(command).arg("--version").output().is_ok())
-        else {
+        let Some(python) = ["python3", "python", "py"].into_iter().find(|command| {
+            Command::new(command)
+                .arg("--version")
+                .output()
+                .map(|output| output.status.success())
+                .unwrap_or(false)
+        }) else {
             return;
         };
         let workspace = unique_temp_dir("workspace-python-background");
