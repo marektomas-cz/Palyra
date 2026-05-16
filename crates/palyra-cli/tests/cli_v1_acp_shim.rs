@@ -152,7 +152,7 @@ fn channels_discord_status_and_health_refresh_preserve_text_and_json_contracts()
 }
 
 #[test]
-fn agent_run_streams_status_events() -> Result<()> {
+fn agent_run_streams_readable_text_by_default() -> Result<()> {
     let (child, _admin_port, grpc_port) = spawn_palyrad_with_dynamic_ports()?;
     let _daemon = ChildGuard::new(child);
     let session_id = generate_canonical_ulid();
@@ -189,17 +189,10 @@ fn agent_run_streams_status_events() -> Result<()> {
     );
     let stdout = String::from_utf8(output.stdout).context("stdout was not valid UTF-8")?;
     assert!(
-        stdout.contains("agent.status") && stdout.contains("kind=accepted"),
-        "agent run should include accepted status event: {stdout}"
+        !stdout.contains("agent.status") && !stdout.contains("agent.token"),
+        "default agent run text should hide internal event plumbing: {stdout}"
     );
-    assert!(
-        stdout.contains("agent.status") && stdout.contains("kind=done"),
-        "agent run should include done status event: {stdout}"
-    );
-    assert!(
-        stdout.contains("agent.token") && stdout.contains("token=hello"),
-        "agent run should surface streamed model token text instead of a redacted placeholder: {stdout}"
-    );
+    assert!(stdout.contains("hello"), "agent run should stream readable assistant text: {stdout}");
     Ok(())
 }
 

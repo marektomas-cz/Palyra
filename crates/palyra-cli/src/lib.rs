@@ -3680,15 +3680,19 @@ async fn execute_agent_stream_async(
         outcome.ensure_success()?;
         outcome
     } else {
+        let mut text_emitter = AgentTextEmitter::default();
         let outcome = stream_agent_events_async(&mut client, request, |event| {
             if ndjson {
                 emit_acp_event_ndjson(event)
             } else {
-                emit_agent_event_text(event)
+                text_emitter.emit(event)
             }
         })
         .await
         .map_err(|error| enrich_agent_principal_auth_error(error, principal.as_str()))?;
+        if !ndjson {
+            text_emitter.finish()?;
+        }
         outcome.ensure_success()?;
         outcome
     };
@@ -4333,110 +4337,53 @@ fn build_run_stream_request(input: &AgentRunInput) -> Result<common_v1::RunStrea
     })
 }
 
+#[derive(Default)]
+struct AgentTextEmitter {
+    wrote_text: bool,
+    needs_newline: bool,
+}
+
+impl AgentTextEmitter {
+    fn emit(&mut self, event: &common_v1::RunStreamEvent) -> Result<()> {
+        if let Some(common_v1::run_stream_event::Body::ModelToken(token)) = event.body.as_ref() {
+            self.write_token(token.token.as_str())?;
+        }
+        Ok(())
+    }
+
+    fn write_token(&mut self, token: &str) -> Result<()> {
+        if token.is_empty() {
+            return Ok(());
+        }
+        let mut stdout = std::io::stdout().lock();
+        stdout.write_all(token.as_bytes()).context("stdout write failed")?;
+        self.wrote_text = true;
+        self.needs_newline = !token.ends_with('\n') && !token.ends_with('\r');
+        Ok(())
+    }
+
+    fn finish(&mut self) -> Result<()> {
+        if self.wrote_text && self.needs_newline {
+            let mut stdout = std::io::stdout().lock();
+            stdout.write_all(b"\n").context("stdout write failed")?;
+            self.needs_newline = false;
+        }
+        Ok(())
+    }
+}
+
 fn emit_agent_event_text(event: &common_v1::RunStreamEvent) -> Result<()> {
-    let run_id = redacted_presence_for_output(event.run_id.is_some());
-    match event.body.as_ref() {
-        Some(common_v1::run_stream_event::Body::ModelToken(token)) => {
-            println!(
-                "agent.token run_id={} token={} final={}",
-                run_id, token.token, token.is_final
-            );
-        }
-        Some(common_v1::run_stream_event::Body::Status(status)) => {
-            println!(
-                "agent.status run_id={} kind={} message={}",
-                run_id,
-                stream_status_kind_to_text(status.kind),
-                agent_status_message_text(status)
-            );
-        }
-        Some(common_v1::run_stream_event::Body::ToolProposal(proposal)) => {
-            println!(
-                "agent.tool.proposal run_id={} proposal_id={} tool_name={} approval_required={}",
-                run_id,
-                redacted_presence_for_output(proposal.proposal_id.is_some()),
-                safe_stream_label_for_output(proposal.tool_name.as_str()),
-                proposal.approval_required
-            );
-        }
-        Some(common_v1::run_stream_event::Body::ToolDecision(decision)) => {
-            println!(
-                "agent.tool.decision run_id={} proposal_id={} kind={} reason={} approval_required={} policy_enforced={}",
-                run_id,
-                redacted_presence_for_output(decision.proposal_id.is_some()),
-                tool_decision_kind_to_text(decision.kind),
-                redacted_presence_for_output(!decision.reason.trim().is_empty()),
-                decision.approval_required,
-                decision.policy_enforced
-            );
-        }
-        Some(common_v1::run_stream_event::Body::ToolApprovalRequest(approval_request)) => {
-            println!(
-                "agent.tool.approval.request run_id={} proposal_id={} approval_id={} tool_name={} approval_required={} summary=\"{}\" cli_hint=\"{}\"",
-                run_id,
-                redacted_presence_for_output(approval_request.proposal_id.is_some()),
-                redacted_presence_for_output(approval_request.approval_id.is_some()),
-                safe_stream_label_for_output(approval_request.tool_name.as_str()),
-                approval_request.approval_required,
-                redacted_presence_for_output(!approval_request.request_summary.trim().is_empty()),
-                approval_required_cli_hint()
-            );
-        }
-        Some(common_v1::run_stream_event::Body::ToolApprovalResponse(approval_response)) => {
-            println!(
-                "agent.tool.approval.response run_id={} proposal_id={} approval_id={} approved={} scope={} ttl_ms={} reason={}",
-                run_id,
-                redacted_presence_for_output(approval_response.proposal_id.is_some()),
-                redacted_presence_for_output(approval_response.approval_id.is_some()),
-                approval_response.approved,
-                approval_scope_to_text(approval_response.decision_scope),
-                approval_response.decision_scope_ttl_ms,
-                redacted_presence_for_output(!approval_response.reason.trim().is_empty())
-            );
-        }
-        Some(common_v1::run_stream_event::Body::ToolResult(result)) => {
-            println!(
-                "agent.tool.result run_id={} proposal_id={} success={} error={}",
-                run_id,
-                redacted_presence_for_output(result.proposal_id.is_some()),
-                result.success,
-                sanitized_optional_text_field(result.error.as_str())
-            );
-        }
-        Some(common_v1::run_stream_event::Body::ToolAttestation(attestation)) => {
-            println!(
-                "agent.tool.attestation run_id={} proposal_id={} attestation_id={} timed_out={} executor={}",
-                run_id,
-                redacted_presence_for_output(attestation.proposal_id.is_some()),
-                redacted_presence_for_output(attestation.attestation_id.is_some()),
-                attestation.timed_out,
-                safe_stream_label_for_output(attestation.executor.as_str())
-            );
-        }
-        Some(common_v1::run_stream_event::Body::A2uiUpdate(update)) => {
-            println!(
-                "agent.a2ui.update run_id={} surface={} version={}",
-                run_id,
-                redacted_presence_for_output(!update.surface.trim().is_empty()),
-                update.v
-            );
-        }
-        Some(common_v1::run_stream_event::Body::JournalEvent(journal_event)) => {
-            println!(
-                "agent.journal.event run_id={} event_id={} kind={} actor={}",
-                run_id,
-                redacted_presence_for_output(journal_event.event_id.is_some()),
-                journal_event.kind,
-                redacted_presence_for_output(journal_event.actor != 0)
-            );
-        }
-        None => {
-            println!("agent.event run_id={} kind=unknown", run_id);
+    let mut emitter = AgentTextEmitter::default();
+    if let Some(common_v1::run_stream_event::Body::ModelToken(token)) = event.body.as_ref() {
+        emitter.write_token(token.token.as_str())?;
+        if token.is_final {
+            emitter.finish()?;
         }
     }
     Ok(())
 }
 
+#[cfg(test)]
 fn agent_status_message_text(status: &common_v1::StreamStatus) -> String {
     if status.kind == common_v1::stream_status::StatusKind::Failed as i32 {
         return quoted_text_field(sanitize_agent_failure_message(status.message.as_str()).as_str());
@@ -4465,6 +4412,7 @@ fn quoted_text_field(value: &str) -> String {
     format!("\"{escaped}\"")
 }
 
+#[cfg(test)]
 fn safe_stream_label_for_output(value: &str) -> String {
     let sanitized = sanitize_diagnostic_error(value).trim().to_owned();
     if sanitized.is_empty() {
@@ -4486,6 +4434,7 @@ fn safe_stream_label_json_value(value: &str) -> Value {
     }
 }
 
+#[cfg(test)]
 fn sanitized_optional_text_field(value: &str) -> String {
     let sanitized = sanitize_diagnostic_error(value).trim().to_owned();
     if sanitized.is_empty() {
@@ -4650,6 +4599,7 @@ fn is_sensitive_cli_arg_marker(raw: &str) -> bool {
     !normalized.is_empty() && is_sensitive_key(normalized.as_str())
 }
 
+#[cfg(test)]
 fn is_safe_stream_label_char(candidate: char) -> bool {
     candidate.is_ascii_alphanumeric() || matches!(candidate, '.' | '_' | '-' | ':' | '/')
 }
