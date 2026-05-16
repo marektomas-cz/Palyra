@@ -3116,15 +3116,15 @@ mod tests {
     #[test]
     #[cfg(all(unix, not(target_os = "macos")))]
     fn run_constrained_process_enforces_combined_output_quota() {
-        if Command::new("cat").arg("--version").output().is_err() {
+        if Command::new("yes").arg("--version").output().is_err() {
             return;
         }
 
         let workspace = std::env::current_dir().expect("workspace current_dir should resolve");
-        let mut policy = sandbox_policy_with_allowed_executables(workspace, vec!["cat".to_owned()]);
+        let mut policy = sandbox_policy_with_allowed_executables(workspace, vec!["yes".to_owned()]);
         policy.egress_enforcement_mode = EgressEnforcementMode::Preflight;
         policy.max_output_bytes = 16;
-        let input = br#"{"command":"cat","args":["README.md","missing-file-that-does-not-exist"]}"#;
+        let input = br#"{"command":"yes","args":["0123456789abcdef"]}"#;
 
         let error = run_constrained_process(&policy, input, Duration::from_millis(1_000))
             .expect_err("combined stdout+stderr output should hit global quota");
@@ -3134,16 +3134,16 @@ mod tests {
     #[test]
     #[cfg(all(unix, not(target_os = "macos")))]
     fn run_constrained_process_runtime_failure_redacts_child_stderr_payload() {
-        if Command::new("cat").arg("--version").output().is_err() {
+        if Command::new("wc").arg("--version").output().is_err() {
             return;
         }
 
         let workspace = std::env::current_dir().expect("workspace current_dir should resolve");
-        let mut policy = sandbox_policy_with_allowed_executables(workspace, vec!["cat".to_owned()]);
+        let mut policy = sandbox_policy_with_allowed_executables(workspace, vec!["wc".to_owned()]);
         policy.egress_enforcement_mode = EgressEnforcementMode::Preflight;
         let secret_marker = "token=abc123";
         let input = serde_json::to_vec(&serde_json::json!({
-            "command": "cat",
+            "command": "wc",
             "args": [secret_marker],
         }))
         .expect("input should serialize");
