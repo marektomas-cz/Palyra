@@ -32,7 +32,7 @@ const MAX_ARG_LENGTH: usize = 4_096;
 const BUILTIN_LIST_MAX_ENTRIES: usize = 512;
 const CAPTURE_POLL_INTERVAL_MS: u64 = 5;
 const CAPTURE_CHUNK_BYTES: usize = 4 * 1024;
-const PROCESS_FAILURE_STDERR_PREVIEW_BYTES: usize = 512;
+const PROCESS_FAILURE_OUTPUT_PREVIEW_BYTES: usize = 4 * 1024;
 const DEFAULT_BACKGROUND_PROCESS_LIFETIME_MS: u64 = 60_000;
 const MAX_BACKGROUND_PROCESS_LIFETIME_MS: u64 = 5 * 60_000;
 const SENSITIVE_URL_PATH_MARKERS: &[&str] =
@@ -283,18 +283,12 @@ pub fn run_constrained_process(
         });
     }
     if !capture.exit_status.success() {
-        let stderr_bytes = capture.stderr.bytes.len();
-        let stderr_preview = redacted_process_stderr_preview(capture.stderr.bytes.as_slice())
-            .map(|preview| format!(", stderr_preview={preview:?}"))
-            .unwrap_or_default();
         return Err(SandboxProcessRunError {
             kind: SandboxProcessRunErrorKind::RuntimeFailure,
-            message: format!(
-                "sandbox process exited unsuccessfully (code={}, stderr_bytes={}, stderr_truncated={}{})",
+            message: process_failure_message(
                 capture.exit_status.code().unwrap_or(-1),
-                stderr_bytes,
-                capture.stderr.truncated,
-                stderr_preview
+                &capture.stdout,
+                &capture.stderr,
             ),
         });
     }
@@ -322,12 +316,35 @@ pub fn run_constrained_process(
     Ok(SandboxProcessRunSuccess { output_json })
 }
 
-fn redacted_process_stderr_preview(stderr: &[u8]) -> Option<String> {
-    if stderr.is_empty() {
+fn process_failure_message(
+    exit_code: i32,
+    stdout: &StreamCapture,
+    stderr: &StreamCapture,
+) -> String {
+    let stdout_preview = redacted_process_output_preview(stdout.bytes.as_slice())
+        .map(|preview| format!(", stdout_preview={preview:?}"))
+        .unwrap_or_default();
+    let stderr_preview = redacted_process_output_preview(stderr.bytes.as_slice())
+        .map(|preview| format!(", stderr_preview={preview:?}"))
+        .unwrap_or_default();
+
+    format!(
+        "sandbox process exited unsuccessfully (code={exit_code}, stdout_bytes={}, stdout_truncated={}, stderr_bytes={}, stderr_truncated={}{}{})",
+        stdout.bytes.len(),
+        stdout.truncated,
+        stderr.bytes.len(),
+        stderr.truncated,
+        stdout_preview,
+        stderr_preview,
+    )
+}
+
+fn redacted_process_output_preview(output: &[u8]) -> Option<String> {
+    if output.is_empty() {
         return None;
     }
-    let take_len = stderr.len().min(PROCESS_FAILURE_STDERR_PREVIEW_BYTES);
-    let preview = String::from_utf8_lossy(&stderr[..take_len]);
+    let take_len = output.len().min(PROCESS_FAILURE_OUTPUT_PREVIEW_BYTES);
+    let preview = String::from_utf8_lossy(&output[..take_len]);
     let normalized = preview
         .chars()
         .map(|character| if character.is_control() { ' ' } else { character })
@@ -620,6 +637,12 @@ fn validate_input_shape(input: &ProcessRunnerInput) -> Result<(), SandboxProcess
             message: "palyra.process.run requires non-empty field 'command'".to_owned(),
         });
     }
+    if input.command.chars().any(char::is_whitespace) {
+        return Err(SandboxProcessRunError {
+            kind: SandboxProcessRunErrorKind::InvalidInput,
+            message: process_runner_command_with_args_message(input.command.as_str()),
+        });
+    }
     if input.command.len() > MAX_COMMAND_LENGTH {
         return Err(SandboxProcessRunError {
             kind: SandboxProcessRunErrorKind::InvalidInput,
@@ -647,6 +670,24 @@ fn validate_input_shape(input: &ProcessRunnerInput) -> Result<(), SandboxProcess
         }
     }
     Ok(())
+}
+
+fn process_runner_command_with_args_message(command: &str) -> String {
+    let mut tokens = command.split_whitespace();
+    let Some(executable) = tokens.next() else {
+        return "palyra.process.run command must be a bare executable name; put arguments in args"
+            .to_owned();
+    };
+    let args = tokens.map(|arg| format!("{arg:?}")).collect::<Vec<_>>().join(", ");
+    if args.is_empty() {
+        format!(
+            "palyra.process.run command must be a bare executable name without whitespace; got {command:?}"
+        )
+    } else {
+        format!(
+            "palyra.process.run command must be a bare executable name without arguments; got {command:?}. Use command={executable:?} and args=[{args}]"
+        )
+    }
 }
 
 fn validate_allowed_executable(
@@ -1963,12 +2004,13 @@ mod tests {
 
     use super::{
         canonical_workspace_root, collect_requested_egress_hosts,
-        cpu_rlimit_seconds_from_usage_micros, is_host_allowlisted, redacted_process_stderr_preview,
-        resolve_host_working_directory, resolve_working_directory,
+        cpu_rlimit_seconds_from_usage_micros, is_host_allowlisted, process_failure_message,
+        redacted_process_output_preview, resolve_host_working_directory, resolve_working_directory,
         rewrite_host_virtual_workspace_args, run_constrained_process,
         validate_argument_workspace_scope, validate_interpreter_argument_guardrails,
         validate_runtime_egress_enforcement, EgressEnforcementMode, ProcessRunnerInput,
         SandboxProcessRunErrorKind, SandboxProcessRunnerPolicy, SandboxProcessRunnerTier,
+        StreamCapture,
     };
 
     fn portable_test_memory_limit_bytes() -> u64 {
@@ -2233,6 +2275,21 @@ mod tests {
             .expect_err("non-allowlisted executable must be denied");
         assert_eq!(error.kind, SandboxProcessRunErrorKind::WorkspaceScopeDenied);
         assert!(error.message.contains("not allowlisted"));
+    }
+
+    #[test]
+    fn run_constrained_process_rejects_command_field_with_embedded_args() {
+        let workspace = std::env::current_dir().expect("workspace current_dir should resolve");
+        let policy = host_access_policy(workspace);
+        let input = br#"{"command":"npm test","args":[]}"#;
+
+        let error = run_constrained_process(&policy, input, Duration::from_millis(1_000))
+            .expect_err("command strings with embedded args must be rejected before spawn");
+
+        assert_eq!(error.kind, SandboxProcessRunErrorKind::InvalidInput);
+        assert!(error.message.contains("bare executable name"), "{}", error.message);
+        assert!(error.message.contains("command=\"npm\""), "{}", error.message);
+        assert!(error.message.contains("args=[\"test\"]"), "{}", error.message);
     }
 
     #[test]
@@ -2940,7 +2997,7 @@ mod tests {
 
     #[test]
     fn process_stderr_preview_redacts_secret_like_values() {
-        let preview = redacted_process_stderr_preview(
+        let preview = redacted_process_output_preview(
             b"node failed for https://example.com/token/abc123?api_key=qwerty token=abc123\nnext",
         )
         .expect("preview should be present");
@@ -2949,6 +3006,31 @@ mod tests {
         assert!(!preview.contains("abc123"), "{preview}");
         assert!(!preview.contains("qwerty"), "{preview}");
         assert!(preview.contains("node failed"), "{preview}");
+    }
+
+    #[test]
+    fn process_failure_message_includes_redacted_stdout_and_stderr_previews() {
+        let stdout = StreamCapture {
+            bytes: b"AssertionError: expected 180 but got 190\naccess_token=stdout-secret".to_vec(),
+            truncated: false,
+            read_error: None,
+        };
+        let stderr = StreamCapture {
+            bytes: b"stderr token=stderr-secret\n".to_vec(),
+            truncated: false,
+            read_error: None,
+        };
+
+        let message = process_failure_message(1, &stdout, &stderr);
+
+        assert!(message.contains("stdout_bytes="), "{message}");
+        assert!(message.contains("stderr_bytes="), "{message}");
+        assert!(message.contains("stdout_preview="), "{message}");
+        assert!(message.contains("stderr_preview="), "{message}");
+        assert!(message.contains("AssertionError"), "{message}");
+        assert!(!message.contains("stdout-secret"), "{message}");
+        assert!(!message.contains("stderr-secret"), "{message}");
+        assert!(message.contains("<redacted>"), "{message}");
     }
 
     #[test]
