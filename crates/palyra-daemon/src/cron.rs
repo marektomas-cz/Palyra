@@ -1897,6 +1897,12 @@ async fn run_job_with_retries(
                     disable_objective_if_budget_exhausted(Arc::clone(&state), &job)
                         .await?
                         .is_some();
+                if should_pause_recurring_cron_after_policy_denied(&job, &options, terminal_status)
+                {
+                    pause_recurring_cron_after_policy_denied(Arc::clone(&state), &job).await?;
+                    wake_signal.notify_one();
+                    return Ok(());
+                }
                 if terminal_status == CronRunStatus::Succeeded {
                     wake_signal.notify_one();
                     return Ok(());
@@ -1942,6 +1948,34 @@ async fn run_job_with_retries(
         let delay = base_backoff_ms.saturating_mul(backoff_multiplier);
         tokio::time::sleep(Duration::from_millis(delay)).await;
     }
+    Ok(())
+}
+
+fn should_pause_recurring_cron_after_policy_denied(
+    job: &CronJobRecord,
+    options: &TriggerJobOptions,
+    terminal_status: CronRunStatus,
+) -> bool {
+    terminal_status == CronRunStatus::Denied
+        && matches!(job.schedule_type, CronScheduleType::Cron | CronScheduleType::Every)
+        && options.origin_kind.as_deref().unwrap_or("cron") == "cron"
+}
+
+async fn pause_recurring_cron_after_policy_denied(
+    state: Arc<GatewayRuntimeState>,
+    job: &CronJobRecord,
+) -> Result<(), Status> {
+    state
+        .update_cron_job(
+            job.job_id.clone(),
+            CronJobUpdatePatch {
+                enabled: Some(false),
+                next_run_at_unix_ms: Some(None),
+                queued_run: Some(false),
+                ..CronJobUpdatePatch::default()
+            },
+        )
+        .await?;
     Ok(())
 }
 
@@ -2516,10 +2550,11 @@ mod tests {
         cron_successful_completion_tool, cron_terminal_status_from_stream,
         decide_concurrency_policy, load_periodic_reaudit_skills_index, normalize_schedule,
         now_unix_ms_or_fallback, parse_skill_reaudit_interval, periodic_reaudit_targets,
-        scheduled_routine_run_metadata_upsert, should_repair_stale_cron_run, ConcurrencyDecision,
-        CronMatcher, CronMisfireRecoveryAction, CronTimezoneMode, InstalledSkillRecord,
-        InstalledSkillsIndex, SchedulerHealthInput, OBJECTIVE_BUDGET_EXHAUSTED_ERROR_KIND,
-        SCHEDULER_STALE_RUN_AFTER_MS, SKILLS_INDEX_FILE_NAME, SKILLS_LAYOUT_VERSION,
+        scheduled_routine_run_metadata_upsert, should_pause_recurring_cron_after_policy_denied,
+        should_repair_stale_cron_run, ConcurrencyDecision, CronMatcher, CronMisfireRecoveryAction,
+        CronTimezoneMode, InstalledSkillRecord, InstalledSkillsIndex, SchedulerHealthInput,
+        TriggerJobOptions, OBJECTIVE_BUDGET_EXHAUSTED_ERROR_KIND, SCHEDULER_STALE_RUN_AFTER_MS,
+        SKILLS_INDEX_FILE_NAME, SKILLS_LAYOUT_VERSION,
     };
     use crate::gateway::proto::palyra::cron::v1 as cron_v1;
     use crate::journal::{
@@ -2713,6 +2748,33 @@ mod tests {
         assert!(cron_successful_completion_tool("palyra.memory.retain"));
         assert!(!cron_successful_completion_tool("palyra.fs.read_file"));
         assert!(!cron_successful_completion_tool("palyra.process.run"));
+    }
+
+    #[test]
+    fn recurring_cron_policy_denials_pause_only_scheduled_recurring_jobs() {
+        let every_job =
+            sample_every_job("01ARZ3NDEKTSV4RRFFQ69G5FAV", Some(1_000), CronMisfirePolicy::Skip);
+        assert!(should_pause_recurring_cron_after_policy_denied(
+            &every_job,
+            &TriggerJobOptions { origin_kind: Some("cron".to_owned()), ..Default::default() },
+            CronRunStatus::Denied,
+        ));
+        assert!(!should_pause_recurring_cron_after_policy_denied(
+            &every_job,
+            &TriggerJobOptions { origin_kind: Some("manual".to_owned()), ..Default::default() },
+            CronRunStatus::Denied,
+        ));
+
+        let at_job = CronJobRecord {
+            schedule_type: CronScheduleType::At,
+            schedule_payload_json: json!({ "at_unix_ms": 1_000_i64 }).to_string(),
+            ..every_job
+        };
+        assert!(!should_pause_recurring_cron_after_policy_denied(
+            &at_job,
+            &TriggerJobOptions { origin_kind: Some("cron".to_owned()), ..Default::default() },
+            CronRunStatus::Denied,
+        ));
     }
 
     #[test]
