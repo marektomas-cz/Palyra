@@ -104,13 +104,21 @@ async fn create_test_session(
     service: &BrowserServiceImpl,
     principal: &str,
 ) -> browser_v1::CreateSessionResponse {
+    create_test_session_with_private_targets(service, principal, true).await
+}
+
+async fn create_test_session_with_private_targets(
+    service: &BrowserServiceImpl,
+    principal: &str,
+    allow_private_targets: bool,
+) -> browser_v1::CreateSessionResponse {
     service
         .create_session(Request::new(browser_v1::CreateSessionRequest {
             v: 1,
             principal: principal.to_owned(),
             idle_ttl_ms: 10_000,
             budget: None,
-            allow_private_targets: true,
+            allow_private_targets,
             allow_downloads: false,
             action_allowed_domains: Vec::new(),
             persistence_enabled: false,
@@ -128,7 +136,7 @@ async fn create_test_session(
 async fn browser_service_records_failed_navigation_in_action_log() {
     let runtime = simulated_runtime_for_tests();
     let service = BrowserServiceImpl { runtime };
-    let created = create_test_session(&service, "user:ops").await;
+    let created = create_test_session_with_private_targets(&service, "user:ops", false).await;
     let session_id = created.session_id.expect("session id should be present");
 
     let navigate = service
