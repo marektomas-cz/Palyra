@@ -1,7 +1,7 @@
 #![allow(clippy::result_large_err)]
 
 use std::{
-    collections::hash_map::DefaultHasher,
+    collections::{hash_map::DefaultHasher, HashMap},
     fs,
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
@@ -2182,6 +2182,8 @@ async fn execute_single_job_attempt(
     let mut saw_failed = false;
     let mut tool_calls = 0_u64;
     let mut tool_denies = 0_u64;
+    let mut successful_completion_tools = 0_u64;
+    let mut tool_names_by_proposal = HashMap::<String, String>::new();
     let mut final_output = String::new();
     while let Some(event) = stream.next().await {
         let event =
@@ -2190,8 +2192,24 @@ async fn execute_single_job_attempt(
             Some(common_v1::run_stream_event::Body::ModelToken(token)) => {
                 final_output.push_str(token.token.as_str());
             }
-            Some(common_v1::run_stream_event::Body::ToolResult(_)) => {
+            Some(common_v1::run_stream_event::Body::ToolProposal(proposal)) => {
+                if let Some(proposal_id) = proposal.proposal_id.as_ref() {
+                    tool_names_by_proposal.insert(proposal_id.ulid.clone(), proposal.tool_name);
+                }
+            }
+            Some(common_v1::run_stream_event::Body::ToolResult(result)) => {
                 tool_calls = tool_calls.saturating_add(1);
+                if result.success
+                    && result
+                        .proposal_id
+                        .as_ref()
+                        .and_then(|proposal_id| {
+                            tool_names_by_proposal.get(proposal_id.ulid.as_str())
+                        })
+                        .is_some_and(|tool_name| cron_successful_completion_tool(tool_name))
+                {
+                    successful_completion_tools = successful_completion_tools.saturating_add(1);
+                }
             }
             Some(common_v1::run_stream_event::Body::ToolDecision(decision))
                 if decision.kind == common_v1::tool_decision::DecisionKind::Deny as i32 =>
@@ -2217,17 +2235,13 @@ async fn execute_single_job_attempt(
         .await?
         .unwrap_or_else(|| fallback_usage_snapshot(&orchestrator_run_id, &session_id, job));
 
-    let done_but_policy_blocked =
-        saw_done && cron_done_output_indicates_policy_blocked(final_output.as_str(), tool_denies);
-    let terminal_status = if done_but_policy_blocked {
-        CronRunStatus::Denied
-    } else if saw_done {
-        CronRunStatus::Succeeded
-    } else if saw_failed && tool_denies > 0 {
-        CronRunStatus::Denied
-    } else {
-        CronRunStatus::Failed
-    };
+    let terminal_status = cron_terminal_status_from_stream(
+        saw_done,
+        saw_failed,
+        tool_denies,
+        successful_completion_tools,
+        final_output.as_str(),
+    );
 
     let error_kind = if terminal_status == CronRunStatus::Succeeded {
         None
@@ -2238,8 +2252,8 @@ async fn execute_single_job_attempt(
     };
     let error_message = match terminal_status {
         CronRunStatus::Succeeded => None,
-        CronRunStatus::Denied if done_but_policy_blocked => Some(format!(
-            "cron attempt {attempt} was policy-blocked after {tool_denies} denied tool calls"
+        CronRunStatus::Denied if saw_done && tool_denies > 0 => Some(format!(
+            "cron attempt {attempt} completed after {tool_denies} denied tool calls without a successful completion tool result"
         )),
         _ => Some(format!("cron attempt {attempt} failed")),
     };
@@ -2260,6 +2274,38 @@ async fn execute_single_job_attempt(
         .await?;
 
     Ok(terminal_status)
+}
+
+fn cron_terminal_status_from_stream(
+    saw_done: bool,
+    saw_failed: bool,
+    tool_denies: u64,
+    successful_completion_tools: u64,
+    final_output: &str,
+) -> CronRunStatus {
+    if saw_done {
+        if tool_denies > 0
+            && (successful_completion_tools == 0
+                || cron_done_output_indicates_policy_blocked(final_output, tool_denies))
+        {
+            return CronRunStatus::Denied;
+        }
+        return CronRunStatus::Succeeded;
+    }
+    if saw_failed && tool_denies > 0 {
+        return CronRunStatus::Denied;
+    }
+    CronRunStatus::Failed
+}
+
+fn cron_successful_completion_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "palyra.fs.apply_patch"
+            | "palyra.memory.retain"
+            | "palyra.routines.control"
+            | "palyra.secrets.put"
+    )
 }
 
 fn build_cron_prompt(job: &CronJobRecord, triggered_at_unix_ms: i64) -> String {
@@ -2467,6 +2513,7 @@ mod tests {
         budgeted_objective_run_count, build_cron_prompt, build_scheduler_health_snapshot,
         compute_misfire_recovery_plan, compute_next_run_after,
         cron_done_output_indicates_policy_blocked, cron_misfire_audit_payload,
+        cron_successful_completion_tool, cron_terminal_status_from_stream,
         decide_concurrency_policy, load_periodic_reaudit_skills_index, normalize_schedule,
         now_unix_ms_or_fallback, parse_skill_reaudit_interval, periodic_reaudit_targets,
         scheduled_routine_run_metadata_upsert, should_repair_stale_cron_run, ConcurrencyDecision,
@@ -2632,6 +2679,40 @@ mod tests {
             "**Status: BLOCKED**\nNo tool deny events were observed.",
             0,
         ));
+    }
+
+    #[test]
+    fn cron_terminal_status_denies_done_runs_with_unrecovered_policy_denies() {
+        assert_eq!(
+            cron_terminal_status_from_stream(true, false, 1, 0, "I need approval to write file.md"),
+            CronRunStatus::Denied,
+        );
+        assert_eq!(
+            cron_terminal_status_from_stream(
+                true,
+                false,
+                1,
+                1,
+                "The report was created and tests passed.",
+            ),
+            CronRunStatus::Succeeded,
+        );
+        assert_eq!(
+            cron_terminal_status_from_stream(true, false, 1, 1, "Status: blocked by policy."),
+            CronRunStatus::Denied,
+        );
+        assert_eq!(
+            cron_terminal_status_from_stream(true, false, 0, 0, "cron smoke test OK"),
+            CronRunStatus::Succeeded,
+        );
+    }
+
+    #[test]
+    fn cron_completion_tools_are_explicit_mutation_surfaces() {
+        assert!(cron_successful_completion_tool("palyra.fs.apply_patch"));
+        assert!(cron_successful_completion_tool("palyra.memory.retain"));
+        assert!(!cron_successful_completion_tool("palyra.fs.read_file"));
+        assert!(!cron_successful_completion_tool("palyra.process.run"));
     }
 
     #[test]
