@@ -30,9 +30,11 @@ const MAX_COMMAND_LENGTH: usize = 256;
 const MAX_ARGS_COUNT: usize = 128;
 const MAX_ARG_LENGTH: usize = 4_096;
 const BUILTIN_LIST_MAX_ENTRIES: usize = 512;
+const BUILTIN_READ_FILE_MAX_BYTES: usize = 64 * 1024;
 const CAPTURE_POLL_INTERVAL_MS: u64 = 5;
 const CAPTURE_CHUNK_BYTES: usize = 4 * 1024;
 const PROCESS_FAILURE_OUTPUT_PREVIEW_BYTES: usize = 4 * 1024;
+const BACKGROUND_STARTUP_CHECK_MS: u64 = 250;
 const DEFAULT_BACKGROUND_PROCESS_LIFETIME_MS: u64 = 60_000;
 const MAX_BACKGROUND_PROCESS_LIFETIME_MS: u64 = 5 * 60_000;
 const SENSITIVE_URL_PATH_MARKERS: &[&str] =
@@ -421,6 +423,13 @@ fn execute_builtin_process_command(
         "ls" | "dir" => {
             builtin_list_directory_stdout(input.command.trim(), input.args.as_slice(), cwd)?
         }
+        "cat" | "type" => builtin_read_files_stdout(
+            input.command.trim(),
+            input.args.as_slice(),
+            workspace_root,
+            cwd,
+            policy.max_output_bytes,
+        )?,
         "mkdir" => builtin_make_directory_stdout(
             process_runner_allows_host_access(policy),
             input.command.trim(),
@@ -445,6 +454,96 @@ fn execute_builtin_process_command(
         message: format!("failed to serialize sandbox builtin process output JSON: {error}"),
     })?;
     Ok(Some(SandboxProcessRunSuccess { output_json }))
+}
+
+fn builtin_read_files_stdout(
+    command: &str,
+    args: &[String],
+    workspace_root: &Path,
+    cwd: &Path,
+    max_output_bytes: u64,
+) -> Result<String, SandboxProcessRunError> {
+    let mut paths = Vec::new();
+    let mut end_of_options = false;
+    for arg in args {
+        let trimmed = arg.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if !end_of_options && trimmed == "--" {
+            end_of_options = true;
+            continue;
+        }
+        if !end_of_options && trimmed.starts_with('-') {
+            return Err(SandboxProcessRunError {
+                kind: SandboxProcessRunErrorKind::InvalidInput,
+                message: format!(
+                    "palyra.process.run builtin '{command}' does not support flag '{trimmed}'"
+                ),
+            });
+        }
+        paths.push(trimmed);
+    }
+
+    if paths.is_empty() {
+        return Err(SandboxProcessRunError {
+            kind: SandboxProcessRunErrorKind::InvalidInput,
+            message: format!("palyra.process.run builtin '{command}' requires a file path"),
+        });
+    }
+
+    let max_bytes =
+        usize::try_from(max_output_bytes).unwrap_or(usize::MAX).min(BUILTIN_READ_FILE_MAX_BYTES);
+    let max_bytes = max_bytes.max(1);
+    let mut output = Vec::new();
+    let mut truncated = false;
+    for path in paths {
+        if output.len() >= max_bytes {
+            truncated = true;
+            break;
+        }
+        let file_path = resolve_scoped_path(workspace_root, cwd, path, true)?;
+        if !file_path.is_file() {
+            return Err(SandboxProcessRunError {
+                kind: SandboxProcessRunErrorKind::InvalidInput,
+                message: format!(
+                    "palyra.process.run builtin '{command}' target '{}' is not a file",
+                    file_path.display()
+                ),
+            });
+        }
+        let remaining = max_bytes.saturating_sub(output.len());
+        let mut file =
+            fs::File::open(file_path.as_path()).map_err(|error| SandboxProcessRunError {
+                kind: SandboxProcessRunErrorKind::RuntimeFailure,
+                message: format!(
+                    "palyra.process.run builtin '{command}' failed to open '{}': {error}",
+                    file_path.display()
+                ),
+            })?;
+        let mut chunk = Vec::new();
+        file.by_ref().take((remaining + 1) as u64).read_to_end(&mut chunk).map_err(|error| {
+            SandboxProcessRunError {
+                kind: SandboxProcessRunErrorKind::RuntimeFailure,
+                message: format!(
+                    "palyra.process.run builtin '{command}' failed to read '{}': {error}",
+                    file_path.display()
+                ),
+            }
+        })?;
+        if chunk.len() > remaining {
+            output.extend_from_slice(&chunk[..remaining]);
+            truncated = true;
+            break;
+        }
+        output.extend_from_slice(chunk.as_slice());
+    }
+
+    let mut stdout = String::from_utf8_lossy(output.as_slice()).to_string();
+    if truncated {
+        stdout.push_str(&format!("\n... truncated after {max_bytes} bytes\n"));
+    }
+    Ok(stdout)
 }
 
 fn builtin_list_directory_stdout(
@@ -1424,6 +1523,24 @@ fn spawn_background_process(
         kind: SandboxProcessRunErrorKind::SpawnFailed,
         message: format!("sandbox process spawn failed for command '{}': {error}", input.command),
     })?;
+    thread::sleep(Duration::from_millis(BACKGROUND_STARTUP_CHECK_MS));
+    let mut child = child;
+    if let Some(status) = child.try_wait().map_err(|error| SandboxProcessRunError {
+        kind: SandboxProcessRunErrorKind::RuntimeFailure,
+        message: format!(
+            "sandbox background process startup check failed for command '{}': {error}",
+            input.command
+        ),
+    })? {
+        return Err(SandboxProcessRunError {
+            kind: SandboxProcessRunErrorKind::RuntimeFailure,
+            message: format!(
+                "sandbox background process exited before startup check (code={}) for command '{}'; use the cwd field instead of command-line cwd flags, verify the server command, and probe the expected port before browser navigation",
+                status.code().unwrap_or(-1),
+                input.command
+            ),
+        });
+    }
     let pid = child.id();
     let lifetime_ms = lifetime.as_millis() as u64;
     let cleanup = background_cleanup_metadata(pid, lifetime_ms);
@@ -2396,6 +2513,33 @@ mod tests {
     }
 
     #[test]
+    fn run_constrained_process_executes_portable_cat_builtin() {
+        let workspace = unique_temp_dir("workspace-cat-builtin");
+        fs::create_dir_all(workspace.as_path()).expect("workspace directory should be created");
+        fs::write(workspace.join("README.md"), b"hello from workspace\n")
+            .expect("workspace file should be created");
+        let policy =
+            sandbox_policy_with_allowed_executables(workspace.clone(), vec!["cat".to_owned()]);
+        let input = br#"{"command":"cat","args":["README.md"]}"#;
+
+        let result = run_constrained_process(&policy, input, Duration::from_millis(1_000))
+            .expect("portable cat builtin should execute without spawning a platform process");
+        let output: serde_json::Value =
+            serde_json::from_slice(&result.output_json).expect("output should parse");
+
+        assert_eq!(
+            output.get("stdout").and_then(serde_json::Value::as_str),
+            Some("hello from workspace\n")
+        );
+        assert_eq!(
+            output.get("sandbox_backend").and_then(serde_json::Value::as_str),
+            Some("builtin_portable")
+        );
+
+        let _ = fs::remove_dir_all(workspace.as_path());
+    }
+
+    #[test]
     fn run_constrained_process_rejects_directory_listing_outside_workspace() {
         let workspace = unique_temp_dir("workspace-list-deny");
         let outside = unique_temp_dir("outside-list-deny");
@@ -2528,6 +2672,34 @@ mod tests {
             output.get("pid").and_then(serde_json::Value::as_u64)
         );
         assert!(output.pointer("/cleanup/manual_command/command").is_some());
+
+        let _ = fs::remove_dir_all(workspace.as_path());
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn run_constrained_process_rejects_background_process_that_exits_immediately() {
+        #[cfg(windows)]
+        let command = "where.exe";
+        #[cfg(not(windows))]
+        let command = "true";
+
+        if Command::new(command).output().is_err() {
+            return;
+        }
+        let workspace = unique_temp_dir("workspace-background-immediate-exit");
+        fs::create_dir_all(workspace.as_path()).expect("workspace directory should be created");
+        let mut policy =
+            sandbox_policy_with_allowed_executables(workspace.clone(), vec![command.to_owned()]);
+        policy.egress_enforcement_mode = EgressEnforcementMode::Preflight;
+        let input = format!(r#"{{"command":"{command}","args":[],"background":true}}"#);
+
+        let error =
+            run_constrained_process(&policy, input.as_bytes(), Duration::from_millis(1_000))
+                .expect_err("background=true should reject commands that exit before startup");
+
+        assert_eq!(error.kind, SandboxProcessRunErrorKind::RuntimeFailure);
+        assert!(error.message.contains("exited before startup check"), "{}", error.message);
 
         let _ = fs::remove_dir_all(workspace.as_path());
     }

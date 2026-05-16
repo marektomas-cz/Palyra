@@ -31,7 +31,33 @@ pub fn parse_process_runner_tool_input(
     let mut input = serde_json::from_slice::<ProcessRunnerToolInput>(input_json)
         .map_err(|error| ProcessRunnerToolInputParseError::InvalidJson(error.to_string()))?;
     normalize_repeated_command_argument(&mut input);
+    normalize_leading_cwd_argument(&mut input);
+    normalize_repeated_command_argument(&mut input);
     Ok(input)
+}
+
+fn normalize_leading_cwd_argument(input: &mut ProcessRunnerToolInput) {
+    if input.cwd.is_some() || input.args.is_empty() {
+        return;
+    }
+
+    let first = input.args[0].trim();
+    if first == "--cwd" {
+        if input.args.len() < 2 {
+            return;
+        }
+        input.cwd = Some(input.args[1].clone());
+        input.args.drain(0..2);
+        return;
+    }
+
+    if let Some(value) = first.strip_prefix("--cwd=") {
+        if value.trim().is_empty() {
+            return;
+        }
+        input.cwd = Some(value.to_owned());
+        input.args.remove(0);
+    }
 }
 
 fn normalize_repeated_command_argument(input: &mut ProcessRunnerToolInput) {
@@ -146,6 +172,27 @@ mod tests {
             .expect("valid process-runner payload should parse");
 
         assert_eq!(parsed.args, vec!["e2e-smoke-file-patch/math.test.js"]);
+    }
+
+    #[test]
+    fn parse_process_runner_tool_input_normalizes_leading_cwd_arg() {
+        let input = br#"{"command":"node","args":["--cwd","/workspace/app","node","server.js"]}"#;
+        let parsed = parse_process_runner_tool_input(input)
+            .expect("valid process-runner payload should parse");
+
+        assert_eq!(parsed.cwd.as_deref(), Some("/workspace/app"));
+        assert_eq!(parsed.command, "node");
+        assert_eq!(parsed.args, vec!["server.js"]);
+    }
+
+    #[test]
+    fn parse_process_runner_tool_input_normalizes_leading_cwd_equals_arg() {
+        let input = br#"{"command":"npm","args":["--cwd=fixtures/app","test"]}"#;
+        let parsed = parse_process_runner_tool_input(input)
+            .expect("valid process-runner payload should parse");
+
+        assert_eq!(parsed.cwd.as_deref(), Some("fixtures/app"));
+        assert_eq!(parsed.args, vec!["test"]);
     }
 
     #[test]

@@ -380,7 +380,7 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
                             "type":"array",
                             "items":{"type":"string"},
                             "maxItems":64,
-                            "description":"Command arguments only. For `echo hello`, use command='echo' and args=['hello'], not args=['echo hello']. For `node script.js`, use command='node' and args=['script.js'], not args=['node','script.js']; the runtime normalizes a duplicated leading command token, but callers should not rely on that. Do not use mkdir, touch, echo redirection, or interpreter eval for file writes; use palyra.fs.apply_patch first, then use this tool only to verify."
+                            "description":"Command arguments only. For `echo hello`, use command='echo' and args=['hello'], not args=['echo hello']. For `node script.js`, use command='node' and args=['script.js'], not args=['node','script.js']; the runtime normalizes a duplicated leading command token and leading --cwd PATH into the cwd field, but callers should not rely on that. Portable workspace-scoped builtins include pwd, ls/dir, cat/type, and mkdir. Do not use mkdir, touch, echo redirection, or interpreter eval for file writes; use palyra.fs.apply_patch first, then use this tool only to verify."
                         }),
                     ),
                     (
@@ -391,7 +391,7 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
                         "background",
                         json!({
                             "type":"boolean",
-                            "description":"Start an allowlisted long-running local process and return immediately. Use this instead of shell background syntax or nohup for temporary dev servers. For local browser verification, bind to 127.0.0.1 with an explicit port and set timeout_ms to a bounded verification window such as 60000."
+                            "description":"Start an allowlisted long-running local process and return immediately. Use this instead of shell background syntax or nohup for temporary dev servers. The runtime fails fast if the process exits during startup. For local browser verification, bind to 127.0.0.1 with an explicit port and set timeout_ms to a bounded verification window such as 60000."
                         }),
                     ),
                     (
@@ -717,6 +717,8 @@ mod tests {
         assert!(args_description.contains("Do not use mkdir, touch"));
         assert!(args_description.contains("palyra.fs.apply_patch first"));
         assert!(args_description.contains("not args=['node','script.js']"));
+        assert!(args_description.contains("leading --cwd PATH"));
+        assert!(args_description.contains("cat/type"));
 
         let cwd_description = entry
             .input_schema
@@ -724,6 +726,13 @@ mod tests {
             .and_then(serde_json::Value::as_str)
             .expect("cwd description should be visible to models");
         assert!(cwd_description.contains("/workspace/subdir"));
+
+        let background_description = entry
+            .input_schema
+            .pointer("/properties/background/description")
+            .and_then(serde_json::Value::as_str)
+            .expect("background description should be visible to models");
+        assert!(background_description.contains("fails fast"));
     }
 
     #[test]
