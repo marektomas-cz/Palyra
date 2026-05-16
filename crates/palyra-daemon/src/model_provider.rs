@@ -1639,6 +1639,17 @@ fn invalid_response_classification(provider_detail: &str) -> ProviderFailureClas
     )
 }
 
+fn retryable_invalid_response_classification(
+    provider_detail: &str,
+) -> ProviderFailureClassification {
+    provider_failure_classification(
+        ProviderFailureClass::MalformedResponse,
+        ProviderFailureAction::Retry,
+        None,
+        provider_detail,
+    )
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ProviderRetryPolicySnapshot {
     pub max_retries: u32,
@@ -3284,6 +3295,15 @@ impl AttemptError {
             classification: invalid_response_classification(provider_detail),
         }
     }
+
+    fn retryable_invalid_response(message: String, provider_detail: &str) -> Self {
+        Self {
+            message,
+            retryable: true,
+            invalid_response: true,
+            classification: retryable_invalid_response_classification(provider_detail),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -3845,7 +3865,7 @@ impl OpenAiCompatibleProvider {
         let mut completion_text = extract_completion_text(choice.message.content);
         let coerced_raw_tool_markup = if tool_events.is_empty() {
             match coerce_raw_tool_call_markup(completion_text.as_str()).map_err(|error| {
-                AttemptError::invalid_response(
+                AttemptError::retryable_invalid_response(
                     format!("openai-compatible raw tool-call markup is invalid: {error}"),
                     "openai_compatible_raw_tool_call_markup",
                 )
@@ -4460,7 +4480,7 @@ impl AnthropicProvider {
         let mut completion_text = completion_fragments.join("\n");
         let coerced_raw_tool_markup = if tool_events.is_empty() {
             match coerce_raw_tool_call_markup(completion_text.as_str()).map_err(|error| {
-                AttemptError::invalid_response(
+                AttemptError::retryable_invalid_response(
                     format!("anthropic raw tool-call markup is invalid: {error}"),
                     "anthropic_raw_tool_call_markup",
                 )
@@ -5089,14 +5109,20 @@ fn coerce_raw_tool_call_markup(text: &str) -> Result<Option<RawToolCallMarkupExt
             .map(|offset| block.start + offset)
             .ok_or_else(|| "raw tool-call opening tag is missing '>'".to_owned())?;
         let content_start = tag_end.saturating_add(1);
-        let close_start = lower[content_start..]
-            .find(block.close_tag)
-            .map(|offset| content_start + offset)
-            .ok_or_else(|| "raw tool-call block is missing a closing tag".to_owned())?;
-        let block_content = &text[content_start..close_start];
+        let close_start =
+            lower[content_start..].find(block.close_tag).map(|offset| content_start + offset);
+        let (block_content, block_end, has_closing_tag) = match close_start {
+            Some(close_start) => {
+                (&text[content_start..close_start], close_start + block.close_tag.len(), true)
+            }
+            None => (&text[content_start..], text.len(), false),
+        };
         let mut parsed_events = parse_raw_tool_call_invocations(block_content)?;
+        if parsed_events.is_empty() && !has_closing_tag {
+            return Err("raw tool-call block is missing a closing tag".to_owned());
+        }
         tool_events.append(&mut parsed_events);
-        cursor = close_start + block.close_tag.len();
+        cursor = block_end;
     }
     cleaned_text.push_str(&text[cursor..]);
 
@@ -6263,6 +6289,30 @@ mod tests {
     }
 
     #[test]
+    fn raw_tool_call_markup_accepts_complete_invoke_without_outer_close() {
+        let raw = r#"<tool_call>
+<invoke name="palyra.fs.read_file">
+{"path":"app.js"}
+</invoke>"#;
+
+        let extraction = super::coerce_raw_tool_call_markup(raw)
+            .expect("complete invoke should parse without the provider-specific outer close")
+            .expect("raw markup should be detected");
+
+        assert!(extraction.cleaned_text.is_empty());
+        assert_eq!(extraction.tool_events.len(), 1);
+        match &extraction.tool_events[0] {
+            ProviderEvent::ToolProposal { tool_name, input_json, .. } => {
+                assert_eq!(tool_name, "palyra.fs.read_file");
+                let input: serde_json::Value =
+                    serde_json::from_slice(input_json).expect("tool input should stay valid JSON");
+                assert_eq!(input["path"], "app.js");
+            }
+            other => panic!("expected tool proposal, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn raw_tool_call_markup_is_removed_from_surrounding_text() {
         let raw = r#"I will inspect it.
 <tool_call>
@@ -6280,6 +6330,41 @@ Then I will continue."#;
         assert!(extraction.cleaned_text.contains("I will inspect it."));
         assert!(extraction.cleaned_text.contains("Then I will continue."));
         assert_eq!(extraction.tool_events.len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn openai_provider_retries_malformed_raw_tool_call_markup_then_succeeds() {
+        let malformed = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": "<tool_call><invoke name=\"palyra.fs.read_file\">{\"path\":\"app.js\"}"
+                }
+            }]
+        })
+        .to_string();
+        let success = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": "Recovered after retry."
+                },
+                "finish_reason": "stop"
+            }]
+        })
+        .to_string();
+        let (base_url, request_count, handle) =
+            spawn_scripted_server(vec![(200_u16, malformed), (200_u16, success)]);
+        let provider = build_model_provider(&openai_test_config(base_url))
+            .expect("openai provider should build");
+
+        let response = provider
+            .complete(ProviderRequest::from_input_text("hello".to_owned(), false, Vec::new(), None))
+            .await
+            .expect("provider should retry malformed raw markup and return the later response");
+
+        assert_eq!(response.retry_count, 1);
+        assert_eq!(response.output.full_text, "Recovered after retry.");
+        assert_eq!(request_count.load(Ordering::Relaxed), 2);
+        handle.join().expect("scripted server thread should exit");
     }
 
     #[tokio::test(flavor = "multi_thread")]

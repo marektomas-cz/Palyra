@@ -1039,6 +1039,16 @@ async fn process_run_stream_provider_response(
         });
     }
 
+    if !has_pending_tool_results {
+        if let Some(message) = truncated_final_answer_without_tools(&provider_output) {
+            return Ok(RunStreamProviderResponseOutcome::Failed {
+                message,
+                provider_trace_ref: provider_output.raw_provider_refs.provider_trace_ref.clone(),
+                reason: AgentLoopTerminationReason::IncompleteFinalAnswer,
+            });
+        }
+    }
+
     if !has_pending_tool_results && contains_raw_provider_tool_call_markup(reply_text.as_str()) {
         return Ok(RunStreamProviderResponseOutcome::Failed {
             message:
@@ -1186,6 +1196,13 @@ fn contains_raw_provider_tool_call_markup(text: &str) -> bool {
     let normalized = text.to_ascii_lowercase();
     normalized.contains("<minimax:tool_call")
         || (normalized.contains("<tool_call") && normalized.contains("<invoke name="))
+}
+
+fn truncated_final_answer_without_tools(output: &ProviderTurnOutput) -> Option<String> {
+    matches!(output.finish_reason, ProviderFinishReason::Length).then(|| {
+        "model provider stopped because of an output token limit before returning a complete final answer or structured tool call (finish_reason=length)"
+            .to_owned()
+    })
 }
 
 fn incomplete_final_answer_without_tools(text: Option<&str>) -> Option<String> {
@@ -1412,7 +1429,8 @@ mod tests {
     use super::{
         contains_raw_provider_tool_call_markup, incomplete_final_answer_without_tools,
         incomplete_terminal_final_answer, terminal_tool_authorization_failure,
-        tool_result_to_provider_message, RunStreamToolResultForModel,
+        tool_result_to_provider_message, truncated_final_answer_without_tools,
+        RunStreamToolResultForModel,
     };
     use crate::model_provider::{
         ProviderFinishReason, ProviderMessage, ProviderMessageContentPart,
@@ -1605,6 +1623,33 @@ mod tests {
             .expect("bare acknowledgement must not be accepted as a final answer");
 
         assert!(message.contains("bare acknowledgement"));
+    }
+
+    #[test]
+    fn truncated_provider_output_is_not_a_final_answer_without_tools() {
+        let output = ProviderTurnOutput::text(
+            "Created fixtures/app and ran".to_owned(),
+            ProviderFinishReason::Length,
+            ProviderUsage::new(10, 20, "test"),
+            ProviderRawProviderRefs::default(),
+        );
+
+        let message = truncated_final_answer_without_tools(&output)
+            .expect("length-finished output must not be accepted as final");
+
+        assert!(message.contains("finish_reason=length"));
+    }
+
+    #[test]
+    fn stop_finished_provider_output_can_be_final_without_tools() {
+        let output = ProviderTurnOutput::text(
+            "Use cargo test to run the daemon tests.".to_owned(),
+            ProviderFinishReason::Stop,
+            ProviderUsage::new(10, 20, "test"),
+            ProviderRawProviderRefs::default(),
+        );
+
+        assert!(truncated_final_answer_without_tools(&output).is_none());
     }
 
     #[test]
