@@ -126,6 +126,8 @@ pub enum WorkspacePatchError {
     NotARegularFile { path: String },
     #[error("file '{path}' is not valid UTF-8 and cannot be patched line-by-line")]
     InvalidUtf8File { path: String },
+    #[error("file '{path}' is not valid JSON after patch: {message}")]
+    InvalidJsonFile { path: String, message: String },
     #[error("patch hunk apply failed for '{path}': {message}")]
     HunkApplyFailed { path: String, message: String },
     #[error("{operation} '{path}' failed: {source}")]
@@ -396,10 +398,77 @@ fn canonicalize_workspace_roots(
 }
 
 fn normalize_supported_patch_document(patch: &str) -> Cow<'_, str> {
+    if let Some(normalized) = normalize_palyra_patch_fences(patch) {
+        return Cow::Owned(normalized);
+    }
     if patch.starts_with("*** Begin Patch") {
         return Cow::Borrowed(patch);
     }
     normalize_unified_diff_patch(patch).map_or(Cow::Borrowed(patch), Cow::Owned)
+}
+
+fn normalize_palyra_patch_fences(patch: &str) -> Option<String> {
+    let normalized = patch.replace("\r\n", "\n").replace('\r', "\n");
+    let original_lines = normalized.split('\n').collect::<Vec<_>>();
+    if original_lines.is_empty() {
+        return None;
+    }
+
+    let mut lines = original_lines
+        .iter()
+        .map(|line| match canonical_patch_fence_variant(line) {
+            Some(canonical) => canonical.to_owned(),
+            None => (*line).to_owned(),
+        })
+        .collect::<Vec<_>>();
+    let mut changed = lines
+        .iter()
+        .zip(original_lines.iter())
+        .any(|(normalized, original)| normalized != original);
+
+    if patch_control_line(lines[0].as_str()) != "*** Begin Patch" {
+        return None;
+    }
+
+    let Some(first_end_index) =
+        lines.iter().position(|line| patch_control_line(line.as_str()) == "*** End Patch")
+    else {
+        return changed.then(|| lines.join("\n"));
+    };
+
+    let mut tail_contains_duplicate_end = false;
+    for line in lines.iter().skip(first_end_index + 1) {
+        let control = patch_control_line(line.as_str());
+        if control.is_empty() {
+            continue;
+        }
+        if control == "*** End Patch" {
+            tail_contains_duplicate_end = true;
+            continue;
+        }
+        return changed.then(|| lines.join("\n"));
+    }
+
+    if tail_contains_duplicate_end {
+        lines.truncate(first_end_index + 1);
+        changed = true;
+    }
+
+    changed.then(|| {
+        let mut output = lines.join("\n");
+        if !output.ends_with('\n') {
+            output.push('\n');
+        }
+        output
+    })
+}
+
+fn canonical_patch_fence_variant(line: &str) -> Option<&'static str> {
+    match patch_control_line(line).trim() {
+        "*** Begin Patch" | "*** Begin Patch ***" => Some("*** Begin Patch"),
+        "*** End Patch" | "*** End Patch ***" => Some("*** End Patch"),
+        _ => None,
+    }
 }
 
 fn normalize_unified_diff_patch(patch: &str) -> Option<String> {
@@ -814,6 +883,7 @@ fn build_patch_plan(
                 }
                 let after_bytes = render_add_file_bytes(lines.as_slice());
                 ensure_file_size(path, after_bytes.len(), limits.max_file_bytes)?;
+                ensure_structured_file_content(path, after_bytes.as_slice())?;
 
                 touched_paths.insert(target.clone());
                 actions.push(PlannedAction::Write {
@@ -860,6 +930,7 @@ fn build_patch_plan(
                 let before_bytes = read_file_capped(target.as_path(), path, limits.max_file_bytes)?;
                 let after_bytes = render_add_file_bytes(lines.as_slice());
                 ensure_file_size(path, after_bytes.len(), limits.max_file_bytes)?;
+                ensure_structured_file_content(path, after_bytes.as_slice())?;
 
                 touched_paths.insert(target.clone());
                 actions.push(PlannedAction::Write {
@@ -912,8 +983,10 @@ fn build_patch_plan(
                     destination_root = canonical_roots[destination_root_index].clone();
                     output_root_index = destination_root_index;
                     moved_from = Some(normalize_relative_path_display(&relative));
+                    ensure_structured_file_content(move_target, after_bytes.as_slice())?;
                     normalize_relative_path_display(&move_relative)
                 } else {
+                    ensure_structured_file_content(path, after_bytes.as_slice())?;
                     normalize_relative_path_display(&relative)
                 };
 
@@ -1108,6 +1181,23 @@ fn ensure_file_size(
         });
     }
     Ok(())
+}
+
+fn ensure_structured_file_content(path: &str, bytes: &[u8]) -> Result<(), WorkspacePatchError> {
+    if !path_has_extension(path, "json") {
+        return Ok(());
+    }
+    serde_json::from_slice::<serde_json::Value>(bytes).map_err(|source| {
+        WorkspacePatchError::InvalidJsonFile { path: path.to_owned(), message: source.to_string() }
+    })?;
+    Ok(())
+}
+
+fn path_has_extension(path: &str, expected_extension: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case(expected_extension))
 }
 
 fn read_file_capped(
@@ -1881,6 +1971,28 @@ mod tests {
     }
 
     #[test]
+    fn apply_workspace_patch_accepts_common_extra_patch_fence_markers() {
+        let temp = tempdir().expect("tempdir should be created");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace should exist");
+        let patch = "*** Begin Patch ***\n*** Add File: reports/ready.md\n+READY detected\n*** End Patch ***\n*** End Patch\n";
+
+        let outcome = apply_workspace_patch(
+            std::slice::from_ref(&workspace),
+            &default_request(patch, false),
+            &default_limits(),
+        )
+        .expect("common duplicate/trailing patch fences should be normalized");
+
+        assert_eq!(outcome.files_touched.len(), 1);
+        assert_eq!(
+            fs::read_to_string(workspace.join("reports").join("ready.md"))
+                .expect("report should be created"),
+            "READY detected\n"
+        );
+    }
+
+    #[test]
     fn apply_workspace_patch_accepts_unprefixed_add_file_body_lines() {
         let temp = tempdir().expect("tempdir should be created");
         let workspace = temp.path().join("workspace");
@@ -1898,6 +2010,27 @@ mod tests {
         assert_eq!(
             fs::read_to_string(workspace.join("report.txt")).expect("file should be created"),
             "hello\nworld\n"
+        );
+    }
+
+    #[test]
+    fn apply_workspace_patch_rejects_invalid_json_file_content() {
+        let temp = tempdir().expect("tempdir should be created");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(workspace.join("reports")).expect("workspace reports dir should exist");
+        let patch = "*** Begin Patch\n*** Add File: reports/seen.json\n+***\n+{\"seen_ids\":[\"s032-alpha\"]}\n*** End Patch\n";
+
+        let error = apply_workspace_patch(
+            std::slice::from_ref(&workspace),
+            &default_request(patch, false),
+            &default_limits(),
+        )
+        .expect_err("invalid JSON state should be rejected before write");
+
+        assert!(matches!(error, WorkspacePatchError::InvalidJsonFile { .. }));
+        assert!(
+            !workspace.join("reports").join("seen.json").exists(),
+            "invalid JSON state must not be written"
         );
     }
 

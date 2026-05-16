@@ -28,7 +28,7 @@ use crate::{
 
 use checkpoint_flow::WorkspacePatchMutationRequest;
 
-const WORKSPACE_PATCH_GRAMMAR_HINT: &str = "Use a complete Palyra patch document: begin with '*** Begin Patch', then operation headers like '*** Add File: path', '*** Replace File: path', or '*** Update File: path', end with '*** End Patch'. The final non-whitespace line must be exactly '*** End Patch'; never send a partial or truncated patch. For large file creation or multi-file changes, split work into multiple smaller complete apply_patch calls. Add-file and replace-file content lines may start with '+'. Use Add File only for missing files. If an Update File hunk fails with context not found, read the current file and retry with Replace File plus the full intended file content. Update-file hunks must start with '@@' and hunk lines must start with ' ', '+', or '-'.";
+const WORKSPACE_PATCH_GRAMMAR_HINT: &str = "Use a complete Palyra patch document: begin with exactly '*** Begin Patch', then operation headers like '*** Add File: path', '*** Replace File: path', or '*** Update File: path', end with exactly one '*** End Patch'. Never send a partial or truncated patch. For large file creation or multi-file changes, split work into multiple smaller complete apply_patch calls. Add-file and replace-file content lines may start with '+'. Use Add File only for missing files. If an Update File hunk fails with context not found, read the current file and retry with Replace File plus the full intended file content. Update-file hunks must start with '@@' and hunk lines must start with ' ', '+', or '-'. JSON files are validated after patch planning; if JSON validation fails, retry with the complete valid JSON file content.";
 
 pub(crate) struct WorkspacePatchToolRequest<'a> {
     pub(crate) principal: &'a str,
@@ -438,6 +438,7 @@ fn workspace_patch_error_outcome(
         "parse_error": error
             .parse_location()
             .map(|(line, column)| json!({ "line": line, "column": column })),
+        "recovery_hint": workspace_patch_recovery_hint(error),
         "grammar_hint": WORKSPACE_PATCH_GRAMMAR_HINT,
         "error": error.to_string(),
     });
@@ -447,8 +448,33 @@ fn workspace_patch_error_outcome(
         input_json,
         false,
         output_json,
-        format!("palyra.fs.apply_patch failed: {error}. {WORKSPACE_PATCH_GRAMMAR_HINT}"),
+        format!(
+            "palyra.fs.apply_patch failed: {error}. {} {WORKSPACE_PATCH_GRAMMAR_HINT}",
+            workspace_patch_recovery_hint(error)
+        ),
     )
+}
+
+fn workspace_patch_recovery_hint(error: &WorkspacePatchError) -> &'static str {
+    match error {
+        WorkspacePatchError::Parse { message, .. }
+            if message.contains("unexpected content after '*** End Patch'") =>
+        {
+            "Remove any duplicate terminator or text after the final '*** End Patch', then retry with one complete patch."
+        }
+        WorkspacePatchError::Parse { message, .. }
+            if message.contains("expected '*** Begin Patch'") =>
+        {
+            "Start the patch with exactly '*** Begin Patch' on its own line, not a Markdown-decorated variant."
+        }
+        WorkspacePatchError::InvalidJsonFile { .. } => {
+            "Read or reconstruct the intended JSON and retry with Replace File or Add File containing complete valid JSON only."
+        }
+        WorkspacePatchError::HunkApplyFailed { .. } => {
+            "Read the current file and retry with either fresh context hunks or Replace File containing the full intended file content."
+        }
+        _ => "Inspect the patch error and retry with a smaller complete patch that preserves workspace-relative paths.",
+    }
 }
 
 pub(crate) fn extend_patch_string_defaults(defaults: &mut Vec<String>, additions: Vec<String>) {
@@ -533,10 +559,11 @@ fn workspace_patch_tool_execution_outcome(
 #[cfg(test)]
 mod tests {
     use super::{
-        resolve_workspace_patch_roots, workspace_patch_error_outcome, WORKSPACE_PATCH_GRAMMAR_HINT,
+        resolve_workspace_patch_roots, workspace_patch_error_outcome,
+        workspace_patch_recovery_hint, WORKSPACE_PATCH_GRAMMAR_HINT,
     };
     use palyra_common::workspace_patch::{
-        apply_workspace_patch, WorkspacePatchLimits, WorkspacePatchRequest,
+        apply_workspace_patch, WorkspacePatchError, WorkspacePatchLimits, WorkspacePatchRequest,
     };
     use serde_json::{json, Value};
 
@@ -639,5 +666,35 @@ mod tests {
             Some(WORKSPACE_PATCH_GRAMMAR_HINT)
         );
         assert_eq!(payload.pointer("/parse_error/line").and_then(Value::as_u64), Some(1));
+    }
+
+    #[test]
+    fn json_patch_failure_result_includes_specific_recovery_hint() {
+        let error = WorkspacePatchError::InvalidJsonFile {
+            path: "reports/seen.json".to_owned(),
+            message: "expected value at line 1 column 1".to_owned(),
+        };
+
+        let outcome = workspace_patch_error_outcome(
+            "01ARZ3NDEKTSV4RRFFQ69G5FAW",
+            br#"{"patch":"*** Begin Patch\n*** Add File: reports/seen.json\n+***\n*** End Patch\n"}"#,
+            false,
+            "*** Begin Patch\n*** Add File: reports/seen.json\n+***\n*** End Patch\n",
+            &Default::default(),
+            &WorkspacePatchLimits::default(),
+            &error,
+        );
+
+        let expected_hint = workspace_patch_recovery_hint(&error);
+
+        assert!(!outcome.success);
+        assert!(
+            outcome.error.contains(expected_hint),
+            "expected error to include recovery hint: {}",
+            outcome.error
+        );
+        let payload: Value =
+            serde_json::from_slice(outcome.output_json.as_slice()).expect("valid failure json");
+        assert_eq!(payload.get("recovery_hint").and_then(Value::as_str), Some(expected_hint));
     }
 }
