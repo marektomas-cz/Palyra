@@ -324,8 +324,7 @@ fn pending_browser_session_ids(messages: &[ProviderMessage]) -> BTreeSet<String>
                 }
             }
             BROWSER_SESSION_CLOSE_TOOL_NAME => {
-                let closed = output.get("closed").and_then(Value::as_bool).unwrap_or(false);
-                if closed {
+                if browser_session_close_confirmed(&output) {
                     if let Some(session_id) =
                         tool_call.input_json.get("session_id").and_then(Value::as_str)
                     {
@@ -338,6 +337,17 @@ fn pending_browser_session_ids(messages: &[ProviderMessage]) -> BTreeSet<String>
     }
 
     open_session_ids
+}
+
+fn browser_session_close_confirmed(output: &Value) -> bool {
+    output.get("closed").and_then(Value::as_bool).unwrap_or(false)
+        || output.get("reason").and_then(Value::as_str).is_some_and(browser_session_absent_reason)
+        || output.get("error").and_then(Value::as_str).is_some_and(browser_session_absent_reason)
+        || output.get("output").is_some_and(browser_session_close_confirmed)
+}
+
+fn browser_session_absent_reason(raw: &str) -> bool {
+    raw.contains("session_not_found") || raw.contains("chromium_session_not_found")
 }
 
 #[cfg(test)]
@@ -468,6 +478,57 @@ mod tests {
             ProviderMessage::tool_result(
                 "call-close",
                 serde_json::json!({"closed": true}).to_string(),
+            ),
+        ];
+        let state = AgentRunLoopState::new(messages, 2, 4, 10_000);
+
+        let message = state.message_with_cleanup_guidance("agent loop wall-clock budget exhausted");
+
+        assert_eq!(message, "agent loop wall-clock budget exhausted");
+    }
+
+    #[test]
+    fn loop_state_omits_cleanup_guidance_when_browser_session_is_already_absent() {
+        let session_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        let messages = vec![
+            ProviderMessage {
+                role: ProviderMessageRole::Assistant,
+                content: vec![ProviderMessageContentPart::text("creating browser")],
+                name: None,
+                tool_call_id: None,
+                tool_calls: vec![ProviderMessageToolCall {
+                    proposal_id: "call-create".to_owned(),
+                    tool_name: BROWSER_SESSION_CREATE_TOOL_NAME.to_owned(),
+                    input_json: serde_json::json!({}),
+                }],
+            },
+            ProviderMessage::tool_result(
+                "call-create",
+                serde_json::json!({"session_id": session_id}).to_string(),
+            ),
+            ProviderMessage {
+                role: ProviderMessageRole::Assistant,
+                content: Vec::new(),
+                name: None,
+                tool_call_id: None,
+                tool_calls: vec![ProviderMessageToolCall {
+                    proposal_id: "call-close".to_owned(),
+                    tool_name: BROWSER_SESSION_CLOSE_TOOL_NAME.to_owned(),
+                    input_json: serde_json::json!({"session_id": session_id}),
+                }],
+            },
+            ProviderMessage::tool_result(
+                "call-close",
+                serde_json::json!({
+                    "success": false,
+                    "tool_name": BROWSER_SESSION_CLOSE_TOOL_NAME,
+                    "error": "palyra.browser.session.close failed: session_not_found",
+                    "output": {
+                        "closed": false,
+                        "reason": "session_not_found"
+                    }
+                })
+                .to_string(),
             ),
         ];
         let state = AgentRunLoopState::new(messages, 2, 4, 10_000);
