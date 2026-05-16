@@ -736,7 +736,7 @@ fn detect_sensitive_assignment(line: &str, lowered: &str) -> Option<&'static str
     let separator_index = line.find(['=', ':'])?;
     let key = lowered.get(..separator_index)?.trim().trim_matches(['"', '\'']);
     let value = line.get(separator_index + 1..)?.trim();
-    if value.len() < 8 || key.ends_with("_ref") {
+    if value.is_empty() || key.ends_with("_ref") {
         return None;
     }
     SENSITIVE_ASSIGNMENT_KEYS.iter().find(|candidate| key.contains(**candidate)).copied()
@@ -924,15 +924,28 @@ fn redact_sensitive_header_or_assignment(line: &str) -> String {
     let lowered = line.to_ascii_lowercase();
     if detect_sensitive_header(line, &lowered).is_some() {
         if let Some(separator) = line.find(':') {
-            return format!("{} {}", &line[..=separator], REDACTED_SECRET);
+            return redact_value_after_separator(line, separator);
         }
     }
     if detect_sensitive_assignment(line, &lowered).is_some() {
         if let Some(separator) = line.find(['=', ':']) {
-            return format!("{} {}", &line[..=separator], REDACTED_SECRET);
+            return redact_value_after_separator(line, separator);
         }
     }
     line.to_owned()
+}
+
+fn redact_value_after_separator(line: &str, separator_index: usize) -> String {
+    let separator_len =
+        line[separator_index..].chars().next().map(char::len_utf8).unwrap_or_default();
+    let value_start = separator_index.saturating_add(separator_len);
+    let trailing_prefix_len = line[value_start..]
+        .char_indices()
+        .take_while(|(_, ch)| ch.is_whitespace())
+        .map(|(index, ch)| index + ch.len_utf8())
+        .last()
+        .unwrap_or_default();
+    format!("{}{}", &line[..value_start + trailing_prefix_len], REDACTED_SECRET)
 }
 
 fn redact_prefixed_token(
@@ -1137,6 +1150,26 @@ mod tests {
         assert!(!outcome.redacted_text.contains("S013_DUMMY_SECRET_SHOULD_NOT_APPEAR"));
         assert!(outcome.scan.finding_codes().iter().any(|code| code == "secret_leak.marker"));
         assert_eq!(outcome.scan.recommended_action, SafetyAction::Redact);
+    }
+
+    #[test]
+    fn short_sensitive_assignments_preserve_key_names_and_redact_values() {
+        let outcome = redact_text_for_export(
+            "PALYRA_E2E_API_KEY=<dummy>\nSAFE_FLAG=PALYRA_E2E_BETA",
+            SafetySourceKind::Workspace,
+            SafetyContentKind::WorkspaceDocument,
+            TrustLabel::TrustedLocal,
+        );
+
+        assert!(outcome.redacted);
+        assert!(outcome.redacted_text.contains("PALYRA_E2E_API_KEY=[REDACTED_SECRET]"));
+        assert!(outcome.redacted_text.contains("SAFE_FLAG=PALYRA_E2E_BETA"));
+        assert!(!outcome.redacted_text.contains("<dummy>"));
+        assert!(outcome
+            .scan
+            .finding_codes()
+            .iter()
+            .any(|code| code == "secret_leak.assignment.api_key"));
     }
 
     #[test]
