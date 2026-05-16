@@ -354,15 +354,40 @@ fn persisted_state_store_rejects_symlink_profile_registry_file() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn navigate_with_guards_blocks_file_scheme() {
-    let outcome =
-        navigate_with_guards("file:///tmp/index.html", 1_000, true, 3, false, 1024, None).await;
-    assert!(!outcome.success, "file scheme must be blocked");
+async fn navigate_with_guards_blocks_file_scheme_without_private_target_opt_in() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let fixture = temp.path().join("index.html");
+    std::fs::write(fixture.as_path(), "<!doctype html><title>Local</title>")
+        .expect("fixture should be written");
+    let url = Url::from_file_path(fixture.as_path()).expect("file URL should be built");
+
+    let outcome = navigate_with_guards(url.as_str(), 1_000, true, 3, false, 1024, None).await;
+
+    assert!(!outcome.success, "file scheme must be blocked without explicit opt-in");
     assert!(
-        outcome.error.contains("blocked URL scheme"),
+        outcome.error.contains("requires allow_private_targets=true"),
         "error should explain blocked scheme: {}",
         outcome.error
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn navigate_with_guards_allows_local_file_with_private_target_opt_in() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let fixture = temp.path().join("release-notes.html");
+    std::fs::write(
+        fixture.as_path(),
+        "<!doctype html><html><head><title>Release Notes</title></head><body><table><tr><td>1.4.0</td></tr></table></body></html>",
+    )
+    .expect("fixture should be written");
+    let url = Url::from_file_path(fixture.as_path()).expect("file URL should be built");
+
+    let outcome = navigate_with_guards(url.as_str(), 1_000, true, 3, true, 4096, None).await;
+
+    assert!(outcome.success, "file scheme should be allowed with explicit local opt-in");
+    assert_eq!(outcome.final_url, url.as_str());
+    assert!(outcome.page_body.contains("1.4.0"));
+    assert_eq!(outcome.status_code, 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]

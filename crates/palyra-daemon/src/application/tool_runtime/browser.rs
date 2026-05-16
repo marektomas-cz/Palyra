@@ -1,4 +1,10 @@
-use std::{net::IpAddr, sync::Arc, time::Duration};
+use std::{
+    fs,
+    net::IpAddr,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use palyra_common::{
@@ -16,11 +22,12 @@ use tonic::{Request, Status};
 use ulid::Ulid;
 
 use crate::{
+    agents::AgentResolveRequest,
     gateway::{
         current_unix_ms, truncate_with_ellipsis, BrowserServiceRuntimeConfig, GatewayRuntimeState,
-        BROWSER_CLICK_TOOL_NAME, BROWSER_CONSOLE_LOG_TOOL_NAME, BROWSER_HIGHLIGHT_TOOL_NAME,
-        BROWSER_NAVIGATE_TOOL_NAME, BROWSER_NETWORK_LOG_TOOL_NAME, BROWSER_OBSERVE_TOOL_NAME,
-        BROWSER_PDF_TOOL_NAME, BROWSER_PERMISSIONS_GET_TOOL_NAME,
+        ToolRuntimeExecutionContext, BROWSER_CLICK_TOOL_NAME, BROWSER_CONSOLE_LOG_TOOL_NAME,
+        BROWSER_HIGHLIGHT_TOOL_NAME, BROWSER_NAVIGATE_TOOL_NAME, BROWSER_NETWORK_LOG_TOOL_NAME,
+        BROWSER_OBSERVE_TOOL_NAME, BROWSER_PDF_TOOL_NAME, BROWSER_PERMISSIONS_GET_TOOL_NAME,
         BROWSER_PERMISSIONS_SET_TOOL_NAME, BROWSER_PRESS_TOOL_NAME, BROWSER_RESET_STATE_TOOL_NAME,
         BROWSER_SCREENSHOT_TOOL_NAME, BROWSER_SCROLL_TOOL_NAME, BROWSER_SELECT_TOOL_NAME,
         BROWSER_SESSION_CLOSE_TOOL_NAME, BROWSER_SESSION_CREATE_TOOL_NAME,
@@ -70,14 +77,104 @@ fn browser_url_targets_loopback(raw_url: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn browser_url_uses_file_scheme(raw_url: &str) -> bool {
+    Url::parse(raw_url.trim())
+        .map(|parsed| parsed.scheme().eq_ignore_ascii_case("file"))
+        .unwrap_or(false)
+}
+
+async fn validate_browser_file_url_workspace_scope(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    context: ToolRuntimeExecutionContext<'_>,
+    url: &str,
+) -> Result<(), String> {
+    if !browser_url_uses_file_scheme(url) {
+        return Ok(());
+    }
+    let parsed = Url::parse(url.trim()).map_err(|error| format!("invalid file URL: {error}"))?;
+    let file_path = browser_file_url_to_path(&parsed)?;
+    let canonical_target = fs::canonicalize(file_path.as_path()).map_err(|error| {
+        format!("palyra.browser.navigate failed to resolve file URL target: {error}")
+    })?;
+    let metadata = fs::metadata(canonical_target.as_path()).map_err(|error| {
+        format!("palyra.browser.navigate failed to inspect file URL target: {error}")
+    })?;
+    if !metadata.is_file() {
+        return Err("palyra.browser.navigate file URL target is not a regular file".to_owned());
+    }
+
+    let agent_outcome = runtime_state
+        .resolve_agent_for_context(AgentResolveRequest {
+            principal: context.principal.to_owned(),
+            channel: context.channel.map(str::to_owned),
+            session_id: Some(context.session_id.to_owned()),
+            preferred_agent_id: None,
+            persist_session_binding: false,
+        })
+        .await
+        .map_err(|error| {
+            format!(
+                "palyra.browser.navigate failed to resolve agent workspace for file URL: {}",
+                error.message()
+            )
+        })?;
+
+    let canonical_roots =
+        canonicalize_browser_workspace_roots(agent_outcome.agent.workspace_roots.as_slice())?;
+    if canonical_file_path_is_inside_workspace_roots(canonical_target.as_path(), &canonical_roots) {
+        return Ok(());
+    }
+    Err(
+        "palyra.browser.navigate file:// URLs must point at a regular file inside the active agent workspace roots"
+            .to_owned(),
+    )
+}
+
+fn browser_file_url_to_path(parsed: &Url) -> Result<PathBuf, String> {
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("palyra.browser.navigate file URL credentials are not allowed".to_owned());
+    }
+    if parsed.query().is_some() {
+        return Err("palyra.browser.navigate file URL query strings are not allowed".to_owned());
+    }
+    parsed.to_file_path().map_err(|_| "palyra.browser.navigate file URL path is invalid".to_owned())
+}
+
+fn canonicalize_browser_workspace_roots(roots: &[String]) -> Result<Vec<PathBuf>, String> {
+    let mut canonical_roots = Vec::with_capacity(roots.len());
+    for (index, root) in roots.iter().enumerate() {
+        let canonical = fs::canonicalize(Path::new(root)).map_err(|error| {
+            format!("palyra.browser.navigate failed to resolve workspace root {index}: {error}")
+        })?;
+        if !canonical.is_dir() {
+            return Err(format!(
+                "palyra.browser.navigate workspace root {index} is not a directory"
+            ));
+        }
+        canonical_roots.push(canonical);
+    }
+    if canonical_roots.is_empty() {
+        return Err("palyra.browser.navigate agent has no accessible workspace roots".to_owned());
+    }
+    Ok(canonical_roots)
+}
+
+fn canonical_file_path_is_inside_workspace_roots(
+    canonical_target: &Path,
+    canonical_roots: &[PathBuf],
+) -> bool {
+    canonical_roots.iter().any(|root| canonical_target.starts_with(root))
+}
+
 pub(crate) async fn execute_browser_tool(
     runtime_state: &Arc<GatewayRuntimeState>,
-    principal: &str,
-    channel: Option<&str>,
+    context: ToolRuntimeExecutionContext<'_>,
     tool_name: &str,
     proposal_id: &str,
     input_json: &[u8],
 ) -> ToolExecutionOutcome {
+    let principal = context.principal;
+    let channel = context.channel;
     if input_json.len() > MAX_BROWSER_TOOL_INPUT_BYTES {
         return browser_tool_execution_outcome(
             proposal_id,
@@ -420,6 +517,20 @@ pub(crate) async fn execute_browser_tool(
                     "palyra.browser.navigate requires non-empty string field 'url'".to_owned(),
                 );
             }
+            if let Err(error) =
+                validate_browser_file_url_workspace_scope(runtime_state, context, url).await
+            {
+                return browser_tool_execution_outcome(
+                    proposal_id,
+                    input_json,
+                    false,
+                    b"{}".to_vec(),
+                    error,
+                );
+            }
+            let allow_private_targets =
+                browser_tool_allows_private_targets_for_url(runtime_state, &payload, url)
+                    || browser_url_uses_file_scheme(url);
             let mut request = Request::new(browser_v1::NavigateRequest {
                 v: CANONICAL_PROTOCOL_MAJOR,
                 session_id: Some(common_v1::CanonicalId { ulid: session_id }),
@@ -431,11 +542,7 @@ pub(crate) async fn execute_browser_tool(
                     .unwrap_or(true),
                 max_redirects: payload.get("max_redirects").and_then(Value::as_u64).unwrap_or(3)
                     as u32,
-                allow_private_targets: browser_tool_allows_private_targets_for_url(
-                    runtime_state,
-                    &payload,
-                    url,
-                ),
+                allow_private_targets,
             });
             if let Err(error) = attach_browser_auth_metadata(
                 &mut request,
@@ -1668,6 +1775,20 @@ pub(crate) async fn execute_browser_tool(
                 }
             };
             let url = payload.get("url").and_then(Value::as_str).map(str::trim).unwrap_or_default();
+            if let Err(error) =
+                validate_browser_file_url_workspace_scope(runtime_state, context, url).await
+            {
+                return browser_tool_execution_outcome(
+                    proposal_id,
+                    input_json,
+                    false,
+                    b"{}".to_vec(),
+                    error,
+                );
+            }
+            let allow_private_targets =
+                browser_tool_allows_private_targets_for_url(runtime_state, &payload, url)
+                    || browser_url_uses_file_scheme(url);
             let mut request = Request::new(browser_v1::OpenTabRequest {
                 v: CANONICAL_PROTOCOL_MAJOR,
                 session_id: Some(common_v1::CanonicalId { ulid: session_id }),
@@ -1680,11 +1801,7 @@ pub(crate) async fn execute_browser_tool(
                     .unwrap_or(true),
                 max_redirects: payload.get("max_redirects").and_then(Value::as_u64).unwrap_or(3)
                     as u32,
-                allow_private_targets: browser_tool_allows_private_targets_for_url(
-                    runtime_state,
-                    &payload,
-                    url,
-                ),
+                allow_private_targets,
             });
             if let Err(error) = attach_browser_auth_metadata(
                 &mut request,
@@ -2461,8 +2578,9 @@ fn browser_tool_execution_outcome(
 mod tests {
     use super::{
         attach_browser_caller_principal_metadata, browser_console_entry_to_json,
-        browser_network_log_entry_to_json, browser_observe_include_visible_text,
-        browser_tool_execution_outcome, browser_url_targets_loopback,
+        browser_file_url_to_path, browser_network_log_entry_to_json,
+        browser_observe_include_visible_text, browser_tool_execution_outcome,
+        browser_url_targets_loopback, canonical_file_path_is_inside_workspace_roots,
         BROWSER_CALLER_PRINCIPAL_HEADER,
     };
     use crate::transport::grpc::proto::palyra::browser::v1 as browser_v1;
@@ -2580,5 +2698,42 @@ mod tests {
         assert!(!browser_url_targets_loopback("http://192.168.1.10/"));
         assert!(!browser_url_targets_loopback("https://example.com/"));
         assert!(!browser_url_targets_loopback("file:///tmp/index.html"));
+    }
+
+    #[test]
+    fn browser_file_url_scope_accepts_workspace_file_and_rejects_sibling() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let workspace = temp.path().join("workspace");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(workspace.as_path()).expect("workspace should be created");
+        std::fs::create_dir_all(outside.as_path()).expect("outside should be created");
+        let fixture = workspace.join("table.html");
+        let sibling = outside.join("secret.html");
+        std::fs::write(fixture.as_path(), "<table></table>").expect("fixture should be written");
+        std::fs::write(sibling.as_path(), "secret").expect("sibling should be written");
+
+        let fixture_url = reqwest::Url::from_file_path(fixture.as_path())
+            .expect("fixture file URL should be built");
+        let target = browser_file_url_to_path(&fixture_url)
+            .expect("workspace file URL should resolve to path")
+            .canonicalize()
+            .expect("target should canonicalize");
+        let canonical_workspace = workspace.canonicalize().expect("workspace should canonicalize");
+        assert!(canonical_file_path_is_inside_workspace_roots(
+            target.as_path(),
+            &[canonical_workspace]
+        ));
+
+        let sibling_url =
+            reqwest::Url::from_file_path(sibling.as_path()).expect("sibling file URL");
+        let sibling_target = browser_file_url_to_path(&sibling_url)
+            .expect("sibling file URL should resolve to path")
+            .canonicalize()
+            .expect("sibling should canonicalize");
+        let canonical_workspace = workspace.canonicalize().expect("workspace should canonicalize");
+        assert!(!canonical_file_path_is_inside_workspace_roots(
+            sibling_target.as_path(),
+            &[canonical_workspace]
+        ));
     }
 }

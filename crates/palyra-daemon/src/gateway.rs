@@ -656,8 +656,7 @@ pub(crate) async fn execute_tool_with_runtime_dispatch(
     } else if tool_name.starts_with("palyra.browser.") {
         crate::application::tool_runtime::browser::execute_browser_tool(
             runtime_state,
-            context.principal,
-            context.channel,
+            context,
             tool_name,
             proposal_id,
             input_json,

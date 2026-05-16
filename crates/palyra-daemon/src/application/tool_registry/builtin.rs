@@ -664,7 +664,7 @@ fn browser_tool_schema(tool_name: &str) -> Value {
                 "url",
                 json!({
                     "type":"string",
-                    "description":"Target URL. For localhost, 127.0.0.1, or other private targets, set allow_private_targets=true on both session.create and this navigation/open call."
+                    "description":"Target URL. For localhost, 127.0.0.1, or other private targets, set allow_private_targets=true on both session.create and this navigation/open call. file:// URLs are supported only for regular files inside the active agent workspace roots; after opening one, use palyra.browser.observe for DOM/text evidence instead of treating a filesystem read as browser validation."
                 }),
             ));
             properties.push((
@@ -852,6 +852,8 @@ mod tests {
             .and_then(serde_json::Value::as_str)
             .expect("browser url description should be visible to models");
         assert!(url_description.contains("localhost"));
+        assert!(url_description.contains("file:// URLs"));
+        assert!(url_description.contains("active agent workspace roots"));
 
         let screenshot =
             registry_entry("palyra.browser.screenshot").expect("screenshot entry exists");

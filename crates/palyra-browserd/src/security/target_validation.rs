@@ -196,6 +196,10 @@ pub(crate) fn validate_target_url_parts_blocking(
     url: &Url,
     allow_private_targets: bool,
 ) -> Result<(), String> {
+    if url.scheme() == "file" {
+        validate_local_file_url_target(url, allow_private_targets)?;
+        return Ok(());
+    }
     let result = (|| {
         let (host, port) = extract_target_host_port(url)?;
         let resolved = resolve_host_addresses_blocking(host, port)?;
@@ -435,6 +439,16 @@ pub(crate) async fn navigate_with_guards(
     let redirect_limit = max_redirects.clamp(1, 10);
     let mut redirects = 0_u32;
     loop {
+        if current_url.scheme() == "file" {
+            return navigate_local_file_with_guards(
+                &current_url,
+                allow_private_targets,
+                max_response_bytes,
+                started_at,
+                network_log,
+                cookie_updates,
+            );
+        }
         let validated_target = match validate_target_url(&current_url, allow_private_targets).await
         {
             Ok(value) => value,
@@ -669,6 +683,124 @@ pub(crate) async fn navigate_with_guards(
             cookie_updates,
         };
     }
+}
+
+fn navigate_local_file_with_guards(
+    url: &Url,
+    allow_private_targets: bool,
+    max_response_bytes: u64,
+    started_at: Instant,
+    network_log: Vec<NetworkLogEntryInternal>,
+    cookie_updates: Vec<CookieUpdate>,
+) -> NavigateOutcome {
+    let file_path = match validate_local_file_url_target(url, allow_private_targets) {
+        Ok(path) => path,
+        Err(error) => {
+            return NavigateOutcome {
+                success: false,
+                final_url: url.to_string(),
+                status_code: 0,
+                title: String::new(),
+                page_body: String::new(),
+                body_bytes: 0,
+                latency_ms: started_at.elapsed().as_millis() as u64,
+                error,
+                network_log,
+                cookie_updates,
+            };
+        }
+    };
+
+    let metadata = match fs::metadata(file_path.as_path()) {
+        Ok(value) => value,
+        Err(error) => {
+            return NavigateOutcome {
+                success: false,
+                final_url: url.to_string(),
+                status_code: 0,
+                title: String::new(),
+                page_body: String::new(),
+                body_bytes: 0,
+                latency_ms: started_at.elapsed().as_millis() as u64,
+                error: format!("failed to inspect local file target: {error}"),
+                network_log,
+                cookie_updates,
+            };
+        }
+    };
+    let body_bytes = metadata.len();
+    if body_bytes > max_response_bytes {
+        return NavigateOutcome {
+            success: false,
+            final_url: url.to_string(),
+            status_code: 0,
+            title: String::new(),
+            page_body: String::new(),
+            body_bytes,
+            latency_ms: started_at.elapsed().as_millis() as u64,
+            error: format!(
+                "response exceeds max_response_bytes ({body_bytes} > {max_response_bytes})"
+            ),
+            network_log,
+            cookie_updates,
+        };
+    }
+    let page_body = match fs::read(file_path.as_path()) {
+        Ok(bytes) => String::from_utf8_lossy(bytes.as_slice()).into_owned(),
+        Err(error) => {
+            return NavigateOutcome {
+                success: false,
+                final_url: url.to_string(),
+                status_code: 0,
+                title: String::new(),
+                page_body: String::new(),
+                body_bytes,
+                latency_ms: started_at.elapsed().as_millis() as u64,
+                error: format!("failed to read local file target: {error}"),
+                network_log,
+                cookie_updates,
+            };
+        }
+    };
+    NavigateOutcome {
+        success: true,
+        final_url: url.to_string(),
+        status_code: 0,
+        title: String::new(),
+        page_body,
+        body_bytes,
+        latency_ms: started_at.elapsed().as_millis() as u64,
+        error: String::new(),
+        network_log,
+        cookie_updates,
+    }
+}
+
+fn validate_local_file_url_target(
+    url: &Url,
+    allow_private_targets: bool,
+) -> Result<PathBuf, String> {
+    if !allow_private_targets {
+        return Err(
+            "blocked URL scheme 'file'; local file navigation requires allow_private_targets=true"
+                .to_owned(),
+        );
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("file URL credentials are not allowed".to_owned());
+    }
+    if url.query().is_some() {
+        return Err("file URL query strings are not allowed".to_owned());
+    }
+    let file_path = url.to_file_path().map_err(|_| "file URL path is invalid".to_owned())?;
+    let canonical = fs::canonicalize(file_path.as_path())
+        .map_err(|error| format!("failed to resolve local file target: {error}"))?;
+    let metadata = fs::metadata(canonical.as_path())
+        .map_err(|error| format!("failed to inspect local file target: {error}"))?;
+    if !metadata.is_file() {
+        return Err("file URL target is not a regular file".to_owned());
+    }
+    Ok(canonical)
 }
 
 pub(crate) fn enforce_remote_response_ip_policy(
