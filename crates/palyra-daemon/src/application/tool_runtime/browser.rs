@@ -34,6 +34,11 @@ use crate::{
 };
 
 const BROWSER_CALLER_PRINCIPAL_HEADER: &str = "x-palyra-principal";
+const BROWSER_SELECTOR_RECOVERY_HINT: &str = "selector_not_found: call palyra.browser.observe with include_dom_snapshot=true and include_accessibility_tree=true, choose a selector from observed ids, names, labels, roles, or visible text, then retry once with that grounded selector; do not keep guessing selectors";
+const BROWSER_WAIT_FOR_INPUT_RECOVERY_HINT: &str =
+    "wait_for_input_required: pass either selector or text; when unsure, call palyra.browser.observe first and wait for a visible text snippet or observed selector";
+const BROWSER_WAIT_FOR_TIMEOUT_RECOVERY_HINT: &str =
+    "wait_for_timeout: call palyra.browser.observe to inspect the current step/state before retrying with a grounded selector or visible text";
 
 fn browser_tool_allows_private_targets_for_url(
     runtime_state: &GatewayRuntimeState,
@@ -2372,6 +2377,46 @@ fn browser_permissions_to_json(permissions: browser_v1::SessionPermissions) -> V
     })
 }
 
+fn browser_recovery_hint(error: &str) -> Option<&'static str> {
+    let normalized = error.to_ascii_lowercase();
+    if normalized.contains("selector") && normalized.contains("not found") {
+        return Some(BROWSER_SELECTOR_RECOVERY_HINT);
+    }
+    if normalized.contains("wait_for requires non-empty selector")
+        || normalized.contains("wait_for requires non-empty selector or non-empty text")
+    {
+        return Some(BROWSER_WAIT_FOR_INPUT_RECOVERY_HINT);
+    }
+    if normalized.contains("wait_for condition was not satisfied") {
+        return Some(BROWSER_WAIT_FOR_TIMEOUT_RECOVERY_HINT);
+    }
+    None
+}
+
+fn browser_error_with_recovery_hint(error: String) -> String {
+    let Some(hint) = browser_recovery_hint(error.as_str()) else {
+        return error;
+    };
+    if error.contains(hint) {
+        return error;
+    }
+    format!("{error}; recovery_hint={hint}")
+}
+
+fn browser_output_with_recovery_hint(output_json: Vec<u8>, error: &str) -> Vec<u8> {
+    let Some(hint) = browser_recovery_hint(error) else {
+        return output_json;
+    };
+    let mut output = serde_json::from_slice::<Value>(output_json.as_slice())
+        .unwrap_or_else(|_| json!({ "success": false, "error": error }));
+    if let Some(object) = output.as_object_mut() {
+        object.entry("success").or_insert(Value::Bool(false));
+        object.entry("error").or_insert(Value::String(error.to_owned()));
+        object.insert("recovery_hint".to_owned(), Value::String(hint.to_owned()));
+    }
+    serde_json::to_vec(&output).unwrap_or(output_json)
+}
+
 fn browser_tool_execution_outcome(
     proposal_id: &str,
     input_json: &[u8],
@@ -2379,6 +2424,9 @@ fn browser_tool_execution_outcome(
     output_json: Vec<u8>,
     error: String,
 ) -> ToolExecutionOutcome {
+    let output_json =
+        if success { output_json } else { browser_output_with_recovery_hint(output_json, &error) };
+    let error = if success { error } else { browser_error_with_recovery_hint(error) };
     let executed_at_unix_ms = current_unix_ms();
     let mut hasher = Sha256::new();
     hasher.update(b"palyra.browser.tool.attestation.v1");
@@ -2414,7 +2462,8 @@ mod tests {
     use super::{
         attach_browser_caller_principal_metadata, browser_console_entry_to_json,
         browser_network_log_entry_to_json, browser_observe_include_visible_text,
-        browser_url_targets_loopback, BROWSER_CALLER_PRINCIPAL_HEADER,
+        browser_tool_execution_outcome, browser_url_targets_loopback,
+        BROWSER_CALLER_PRINCIPAL_HEADER,
     };
     use crate::transport::grpc::proto::palyra::browser::v1 as browser_v1;
     use palyra_common::CANONICAL_PROTOCOL_MAJOR;
@@ -2456,6 +2505,44 @@ mod tests {
         assert_eq!(exported.value["headers"][0]["value"], "<redacted>");
         assert_eq!(exported.value["safety"]["action"], "redact");
         assert!(exported.redacted);
+    }
+
+    #[test]
+    fn failed_browser_selector_actions_include_recovery_hint() {
+        let outcome = browser_tool_execution_outcome(
+            "proposal-1",
+            br##"{"selector":"#card-number"}"##,
+            false,
+            br#"{"success":false,"error":"selector '#card-number' was not found"}"#.to_vec(),
+            "selector '#card-number' was not found".to_owned(),
+        );
+        let output: serde_json::Value =
+            serde_json::from_slice(outcome.output_json.as_slice()).expect("output should parse");
+
+        assert!(output["recovery_hint"]
+            .as_str()
+            .is_some_and(|hint| hint.contains("palyra.browser.observe")));
+        assert!(outcome.error.contains("recovery_hint=selector_not_found"));
+    }
+
+    #[test]
+    fn invalid_wait_for_output_includes_recovery_hint() {
+        let outcome = browser_tool_execution_outcome(
+            "proposal-1",
+            br#"{"session_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV"}"#,
+            false,
+            b"{}".to_vec(),
+            "palyra.browser.wait_for failed: wait_for requires non-empty selector or non-empty text"
+                .to_owned(),
+        );
+        let output: serde_json::Value =
+            serde_json::from_slice(outcome.output_json.as_slice()).expect("output should parse");
+
+        assert_eq!(output["success"], false);
+        assert!(output["recovery_hint"]
+            .as_str()
+            .is_some_and(|hint| hint.contains("pass either selector or text")));
+        assert!(outcome.error.contains("recovery_hint=wait_for_input_required"));
     }
 
     #[test]

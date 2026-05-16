@@ -654,11 +654,17 @@ fn browser_tool_schema(tool_name: &str) -> Value {
             required.push("url");
         }
         "palyra.browser.click" | "palyra.browser.highlight" => {
-            properties.push(("selector", json!({"type":"string"})));
+            properties.push((
+                "selector",
+                json!({"type":"string","description":"CSS selector grounded in a prior palyra.browser.observe result. If this selector is not found, call observe and retry once with an observed id, label, role, name, or visible-text-adjacent selector."}),
+            ));
             required.push("selector");
         }
         "palyra.browser.type" => {
-            properties.push(("selector", json!({"type":"string"})));
+            properties.push((
+                "selector",
+                json!({"type":"string","description":"CSS selector grounded in a prior palyra.browser.observe result. Prefer stable input id/name/label evidence; if not found, call observe before retrying."}),
+            ));
             properties.push(("text", json!({"type":"string"})));
             required.extend(["selector", "text"]);
         }
@@ -667,13 +673,27 @@ fn browser_tool_schema(tool_name: &str) -> Value {
             required.push("key");
         }
         "palyra.browser.select" => {
-            properties.push(("selector", json!({"type":"string"})));
+            properties.push((
+                "selector",
+                json!({"type":"string","description":"CSS selector for a select/input control grounded in a prior palyra.browser.observe result. If the selector is not found, inspect the current DOM/accessibility state before retrying."}),
+            ));
             properties.push(("value", json!({"type":"string"})));
             required.extend(["selector", "value"]);
         }
         "palyra.browser.scroll" => {
             properties.push(("delta_x", json!({"type":"integer"})));
             properties.push(("delta_y", json!({"type":"integer"})));
+        }
+        "palyra.browser.wait_for" => {
+            properties.push((
+                "selector",
+                json!({"type":"string","description":"Optional CSS selector to wait for. Provide selector or text; if unsure, call palyra.browser.observe first."}),
+            ));
+            properties.push((
+                "text",
+                json!({"type":"string","description":"Optional visible text snippet to wait for. Provide selector or text; do not call wait_for with both empty."}),
+            ));
+            properties.push(("poll_interval_ms", json!({"type":"integer","minimum":1})));
         }
         "palyra.browser.session.create" => {
             properties.push(("profile_id", json!({"type":"string"})));
@@ -752,6 +772,32 @@ mod tests {
         assert!(patch_description.contains("missing parent directories"));
         assert!(patch_description.contains("reports/report.md"));
         assert!(patch_description.contains("never use host absolute paths"));
+    }
+
+    #[test]
+    fn browser_wait_for_schema_exposes_required_condition_fields() {
+        let entry = registry_entry("palyra.browser.wait_for").expect("wait_for entry exists");
+        let selector_description = entry
+            .input_schema
+            .pointer("/properties/selector/description")
+            .and_then(serde_json::Value::as_str)
+            .expect("wait_for selector description should be visible to models");
+        let text_description = entry
+            .input_schema
+            .pointer("/properties/text/description")
+            .and_then(serde_json::Value::as_str)
+            .expect("wait_for text description should be visible to models");
+
+        assert!(selector_description.contains("Provide selector or text"));
+        assert!(text_description.contains("do not call wait_for with both empty"));
+
+        let type_entry = registry_entry("palyra.browser.type").expect("type entry exists");
+        let type_selector_description = type_entry
+            .input_schema
+            .pointer("/properties/selector/description")
+            .and_then(serde_json::Value::as_str)
+            .expect("type selector description should be visible to models");
+        assert!(type_selector_description.contains("palyra.browser.observe"));
     }
 
     #[test]
