@@ -6,6 +6,10 @@ pub enum ProtocolCommand {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    Validate {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     ValidateId {
         #[arg(long)]
         id: String,

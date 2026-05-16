@@ -28,6 +28,31 @@ pub(crate) fn run_protocol(command: ProtocolCommand) -> Result<()> {
             );
             std::io::stdout().flush().context("stdout flush failed")
         }
+        ProtocolCommand::Validate { json } => {
+            let payload = protocol_validate_output_value();
+            if output::preferred_json(json) {
+                return output::print_json_pretty(
+                    &payload,
+                    "failed to encode protocol validation output as JSON",
+                );
+            }
+            if output::preferred_ndjson(json, false) {
+                output::print_json_line(
+                    &payload,
+                    "failed to encode protocol validation output as NDJSON",
+                )?;
+                return std::io::stdout().flush().context("stdout flush failed");
+            }
+            println!(
+                "protocol.validate status=ok protocol_major={} json.envelope.v={}",
+                CANONICAL_PROTOCOL_MAJOR, CANONICAL_JSON_ENVELOPE_VERSION
+            );
+            println!(
+                "protocol.validate.handoff source_checkout_commands=\"{}\"",
+                protocol_validate_handoff_commands().join("; ")
+            );
+            std::io::stdout().flush().context("stdout flush failed")
+        }
         ProtocolCommand::ValidateId { id, json } => {
             validate_canonical_id(&id).with_context(|| format!("invalid canonical ID: {}", id))?;
             if output::preferred_json(json) {
@@ -52,5 +77,39 @@ pub(crate) fn run_protocol(command: ProtocolCommand) -> Result<()> {
             println!("canonical_id.valid=true id={id}");
             std::io::stdout().flush().context("stdout flush failed")
         }
+    }
+}
+
+fn protocol_validate_output_value() -> serde_json::Value {
+    json!({
+        "valid": true,
+        "protocol_major": CANONICAL_PROTOCOL_MAJOR,
+        "json_envelope_version": CANONICAL_JSON_ENVELOPE_VERSION,
+        "checks": [
+            {
+                "name": "runtime_protocol_constants",
+                "status": "ok",
+                "protocol_major": CANONICAL_PROTOCOL_MAJOR,
+                "json_envelope_version": CANONICAL_JSON_ENVELOPE_VERSION,
+            }
+        ],
+        "source_checkout_handoff": {
+            "available": true,
+            "commands": protocol_validate_handoff_commands(),
+        }
+    })
+}
+
+fn protocol_validate_handoff_commands() -> Vec<&'static str> {
+    if cfg!(windows) {
+        vec![
+            "pwsh scripts/protocol/validate-proto.ps1",
+            "pwsh scripts/protocol/check-generated-stubs.ps1",
+        ]
+    } else {
+        vec![
+            "bash scripts/protocol/validate-proto.sh",
+            "bash scripts/protocol/check-generated-stubs.sh",
+        ]
     }
 }

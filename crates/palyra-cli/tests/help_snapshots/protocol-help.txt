@@ -4,6 +4,7 @@ Usage: palyra protocol [OPTIONS] <COMMAND>
 
 Commands:
   version
+  validate
   validate-id
 
 Options:

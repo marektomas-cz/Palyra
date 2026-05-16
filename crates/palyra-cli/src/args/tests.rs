@@ -4956,11 +4956,26 @@ fn parse_protocol_validate_id() {
 }
 
 #[test]
+fn parse_protocol_validate() {
+    let parsed = Cli::parse_from(["palyra", "protocol", "validate"]);
+    assert_eq!(
+        parsed.command,
+        Command::Protocol { command: ProtocolCommand::Validate { json: false } }
+    );
+}
+
+#[test]
 fn parse_protocol_json_flags() {
     let version = Cli::parse_from(["palyra", "protocol", "version", "--json"]);
     assert_eq!(
         version.command,
         Command::Protocol { command: ProtocolCommand::Version { json: true } }
+    );
+
+    let validate = Cli::parse_from(["palyra", "protocol", "validate", "--json"]);
+    assert_eq!(
+        validate.command,
+        Command::Protocol { command: ProtocolCommand::Validate { json: true } }
     );
 
     let validate_id = Cli::parse_from([
