@@ -414,17 +414,24 @@ fn normalize_palyra_patch_fences(patch: &str) -> Option<String> {
         return None;
     }
 
-    let mut lines = original_lines
-        .iter()
-        .map(|line| match canonical_patch_fence_variant(line) {
-            Some(canonical) => canonical.to_owned(),
-            None => (*line).to_owned(),
-        })
-        .collect::<Vec<_>>();
-    let mut changed = lines
-        .iter()
-        .zip(original_lines.iter())
-        .any(|(normalized, original)| normalized != original);
+    let mut lines = Vec::with_capacity(original_lines.len());
+    let mut changed = false;
+    let mut pending_empty_file_header: Option<(usize, String)> = None;
+    for original in &original_lines {
+        let Some(line) =
+            normalize_patch_control_variant(original, &mut lines, &mut pending_empty_file_header)
+        else {
+            changed = true;
+            continue;
+        };
+        changed |= line != *original;
+        if let Some(path) = full_file_operation_path(line.as_str()) {
+            pending_empty_file_header = Some((lines.len(), path.to_owned()));
+        } else if !patch_control_line(line.as_str()).trim().is_empty() || !line.trim().is_empty() {
+            pending_empty_file_header = None;
+        }
+        lines.push(line);
+    }
 
     if patch_control_line(lines[0].as_str()) != "*** Begin Patch" {
         return None;
@@ -463,12 +470,66 @@ fn normalize_palyra_patch_fences(patch: &str) -> Option<String> {
     })
 }
 
+fn normalize_patch_control_variant(
+    line: &str,
+    output_lines: &mut [String],
+    pending_empty_file_header: &mut Option<(usize, String)>,
+) -> Option<String> {
+    if let Some(canonical) = canonical_patch_fence_variant(line) {
+        return Some(canonical.to_owned());
+    }
+    if let Some(path) = begin_file_variant_path(line) {
+        if let Some((header_index, pending_path)) = pending_empty_file_header.as_ref() {
+            if path == *pending_path && output_lines.get(*header_index).is_some() {
+                return None;
+            }
+        }
+        return Some(format!("*** Add File: {path}"));
+    }
+    if is_file_body_wrapper_variant(line) {
+        return None;
+    }
+    Some(line.to_owned())
+}
+
 fn canonical_patch_fence_variant(line: &str) -> Option<&'static str> {
     match patch_control_line(line).trim() {
         "*** Begin Patch" | "*** Begin Patch ***" => Some("*** Begin Patch"),
         "*** End Patch" | "*** End Patch ***" => Some("*** End Patch"),
         _ => None,
     }
+}
+
+fn begin_file_variant_path(line: &str) -> Option<String> {
+    let control = strip_trailing_patch_stars(patch_control_line(line));
+    let path = control.strip_prefix("*** Begin File:")?.trim();
+    (!path.is_empty()).then(|| path.to_owned())
+}
+
+fn is_file_body_wrapper_variant(line: &str) -> bool {
+    let control = strip_trailing_patch_stars(patch_control_line(line));
+    matches!(
+        control,
+        "*** Begin Body"
+            | "*** Begin Body:"
+            | "*** End Body"
+            | "*** End Body:"
+            | "*** End File"
+            | "*** End File:"
+    )
+}
+
+fn strip_trailing_patch_stars(line: &str) -> &str {
+    line.trim().strip_suffix("***").unwrap_or(line.trim()).trim()
+}
+
+fn full_file_operation_path(line: &str) -> Option<&str> {
+    let control = patch_control_line(line);
+    control
+        .strip_prefix("*** Add File: ")
+        .or_else(|| control.strip_prefix("*** Replace File: "))
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
 }
 
 fn normalize_unified_diff_patch(patch: &str) -> Option<String> {
@@ -1989,6 +2050,68 @@ mod tests {
             fs::read_to_string(workspace.join("reports").join("ready.md"))
                 .expect("report should be created"),
             "READY detected\n"
+        );
+    }
+
+    #[test]
+    fn apply_workspace_patch_accepts_begin_file_body_wrappers() {
+        let temp = tempdir().expect("tempdir should be created");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace should exist");
+        let patch = concat!(
+            "*** Begin Patch\n",
+            "*** Begin File: reports/node-lts.md\n",
+            "*** Begin Body:\n",
+            "# Node LTS\n",
+            "Use active LTS releases for production.\n",
+            "*** End Body\n",
+            "*** End File\n",
+            "*** End Patch\n",
+        );
+
+        let outcome = apply_workspace_patch(
+            std::slice::from_ref(&workspace),
+            &default_request(patch, false),
+            &default_limits(),
+        )
+        .expect("begin-file/body wrappers should normalize to an add-file patch");
+
+        assert_eq!(outcome.files_touched.len(), 1);
+        assert_eq!(
+            fs::read_to_string(workspace.join("reports").join("node-lts.md"))
+                .expect("report should be created"),
+            "# Node LTS\nUse active LTS releases for production.\n"
+        );
+    }
+
+    #[test]
+    fn apply_workspace_patch_ignores_duplicate_begin_file_after_add_placeholder() {
+        let temp = tempdir().expect("tempdir should be created");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace should exist");
+        let patch = concat!(
+            "*** Begin Patch\n",
+            "*** Add File: reports/progress.md\n",
+            "*** Begin File: reports/progress.md\n",
+            "START\n",
+            "MIDDLE\n",
+            "END\n",
+            "*** End File\n",
+            "*** End Patch\n",
+        );
+
+        let outcome = apply_workspace_patch(
+            std::slice::from_ref(&workspace),
+            &default_request(patch, false),
+            &default_limits(),
+        )
+        .expect("duplicate begin-file marker after add-file placeholder should be ignored");
+
+        assert_eq!(outcome.files_touched.len(), 1);
+        assert_eq!(
+            fs::read_to_string(workspace.join("reports").join("progress.md"))
+                .expect("report should be created"),
+            "START\nMIDDLE\nEND\n"
         );
     }
 
