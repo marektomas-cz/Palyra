@@ -1390,6 +1390,26 @@ async fn build_previous_run_context_prompt_includes_recent_turns_when_available(
     );
 }
 
+fn assert_legacy_provider_input_preserves_user_text(provider_input_text: &str, user_text: &str) {
+    let expected_suffix = format!("\n\n{user_text}");
+    assert!(
+        provider_input_text.starts_with("<palyra_runtime_context>\n"),
+        "legacy provider input should start with the trusted runtime context block: {provider_input_text}"
+    );
+    assert!(
+        provider_input_text.contains("current_utc: "),
+        "legacy provider input should expose a current UTC timestamp"
+    );
+    assert!(
+        provider_input_text.contains("temporal_evidence_contract: "),
+        "legacy provider input should include the temporal evidence contract"
+    );
+    assert!(
+        provider_input_text.ends_with(expected_suffix.as_str()),
+        "legacy provider input should keep the raw user text after runtime context"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn prepare_model_provider_input_collects_vision_inputs_for_image_attachments() {
     let state = build_test_runtime_state(false);
@@ -1436,9 +1456,9 @@ async fn prepare_model_provider_input_collects_vision_inputs_for_image_attachmen
     .expect("provider input preparation should succeed");
     assert_eq!(prepared.vision_inputs.len(), 1, "image attachment should produce a vision input");
     assert_eq!(prepared.vision_inputs[0].mime_type, "image/png");
-    assert_eq!(
-        prepared.provider_input_text, "summarize screenshot",
-        "without memory auto-inject helper should preserve raw input text"
+    assert_legacy_provider_input_preserves_user_text(
+        prepared.provider_input_text.as_str(),
+        "summarize screenshot",
     );
 }
 
@@ -1543,9 +1563,20 @@ async fn prepare_model_provider_input_supports_legacy_and_context_engine_flows()
     .await
     .expect("context engine provider input preparation should succeed");
 
+    assert_legacy_provider_input_preserves_user_text(
+        legacy_prepared.provider_input_text.as_str(),
+        input_text,
+    );
     assert_eq!(
-        rollout_prepared.provider_input_text, legacy_prepared.provider_input_text,
-        "context engine rollout should preserve provider input for the simple baseline case"
+        rollout_prepared.provider_input_text, input_text,
+        "context engine rollout should keep the user segment clean for the simple baseline case"
+    );
+    assert!(
+        rollout_prepared
+            .provider_messages
+            .iter()
+            .any(|message| message.text_content().contains("Runtime context: current_utc=")),
+        "context engine rollout should carry trusted runtime context through compiled provider messages"
     );
     let rollout_tape = rollout_state
         .journal_store
@@ -1638,9 +1669,9 @@ async fn prepare_model_provider_input_fallback_mode_returns_raw_input_when_tape_
     )
     .await
     .expect("fallback mode should not fail when tape append cannot persist");
-    assert_eq!(
-        prepared.provider_input_text, "rollback checklist",
-        "fallback mode should preserve raw input after memory auto-inject failure"
+    assert_legacy_provider_input_preserves_user_text(
+        prepared.provider_input_text.as_str(),
+        "rollback checklist",
     );
 }
 
