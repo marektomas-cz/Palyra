@@ -38,13 +38,15 @@ use super::vault::vault_get_requires_approval;
 use super::{
     best_effort_mark_approval_error, common_v1, constant_time_eq,
     enforce_vault_get_approval_policy, enforce_vault_scope_access, ingest_memory_best_effort,
-    resolve_cron_job_channel_for_create, tool_approval_response_proposal_id,
-    workspace_patch_metrics_from_output, CachedMemorySearchEntry, GatewayAuthConfig,
-    GatewayJournalConfigSnapshot, GatewayRuntimeConfigSnapshot, GatewayRuntimeState,
-    MemoryRuntimeConfig, ProviderRequest, RequestContext, ToolApprovalOutcome, HEADER_CHANNEL,
-    HEADER_DEVICE_ID, HEADER_PRINCIPAL, MAX_APPROVAL_PAGE_LIMIT,
-    VAULT_RATE_LIMIT_MAX_PRINCIPAL_BUCKETS, VAULT_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW,
+    process_runner_input_should_use_active_root, resolve_cron_job_channel_for_create,
+    tool_approval_response_proposal_id, workspace_patch_metrics_from_output,
+    CachedMemorySearchEntry, GatewayAuthConfig, GatewayJournalConfigSnapshot,
+    GatewayRuntimeConfigSnapshot, GatewayRuntimeState, MemoryRuntimeConfig, ProviderRequest,
+    RequestContext, ToolApprovalOutcome, HEADER_CHANNEL, HEADER_DEVICE_ID, HEADER_PRINCIPAL,
+    MAX_APPROVAL_PAGE_LIMIT, VAULT_RATE_LIMIT_MAX_PRINCIPAL_BUCKETS,
+    VAULT_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW,
 };
+use crate::application::tool_runtime::workspace_scope::ActiveWorkspaceRoot;
 use crate::application::tool_security::ToolProposalBackendSelection;
 use crate::application::{
     approvals::{apply_tool_approval_outcome, approval_risk_for_tool},
@@ -104,6 +106,45 @@ static SESSION_COMPACTION_TEST_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
 const PARITY_REDIRECT_CREDENTIALS_URL: &str =
     include_str!("../../../../fixtures/parity/redirect-credentials-url.txt");
 const PARITY_TRICKY_DOM_HTML: &str = include_str!("../../../../fixtures/parity/tricky-dom.html");
+
+fn active_workspace_root_for_gateway_test() -> ActiveWorkspaceRoot {
+    ActiveWorkspaceRoot {
+        root: PathBuf::from("C:/workspace/scenario-s002-notes-api"),
+        relative_path: "scenario-s002-notes-api".to_owned(),
+    }
+}
+
+#[test]
+fn process_runner_input_uses_active_root_for_default_cwd() {
+    let active_root = active_workspace_root_for_gateway_test();
+
+    assert!(process_runner_input_should_use_active_root(
+        br#"{"command":"npm","args":["test"]}"#,
+        &active_root,
+    ));
+    assert!(process_runner_input_should_use_active_root(
+        br#"{"command":"npm","args":["test"],"cwd":"workspace"}"#,
+        &active_root,
+    ));
+}
+
+#[test]
+fn process_runner_input_preserves_explicit_active_root_paths() {
+    let active_root = active_workspace_root_for_gateway_test();
+
+    assert!(!process_runner_input_should_use_active_root(
+        br#"{"command":"npm","args":["test"],"cwd":"scenario-s002-notes-api"}"#,
+        &active_root,
+    ));
+    assert!(!process_runner_input_should_use_active_root(
+        br#"{"command":"node","args":["scenario-s002-notes-api/server.js"]}"#,
+        &active_root,
+    ));
+    assert!(!process_runner_input_should_use_active_root(
+        br#"{"command":"npm","args":["--prefix=scenario-s002-notes-api","test"]}"#,
+        &active_root,
+    ));
+}
 
 async fn lock_session_compaction_test_guard() -> MutexGuard<'static, ()> {
     SESSION_COMPACTION_TEST_MUTEX.get_or_init(|| Mutex::new(())).lock().await

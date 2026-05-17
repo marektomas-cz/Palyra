@@ -128,7 +128,7 @@ pub(crate) async fn preview_project_context(
         .await?
         .unwrap_or_else(|| SessionProjectContextStateRecord::new(session_id));
 
-    let draft_focus_paths = derive_focus_paths_from_prompt(input_text);
+    let draft_focus_paths = derive_focus_paths_from_prompt(input_text, workspace_roots.as_slice());
     let next_focus_paths =
         merge_focus_paths(state.focus_paths.as_slice(), draft_focus_paths.as_slice());
     let next_focus_path_strings =
@@ -520,7 +520,10 @@ fn truncate_project_context_text(input: &str, max_chars: usize) -> (String, bool
     (input.chars().take(max_chars).collect::<String>(), true)
 }
 
-fn derive_focus_paths_from_prompt(input_text: &str) -> Vec<ProjectContextFocusPath> {
+fn derive_focus_paths_from_prompt(
+    input_text: &str,
+    workspace_roots: &[PathBuf],
+) -> Vec<ProjectContextFocusPath> {
     let parsed = parse_context_references(input_text);
     let mut reasons_by_path = BTreeMap::<String, String>::new();
     for reference in parsed.references {
@@ -541,10 +544,119 @@ fn derive_focus_paths_from_prompt(input_text: &str) -> Vec<ProjectContextFocusPa
             .entry(normalized)
             .or_insert_with(|| format!("@{}", reference.kind.as_str()));
     }
+    for focus_path in derive_absolute_workspace_focus_paths(input_text, workspace_roots) {
+        reasons_by_path.entry(focus_path).or_insert_with(|| "prompt_workspace_path".to_owned());
+    }
     reasons_by_path
         .into_iter()
         .map(|(path, reason)| ProjectContextFocusPath { path, reason })
         .collect()
+}
+
+fn derive_absolute_workspace_focus_paths(
+    input_text: &str,
+    workspace_roots: &[PathBuf],
+) -> Vec<String> {
+    let canonical_roots = workspace_roots
+        .iter()
+        .filter_map(|root| root.canonicalize().ok().filter(|path| path.is_dir()))
+        .collect::<Vec<_>>();
+    if canonical_roots.is_empty() {
+        return Vec::new();
+    }
+
+    let mut focus_paths = BTreeSet::<String>::new();
+    for raw_path in extract_absolute_prompt_paths(input_text) {
+        let parsed = PathBuf::from(raw_path.as_str());
+        if !parsed.is_absolute() {
+            continue;
+        }
+        let existing = nearest_existing_path(parsed.as_path());
+        let Some(existing) = existing else {
+            continue;
+        };
+        let canonical = existing.canonicalize().unwrap_or(existing);
+        let directory = if canonical.is_dir() {
+            canonical
+        } else {
+            canonical.parent().map(Path::to_path_buf).unwrap_or(canonical)
+        };
+        for root in &canonical_roots {
+            if !directory.starts_with(root) || directory == *root {
+                continue;
+            }
+            let relative = directory.strip_prefix(root).unwrap_or(Path::new(""));
+            let display = normalize_directory_display(relative);
+            if display != "." {
+                focus_paths.insert(display);
+            }
+        }
+    }
+    focus_paths.into_iter().collect()
+}
+
+fn nearest_existing_path(path: &Path) -> Option<PathBuf> {
+    let mut cursor = path.to_path_buf();
+    loop {
+        if cursor.exists() {
+            return Some(cursor);
+        }
+        if !cursor.pop() {
+            return None;
+        }
+    }
+}
+
+fn extract_absolute_prompt_paths(input_text: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < input_text.len() {
+        let Some((relative_start, _)) = input_text[cursor..]
+            .char_indices()
+            .find(|(index, ch)| looks_like_prompt_path_start(input_text, cursor + *index, *ch))
+        else {
+            break;
+        };
+        let start = cursor + relative_start;
+        let quote = preceding_quote(input_text, start);
+        let mut end = start;
+        while end < input_text.len() {
+            let ch = input_text[end..].chars().next().unwrap_or_default();
+            if prompt_path_terminates(ch, quote) {
+                break;
+            }
+            end = end.saturating_add(ch.len_utf8());
+        }
+        let candidate = trim_prompt_path_candidate(&input_text[start..end]);
+        if !candidate.is_empty() {
+            paths.push(candidate.to_owned());
+        }
+        cursor = end.saturating_add(1);
+    }
+    paths
+}
+
+fn looks_like_prompt_path_start(input_text: &str, start: usize, ch: char) -> bool {
+    if !ch.is_ascii_alphabetic() {
+        return false;
+    }
+    let bytes = input_text.as_bytes();
+    bytes.get(start + 1) == Some(&b':') && matches!(bytes.get(start + 2), Some(b'\\' | b'/'))
+}
+
+fn preceding_quote(input_text: &str, start: usize) -> Option<char> {
+    input_text[..start].chars().next_back().filter(|ch| matches!(ch, '"' | '\''))
+}
+
+fn prompt_path_terminates(ch: char, quote: Option<char>) -> bool {
+    if Some(ch) == quote {
+        return true;
+    }
+    quote.is_none() && (ch.is_whitespace() || matches!(ch, '"' | '\'' | '`' | '<' | '>' | '|'))
+}
+
+fn trim_prompt_path_candidate(candidate: &str) -> &str {
+    candidate.trim().trim_matches(['.', ',', ';', ':', '!', '?', ')', ']', '}'])
 }
 
 fn merge_focus_paths(
@@ -948,10 +1060,25 @@ mod tests {
     fn derives_focus_paths_from_file_and_folder_references() {
         let focus = derive_focus_paths_from_prompt(
             "Review @file:apps/web/src/App.tsx and @folder:crates/palyra-daemon/src",
+            &[],
         );
         assert_eq!(focus.len(), 2);
         assert_eq!(focus[0].path, "apps/web/src/App.tsx");
         assert_eq!(focus[1].path, "crates/palyra-daemon/src");
+    }
+
+    #[test]
+    fn derives_focus_path_from_absolute_workspace_prompt_path() {
+        let root = temp_project_context_root();
+        let project = root.join("scenario-s002-notes-api");
+        fs::create_dir_all(project.as_path()).expect("project directory should exist");
+        let prompt = format!("Work only inside {}. Create package.json there.", project.display());
+
+        let focus = derive_focus_paths_from_prompt(prompt.as_str(), std::slice::from_ref(&root));
+
+        assert_eq!(focus.len(), 1);
+        assert_eq!(focus[0].path, "scenario-s002-notes-api");
+        assert_eq!(focus[0].reason, "prompt_workspace_path");
     }
 
     #[test]

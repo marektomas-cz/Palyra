@@ -18,6 +18,9 @@ use ulid::Ulid;
 
 use crate::{
     agents::AgentResolveRequest,
+    application::tool_runtime::workspace_scope::{
+        relative_path_already_targets_active_root, session_active_workspace_root,
+    },
     gateway::{
         current_unix_ms, GatewayRuntimeState, MAX_PATCH_TOOL_MARKER_BYTES,
         MAX_PATCH_TOOL_PATTERN_BYTES, MAX_PATCH_TOOL_REDACTION_PATTERNS,
@@ -200,19 +203,26 @@ pub(crate) async fn execute_workspace_patch_tool(
     };
     let agent_workspace_roots =
         agent_outcome.agent.workspace_roots.iter().map(PathBuf::from).collect::<Vec<_>>();
-    let workspace_roots =
-        match resolve_workspace_patch_roots(&parsed, agent_workspace_roots.as_slice()) {
-            Ok(workspace_roots) => workspace_roots,
-            Err(message) => {
-                return workspace_patch_tool_execution_outcome(
-                    proposal_id,
-                    input_json,
-                    false,
-                    b"{}".to_vec(),
-                    message,
-                );
-            }
-        };
+    let workspace_roots = match resolve_workspace_patch_roots(
+        runtime_state,
+        session_id,
+        &parsed,
+        patch.as_str(),
+        agent_workspace_roots.as_slice(),
+    )
+    .await
+    {
+        Ok(workspace_roots) => workspace_roots,
+        Err(message) => {
+            return workspace_patch_tool_execution_outcome(
+                proposal_id,
+                input_json,
+                false,
+                b"{}".to_vec(),
+                message,
+            );
+        }
+    };
     let limits = WorkspacePatchLimits::default();
     let planning_request = WorkspacePatchRequest {
         patch: patch.clone(),
@@ -260,21 +270,55 @@ pub(crate) async fn execute_workspace_patch_tool(
     .await
 }
 
-fn resolve_workspace_patch_roots(
+async fn resolve_workspace_patch_roots(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    session_id: &str,
     parsed: &serde_json::Map<String, Value>,
+    patch: &str,
     agent_workspace_roots: &[PathBuf],
 ) -> Result<Vec<PathBuf>, String> {
-    let Some(value) = parsed.get("workspace_root") else {
-        return Ok(agent_workspace_roots.to_vec());
-    };
-    let Some(raw_workspace_root) = value.as_str() else {
-        return Err("palyra.fs.apply_patch workspace_root must be a string".to_owned());
-    };
-    let workspace_root = raw_workspace_root.trim();
-    if workspace_root.is_empty() {
-        return Ok(agent_workspace_roots.to_vec());
+    if let Some(value) = parsed.get("workspace_root") {
+        let Some(raw_workspace_root) = value.as_str() else {
+            return Err("palyra.fs.apply_patch workspace_root must be a string".to_owned());
+        };
+        let workspace_root = raw_workspace_root.trim();
+        if !workspace_root.is_empty() {
+            return resolve_workspace_root_override(agent_workspace_roots, workspace_root)
+                .map(|root| vec![root]);
+        }
     }
-    resolve_workspace_root_override(agent_workspace_roots, workspace_root).map(|root| vec![root])
+    if let Some(active_root) =
+        session_active_workspace_root(runtime_state, session_id, agent_workspace_roots).await?
+    {
+        if !patch_already_targets_active_root(patch, &active_root) {
+            return Ok(vec![active_root.root]);
+        }
+    }
+    Ok(agent_workspace_roots.to_vec())
+}
+
+fn patch_already_targets_active_root(
+    patch: &str,
+    active_root: &crate::application::tool_runtime::workspace_scope::ActiveWorkspaceRoot,
+) -> bool {
+    let operation_paths = patch_operation_paths(patch);
+    !operation_paths.is_empty()
+        && operation_paths
+            .iter()
+            .all(|path| relative_path_already_targets_active_root(path, active_root))
+}
+
+fn patch_operation_paths(patch: &str) -> Vec<String> {
+    patch
+        .lines()
+        .filter_map(|line| {
+            ["*** Add File:", "*** Update File:", "*** Replace File:", "*** Delete File:"]
+                .iter()
+                .find_map(|prefix| line.strip_prefix(prefix).map(str::trim))
+        })
+        .filter(|path| !path.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 fn resolve_workspace_root_override(
@@ -559,13 +603,13 @@ fn workspace_patch_tool_execution_outcome(
 #[cfg(test)]
 mod tests {
     use super::{
-        resolve_workspace_patch_roots, workspace_patch_error_outcome,
+        patch_operation_paths, resolve_workspace_root_override, workspace_patch_error_outcome,
         workspace_patch_recovery_hint, WORKSPACE_PATCH_GRAMMAR_HINT,
     };
     use palyra_common::workspace_patch::{
         apply_workspace_patch, WorkspacePatchError, WorkspacePatchLimits, WorkspacePatchRequest,
     };
-    use serde_json::{json, Value};
+    use serde_json::Value;
 
     #[test]
     fn workspace_root_override_targets_existing_subdirectory() {
@@ -574,12 +618,12 @@ mod tests {
         let project = workspace.join("e2e-cli").join("file-tool-smoke");
         std::fs::create_dir_all(&project).expect("project directory should exist");
 
-        let parsed = json!({ "workspace_root": "e2e-cli/file-tool-smoke" })
-            .as_object()
-            .expect("json object")
-            .clone();
-        let roots = resolve_workspace_patch_roots(&parsed, std::slice::from_ref(&workspace))
-            .expect("workspace root override should resolve");
+        let roots = resolve_workspace_root_override(
+            std::slice::from_ref(&workspace),
+            "e2e-cli/file-tool-smoke",
+        )
+        .expect("workspace root override should resolve");
+        let roots = vec![roots];
         let patch = "*** Begin Patch\n*** Add File: calc.js\n+export const add = (a, b) => a + b;\n*** End Patch\n";
 
         apply_workspace_patch(
@@ -605,12 +649,9 @@ mod tests {
         std::fs::create_dir_all(&workspace).expect("workspace directory should exist");
         std::fs::create_dir_all(&outside).expect("outside directory should exist");
 
-        let parsed = json!({ "workspace_root": outside.to_string_lossy() })
-            .as_object()
-            .expect("json object")
-            .clone();
-        let error = resolve_workspace_patch_roots(&parsed, &[workspace])
-            .expect_err("outside workspace_root should be rejected");
+        let error =
+            resolve_workspace_root_override(&[workspace], outside.to_string_lossy().as_ref())
+                .expect_err("outside workspace_root should be rejected");
 
         assert!(error.contains("escapes agent workspace roots"), "unexpected error: {error}");
     }
@@ -623,14 +664,33 @@ mod tests {
         std::fs::create_dir_all(&workspace).expect("workspace directory should exist");
         std::fs::create_dir_all(&outside).expect("outside directory should exist");
 
-        let parsed = json!({ "workspace_root": outside.to_string_lossy() })
-            .as_object()
-            .expect("json object")
-            .clone();
-        let error = resolve_workspace_patch_roots(&parsed, &[workspace])
-            .expect_err("host workspace_root should be rejected");
+        let error =
+            resolve_workspace_root_override(&[workspace], outside.to_string_lossy().as_ref())
+                .expect_err("host workspace_root should be rejected");
 
         assert!(error.contains("escapes agent workspace roots"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn patch_operation_paths_extracts_add_update_replace_delete_targets() {
+        let patch = concat!(
+            "*** Begin Patch\n",
+            "*** Add File: package.json\n",
+            "+{}\n",
+            "*** Update File: src/index.js\n",
+            "@@\n",
+            "-old\n",
+            "+new\n",
+            "*** Replace File: README.md\n",
+            "+docs\n",
+            "*** Delete File: tmp.txt\n",
+            "*** End Patch\n",
+        );
+
+        assert_eq!(
+            patch_operation_paths(patch),
+            vec!["package.json", "src/index.js", "README.md", "tmp.txt"]
+        );
     }
 
     #[test]

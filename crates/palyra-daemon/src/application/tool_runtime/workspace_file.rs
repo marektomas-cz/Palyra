@@ -14,6 +14,9 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     agents::AgentResolveRequest,
+    application::tool_runtime::workspace_scope::{
+        relative_path_already_targets_active_root, session_active_workspace_root,
+    },
     gateway::{
         GatewayRuntimeState, ToolRuntimeExecutionContext, MAX_WORKSPACE_LIST_DIR_TOOL_INPUT_BYTES,
         MAX_WORKSPACE_READ_FILE_BYTES, MAX_WORKSPACE_READ_FILE_TOOL_INPUT_BYTES,
@@ -126,11 +129,17 @@ pub(crate) async fn execute_workspace_read_file_tool(
 
     let agent_workspace_roots =
         agent_outcome.agent.workspace_roots.iter().map(PathBuf::from).collect::<Vec<_>>();
-    let workspace_roots = match resolve_workspace_file_roots(
+    let workspace_roots = resolve_workspace_file_roots(
+        runtime_state,
+        context.session_id,
         WORKSPACE_READ_FILE_TOOL_NAME,
         agent_workspace_roots.as_slice(),
         input.workspace_root.as_deref(),
-    ) {
+        input.path.as_str(),
+        true,
+    )
+    .await;
+    let workspace_roots = match workspace_roots {
         Ok(roots) => roots,
         Err(error) => {
             return workspace_read_file_outcome(
@@ -215,11 +224,17 @@ pub(crate) async fn execute_workspace_list_dir_tool(
 
     let agent_workspace_roots =
         agent_outcome.agent.workspace_roots.iter().map(PathBuf::from).collect::<Vec<_>>();
-    let workspace_roots = match resolve_workspace_file_roots(
+    let workspace_roots = resolve_workspace_file_roots(
+        runtime_state,
+        context.session_id,
         WORKSPACE_LIST_DIR_TOOL_NAME,
         agent_workspace_roots.as_slice(),
         input.workspace_root.as_deref(),
-    ) {
+        input.path.as_str(),
+        true,
+    )
+    .await;
+    let workspace_roots = match workspace_roots {
         Ok(roots) => roots,
         Err(error) => {
             return workspace_list_dir_outcome(
@@ -346,7 +361,42 @@ fn validate_workspace_path_syntax(path: &str, tool_name: &str) -> Result<(), Str
     Ok(())
 }
 
-fn resolve_workspace_file_roots(
+async fn resolve_workspace_file_roots(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    session_id: &str,
+    tool_name: &str,
+    agent_workspace_roots: &[PathBuf],
+    workspace_root: Option<&str>,
+    requested_path: &str,
+    use_active_session_root: bool,
+) -> Result<Vec<PathBuf>, String> {
+    if let Some(workspace_root) = workspace_root {
+        let workspace_root = workspace_root.trim();
+        if !workspace_root.is_empty() {
+            return resolve_workspace_root_override(
+                tool_name,
+                agent_workspace_roots,
+                workspace_root,
+            )
+            .map(|root| vec![root]);
+        }
+    }
+    if use_active_session_root {
+        if let Some(active_root) =
+            session_active_workspace_root(runtime_state, session_id, agent_workspace_roots).await?
+        {
+            if requested_path.is_empty()
+                || !relative_path_already_targets_active_root(requested_path, &active_root)
+            {
+                return Ok(vec![active_root.root]);
+            }
+        }
+    }
+    Ok(agent_workspace_roots.to_vec())
+}
+
+#[cfg(test)]
+fn resolve_workspace_file_roots_for_override(
     tool_name: &str,
     agent_workspace_roots: &[PathBuf],
     workspace_root: Option<&str>,
@@ -1052,7 +1102,7 @@ mod tests {
             br#"{"path":"calculator.js","workspace_root":"agent-smoke"}"#,
         )
         .expect("workspace_root override should parse");
-        let roots = resolve_workspace_file_roots(
+        let roots = resolve_workspace_file_roots_for_override(
             WORKSPACE_READ_FILE_TOOL_NAME,
             std::slice::from_ref(&workspace),
             input.workspace_root.as_deref(),
@@ -1083,7 +1133,7 @@ mod tests {
         )
         .expect("absolute workspace_root should parse");
 
-        let error = resolve_workspace_file_roots(
+        let error = resolve_workspace_file_roots_for_override(
             WORKSPACE_READ_FILE_TOOL_NAME,
             std::slice::from_ref(&workspace),
             input.workspace_root.as_deref(),
@@ -1201,7 +1251,7 @@ mod tests {
             br#"{"path":".","workspace_root":"scenario-s002-notes-api","max_entries":10}"#,
         )
         .expect("list input should parse");
-        let roots = resolve_workspace_file_roots(
+        let roots = resolve_workspace_file_roots_for_override(
             WORKSPACE_LIST_DIR_TOOL_NAME,
             std::slice::from_ref(&workspace),
             input.workspace_root.as_deref(),

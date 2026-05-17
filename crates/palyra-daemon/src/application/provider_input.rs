@@ -12,7 +12,9 @@ use crate::{
     },
     application::learning::render_preference_prompt_context,
     application::memory::{MEMORY_CONTEXT_FENCE_VERSION, MEMORY_TRUST_LABEL_RETRIEVED},
-    application::project_context::{render_project_context_prompt, ProjectContextPreviewEnvelope},
+    application::project_context::{
+        preview_project_context, render_project_context_prompt, ProjectContextPreviewEnvelope,
+    },
     application::recall::{
         default_recall_request, explicit_recall_tape_payload, materialize_explicit_recall_context,
         parse_explicit_recall_selection, render_explicit_recall_prompt,
@@ -853,7 +855,29 @@ async fn prepare_model_provider_input_legacy(
     .await?
     {
         Some(value) => value,
-        None => input_with_compaction,
+        None => match preview_project_context(
+            runtime_state,
+            context,
+            session_id,
+            input_with_compaction.as_str(),
+            true,
+        )
+        .await
+        {
+            Ok(preview) => render_project_context_prompt(&preview, input_with_compaction.as_str())
+                .unwrap_or(input_with_compaction),
+            Err(error) => {
+                warn!(
+                    run_id,
+                    principal = %context.principal,
+                    session_id,
+                    status_code = ?error.code(),
+                    status_message = %error.message(),
+                    "failed to derive project context from prompt; continuing with raw input"
+                );
+                input_with_compaction
+            }
+        },
     };
     let input_with_attachment_recall = match build_attachment_recall_prompt(
         runtime_state,

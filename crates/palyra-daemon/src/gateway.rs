@@ -19,7 +19,10 @@ use palyra_auth::{
     AuthExpiryDistribution, AuthHealthSummary, AuthProfileRegistry, OAuthRefreshAdapter,
     OAuthRefreshOutcome,
 };
-use palyra_common::{build_metadata, validate_canonical_id, CANONICAL_PROTOCOL_MAJOR};
+use palyra_common::{
+    build_metadata, process_runner_input::parse_process_runner_tool_input, validate_canonical_id,
+    CANONICAL_PROTOCOL_MAJOR,
+};
 use palyra_policy::{evaluate_with_config, PolicyDecision, PolicyEvaluationConfig, PolicyRequest};
 #[cfg(test)]
 use palyra_vault::{
@@ -48,7 +51,12 @@ use crate::{
         AgentResolutionSource,
     },
     application::{
-        conversation_bindings::ConversationBindingStore, inbound_coalescer::InboundCoalescer,
+        conversation_bindings::ConversationBindingStore,
+        inbound_coalescer::InboundCoalescer,
+        tool_runtime::workspace_scope::{
+            relative_path_already_targets_active_root, session_active_workspace_root,
+            ActiveWorkspaceRoot,
+        },
     },
     channel_router::{
         ChannelPairingSnapshot, ChannelRouter, ChannelRouterConfig,
@@ -672,9 +680,80 @@ pub(crate) async fn execute_tool_with_runtime_dispatch(
             ),
         )
         .await
+    } else if tool_name == PROCESS_RUNNER_TOOL_NAME {
+        let config =
+            process_runner_tool_config_for_session(runtime_state, context, input_json).await;
+        execute_tool_call(&config, proposal_id, tool_name, input_json).await
     } else {
         execute_tool_call(&runtime_state.config.tool_call, proposal_id, tool_name, input_json).await
     }
+}
+
+async fn process_runner_tool_config_for_session(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    context: ToolRuntimeExecutionContext<'_>,
+    input_json: &[u8],
+) -> ToolCallConfig {
+    let mut config = runtime_state.config.tool_call.clone();
+    let workspace_roots = [config.process_runner.workspace_root.clone()];
+    match session_active_workspace_root(runtime_state, context.session_id, &workspace_roots).await {
+        Ok(Some(active_root)) => {
+            if process_runner_input_should_use_active_root(input_json, &active_root) {
+                config.process_runner.workspace_root = active_root.root;
+            }
+        }
+        Ok(None) => {}
+        Err(message) => {
+            warn!(
+                run_id = %context.run_id,
+                session_id = %context.session_id,
+                error = %message,
+                "failed to resolve active project root for process runner; using configured workspace root"
+            );
+        }
+    }
+    config
+}
+
+fn process_runner_input_should_use_active_root(
+    input_json: &[u8],
+    active_root: &ActiveWorkspaceRoot,
+) -> bool {
+    let Ok(input) = parse_process_runner_tool_input(input_json) else {
+        return false;
+    };
+    if !process_runner_cwd_uses_workspace_root(input.cwd.as_deref(), active_root) {
+        return false;
+    }
+    !input.args.iter().any(|arg| process_runner_argument_targets_active_root(arg, active_root))
+}
+
+fn process_runner_cwd_uses_workspace_root(
+    cwd: Option<&str>,
+    active_root: &ActiveWorkspaceRoot,
+) -> bool {
+    let Some(raw_cwd) = cwd.map(str::trim).filter(|value| !value.is_empty()) else {
+        return true;
+    };
+    if relative_path_already_targets_active_root(raw_cwd, active_root) {
+        return false;
+    }
+    let normalized = raw_cwd.replace('\\', "/");
+    let trimmed = normalized.trim_end_matches('/');
+    matches!(trimmed, "." | "./" | "workspace" | "/workspace")
+}
+
+fn process_runner_argument_targets_active_root(
+    argument: &str,
+    active_root: &ActiveWorkspaceRoot,
+) -> bool {
+    let trimmed = argument.trim().trim_matches('"').trim_matches('\'');
+    if relative_path_already_targets_active_root(trimmed, active_root) {
+        return true;
+    }
+    trimmed
+        .split_once('=')
+        .is_some_and(|(_, value)| relative_path_already_targets_active_root(value, active_root))
 }
 
 pub(crate) fn record_tool_execution_outcome_metrics(
