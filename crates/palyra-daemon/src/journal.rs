@@ -16,7 +16,9 @@ use palyra_common::runtime_contracts::{
     RunLifecycleTransitionRecord, RuntimeActorKind, RuntimeActorRef, StableErrorEnvelope,
     ToolResultArtifactRef, ToolResultSensitivity, ToolResultVisibility,
 };
-use rusqlite::{params, params_from_iter, Connection, ErrorCode, OptionalExtension, Transaction};
+use rusqlite::{
+    params, params_from_iter, Connection, ErrorCode, OptionalExtension, ToSql, Transaction,
+};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -15606,13 +15608,17 @@ fn load_session_search_candidates(
     query_terms: &[String],
     scan_limit: usize,
 ) -> Result<Vec<SessionSearchCandidate>, JournalError> {
-    let rough_term = query_terms
-        .iter()
-        .max_by_key(|term| term.len())
-        .map(String::as_str)
-        .unwrap_or(normalized_query);
-    let like_pattern = format!("%{}%", escape_sql_like(rough_term.to_ascii_lowercase().as_str()));
-    let mut statement = connection.prepare(
+    let like_needles = session_search_like_needles(normalized_query, query_terms);
+    let like_clause = if like_needles.is_empty() {
+        "1 = 1".to_owned()
+    } else {
+        (0..like_needles.len())
+            .map(|index| format!("LOWER(tape.payload_json) LIKE ?{} ESCAPE '\\'", index + 5))
+            .collect::<Vec<_>>()
+            .join(" OR ")
+    };
+    let limit_parameter_index = like_needles.len() + 5;
+    let sql = format!(
         r#"
             SELECT
                 sessions.session_ulid,
@@ -15657,20 +15663,30 @@ fn load_session_search_candidates(
               AND ((sessions.channel = ?3) OR (sessions.channel IS NULL AND ?3 IS NULL))
               AND (?4 = 1 OR sessions.archived_at_unix_ms IS NULL)
               AND tape.event_type IN ('message.received', 'queued.input', 'message.replied', 'rollback.marker')
-              AND LOWER(tape.payload_json) LIKE ?5 ESCAPE '\'
+              AND ({like_clause})
             ORDER BY tape.created_at_unix_ms DESC, tape.run_ulid DESC, tape.seq DESC
-            LIMIT ?6
+            LIMIT ?{limit_parameter_index}
         "#,
-    )?;
+    );
+    let mut statement = connection.prepare(sql.as_str())?;
     let now_unix_ms = current_unix_ms()?;
-    let mut rows = statement.query(params![
-        request.principal.as_str(),
-        request.device_id.as_str(),
-        request.channel.as_deref(),
-        if request.include_archived { 1_i64 } else { 0_i64 },
-        like_pattern,
-        scan_limit as i64,
-    ])?;
+    let channel = request.channel.as_deref();
+    let include_archived = if request.include_archived { 1_i64 } else { 0_i64 };
+    let scan_limit = scan_limit as i64;
+    let like_patterns = like_needles
+        .iter()
+        .map(|needle| format!("%{}%", escape_sql_like(needle.as_str())))
+        .collect::<Vec<_>>();
+    let mut parameters: Vec<&dyn ToSql> = Vec::with_capacity(5 + like_patterns.len());
+    parameters.push(&request.principal);
+    parameters.push(&request.device_id);
+    parameters.push(&channel);
+    parameters.push(&include_archived);
+    for pattern in &like_patterns {
+        parameters.push(pattern);
+    }
+    parameters.push(&scan_limit);
+    let mut rows = statement.query(params_from_iter(parameters))?;
     let mut candidates = Vec::new();
     while let Some(row) = rows.next()? {
         let session = map_orchestrator_session_row(row)?;
@@ -15829,13 +15845,68 @@ fn session_search_terms(query: &str) -> Vec<String> {
     terms
 }
 
+fn session_search_like_needles(query: &str, terms: &[String]) -> Vec<String> {
+    let mut needles = Vec::new();
+    push_session_search_like_needle(&mut needles, query.to_ascii_lowercase());
+    for term in terms {
+        push_session_search_like_needle(&mut needles, term.clone());
+        if let Some(prefix) = session_search_term_prefix(term) {
+            push_session_search_like_needle(&mut needles, prefix);
+        }
+    }
+    needles.truncate(12);
+    needles
+}
+
+fn push_session_search_like_needle(needles: &mut Vec<String>, needle: String) {
+    let needle = needle.trim().to_owned();
+    if needle.len() < 2 || needles.iter().any(|existing| existing == &needle) {
+        return;
+    }
+    needles.push(needle);
+}
+
+fn session_search_term_prefix(term: &str) -> Option<String> {
+    let chars = term.chars().collect::<Vec<_>>();
+    if chars.len() < 5 {
+        return None;
+    }
+    let prefix_len = chars.len().saturating_sub(1).clamp(4, 6);
+    let prefix = chars.iter().take(prefix_len).collect::<String>();
+    (prefix != term).then_some(prefix)
+}
+
 fn session_search_text_matches(text: &str, query: &str, terms: &[String]) -> bool {
     let normalized_text = text.to_ascii_lowercase();
     let normalized_query = query.to_ascii_lowercase();
     if !normalized_query.is_empty() && normalized_text.contains(normalized_query.as_str()) {
         return true;
     }
-    !terms.is_empty() && terms.iter().all(|term| normalized_text.contains(term.as_str()))
+    if terms.is_empty() {
+        return false;
+    }
+    session_search_matched_term_count(normalized_text.as_str(), terms)
+        >= session_search_minimum_matched_terms(terms.len())
+}
+
+fn session_search_matched_term_count(normalized_text: &str, terms: &[String]) -> usize {
+    terms.iter().filter(|term| session_search_term_matches_text(normalized_text, term)).count()
+}
+
+fn session_search_minimum_matched_terms(term_count: usize) -> usize {
+    match term_count {
+        0 => 0,
+        1 => 1,
+        2 => 2,
+        _ => 2,
+    }
+}
+
+fn session_search_term_matches_text(normalized_text: &str, term: &str) -> bool {
+    normalized_text.contains(term)
+        || session_search_term_prefix(term)
+            .as_deref()
+            .is_some_and(|prefix| normalized_text.contains(prefix))
 }
 
 fn score_session_search_match(
@@ -15857,8 +15928,7 @@ fn score_session_search_match(
     let term_score = if terms.is_empty() {
         0.0
     } else {
-        let matched_terms =
-            terms.iter().filter(|term| normalized_text.contains(term.as_str())).count();
+        let matched_terms = session_search_matched_term_count(normalized_text.as_str(), terms);
         0.32 * (matched_terms as f64 / terms.len() as f64)
     };
     let event_quality = match event_type {
@@ -20671,6 +20741,46 @@ mod tests {
         assert_eq!(
             outcome.diagnostics.degraded_reason.as_deref(),
             Some("transcript_vector_index_unavailable")
+        );
+    }
+
+    #[test]
+    fn session_search_matches_natural_language_prior_session_recall() {
+        let db_path = temp_db_path();
+        let store = JournalStore::open(test_journal_config(db_path, false))
+            .expect("journal store should open");
+
+        upsert_orchestrator_session(&store, "01ARZ3NDEKTSV4RRFFQ69G5SE1");
+        start_orchestrator_run(&store, "01ARZ3NDEKTSV4RRFFQ69G5SE1", "01ARZ3NDEKTSV4RRFFQ69G5RE1");
+        store
+            .append_orchestrator_tape_event(&OrchestratorTapeAppendRequest {
+                run_id: "01ARZ3NDEKTSV4RRFFQ69G5RE1".to_owned(),
+                seq: 0,
+                event_type: "message.received".to_owned(),
+                payload_json: r#"{"text":"Scénář S036. Dočasný feature flag se jmenuje PALYRA_E2E_BETA. Neukládej to do trvalé memory."}"#.to_owned(),
+            })
+            .expect("tape event should persist");
+
+        let outcome = store
+            .search_orchestrator_session_windows(&SessionSearchRequest {
+                principal: "user:ops".to_owned(),
+                device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+                channel: Some("cli".to_owned()),
+                query: "název dočasného feature flagu".to_owned(),
+                top_k: 4,
+                min_score: 0.0,
+                window_before: 0,
+                window_after: 0,
+                max_windows_per_session: 1,
+                include_archived: false,
+            })
+            .expect("session search should succeed");
+
+        assert_eq!(outcome.groups.len(), 1);
+        let matched = &outcome.groups[0].windows[0].matched;
+        assert!(
+            matched.text.contains("PALYRA_E2E_BETA"),
+            "session recall should surface the prior feature flag"
         );
     }
 
