@@ -193,6 +193,10 @@ fn browser_session_create_returns_model_visible_handle() {
         ToolResultProjectionPolicy::InlineUnlessLarge
     );
     assert_eq!(
+        projection_policy_for_tool("palyra.fs.search"),
+        ToolResultProjectionPolicy::InlineUnlessLarge
+    );
+    assert_eq!(
         projection_policy_for_tool("palyra.browser.observe"),
         ToolResultProjectionPolicy::RedactedPreviewAndArtifact
     );
@@ -212,9 +216,12 @@ fn browser_session_create_schema_discourages_invented_profile_ids() {
 fn workspace_file_schemas_accept_workspace_root_override() {
     let read_file = registry_entry("palyra.fs.read_file").expect("read file entry exists");
     let list_dir = registry_entry("palyra.fs.list_dir").expect("list dir entry exists");
+    let search = registry_entry("palyra.fs.search").expect("search entry exists");
 
     assert_eq!(read_file.input_schema["properties"]["workspace_root"]["type"], "string");
     assert_eq!(list_dir.input_schema["properties"]["workspace_root"]["type"], "string");
+    assert_eq!(search.input_schema["properties"]["workspace_root"]["type"], "string");
+    assert_eq!(search.input_schema["properties"]["query"]["maxLength"], 512);
     assert!(read_file.input_schema["properties"]["workspace_root"]["description"]
         .as_str()
         .unwrap_or_default()
@@ -223,6 +230,11 @@ fn workspace_file_schemas_accept_workspace_root_override() {
         .as_str()
         .unwrap_or_default()
         .contains("nested project"));
+    assert!(search.description.contains("public API renames"));
+    assert!(search.input_schema["properties"]["query"]["description"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("not a regular expression"));
 }
 
 #[test]

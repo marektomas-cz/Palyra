@@ -8,7 +8,7 @@ use crate::{
     model_provider::{ProviderMessage, ProviderMessageContentPart, ProviderMessageRole},
 };
 
-pub(crate) const INSTRUCTION_COMPILER_VERSION: u32 = 25;
+pub(crate) const INSTRUCTION_COMPILER_VERSION: u32 = 26;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct InstructionTrustSummary {
@@ -211,11 +211,12 @@ fn tool_specific_contract(tool_names: &[String]) -> String {
     }
     if tool_names.iter().any(|tool| tool == "palyra.fs.read_file")
         || tool_names.iter().any(|tool| tool == "palyra.fs.list_dir")
+        || tool_names.iter().any(|tool| tool == "palyra.fs.search")
     {
-        contracts.push("Palyra workspace read contract: use palyra.fs.list_dir for directory discovery and palyra.fs.read_file for bounded file contents. Avoid process.run find, grep, shell commands, or interpreter eval just to inspect workspace files; process.run cat/type are bounded workspace-scoped compatibility fallbacks, not the primary read path. Workspace paths are relative by default; /workspace, /workspace/path, and workspace/path are virtual aliases for the current agent workspace root.".to_owned());
+        contracts.push("Palyra workspace read contract: use palyra.fs.list_dir for directory discovery, palyra.fs.read_file for bounded file contents, and palyra.fs.search for literal text search across workspace files. Avoid process.run find, grep, shell commands, or interpreter eval just to inspect workspace files; process.run cat/type are bounded workspace-scoped compatibility fallbacks, not the primary read path. For refactors, public API renames, file moves, or terminology migrations, search the scoped project for old and new identifiers before and after patching, include implementation, tests, docs, examples, and config files, and do not report success while stale old identifiers remain except documented compatibility aliases. Workspace paths are relative by default; /workspace, /workspace/path, and workspace/path are virtual aliases for the current agent workspace root.".to_owned());
     }
     if tool_names.iter().any(|tool| tool == "palyra.process.run") {
-        contracts.push("palyra.process.run execution contract: call only bare executable names, never inline shell syntax in the command field. Even when local desktop profiles allow broad executable selection with allowed_executables='*', cwd and path-like arguments must stay inside the workspace; use relative paths or /workspace/path aliases, and expect absolute host paths outside the workspace to be denied. Restrictive profiles may also enforce executable allowlists, egress controls, and interpreter guardrails. Do not use process.run to write files when palyra.fs.apply_patch can perform the edit with attestation. For requested file creation or edits, call palyra.fs.apply_patch first, then use process.run for verification commands such as node, npm, cargo, ls, dir, cat, type, or pwd. On Windows, do not use process.run for Unix discovery commands such as grep, Unix find, xargs, sed, or awk; Windows find is a text-search command, not directory traversal, so use palyra.fs.list_dir/read_file or PowerShell only when a real shell command is necessary. Pass only executable arguments in args; for `node e2e-smoke-file-patch/math.test.js`, use command='node' and args=['e2e-smoke-file-patch/math.test.js'], not args=['node','e2e-smoke-file-patch/math.test.js']. Set working directories with the cwd field rather than `--cwd` arguments. For npm scripts, use command='npm' with args=['run','script'] and cwd='project' when possible; if cwd cannot be set, use args=['--prefix','project','run','script']. Never use command='node' for npm itself, never pass args=['npm run script'], and never put --prefix on node. Before JavaScript or TypeScript test execution, inspect package.json or existing project files and choose an explicit supported command. Do not run ambiguous `npx test`; use package scripts such as npm test/npm run test, direct node file execution, or a specific known runner such as npx playwright test only when the dependency or package metadata supports it. If test output says 0 tests, 0 assertions, no matching files, or equivalent, treat it as failed verification and fix the command or test discovery before claiming success. For Playwright tests, verify @playwright/test is installed or declared before using npx playwright test; if it is missing and installing dependencies is outside the task or blocked, report the missing dependency instead of looping. For config/env smoke checks, use safe placeholder env values from .env.example, README, or config defaults when validation requires variables, and never read or copy real .env secret values into commands or output. After one failed missing-env validation, rerun once with safe placeholders or stop with a clear missing-env result. Use background=true for temporary dev servers instead of nohup, '&', or platform-specific launchers; the runtime fails fast if the background process exits during startup. For local browser verification, bind servers to 127.0.0.1 with an explicit port, set timeout_ms to a bounded verification window such as 60000, verify the exact URL/port is listening before browser navigation, and navigate to that actual 127.0.0.1 URL rather than a guessed localhost default. If a background process exits or the port probe fails, report the lifecycle failure instead of navigating to a stale port. If a command is denied by policy, treat that as an operational limit and continue with a safe fallback or clearly report the blocked verification step.".to_owned());
+        contracts.push("palyra.process.run execution contract: call only bare executable names, never inline shell syntax in the command field. Even when local desktop profiles allow broad executable selection with allowed_executables='*', cwd and path-like arguments must stay inside the workspace; use relative paths or /workspace/path aliases, and expect absolute host paths outside the workspace to be denied. Restrictive profiles may also enforce executable allowlists, egress controls, and interpreter guardrails. Do not use process.run to write files when palyra.fs.apply_patch can perform the edit with attestation. For requested file creation or edits, call palyra.fs.apply_patch first, then use process.run for verification commands such as node, npm, cargo, ls, dir, cat, type, or pwd. On Windows, do not use process.run for Unix discovery commands such as grep, Unix find, xargs, sed, or awk; Windows find is a text-search command, not directory traversal, so use palyra.fs.list_dir/read_file/search or PowerShell only when a real shell command is necessary. Pass only executable arguments in args; for `node e2e-smoke-file-patch/math.test.js`, use command='node' and args=['e2e-smoke-file-patch/math.test.js'], not args=['node','e2e-smoke-file-patch/math.test.js']. Set working directories with the cwd field rather than `--cwd` arguments. For npm scripts, use command='npm' with args=['run','script'] and cwd='project' when possible; if cwd cannot be set, use args=['--prefix','project','run','script']. Never use command='node' for npm itself, never pass args=['npm run script'], and never put --prefix on node. Before JavaScript or TypeScript test execution, inspect package.json or existing project files and choose an explicit supported command. Do not run ambiguous `npx test`; use package scripts such as npm test/npm run test, direct node file execution, or a specific known runner such as npx playwright test only when the dependency or package metadata supports it. If test output says 0 tests, 0 assertions, no matching files, or equivalent, treat it as failed verification and fix the command or test discovery before claiming success. For Playwright tests, verify @playwright/test is installed or declared before using npx playwright test; if it is missing and installing dependencies is outside the task or blocked, report the missing dependency instead of looping. For config/env smoke checks, use safe placeholder env values from .env.example, README, or config defaults when validation requires variables, and never read or copy real .env secret values into commands or output. After one failed missing-env validation, rerun once with safe placeholders or stop with a clear missing-env result. Use background=true for temporary dev servers instead of nohup, '&', or platform-specific launchers; the runtime fails fast if the background process exits during startup. For local browser verification, bind servers to 127.0.0.1 with an explicit port, set timeout_ms to a bounded verification window such as 60000, verify the exact URL/port is listening before browser navigation, and navigate to that actual 127.0.0.1 URL rather than a guessed localhost default. If a background process exits or the port probe fails, report the lifecycle failure instead of navigating to a stale port. If a command is denied by policy, treat that as an operational limit and continue with a safe fallback or clearly report the blocked verification step.".to_owned());
     }
     if tool_names.iter().any(|tool| tool == "palyra.http.fetch") {
         contracts.push("palyra.http.fetch research contract: for public documentation research, prefer official compact endpoints such as JSON indexes, release metadata, changelogs, or version files before large HTML landing pages. For docs, include allowed_content_types containing text/html, text/plain, text/markdown, and application/json unless the task needs a narrower policy. A successful fetch may return truncated=true with a bounded body_text; use the returned body_text as partial evidence, then switch to a smaller official URL or one browser observe attempt if the needed fact is not present. Do not repeat fetch/browser fallbacks against the same oversized or blocked URL until the model turn limit; report which source was blocked or truncated and what remains unknown.".to_owned());
@@ -334,7 +335,7 @@ mod tests {
         let first = compiler.compile_with_runtime_context(input.clone(), fixed_runtime_context());
         let second = compiler.compile_with_runtime_context(input, fixed_runtime_context());
         assert_eq!(first.hash, second.hash);
-        assert_eq!(first.version, 25);
+        assert_eq!(first.version, 26);
         assert_eq!(first.provider_messages().len(), 2);
     }
 
@@ -460,6 +461,23 @@ mod tests {
     }
 
     #[test]
+    fn tool_specific_contract_explains_workspace_search_for_refactors() {
+        let contract = super::tool_specific_contract(&[
+            "palyra.fs.read_file".to_owned(),
+            "palyra.fs.list_dir".to_owned(),
+            "palyra.fs.search".to_owned(),
+        ]);
+
+        assert!(contract.contains("palyra.fs.search"));
+        assert!(contract.contains("literal text search"));
+        assert!(contract.contains("public API renames"));
+        assert!(contract.contains("old and new identifiers before and after patching"));
+        assert!(contract.contains("docs, examples"));
+        assert!(contract.contains("stale old identifiers remain"));
+        assert!(contract.contains("compatibility aliases"));
+    }
+
+    #[test]
     fn tool_specific_contract_explains_process_runner_limits() {
         let contract = super::tool_specific_contract(&["palyra.process.run".to_owned()]);
 
@@ -472,7 +490,7 @@ mod tests {
             "verification commands such as node, npm, cargo, ls, dir, cat, type, or pwd"
         ));
         assert!(contract.contains("Windows find is a text-search command"));
-        assert!(contract.contains("palyra.fs.list_dir/read_file"));
+        assert!(contract.contains("palyra.fs.list_dir/read_file/search"));
         assert!(contract.contains("Pass only executable arguments in args"));
         assert!(contract.contains("not args=['node','e2e-smoke-file-patch/math.test.js']"));
         assert!(contract.contains("cwd field rather than `--cwd`"));

@@ -301,6 +301,29 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
             ToolResultProjectionPolicy::InlineUnlessLarge,
         ),
         entry(
+            "palyra.fs.search",
+            "Search text files inside the current agent workspace root for a literal string. Use this before and after refactors or public API renames to find implementation, test, docs, and example references without relying on shell grep.",
+            object_schema(
+                &["query"],
+                vec![
+                    ("query", json!({"type":"string","maxLength":512,"description":"Literal text to search for, such as an old identifier during a rename. This is not a regular expression."})),
+                    (
+                        "path",
+                        json!({"type":"string","description":"Optional file or directory path relative to the workspace root. Omit for the active workspace root. /workspace and workspace/ are accepted virtual workspace aliases."}),
+                    ),
+                    (
+                        "workspace_root",
+                        json!({"type":"string","description":"Optional existing workspace subdirectory to treat as the search root. Use this when the task is scoped to a nested project directory."}),
+                    ),
+                    ("case_sensitive", json!({"type":"boolean","default":true})),
+                    ("max_matches", json!({"type":"integer","minimum":1,"maximum":200})),
+                ],
+                false,
+            ),
+            ToolParallelismPolicy::ReadOnly,
+            ToolResultProjectionPolicy::InlineUnlessLarge,
+        ),
+        entry(
             "palyra.delegation.query",
             "Inspect delegated child tasks, child run status and merge previews in the current scope.",
             object_schema(
@@ -411,7 +434,7 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
                             "type":"array",
                             "items":{"type":"string"},
                             "maxItems":64,
-                            "description":"Command arguments only. For `echo hello`, use command='echo' and args=['hello'], not args=['echo hello']. For `node script.js`, use command='node' and args=['script.js'], not args=['node','script.js']; the runtime normalizes a duplicated leading command token and leading --cwd PATH into the cwd field, but callers should not rely on that. For npm scripts, use command='npm' with args=['run','script'] and cwd set to the package directory, or args=['--prefix','project','run','script'] if cwd cannot be set; never run npm through node and never put --prefix on node. Portable workspace-scoped builtins include pwd, ls/dir, cat/type, and mkdir. On Windows, Unix grep/find/xargs/sed/awk are not portable; Windows find is a text search command, not directory traversal, so use palyra.fs.list_dir/read_file for workspace discovery. Do not use mkdir, touch, echo redirection, or interpreter eval for file writes; use palyra.fs.apply_patch first, then use this tool only to verify."
+                            "description":"Command arguments only. For `echo hello`, use command='echo' and args=['hello'], not args=['echo hello']. For `node script.js`, use command='node' and args=['script.js'], not args=['node','script.js']; the runtime normalizes a duplicated leading command token and leading --cwd PATH into the cwd field, but callers should not rely on that. For npm scripts, use command='npm' with args=['run','script'] and cwd set to the package directory, or args=['--prefix','project','run','script'] if cwd cannot be set; never run npm through node and never put --prefix on node. Portable workspace-scoped builtins include pwd, ls/dir, cat/type, and mkdir. On Windows, Unix grep/find/xargs/sed/awk are not portable; Windows find is a text search command, not directory traversal, so use palyra.fs.list_dir/read_file/search for workspace discovery. Do not use mkdir, touch, echo redirection, or interpreter eval for file writes; use palyra.fs.apply_patch first, then use this tool only to verify."
                         }),
                     ),
                     (
@@ -779,7 +802,7 @@ mod tests {
         assert!(args_description.contains("command='npm'"));
         assert!(args_description.contains("never run npm through node"));
         assert!(args_description.contains("Windows find is a text search command"));
-        assert!(args_description.contains("palyra.fs.list_dir/read_file"));
+        assert!(args_description.contains("palyra.fs.list_dir/read_file/search"));
         assert!(args_description.contains("cat/type"));
 
         let cwd_description = entry

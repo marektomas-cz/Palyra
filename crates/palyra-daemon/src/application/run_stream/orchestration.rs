@@ -1394,6 +1394,7 @@ fn has_action_tool_evidence(messages: &[ProviderMessage]) -> bool {
             call.tool_name.as_str(),
             "palyra.fs.list_dir"
                 | "palyra.fs.read_file"
+                | "palyra.fs.search"
                 | "palyra.memory.search"
                 | "palyra.memory.recall"
         )

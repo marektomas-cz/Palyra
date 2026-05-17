@@ -732,6 +732,14 @@ pub const TOOL_CATALOG: &[ToolCatalogEntry] = &[
         recommend_always_allow: false,
     },
     ToolCatalogEntry {
+        tool_name: "palyra.fs.search",
+        title: "Workspace text search",
+        description: "Searches workspace text files inside the resolved workspace boundary.",
+        category: "filesystem",
+        risk_level: ApprovalRiskLevel::High,
+        recommend_always_allow: false,
+    },
+    ToolCatalogEntry {
         tool_name: "palyra.fs.apply_patch",
         title: "Workspace patch",
         description: "Applies attested file patches inside the resolved workspace boundary.",

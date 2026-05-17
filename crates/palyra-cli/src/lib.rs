@@ -669,6 +669,7 @@ const LOCAL_DESKTOP_DEFAULT_ALLOWED_TOOLS: &[&str] = &[
     "palyra.http.fetch",
     "palyra.fs.read_file",
     "palyra.fs.list_dir",
+    "palyra.fs.search",
     "palyra.fs.apply_patch",
     "palyra.browser.session.create",
     "palyra.browser.session.close",
@@ -10658,6 +10659,10 @@ mod init_command_tests {
         assert!(
             allowed_tools.iter().any(|tool| tool == "palyra.fs.list_dir"),
             "local init should expose controlled workspace directory listings"
+        );
+        assert!(
+            allowed_tools.iter().any(|tool| tool == "palyra.fs.search"),
+            "local init should expose controlled workspace text search for refactors"
         );
         assert!(
             allowed_tools.iter().any(|tool| tool == "palyra.browser.navigate"),

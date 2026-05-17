@@ -20,13 +20,20 @@ use crate::{
     gateway::{
         GatewayRuntimeState, ToolRuntimeExecutionContext, MAX_WORKSPACE_LIST_DIR_TOOL_INPUT_BYTES,
         MAX_WORKSPACE_READ_FILE_BYTES, MAX_WORKSPACE_READ_FILE_TOOL_INPUT_BYTES,
-        WORKSPACE_LIST_DIR_TOOL_NAME, WORKSPACE_READ_FILE_TOOL_NAME,
+        MAX_WORKSPACE_SEARCH_TOOL_INPUT_BYTES, WORKSPACE_LIST_DIR_TOOL_NAME,
+        WORKSPACE_READ_FILE_TOOL_NAME, WORKSPACE_SEARCH_TOOL_NAME,
     },
     tool_protocol::{build_tool_execution_outcome, ToolExecutionOutcome},
 };
 
 const WORKSPACE_LIST_DIR_DEFAULT_ENTRIES: usize = 128;
 const WORKSPACE_LIST_DIR_MAX_ENTRIES: usize = 512;
+const WORKSPACE_SEARCH_DEFAULT_MATCHES: usize = 64;
+const WORKSPACE_SEARCH_MAX_MATCHES: usize = 200;
+const WORKSPACE_SEARCH_MAX_FILES: usize = 2_000;
+const WORKSPACE_SEARCH_MAX_FILE_BYTES: u64 = 1024 * 1024;
+const WORKSPACE_SEARCH_SKIPPED_DIRS: &[&str] =
+    &[".git", "node_modules", "target", "dist", "build", ".next", ".svelte-kit"];
 
 #[derive(Debug, Deserialize)]
 struct WorkspaceReadFileInput {
@@ -47,6 +54,19 @@ struct WorkspaceListDirInput {
     workspace_root: Option<String>,
     #[serde(default)]
     max_entries: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkspaceSearchInput {
+    query: String,
+    #[serde(default)]
+    path: String,
+    #[serde(default)]
+    workspace_root: Option<String>,
+    #[serde(default)]
+    case_sensitive: Option<bool>,
+    #[serde(default)]
+    max_matches: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -72,6 +92,30 @@ struct WorkspaceListDirOutput {
     workspace_root_index: usize,
     entries: Vec<WorkspaceListDirEntry>,
     truncated: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct WorkspaceSearchOutput {
+    query: String,
+    path: String,
+    workspace_root_index: usize,
+    case_sensitive: bool,
+    matches: Vec<WorkspaceSearchMatch>,
+    truncated: bool,
+    files_scanned: usize,
+    files_with_matches: usize,
+    skipped_files: usize,
+    skipped_dirs: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct WorkspaceSearchMatch {
+    path: String,
+    line: usize,
+    column: usize,
+    line_text: String,
+    #[serde(skip_serializing_if = "is_false")]
+    redacted: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -273,6 +317,83 @@ pub(crate) async fn execute_workspace_list_dir_tool(
     }
 }
 
+pub(crate) async fn execute_workspace_search_tool(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    context: ToolRuntimeExecutionContext<'_>,
+    proposal_id: &str,
+    input_json: &[u8],
+) -> ToolExecutionOutcome {
+    let input = match parse_workspace_search_input(input_json) {
+        Ok(input) => input,
+        Err(error) => {
+            return workspace_search_outcome(proposal_id, input_json, false, b"{}".to_vec(), error);
+        }
+    };
+
+    let agent_outcome = match runtime_state
+        .resolve_agent_for_context(AgentResolveRequest {
+            principal: context.principal.to_owned(),
+            channel: context.channel.map(str::to_owned),
+            session_id: Some(context.session_id.to_owned()),
+            preferred_agent_id: None,
+            persist_session_binding: false,
+        })
+        .await
+    {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            return workspace_search_outcome(
+                proposal_id,
+                input_json,
+                false,
+                b"{}".to_vec(),
+                format!(
+                    "{WORKSPACE_SEARCH_TOOL_NAME} failed to resolve agent workspace: {}",
+                    error.message()
+                ),
+            );
+        }
+    };
+
+    let agent_workspace_roots =
+        agent_outcome.agent.workspace_roots.iter().map(PathBuf::from).collect::<Vec<_>>();
+    let workspace_roots = resolve_workspace_file_roots(
+        runtime_state,
+        context.session_id,
+        WORKSPACE_SEARCH_TOOL_NAME,
+        agent_workspace_roots.as_slice(),
+        input.workspace_root.as_deref(),
+        input.path.as_str(),
+        true,
+    )
+    .await;
+    let workspace_roots = match workspace_roots {
+        Ok(roots) => roots,
+        Err(error) => {
+            return workspace_search_outcome(proposal_id, input_json, false, b"{}".to_vec(), error);
+        }
+    };
+    let search = match search_workspace_from_roots(workspace_roots.as_slice(), &input) {
+        Ok(search) => search,
+        Err(error) => {
+            return workspace_search_outcome(proposal_id, input_json, false, b"{}".to_vec(), error);
+        }
+    };
+
+    match serde_json::to_vec(&search) {
+        Ok(output_json) => {
+            workspace_search_outcome(proposal_id, input_json, true, output_json, String::new())
+        }
+        Err(error) => workspace_search_outcome(
+            proposal_id,
+            input_json,
+            false,
+            b"{}".to_vec(),
+            format!("{WORKSPACE_SEARCH_TOOL_NAME} failed to serialize output: {error}"),
+        ),
+    }
+}
+
 fn parse_workspace_read_file_input(input_json: &[u8]) -> Result<WorkspaceReadFileInput, String> {
     if input_json.len() > MAX_WORKSPACE_READ_FILE_TOOL_INPUT_BYTES {
         return Err(format!(
@@ -318,6 +439,35 @@ fn parse_workspace_list_dir_input(input_json: &[u8]) -> Result<WorkspaceListDirI
     input.workspace_root = normalize_optional_workspace_root(input.workspace_root);
     input.path = normalize_workspace_path_input(input.path.as_str());
     validate_workspace_path_syntax(input.path.as_str(), WORKSPACE_LIST_DIR_TOOL_NAME)?;
+    Ok(input)
+}
+
+fn parse_workspace_search_input(input_json: &[u8]) -> Result<WorkspaceSearchInput, String> {
+    if input_json.len() > MAX_WORKSPACE_SEARCH_TOOL_INPUT_BYTES {
+        return Err(format!(
+            "{WORKSPACE_SEARCH_TOOL_NAME} input exceeds {MAX_WORKSPACE_SEARCH_TOOL_INPUT_BYTES} bytes"
+        ));
+    }
+
+    let mut input =
+        serde_json::from_slice::<WorkspaceSearchInput>(input_json).map_err(|error| {
+            format!("{WORKSPACE_SEARCH_TOOL_NAME} input must match search schema: {error}")
+        })?;
+    input.query = input.query.trim().to_owned();
+    if input.query.is_empty() {
+        return Err(format!(
+            "{WORKSPACE_SEARCH_TOOL_NAME} requires non-empty string field 'query'"
+        ));
+    }
+    if input.query.len() > 512 {
+        return Err(format!("{WORKSPACE_SEARCH_TOOL_NAME} query exceeds 512 bytes"));
+    }
+    if matches!(input.max_matches, Some(0)) {
+        return Err(format!("{WORKSPACE_SEARCH_TOOL_NAME} max_matches must be >= 1"));
+    }
+    input.workspace_root = normalize_optional_workspace_root(input.workspace_root);
+    input.path = normalize_workspace_path_input(input.path.as_str());
+    validate_workspace_path_syntax(input.path.as_str(), WORKSPACE_SEARCH_TOOL_NAME)?;
     Ok(input)
 }
 
@@ -798,6 +948,351 @@ fn list_workspace_directory(
     Ok(WorkspaceListDirOutput { path: display_path, workspace_root_index, entries, truncated })
 }
 
+fn search_workspace_from_roots(
+    workspace_roots: &[PathBuf],
+    input: &WorkspaceSearchInput,
+) -> Result<WorkspaceSearchOutput, String> {
+    let canonical_roots =
+        canonicalize_workspace_roots(workspace_roots, WORKSPACE_SEARCH_TOOL_NAME)?;
+    if canonical_roots.is_empty() {
+        return Err(format!(
+            "{WORKSPACE_SEARCH_TOOL_NAME} agent has no accessible workspace roots"
+        ));
+    }
+
+    let requested = Path::new(input.path.as_str());
+    if requested.is_absolute() {
+        let (workspace_root_index, canonical_target, display_path) =
+            resolve_absolute_workspace_search_path(canonical_roots.as_slice(), requested, input)?;
+        let canonical_root = canonical_roots
+            .iter()
+            .find_map(|(index, root)| (*index == workspace_root_index).then_some(root.as_path()))
+            .ok_or_else(|| {
+                format!("{WORKSPACE_SEARCH_TOOL_NAME} failed to resolve workspace root for search")
+            })?;
+        return search_workspace_path(
+            workspace_root_index,
+            canonical_root,
+            canonical_target,
+            display_path,
+            input,
+        );
+    }
+
+    for (workspace_root_index, canonical_root) in &canonical_roots {
+        let candidate = if input.path.is_empty() {
+            canonical_root.clone()
+        } else {
+            canonical_root.join(Path::new(input.path.as_str()))
+        };
+        let canonical_target = match fs::canonicalize(&candidate) {
+            Ok(path) => path,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(format!(
+                    "{WORKSPACE_SEARCH_TOOL_NAME} failed to resolve path in workspace root {workspace_root_index}: {error}"
+                ));
+            }
+        };
+        if !canonical_target.starts_with(canonical_root.as_path()) {
+            return Err(format!("{WORKSPACE_SEARCH_TOOL_NAME} path escapes agent workspace roots"));
+        }
+        if !canonical_target.is_file() && !canonical_target.is_dir() {
+            return Err(format!(
+                "{WORKSPACE_SEARCH_TOOL_NAME} target is not a file or directory: {}",
+                display_requested_path(input.path.as_str())
+            ));
+        }
+
+        let display_path = canonical_target
+            .strip_prefix(canonical_root)
+            .map(normalize_relative_path_display)
+            .unwrap_or_else(|_| display_requested_path(input.path.as_str()).to_owned());
+        return search_workspace_path(
+            *workspace_root_index,
+            canonical_root.as_path(),
+            canonical_target,
+            display_path,
+            input,
+        );
+    }
+
+    Err(format!(
+        "{WORKSPACE_SEARCH_TOOL_NAME} path not found in agent workspace roots: {}",
+        display_requested_path(input.path.as_str())
+    ))
+}
+
+fn resolve_absolute_workspace_search_path(
+    canonical_roots: &[(usize, PathBuf)],
+    requested: &Path,
+    input: &WorkspaceSearchInput,
+) -> Result<(usize, PathBuf, String), String> {
+    let canonical_target = fs::canonicalize(requested).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            format!(
+                "{WORKSPACE_SEARCH_TOOL_NAME} path not found in agent workspace roots: {}",
+                input.path
+            )
+        } else {
+            format!("{WORKSPACE_SEARCH_TOOL_NAME} failed to resolve path: {error}")
+        }
+    })?;
+    for (workspace_root_index, canonical_root) in canonical_roots {
+        if canonical_target.starts_with(canonical_root) {
+            if !canonical_target.is_file() && !canonical_target.is_dir() {
+                return Err(format!(
+                    "{WORKSPACE_SEARCH_TOOL_NAME} target is not a file or directory: {}",
+                    display_requested_path(input.path.as_str())
+                ));
+            }
+            let display_path = canonical_target
+                .strip_prefix(canonical_root)
+                .map(normalize_relative_path_display)
+                .unwrap_or_else(|_| input.path.clone());
+            return Ok((*workspace_root_index, canonical_target, display_path));
+        }
+    }
+    Err(format!("{WORKSPACE_SEARCH_TOOL_NAME} path escapes agent workspace roots"))
+}
+
+fn search_workspace_path(
+    workspace_root_index: usize,
+    canonical_root: &Path,
+    path: PathBuf,
+    display_path: String,
+    input: &WorkspaceSearchInput,
+) -> Result<WorkspaceSearchOutput, String> {
+    let max_matches = input
+        .max_matches
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(WORKSPACE_SEARCH_DEFAULT_MATCHES)
+        .min(WORKSPACE_SEARCH_MAX_MATCHES);
+    let case_sensitive = input.case_sensitive.unwrap_or(true);
+    let mut state = WorkspaceSearchState::new(input.query.as_str(), case_sensitive, max_matches);
+    search_workspace_path_recursive(canonical_root, path.as_path(), &mut state)?;
+
+    Ok(WorkspaceSearchOutput {
+        query: input.query.clone(),
+        path: display_path,
+        workspace_root_index,
+        case_sensitive,
+        matches: state.matches,
+        truncated: state.truncated,
+        files_scanned: state.files_scanned,
+        files_with_matches: state.files_with_matches,
+        skipped_files: state.skipped_files,
+        skipped_dirs: state.skipped_dirs,
+    })
+}
+
+struct WorkspaceSearchState {
+    query: String,
+    normalized_query: String,
+    case_sensitive: bool,
+    max_matches: usize,
+    matches: Vec<WorkspaceSearchMatch>,
+    truncated: bool,
+    files_scanned: usize,
+    files_with_matches: usize,
+    skipped_files: usize,
+    skipped_dirs: usize,
+}
+
+impl WorkspaceSearchState {
+    fn new(query: &str, case_sensitive: bool, max_matches: usize) -> Self {
+        Self {
+            query: query.to_owned(),
+            normalized_query: if case_sensitive {
+                query.to_owned()
+            } else {
+                query.to_ascii_lowercase()
+            },
+            case_sensitive,
+            max_matches,
+            matches: Vec::new(),
+            truncated: false,
+            files_scanned: 0,
+            files_with_matches: 0,
+            skipped_files: 0,
+            skipped_dirs: 0,
+        }
+    }
+
+    fn has_capacity(&self) -> bool {
+        self.matches.len() < self.max_matches && self.files_scanned < WORKSPACE_SEARCH_MAX_FILES
+    }
+}
+
+fn search_workspace_path_recursive(
+    canonical_root: &Path,
+    path: &Path,
+    state: &mut WorkspaceSearchState,
+) -> Result<(), String> {
+    if !state.has_capacity() {
+        state.truncated = true;
+        return Ok(());
+    }
+    let metadata = fs::metadata(path).map_err(|error| {
+        format!(
+            "{WORKSPACE_SEARCH_TOOL_NAME} failed to inspect workspace path {}: {error}",
+            path.to_string_lossy()
+        )
+    })?;
+    if metadata.is_dir() {
+        search_workspace_directory_recursive(canonical_root, path, state)?;
+    } else if metadata.is_file() {
+        search_workspace_file(canonical_root, path, metadata.len(), state)?;
+    } else {
+        state.skipped_files = state.skipped_files.saturating_add(1);
+    }
+    Ok(())
+}
+
+fn search_workspace_directory_recursive(
+    canonical_root: &Path,
+    path: &Path,
+    state: &mut WorkspaceSearchState,
+) -> Result<(), String> {
+    let mut entries = Vec::new();
+    for entry_result in fs::read_dir(path).map_err(|error| {
+        format!(
+            "{WORKSPACE_SEARCH_TOOL_NAME} failed to read workspace directory {}: {error}",
+            path.to_string_lossy()
+        )
+    })? {
+        let entry = entry_result.map_err(|error| {
+            format!(
+                "{WORKSPACE_SEARCH_TOOL_NAME} failed to read directory entry for {}: {error}",
+                path.to_string_lossy()
+            )
+        })?;
+        entries.push(entry);
+    }
+    entries.sort_by_key(|entry| entry.path());
+
+    for entry in entries {
+        if !state.has_capacity() {
+            state.truncated = true;
+            break;
+        }
+        let file_type = entry.file_type().map_err(|error| {
+            format!(
+                "{WORKSPACE_SEARCH_TOOL_NAME} failed to inspect directory entry for {}: {error}",
+                path.to_string_lossy()
+            )
+        })?;
+        if file_type.is_dir()
+            && should_skip_search_dir(entry.file_name().to_string_lossy().as_ref())
+        {
+            state.skipped_dirs = state.skipped_dirs.saturating_add(1);
+            continue;
+        }
+        if file_type.is_symlink() {
+            if file_type.is_dir() {
+                state.skipped_dirs = state.skipped_dirs.saturating_add(1);
+            } else {
+                state.skipped_files = state.skipped_files.saturating_add(1);
+            }
+            continue;
+        }
+        search_workspace_path_recursive(canonical_root, entry.path().as_path(), state)?;
+    }
+    Ok(())
+}
+
+fn should_skip_search_dir(name: &str) -> bool {
+    WORKSPACE_SEARCH_SKIPPED_DIRS.iter().any(|candidate| candidate == &name)
+}
+
+fn search_workspace_file(
+    canonical_root: &Path,
+    path: &Path,
+    size_bytes: u64,
+    state: &mut WorkspaceSearchState,
+) -> Result<(), String> {
+    if state.files_scanned >= WORKSPACE_SEARCH_MAX_FILES {
+        state.truncated = true;
+        return Ok(());
+    }
+    state.files_scanned = state.files_scanned.saturating_add(1);
+    if size_bytes > WORKSPACE_SEARCH_MAX_FILE_BYTES {
+        state.skipped_files = state.skipped_files.saturating_add(1);
+        return Ok(());
+    }
+    let bytes = fs::read(path).map_err(|error| {
+        format!(
+            "{WORKSPACE_SEARCH_TOOL_NAME} failed to read workspace file {}: {error}",
+            path.to_string_lossy()
+        )
+    })?;
+    let Ok(text) = String::from_utf8(bytes) else {
+        state.skipped_files = state.skipped_files.saturating_add(1);
+        return Ok(());
+    };
+    let display_path = path
+        .strip_prefix(canonical_root)
+        .map(normalize_relative_path_display)
+        .unwrap_or_else(|_| path.to_string_lossy().into_owned());
+    let before = state.matches.len();
+    for (line_index, line) in text.lines().enumerate() {
+        search_workspace_line(display_path.as_str(), line_index + 1, line, state);
+        if state.matches.len() >= state.max_matches {
+            state.truncated = true;
+            break;
+        }
+    }
+    if state.matches.len() > before {
+        state.files_with_matches = state.files_with_matches.saturating_add(1);
+    }
+    Ok(())
+}
+
+fn search_workspace_line(
+    path: &str,
+    line_number: usize,
+    line: &str,
+    state: &mut WorkspaceSearchState,
+) {
+    let haystack = if state.case_sensitive { line.to_owned() } else { line.to_ascii_lowercase() };
+    let needle = state.normalized_query.as_str();
+    let mut search_start = 0usize;
+    while let Some(relative_index) = haystack[search_start..].find(needle) {
+        let byte_index = search_start + relative_index;
+        let column = line[..byte_index].chars().count() + 1;
+        let (line_text, redacted) = redact_workspace_search_line(line);
+        state.matches.push(WorkspaceSearchMatch {
+            path: path.to_owned(),
+            line: line_number,
+            column,
+            line_text,
+            redacted,
+        });
+        if state.matches.len() >= state.max_matches {
+            return;
+        }
+        search_start = byte_index.saturating_add(state.query.len().max(1));
+        if search_start >= haystack.len() {
+            return;
+        }
+    }
+}
+
+fn redact_workspace_search_line(line: &str) -> (String, bool) {
+    let redaction = redact_text_for_export(
+        line,
+        SafetySourceKind::Workspace,
+        SafetyContentKind::WorkspaceDocument,
+        TrustLabel::TrustedLocal,
+    );
+    let redacted = redaction.scan.has_category(SafetyFindingCategory::SecretLeak);
+    if redacted {
+        (redaction.redacted_text, true)
+    } else {
+        (line.to_owned(), false)
+    }
+}
+
 fn read_workspace_file_chunk(
     workspace_root_index: usize,
     path: PathBuf,
@@ -926,6 +1421,26 @@ fn workspace_list_dir_outcome(
     build_tool_execution_outcome(
         proposal_id,
         WORKSPACE_LIST_DIR_TOOL_NAME,
+        input_json,
+        success,
+        output_json,
+        error,
+        false,
+        "workspace_file".to_owned(),
+        "workspace_roots".to_owned(),
+    )
+}
+
+fn workspace_search_outcome(
+    proposal_id: &str,
+    input_json: &[u8],
+    success: bool,
+    output_json: Vec<u8>,
+    error: String,
+) -> ToolExecutionOutcome {
+    build_tool_execution_outcome(
+        proposal_id,
+        WORKSPACE_SEARCH_TOOL_NAME,
         input_json,
         success,
         output_json,
@@ -1266,6 +1781,64 @@ mod tests {
             output.entries.iter().map(|entry| entry.path.as_str()).collect::<Vec<_>>(),
             vec!["server.js", "tests"]
         );
+    }
+
+    #[test]
+    fn search_workspace_finds_identifier_in_docs_and_skips_dependencies() {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let workspace = tempdir.path().join("workspace");
+        let project = workspace.join("client-id-api");
+        fs::create_dir_all(project.join("src")).expect("src should exist");
+        fs::create_dir_all(project.join("docs")).expect("docs should exist");
+        fs::create_dir_all(project.join("node_modules").join("pkg"))
+            .expect("node_modules should exist");
+        fs::write(project.join("src").join("order.js"), "export const customerId = 1;\n")
+            .expect("source file should be written");
+        fs::write(
+            project.join("docs").join("usage.md"),
+            "Use customerId when creating an order.\n",
+        )
+        .expect("docs file should be written");
+        fs::write(project.join("node_modules").join("pkg").join("index.js"), "customerId\n")
+            .expect("dependency file should be written");
+        let input = parse_workspace_search_input(
+            br#"{"query":"customerId","workspace_root":"client-id-api","max_matches":10}"#,
+        )
+        .expect("search input should parse");
+        let roots = resolve_workspace_file_roots_for_override(
+            WORKSPACE_SEARCH_TOOL_NAME,
+            std::slice::from_ref(&workspace),
+            input.workspace_root.as_deref(),
+        )
+        .expect("workspace_root override should resolve");
+
+        let output = search_workspace_from_roots(roots.as_slice(), &input)
+            .expect("workspace search should complete");
+
+        assert!(!output.truncated);
+        assert_eq!(
+            output.matches.iter().map(|entry| entry.path.as_str()).collect::<Vec<_>>(),
+            vec!["docs/usage.md", "src/order.js"]
+        );
+        assert_eq!(output.files_with_matches, 2);
+        assert_eq!(output.skipped_dirs, 1);
+    }
+
+    #[test]
+    fn search_workspace_redacts_secret_like_matching_lines() {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        fs::write(tempdir.path().join("config.txt"), "token=S020_DUMMY_SECRET_SHOULD_NOT_APPEAR\n")
+            .expect("workspace file should be written");
+        let input = parse_workspace_search_input(br#"{"query":"token"}"#)
+            .expect("search input should parse");
+
+        let output = search_workspace_from_roots(&[tempdir.path().to_path_buf()], &input)
+            .expect("workspace search should complete");
+
+        assert_eq!(output.matches.len(), 1);
+        assert!(output.matches[0].redacted);
+        assert!(output.matches[0].line_text.contains("[REDACTED_SECRET]"));
+        assert!(!output.matches[0].line_text.contains("S020_DUMMY_SECRET_SHOULD_NOT_APPEAR"));
     }
 
     #[test]
