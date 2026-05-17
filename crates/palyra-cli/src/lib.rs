@@ -4929,7 +4929,7 @@ mod agent_stream_output_tests {
     }
 
     #[test]
-    fn tool_events_keep_request_stream_open_for_later_approval_responses() {
+    fn request_stream_stays_open_until_terminal_status() {
         let tool_result = common_v1::RunStreamEvent {
             v: CANONICAL_PROTOCOL_MAJOR,
             run_id: None,
@@ -4954,7 +4954,7 @@ mod agent_stream_output_tests {
                 },
             )),
         };
-        let final_token = common_v1::RunStreamEvent {
+        let final_model_token = common_v1::RunStreamEvent {
             v: CANONICAL_PROTOCOL_MAJOR,
             run_id: None,
             body: Some(common_v1::run_stream_event::Body::ModelToken(common_v1::ModelToken {
@@ -4962,10 +4962,19 @@ mod agent_stream_output_tests {
                 is_final: true,
             })),
         };
+        let done_status = common_v1::RunStreamEvent {
+            v: CANONICAL_PROTOCOL_MAJOR,
+            run_id: None,
+            body: Some(common_v1::run_stream_event::Body::Status(common_v1::StreamStatus {
+                kind: common_v1::stream_status::StatusKind::Done as i32,
+                message: "completed".to_owned(),
+            })),
+        };
 
         assert!(!run_stream_can_close_request_side(&tool_result));
         assert!(!run_stream_can_close_request_side(&tool_attestation));
-        assert!(run_stream_can_close_request_side(&final_token));
+        assert!(!run_stream_can_close_request_side(&final_model_token));
+        assert!(run_stream_can_close_request_side(&done_status));
     }
 }
 
@@ -5100,7 +5109,8 @@ fn is_terminal_stream_status(kind: i32) -> bool {
 fn run_stream_can_close_request_side(event: &common_v1::RunStreamEvent) -> bool {
     matches!(
         event.body.as_ref(),
-        Some(common_v1::run_stream_event::Body::ModelToken(token)) if token.is_final
+        Some(common_v1::run_stream_event::Body::Status(status))
+            if is_terminal_stream_status(status.kind)
     )
 }
 

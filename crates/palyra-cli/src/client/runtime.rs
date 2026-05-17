@@ -33,7 +33,7 @@ impl GatewayRunStream {
         self.request_sender
             .send(RunStreamRequestEnvelope::Request(Box::new(request)))
             .await
-            .context("failed to queue RunStream request message")
+            .context("failed to queue RunStream request message because the request stream is already closed")
     }
 
     pub(crate) async fn close_request_stream(&self) -> Result<()> {
