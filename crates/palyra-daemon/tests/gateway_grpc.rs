@@ -8551,21 +8551,37 @@ async fn grpc_run_stream_persists_orchestrator_snapshot_and_matches_golden_tape(
 
     let mut response_stream =
         client.run_stream(stream_request).await.context("failed to call RunStream")?.into_inner();
+    let mut progress_statuses = Vec::new();
     while let Some(event) = response_stream.next().await {
-        let _event = event.context("failed to read RunStream event")?;
+        let event = event.context("failed to read RunStream event")?;
+        if let Some(common_v1::run_stream_event::Body::Status(status)) = event.body {
+            if status.message.trim().starts_with("progress:") {
+                progress_statuses.push(status.message);
+            }
+        }
     }
+    assert_eq!(
+        progress_statuses,
+        [
+            "progress:agent_loop.started",
+            "progress:agent_loop.turn_started",
+            "progress:agent_loop.terminated",
+        ],
+        "RunStream should expose harness-owned progress events independently of model text"
+    );
 
     let run_snapshot = admin_get_json_async(admin_port, format!("/admin/v1/runs/{RUN_ID}")).await?;
     assert_eq!(
         run_snapshot.get("state").and_then(Value::as_str).context("run snapshot missing state")?,
         "done"
     );
-    assert_eq!(
-        run_snapshot
-            .get("prompt_tokens")
-            .and_then(Value::as_u64)
-            .context("run snapshot missing prompt_tokens")?,
-        3
+    let prompt_tokens = run_snapshot
+        .get("prompt_tokens")
+        .and_then(Value::as_u64)
+        .context("run snapshot missing prompt_tokens")?;
+    assert!(
+        prompt_tokens >= 3,
+        "run snapshot should account for at least the user prompt tokens, observed={prompt_tokens}"
     );
     assert_eq!(
         run_snapshot

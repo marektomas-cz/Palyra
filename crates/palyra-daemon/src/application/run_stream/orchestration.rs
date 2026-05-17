@@ -410,6 +410,25 @@ async fn append_agent_loop_tape_event(
 }
 
 #[allow(clippy::result_large_err)]
+async fn send_agent_loop_progress_status(
+    sender: &mpsc::Sender<Result<common_v1::RunStreamEvent, Status>>,
+    runtime_state: &Arc<GatewayRuntimeState>,
+    run_id: &str,
+    tape_seq: &mut i64,
+    phase: &str,
+) -> Result<(), Status> {
+    send_status_with_tape(
+        sender,
+        runtime_state,
+        run_id,
+        tape_seq,
+        common_v1::stream_status::StatusKind::InProgress,
+        format!("progress:{phase}").as_str(),
+    )
+    .await
+}
+
+#[allow(clippy::result_large_err)]
 #[allow(clippy::too_many_arguments)]
 async fn terminate_run_stream_with_agent_loop_reason(
     sender: &mpsc::Sender<Result<common_v1::RunStreamEvent, Status>>,
@@ -429,6 +448,14 @@ async fn terminate_run_stream_with_agent_loop_reason(
         tape_seq,
         "agent_loop.terminated",
         loop_state.termination_payload(run_id, reason, message.as_str(), provider_trace_ref),
+    )
+    .await?;
+    send_agent_loop_progress_status(
+        sender,
+        runtime_state,
+        run_id,
+        tape_seq,
+        "agent_loop.terminated",
     )
     .await?;
     run_state
@@ -713,6 +740,7 @@ pub(crate) async fn process_run_stream_message(
         prepared_provider_input.vision_inputs,
         provider_model_override.clone(),
     );
+    base_provider_request.user_visible_input_text = Some(input_text.clone());
     base_provider_request.instruction_hash = prepared_provider_input.instruction_hash.clone();
     base_provider_request.context_trace_id = prepared_provider_input.context_trace_id.clone();
     base_provider_request.budget_profile = prepared_provider_input.budget_profile.clone();
@@ -735,6 +763,14 @@ pub(crate) async fn process_run_stream_message(
         tape_seq,
         "agent_loop.started",
         loop_state.start_payload(run_id.as_str()),
+    )
+    .await?;
+    send_agent_loop_progress_status(
+        sender,
+        runtime_state,
+        run_id.as_str(),
+        tape_seq,
+        "agent_loop.started",
     )
     .await?;
     let mut length_recovery_attempted = false;
@@ -773,6 +809,14 @@ pub(crate) async fn process_run_stream_message(
             loop_state.turn_payload(run_id.as_str(), "agent_loop.turn_started"),
         )
         .await?;
+        send_agent_loop_progress_status(
+            sender,
+            runtime_state,
+            run_id.as_str(),
+            tape_seq,
+            "agent_loop.turn_started",
+        )
+        .await?;
 
         let tool_catalog_snapshot = if let Some(snapshot) = first_turn_tool_catalog_snapshot.take()
         {
@@ -798,6 +842,8 @@ pub(crate) async fn process_run_stream_message(
             base_provider_request.vision_inputs.clone(),
             base_provider_request.model_override.clone(),
         );
+        provider_request.user_visible_input_text =
+            base_provider_request.user_visible_input_text.clone();
         provider_request.messages = loop_state.messages();
         provider_request.tool_catalog_snapshot =
             Some(snapshot_to_provider_request_value(&tool_catalog_snapshot));
@@ -907,6 +953,14 @@ pub(crate) async fn process_run_stream_message(
                         ),
                     )
                     .await?;
+                    send_agent_loop_progress_status(
+                        sender,
+                        runtime_state,
+                        run_id.as_str(),
+                        tape_seq,
+                        "agent_loop.terminated",
+                    )
+                    .await?;
                     return Ok(RunStreamMessageProcessingOutcome::Continue);
                 }
 
@@ -929,6 +983,14 @@ pub(crate) async fn process_run_stream_message(
                     loop_state.turn_payload(run_id.as_str(), "agent_loop.turn_completed"),
                 )
                 .await?;
+                send_agent_loop_progress_status(
+                    sender,
+                    runtime_state,
+                    run_id.as_str(),
+                    tape_seq,
+                    "agent_loop.turn_completed",
+                )
+                .await?;
             }
             RunStreamProviderResponseOutcome::Failed { message, provider_trace_ref, reason } => {
                 if let Some(recovery_prompt) = length_recovery_prompt(
@@ -946,6 +1008,14 @@ pub(crate) async fn process_run_stream_message(
                         "agent_loop.length_recovery_requested",
                         loop_state
                             .turn_payload(run_id.as_str(), "agent_loop.length_recovery_requested"),
+                    )
+                    .await?;
+                    send_agent_loop_progress_status(
+                        sender,
+                        runtime_state,
+                        run_id.as_str(),
+                        tape_seq,
+                        "agent_loop.length_recovery_requested",
                     )
                     .await?;
                     continue;

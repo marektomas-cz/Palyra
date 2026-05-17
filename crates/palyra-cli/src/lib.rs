@@ -4388,12 +4388,18 @@ fn agent_status_message_text(status: &common_v1::StreamStatus) -> String {
     if status.kind == common_v1::stream_status::StatusKind::Failed as i32 {
         return quoted_text_field(sanitize_agent_failure_message(status.message.as_str()).as_str());
     }
+    if let Some(progress) = safe_agent_progress_status_message(status) {
+        return progress.to_owned();
+    }
     redacted_presence_for_output(!status.message.trim().is_empty())
 }
 
 fn agent_status_message_json(status: &common_v1::StreamStatus) -> Value {
     if status.kind == common_v1::stream_status::StatusKind::Failed as i32 {
         return Value::String(sanitize_agent_failure_message(status.message.as_str()));
+    }
+    if let Some(progress) = safe_agent_progress_status_message(status) {
+        return Value::String(progress.to_owned());
     }
     redacted_presence_json_value(!status.message.trim().is_empty())
 }
@@ -4410,6 +4416,24 @@ fn sanitize_agent_failure_message(message: &str) -> String {
 fn quoted_text_field(value: &str) -> String {
     let escaped = value.replace('"', "'").replace(['\r', '\n'], " ");
     format!("\"{escaped}\"")
+}
+
+fn safe_agent_progress_status_message(status: &common_v1::StreamStatus) -> Option<&str> {
+    if status.kind != common_v1::stream_status::StatusKind::InProgress as i32 {
+        return None;
+    }
+
+    let trimmed = status.message.trim();
+    let phase = trimmed.strip_prefix("progress:")?;
+    if !phase.is_empty()
+        && phase.chars().all(|candidate| {
+            candidate.is_ascii_alphanumeric() || matches!(candidate, '.' | '_' | '-')
+        })
+    {
+        Some(trimmed)
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -4641,6 +4665,24 @@ mod agent_stream_output_tests {
 
         assert_eq!(agent_status_message_text(&accepted), REDACTED);
         assert_eq!(agent_status_message_json(&accepted), Value::String(REDACTED.to_owned()));
+    }
+
+    #[test]
+    fn ndjson_progress_status_exposes_safe_progress_label() {
+        let event = common_v1::RunStreamEvent {
+            v: CANONICAL_PROTOCOL_MAJOR,
+            run_id: None,
+            body: Some(common_v1::run_stream_event::Body::Status(status(
+                common_v1::stream_status::StatusKind::InProgress,
+                "progress:agent_loop.turn_started",
+            ))),
+        };
+
+        let value = agent_event_json_value(&event);
+
+        assert_eq!(value["type"], "run.progress");
+        assert_eq!(value["kind"], "in_progress");
+        assert_eq!(value["message"], "progress:agent_loop.turn_started");
     }
 
     #[test]
@@ -4936,12 +4978,19 @@ fn agent_event_json_value(event: &common_v1::RunStreamEvent) -> serde_json::Valu
             "token": token.token,
             "is_final": token.is_final,
         }),
-        Some(common_v1::run_stream_event::Body::Status(status)) => json!({
-            "type": "run.status",
-            "run_id": run_id,
-            "kind": stream_status_kind_to_text(status.kind),
-            "message": agent_status_message_json(status),
-        }),
+        Some(common_v1::run_stream_event::Body::Status(status)) => {
+            let event_type = if safe_agent_progress_status_message(status).is_some() {
+                "run.progress"
+            } else {
+                "run.status"
+            };
+            json!({
+                "type": event_type,
+                "run_id": run_id,
+                "kind": stream_status_kind_to_text(status.kind),
+                "message": agent_status_message_json(status),
+            })
+        }
         Some(common_v1::run_stream_event::Body::ToolProposal(proposal)) => json!({
             "type": "tool.proposal",
             "run_id": run_id,

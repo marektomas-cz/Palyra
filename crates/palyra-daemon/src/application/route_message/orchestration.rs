@@ -472,6 +472,7 @@ pub(crate) async fn handle_routed_route_message(
         prepared_provider_input.vision_inputs,
         (routing_decision.mode == "enforced").then(|| routing_decision.actual_model_id.clone()),
     );
+    provider_request.user_visible_input_text = Some(effective_input_text.clone());
     provider_request.tool_catalog_snapshot =
         Some(snapshot_to_provider_request_value(&tool_catalog_snapshot));
     provider_request.instruction_hash = prepared_provider_input.instruction_hash.clone();

@@ -3056,6 +3056,10 @@ impl ModelProvider for DeterministicProvider {
 
             let completion_source = if request.json_mode {
                 r#"{"ack":"ok"}"#.to_owned()
+            } else if let Some(user_visible_input_text) =
+                request.user_visible_input_text.as_ref().filter(|value| !value.trim().is_empty())
+            {
+                user_visible_input_text.clone()
             } else {
                 request.input_text.clone()
             };
@@ -5367,6 +5371,7 @@ mod tests {
     fn provider_request_adapters_serialize_message_contracts() {
         let request = ProviderRequest {
             input_text: "What changed?".to_owned(),
+            user_visible_input_text: None,
             messages: vec![
                 ProviderMessage {
                     role: ProviderMessageRole::System,
@@ -5407,6 +5412,7 @@ mod tests {
     fn provider_request_adapters_serialize_tool_refeed_messages() {
         let request = ProviderRequest {
             input_text: "Use a tool.".to_owned(),
+            user_visible_input_text: None,
             messages: vec![
                 ProviderMessage::user_text("Use a tool."),
                 ProviderMessage {
@@ -5663,6 +5669,29 @@ mod tests {
         assert!(
             tokens.len() > 1,
             "long deterministic output should be split into bounded preview chunks"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn deterministic_provider_echoes_user_visible_input_when_prompt_is_augmented() {
+        let provider = build_model_provider(&ModelProviderConfig::default())
+            .expect("provider should build from defaults");
+        let mut request = ProviderRequest::from_input_text(
+            "Runtime context: current_utc=2026-05-17T00:00:00Z\n\nalpha beta gamma".to_owned(),
+            false,
+            Vec::new(),
+            None,
+        );
+        request.user_visible_input_text = Some("alpha beta gamma".to_owned());
+
+        let response =
+            provider.complete(request).await.expect("deterministic provider should succeed");
+
+        assert_eq!(response.output.full_text, "alpha beta gamma");
+        assert_eq!(response.completion_tokens, 3);
+        assert!(
+            response.prompt_tokens > response.completion_tokens,
+            "augmented prompt accounting should still include model-visible context"
         );
     }
 

@@ -149,6 +149,8 @@ impl ProviderMessage {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProviderRequest {
     pub input_text: String,
+    #[serde(skip_serializing, skip_deserializing)]
+    pub user_visible_input_text: Option<String>,
     pub messages: Vec<ProviderMessage>,
     pub json_mode: bool,
     pub vision_inputs: Vec<ProviderImageInput>,
@@ -174,6 +176,7 @@ impl ProviderRequest {
         Self {
             messages: vec![ProviderMessage::user_text(input_text.clone())],
             input_text,
+            user_visible_input_text: None,
             json_mode,
             vision_inputs,
             model_override,
