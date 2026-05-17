@@ -432,6 +432,7 @@ pub(crate) async fn console_routine_upsert_handler(
     let execution = parse_execution_config(
         payload.run_mode.as_deref(),
         default_run_mode_for_trigger_kind(trigger_kind),
+        default_execution_posture_for_trigger_kind(trigger_kind),
         payload.procedure_profile_id.clone(),
         payload.skill_profile_id.clone(),
         payload.provider_profile_id.clone(),
@@ -2141,6 +2142,18 @@ fn default_run_mode_for_trigger_kind(trigger_kind: RoutineTriggerKind) -> Routin
     }
 }
 
+fn default_execution_posture_for_trigger_kind(
+    trigger_kind: RoutineTriggerKind,
+) -> RoutineExecutionPosture {
+    match trigger_kind {
+        RoutineTriggerKind::Schedule => RoutineExecutionPosture::SensitiveTools,
+        RoutineTriggerKind::Hook
+        | RoutineTriggerKind::Webhook
+        | RoutineTriggerKind::SystemEvent
+        | RoutineTriggerKind::Manual => RoutineExecutionPosture::Standard,
+    }
+}
+
 #[allow(clippy::result_large_err)]
 fn parse_schedule_type(value: &str) -> Result<CronScheduleType, Response> {
     CronScheduleType::from_str(value).ok_or_else(|| {
@@ -2185,6 +2198,7 @@ fn parse_misfire_policy(value: Option<&str>) -> Result<CronMisfirePolicy, Respon
 fn parse_execution_config(
     run_mode: Option<&str>,
     default_run_mode: RoutineRunMode,
+    default_execution_posture: RoutineExecutionPosture,
     procedure_profile_id: Option<String>,
     skill_profile_id: Option<String>,
     provider_profile_id: Option<String>,
@@ -2205,7 +2219,7 @@ fn parse_execution_config(
                 "execution_posture must be one of standard|sensitive_tools",
             ))
         })?,
-        None => RoutineExecutionPosture::Standard,
+        None => default_execution_posture,
     };
     Ok(RoutineExecutionConfig {
         run_mode,
@@ -2463,8 +2477,9 @@ mod tests {
     };
     use crate::journal::{OrchestratorSessionRecord, OrchestratorTapeRecord};
     use crate::routines::{
-        RoutineApprovalPolicy, RoutineDeliveryMode, RoutineExecutionConfig, RoutineMetadataRecord,
-        RoutineRunMode, RoutineSilentPolicy, RoutineTriggerKind,
+        RoutineApprovalPolicy, RoutineDeliveryMode, RoutineExecutionConfig,
+        RoutineExecutionPosture, RoutineMetadataRecord, RoutineRunMode, RoutineSilentPolicy,
+        RoutineTriggerKind,
     };
     use chrono::{TimeZone, Utc};
     use serde_json::json;
@@ -2522,6 +2537,7 @@ mod tests {
         let execution = parse_execution_config(
             Some("fresh_session"),
             RoutineRunMode::SameSession,
+            RoutineExecutionPosture::Standard,
             Some("01ARZ3NDEKTSV4RRFFQ69G5FC0".to_owned()),
             Some("01ARZ3NDEKTSV4RRFFQ69G5FC1".to_owned()),
             Some("01ARZ3NDEKTSV4RRFFQ69G5FC2".to_owned()),
@@ -2535,11 +2551,19 @@ mod tests {
 
     #[test]
     fn parse_execution_config_uses_schedule_fresh_session_default() {
-        let execution =
-            parse_execution_config(None, RoutineRunMode::FreshSession, None, None, None, None)
-                .expect("execution config should parse");
+        let execution = parse_execution_config(
+            None,
+            RoutineRunMode::FreshSession,
+            RoutineExecutionPosture::SensitiveTools,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("execution config should parse");
 
         assert_eq!(execution.run_mode, RoutineRunMode::FreshSession);
+        assert_eq!(execution.execution_posture, RoutineExecutionPosture::SensitiveTools);
     }
 
     #[test]
@@ -2547,6 +2571,7 @@ mod tests {
         let execution = parse_execution_config(
             Some("same_session"),
             RoutineRunMode::FreshSession,
+            RoutineExecutionPosture::SensitiveTools,
             None,
             None,
             None,
@@ -2555,6 +2580,23 @@ mod tests {
         .expect("execution config should parse");
 
         assert_eq!(execution.run_mode, RoutineRunMode::SameSession);
+        assert_eq!(execution.execution_posture, RoutineExecutionPosture::SensitiveTools);
+    }
+
+    #[test]
+    fn parse_execution_config_preserves_explicit_standard_posture() {
+        let execution = parse_execution_config(
+            None,
+            RoutineRunMode::FreshSession,
+            RoutineExecutionPosture::SensitiveTools,
+            None,
+            None,
+            None,
+            Some("standard"),
+        )
+        .expect("execution config should parse");
+
+        assert_eq!(execution.execution_posture, RoutineExecutionPosture::Standard);
     }
 
     #[test]

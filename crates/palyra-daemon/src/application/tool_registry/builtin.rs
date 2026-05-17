@@ -199,7 +199,7 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
         ),
         entry(
             "palyra.routines.control",
-            "Create, update, pause, resume, or manually dispatch routines through the approval-aware runtime. For new reminders and monitors, omit routine_id and use operation=upsert with trigger_kind=schedule, name, prompt, and natural_language_schedule such as 'every 30 minutes' or 'every 40 seconds'.",
+            "Create, update, pause, resume, or manually dispatch routines through the approval-aware runtime. For new reminders and monitors, omit routine_id and use operation=upsert with trigger_kind=schedule, name, prompt, and natural_language_schedule such as 'every 30 minutes' or 'every 40 seconds'. Scheduled routines default to execution_posture=sensitive_tools because future runs cannot prompt for per-tool approval; set execution_posture=standard only when the routine must stay read-only or approval-gated.",
             object_schema(
                 &["operation"],
                 vec![
