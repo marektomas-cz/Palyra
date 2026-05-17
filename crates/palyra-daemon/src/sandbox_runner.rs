@@ -1652,6 +1652,7 @@ fn background_process_lifetime(timeout_ms: Option<u64>, execution_timeout: Durat
     timeout_ms
         .map(Duration::from_millis)
         .unwrap_or(default_lifetime)
+        .max(default_lifetime)
         .min(Duration::from_millis(MAX_BACKGROUND_PROCESS_LIFETIME_MS))
 }
 
@@ -2755,12 +2756,12 @@ mod tests {
     }
 
     #[test]
-    fn background_process_lifetime_honors_explicit_bounded_timeout() {
+    fn background_process_lifetime_floors_short_explicit_timeout() {
         let short = super::background_process_lifetime(Some(100), Duration::from_millis(750));
         let capped =
             super::background_process_lifetime(Some(10 * 60_000), Duration::from_millis(750));
 
-        assert_eq!(short, Duration::from_millis(100));
+        assert_eq!(short, Duration::from_millis(60_000));
         assert_eq!(capped, Duration::from_millis(5 * 60_000));
     }
 
