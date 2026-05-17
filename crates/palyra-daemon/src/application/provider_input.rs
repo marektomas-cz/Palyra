@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use base64::Engine as _;
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tonic::Status;
@@ -921,6 +922,7 @@ async fn prepare_model_provider_input_legacy(
             provider_input_text,
         )
         .await?;
+        let provider_input_text = prepend_legacy_runtime_context(provider_input_text);
         return Ok(PreparedModelProviderInput {
             provider_input_text,
             provider_messages: Vec::new(),
@@ -996,6 +998,7 @@ async fn prepare_model_provider_input_legacy(
         provider_input_text,
     )
     .await?;
+    let provider_input_text = prepend_legacy_runtime_context(provider_input_text);
     Ok(PreparedModelProviderInput {
         provider_input_text,
         provider_messages: previous_provider_messages,
@@ -1004,6 +1007,20 @@ async fn prepare_model_provider_input_legacy(
         context_trace_id: None,
         budget_profile: None,
     })
+}
+
+fn prepend_legacy_runtime_context(provider_input_text: String) -> String {
+    format!("{}\n\n{}", render_legacy_runtime_context_prompt(Utc::now()), provider_input_text)
+}
+
+fn render_legacy_runtime_context_prompt(now: DateTime<Utc>) -> String {
+    format!(
+        "<palyra_runtime_context>\ncurrent_utc: {}\ncurrent_unix_ms: {}\nhost_os: {}\nhost_family: {}\ntemporal_evidence_contract: Use current_utc or current_unix_ms as trusted runtime evidence when the user asks for current timestamps in reports, monitoring output, changelogs, status summaries, or citations. Do not invent calendar dates or times; if no exact timestamp is required, omit it instead of fabricating one.\n</palyra_runtime_context>",
+        now.to_rfc3339_opts(SecondsFormat::Secs, true),
+        now.timestamp_millis(),
+        std::env::consts::OS,
+        std::env::consts::FAMILY,
+    )
 }
 
 #[allow(clippy::result_large_err)]
@@ -1188,8 +1205,12 @@ pub(crate) fn memory_auto_inject_tape_payload(query: &str, hits: &[MemorySearchH
 
 #[cfg(test)]
 mod tests {
-    use super::{curated_memory_sources_for_prompt_context, sanitize_prompt_inline_value};
+    use super::{
+        curated_memory_sources_for_prompt_context, render_legacy_runtime_context_prompt,
+        sanitize_prompt_inline_value,
+    };
     use crate::journal::MemorySource;
+    use chrono::TimeZone;
 
     #[test]
     fn sanitize_prompt_inline_value_flattens_control_characters() {
@@ -1206,5 +1227,20 @@ mod tests {
         assert!(!sources.contains(&MemorySource::TapeUserMessage));
         assert!(!sources.contains(&MemorySource::TapeToolResult));
         assert!(!sources.contains(&MemorySource::Summary));
+    }
+
+    #[test]
+    fn legacy_runtime_context_prompt_exposes_trusted_current_time() {
+        let now = chrono::Utc
+            .with_ymd_and_hms(2026, 5, 17, 12, 34, 56)
+            .single()
+            .expect("fixed timestamp should be valid");
+
+        let prompt = render_legacy_runtime_context_prompt(now);
+
+        assert!(prompt.contains("current_utc: 2026-05-17T12:34:56Z"));
+        assert!(prompt.contains("current_unix_ms: 1779021296000"));
+        assert!(prompt.contains("temporal_evidence_contract"));
+        assert!(prompt.contains("Do not invent calendar dates or times"));
     }
 }
