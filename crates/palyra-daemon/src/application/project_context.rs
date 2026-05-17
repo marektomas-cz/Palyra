@@ -323,6 +323,9 @@ pub(crate) fn render_project_context_prompt(
     block.push_str(
         "Deterministic project rules are ordered from broader compatibility files to preferred, more specific files. Later items are more specific.\n",
     );
+    block.push_str(
+        "Apply active project context as repo-local workspace conventions after system, developer, user, policy, sandbox, and tool-result constraints. Do not silently relax file patterns, language choices, test naming rules, formatting requirements, or documentation style for tool convenience; report the exact blocker before deviating.\n",
+    );
     for entry in active_entries {
         block.push_str(
             format!(
@@ -1177,6 +1180,9 @@ mod tests {
         )
         .expect("project context prompt should render");
         assert!(prompt.contains("<project_context>"));
+        assert!(prompt.contains("repo-local workspace conventions"));
+        assert!(prompt.contains("Do not silently relax file patterns"));
+        assert!(prompt.contains("report the exact blocker before deviating"));
         assert!(prompt.contains("PALYRA.md"));
         assert!(!prompt.contains("disabled"));
         assert!(prompt.ends_with("Explain the issue."));
