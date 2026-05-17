@@ -267,6 +267,10 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
                 &["path"],
                 vec![
                     ("path", json!({"type":"string"})),
+                    (
+                        "workspace_root",
+                        json!({"type":"string","description":"Optional existing workspace subdirectory to treat as the read root. Use this when a prior apply_patch call used workspace_root for the same project."}),
+                    ),
                     ("offset_bytes", json!({"type":"integer","minimum":0})),
                     ("max_bytes", json!({"type":"integer","minimum":1})),
                 ],
@@ -284,6 +288,10 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
                     (
                         "path",
                         json!({"type":"string","description":"Directory path relative to the workspace root. Omit for the workspace root. /workspace and workspace/ are accepted virtual workspace aliases."}),
+                    ),
+                    (
+                        "workspace_root",
+                        json!({"type":"string","description":"Optional existing workspace subdirectory to treat as the listing root. Use this when the task is scoped to a nested project directory."}),
                     ),
                     ("max_entries", json!({"type":"integer","minimum":1,"maximum":512})),
                 ],

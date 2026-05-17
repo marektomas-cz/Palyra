@@ -161,6 +161,23 @@ fn browser_session_create_returns_model_visible_handle() {
 }
 
 #[test]
+fn workspace_file_schemas_accept_workspace_root_override() {
+    let read_file = registry_entry("palyra.fs.read_file").expect("read file entry exists");
+    let list_dir = registry_entry("palyra.fs.list_dir").expect("list dir entry exists");
+
+    assert_eq!(read_file.input_schema["properties"]["workspace_root"]["type"], "string");
+    assert_eq!(list_dir.input_schema["properties"]["workspace_root"]["type"], "string");
+    assert!(read_file.input_schema["properties"]["workspace_root"]["description"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("prior apply_patch"));
+    assert!(list_dir.input_schema["properties"]["workspace_root"]["description"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("nested project"));
+}
+
+#[test]
 fn browser_observe_schema_exposes_visible_text_default() {
     let entry = registry_entry("palyra.browser.observe").expect("browser observe tool entry");
 

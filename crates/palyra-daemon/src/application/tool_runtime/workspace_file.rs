@@ -29,6 +29,8 @@ const WORKSPACE_LIST_DIR_MAX_ENTRIES: usize = 512;
 struct WorkspaceReadFileInput {
     path: String,
     #[serde(default)]
+    workspace_root: Option<String>,
+    #[serde(default)]
     offset_bytes: u64,
     #[serde(default)]
     max_bytes: Option<u64>,
@@ -38,6 +40,8 @@ struct WorkspaceReadFileInput {
 struct WorkspaceListDirInput {
     #[serde(default)]
     path: String,
+    #[serde(default)]
+    workspace_root: Option<String>,
     #[serde(default)]
     max_entries: Option<u64>,
 }
@@ -120,8 +124,24 @@ pub(crate) async fn execute_workspace_read_file_tool(
         }
     };
 
-    let workspace_roots =
+    let agent_workspace_roots =
         agent_outcome.agent.workspace_roots.iter().map(PathBuf::from).collect::<Vec<_>>();
+    let workspace_roots = match resolve_workspace_file_roots(
+        WORKSPACE_READ_FILE_TOOL_NAME,
+        agent_workspace_roots.as_slice(),
+        input.workspace_root.as_deref(),
+    ) {
+        Ok(roots) => roots,
+        Err(error) => {
+            return workspace_read_file_outcome(
+                proposal_id,
+                input_json,
+                false,
+                b"{}".to_vec(),
+                error,
+            );
+        }
+    };
     let read = match read_workspace_file_from_roots(workspace_roots.as_slice(), &input) {
         Ok(read) => read,
         Err(error) => {
@@ -193,8 +213,24 @@ pub(crate) async fn execute_workspace_list_dir_tool(
         }
     };
 
-    let workspace_roots =
+    let agent_workspace_roots =
         agent_outcome.agent.workspace_roots.iter().map(PathBuf::from).collect::<Vec<_>>();
+    let workspace_roots = match resolve_workspace_file_roots(
+        WORKSPACE_LIST_DIR_TOOL_NAME,
+        agent_workspace_roots.as_slice(),
+        input.workspace_root.as_deref(),
+    ) {
+        Ok(roots) => roots,
+        Err(error) => {
+            return workspace_list_dir_outcome(
+                proposal_id,
+                input_json,
+                false,
+                b"{}".to_vec(),
+                error,
+            );
+        }
+    };
     let listing = match list_workspace_dir_from_roots(workspace_roots.as_slice(), &input) {
         Ok(listing) => listing,
         Err(error) => {
@@ -242,6 +278,7 @@ fn parse_workspace_read_file_input(input_json: &[u8]) -> Result<WorkspaceReadFil
     if matches!(input.max_bytes, Some(0)) {
         return Err(format!("{WORKSPACE_READ_FILE_TOOL_NAME} max_bytes must be >= 1"));
     }
+    input.workspace_root = normalize_optional_workspace_root(input.workspace_root);
     input.path = normalize_workspace_path_input(input.path.as_str());
     validate_workspace_path_syntax(input.path.as_str(), WORKSPACE_READ_FILE_TOOL_NAME)?;
     Ok(input)
@@ -263,9 +300,14 @@ fn parse_workspace_list_dir_input(input_json: &[u8]) -> Result<WorkspaceListDirI
     if matches!(input.max_entries, Some(0)) {
         return Err(format!("{WORKSPACE_LIST_DIR_TOOL_NAME} max_entries must be >= 1"));
     }
+    input.workspace_root = normalize_optional_workspace_root(input.workspace_root);
     input.path = normalize_workspace_path_input(input.path.as_str());
     validate_workspace_path_syntax(input.path.as_str(), WORKSPACE_LIST_DIR_TOOL_NAME)?;
     Ok(input)
+}
+
+fn normalize_optional_workspace_root(workspace_root: Option<String>) -> Option<String> {
+    workspace_root.map(|value| value.trim().to_owned()).filter(|value| !value.is_empty())
 }
 
 fn normalize_workspace_path_input(path: &str) -> String {
@@ -300,6 +342,106 @@ fn validate_workspace_path_syntax(path: &str, tool_name: &str) -> Result<(), Str
         return Err(format!(
             "{tool_name} path must not contain root, prefix, '.', or '..' components"
         ));
+    }
+    Ok(())
+}
+
+fn resolve_workspace_file_roots(
+    tool_name: &str,
+    agent_workspace_roots: &[PathBuf],
+    workspace_root: Option<&str>,
+) -> Result<Vec<PathBuf>, String> {
+    let Some(workspace_root) = workspace_root else {
+        return Ok(agent_workspace_roots.to_vec());
+    };
+    let workspace_root = workspace_root.trim();
+    if workspace_root.is_empty() {
+        return Ok(agent_workspace_roots.to_vec());
+    }
+    resolve_workspace_root_override(tool_name, agent_workspace_roots, workspace_root)
+        .map(|root| vec![root])
+}
+
+fn resolve_workspace_root_override(
+    tool_name: &str,
+    agent_workspace_roots: &[PathBuf],
+    workspace_root: &str,
+) -> Result<PathBuf, String> {
+    if workspace_root.chars().any(char::is_control) {
+        return Err(format!("{tool_name} workspace_root contains unsupported characters"));
+    }
+
+    let canonical_roots = canonicalize_workspace_roots(agent_workspace_roots, tool_name)?;
+    if canonical_roots.is_empty() {
+        return Err(format!("{tool_name} agent has no accessible workspace roots"));
+    }
+
+    let requested = Path::new(workspace_root);
+    if requested.is_absolute() {
+        return canonicalize_workspace_root_override(
+            tool_name,
+            requested,
+            &canonical_roots,
+            workspace_root,
+        );
+    }
+    validate_relative_workspace_root_override(tool_name, requested, workspace_root)?;
+    for (_, canonical_root) in &canonical_roots {
+        let candidate = canonical_root.join(requested);
+        match canonicalize_workspace_root_override(
+            tool_name,
+            candidate.as_path(),
+            &canonical_roots,
+            workspace_root,
+        ) {
+            Ok(path) => return Ok(path),
+            Err(error) if error.contains("does not exist") => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(format!(
+        "{tool_name} workspace_root does not exist inside agent workspace roots: {workspace_root}"
+    ))
+}
+
+fn canonicalize_workspace_root_override(
+    tool_name: &str,
+    candidate: &Path,
+    canonical_roots: &[(usize, PathBuf)],
+    workspace_root: &str,
+) -> Result<PathBuf, String> {
+    let canonical_candidate = fs::canonicalize(candidate).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            format!(
+                "{tool_name} workspace_root does not exist inside agent workspace roots: {workspace_root}"
+            )
+        } else {
+            format!("{tool_name} failed to resolve workspace_root {workspace_root}: {error}")
+        }
+    })?;
+    if !canonical_candidate.is_dir() {
+        return Err(format!("{tool_name} workspace_root is not a directory: {workspace_root}"));
+    }
+    if canonical_roots.iter().any(|(_, root)| canonical_candidate.starts_with(root)) {
+        return Ok(canonical_candidate);
+    }
+    Err(format!("{tool_name} workspace_root escapes agent workspace roots: {workspace_root}"))
+}
+
+fn validate_relative_workspace_root_override(
+    tool_name: &str,
+    path: &Path,
+    raw_workspace_root: &str,
+) -> Result<(), String> {
+    for component in path.components() {
+        match component {
+            Component::Normal(_) | Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(format!(
+                    "{tool_name} workspace_root must stay inside agent workspace roots: {raw_workspace_root}"
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -756,6 +898,7 @@ mod tests {
         fs::write(file_path, contents).expect("workspace file should be written");
         let input = WorkspaceReadFileInput {
             path: "agent-e2e-tool-test.js".to_owned(),
+            workspace_root: None,
             offset_bytes: 0,
             max_bytes: None,
         };
@@ -779,8 +922,12 @@ mod tests {
         let contents =
             "const publicValue = 'visible';\nconst privateValue = 'S020_DUMMY_SECRET_SHOULD_NOT_APPEAR';\n";
         fs::write(file_path, contents).expect("workspace file should be written");
-        let input =
-            WorkspaceReadFileInput { path: "app.js".to_owned(), offset_bytes: 0, max_bytes: None };
+        let input = WorkspaceReadFileInput {
+            path: "app.js".to_owned(),
+            workspace_root: None,
+            offset_bytes: 0,
+            max_bytes: None,
+        };
 
         let output = read_workspace_file_from_roots(&[tempdir.path().to_path_buf()], &input)
             .expect("workspace file should be readable");
@@ -801,6 +948,7 @@ mod tests {
         fs::write(tempdir.path().join("chunk.txt"), "abcdef").expect("workspace file should exist");
         let input = WorkspaceReadFileInput {
             path: "chunk.txt".to_owned(),
+            workspace_root: None,
             offset_bytes: 2,
             max_bytes: Some(3),
         };
@@ -823,6 +971,7 @@ mod tests {
             .expect("workspace file should be written");
         let input = WorkspaceReadFileInput {
             path: file_path.to_string_lossy().into_owned(),
+            workspace_root: None,
             offset_bytes: 0,
             max_bytes: None,
         };
@@ -871,6 +1020,59 @@ mod tests {
     }
 
     #[test]
+    fn read_workspace_file_accepts_workspace_root_override() {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let workspace = tempdir.path().join("workspace");
+        let project = workspace.join("agent-smoke");
+        fs::create_dir_all(&project).expect("project dir should exist");
+        fs::write(project.join("calculator.js"), "export const add = (a, b) => a + b;\n")
+            .expect("workspace file should be written");
+        let input = parse_workspace_read_file_input(
+            br#"{"path":"calculator.js","workspace_root":"agent-smoke"}"#,
+        )
+        .expect("workspace_root override should parse");
+        let roots = resolve_workspace_file_roots(
+            WORKSPACE_READ_FILE_TOOL_NAME,
+            std::slice::from_ref(&workspace),
+            input.workspace_root.as_deref(),
+        )
+        .expect("workspace_root override should resolve");
+
+        let output =
+            read_workspace_file_from_roots(roots.as_slice(), &input).expect("file should read");
+
+        assert_eq!(output.path, "calculator.js");
+        assert_eq!(output.text.as_deref(), Some("export const add = (a, b) => a + b;\n"));
+        assert_eq!(output.workspace_root_index, 0);
+    }
+
+    #[test]
+    fn read_workspace_file_rejects_workspace_root_override_outside_agent_roots() {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let workspace = tempdir.path().join("workspace");
+        let outside = tempdir.path().join("outside");
+        fs::create_dir_all(&workspace).expect("workspace dir should exist");
+        fs::create_dir_all(&outside).expect("outside dir should exist");
+        let input = parse_workspace_read_file_input(
+            format!(
+                r#"{{"path":"notes.txt","workspace_root":"{}"}}"#,
+                outside.to_string_lossy().replace('\\', "\\\\")
+            )
+            .as_bytes(),
+        )
+        .expect("absolute workspace_root should parse");
+
+        let error = resolve_workspace_file_roots(
+            WORKSPACE_READ_FILE_TOOL_NAME,
+            std::slice::from_ref(&workspace),
+            input.workspace_root.as_deref(),
+        )
+        .expect_err("outside workspace_root should be rejected");
+
+        assert!(error.contains("escapes agent workspace roots"), "unexpected error: {error}");
+    }
+
+    #[test]
     fn read_workspace_file_rejects_absolute_path_outside_root() {
         let tempdir = tempfile::tempdir().expect("tempdir should be created");
         let workspace = tempdir.path().join("workspace");
@@ -881,6 +1083,7 @@ mod tests {
         fs::write(&outside_file, "secret").expect("outside file should be written");
         let input = WorkspaceReadFileInput {
             path: outside_file.to_string_lossy().into_owned(),
+            workspace_root: None,
             offset_bytes: 0,
             max_bytes: None,
         };
@@ -902,6 +1105,7 @@ mod tests {
         fs::write(&outside_file, "host note\n").expect("outside file should be written");
         let input = WorkspaceReadFileInput {
             path: outside_file.to_string_lossy().into_owned(),
+            workspace_root: None,
             offset_bytes: 0,
             max_bytes: None,
         };
@@ -963,6 +1167,37 @@ mod tests {
     }
 
     #[test]
+    fn list_workspace_dir_accepts_workspace_root_override() {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let workspace = tempdir.path().join("workspace");
+        let project = workspace.join("scenario-s002-notes-api");
+        fs::create_dir_all(project.join("tests")).expect("project dirs should exist");
+        fs::write(project.join("server.js"), "console.log('ok');\n")
+            .expect("server file should exist");
+        fs::write(project.join("tests").join("api.test.js"), "console.log('test');\n")
+            .expect("test file should exist");
+        let input = parse_workspace_list_dir_input(
+            br#"{"path":".","workspace_root":"scenario-s002-notes-api","max_entries":10}"#,
+        )
+        .expect("list input should parse");
+        let roots = resolve_workspace_file_roots(
+            WORKSPACE_LIST_DIR_TOOL_NAME,
+            std::slice::from_ref(&workspace),
+            input.workspace_root.as_deref(),
+        )
+        .expect("workspace_root override should resolve");
+
+        let output =
+            list_workspace_dir_from_roots(roots.as_slice(), &input).expect("dir should list");
+
+        assert_eq!(output.path, ".");
+        assert_eq!(
+            output.entries.iter().map(|entry| entry.path.as_str()).collect::<Vec<_>>(),
+            vec!["server.js", "tests"]
+        );
+    }
+
+    #[test]
     fn list_workspace_dir_rejects_absolute_host_path_even_when_near_workspace_root() {
         let tempdir = tempfile::tempdir().expect("tempdir should be created");
         let workspace = tempdir.path().join("workspace");
@@ -973,6 +1208,7 @@ mod tests {
             .expect("outside file should be written");
         let input = WorkspaceListDirInput {
             path: outside.to_string_lossy().into_owned(),
+            workspace_root: None,
             max_entries: None,
         };
 
