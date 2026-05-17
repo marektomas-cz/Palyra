@@ -526,7 +526,65 @@ async fn find_lifecycle_duplicate(
             }
         }
     }
+    if let Some(conflict) = find_lifecycle_conflict_by_scope_scan(
+        runtime_state,
+        request,
+        classification,
+        channel_scope,
+        session_scope,
+    )
+    .await?
+    {
+        return Ok(Some(conflict));
+    }
     Ok(None)
+}
+
+#[allow(clippy::result_large_err)]
+async fn find_lifecycle_conflict_by_scope_scan(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    request: &MemoryLifecycleRetainRequest,
+    classification: &MemoryWriteClassification,
+    channel_scope: Option<String>,
+    session_scope: Option<String>,
+) -> Result<Option<LifecycleDuplicate>, Status> {
+    if !matches!(
+        classification.category,
+        MemoryWriteCategory::Correction | MemoryWriteCategory::Preference
+    ) {
+        return Ok(None);
+    }
+
+    let (items, _) = runtime_state
+        .list_memory_items(
+            None,
+            Some(128),
+            request.principal.clone(),
+            channel_scope,
+            session_scope,
+            Vec::new(),
+            Vec::new(),
+        )
+        .await?;
+    let mut best = None::<(MemoryItemRecord, usize)>;
+    for item in items {
+        let exact = normalize_lifecycle_content(item.content_text.as_str()) == request.content_text;
+        if exact {
+            return Ok(Some(LifecycleDuplicate { item, exact: true }));
+        }
+        let overlap = lifecycle_conflict_overlap_count(
+            request.content_text.as_str(),
+            item.content_text.as_str(),
+        );
+        if overlap < LIFECYCLE_CONFLICT_MIN_OVERLAP {
+            continue;
+        }
+        if best.as_ref().is_none_or(|(_, best_overlap)| overlap > *best_overlap) {
+            best = Some((item, overlap));
+        }
+    }
+
+    Ok(best.map(|(item, _)| LifecycleDuplicate { item, exact: false }))
 }
 
 fn lifecycle_duplicate_search_queries(content_text: &str) -> Vec<String> {
@@ -652,13 +710,18 @@ fn lifecycle_conflict_matches(
     if !matches!(category, MemoryWriteCategory::Correction | MemoryWriteCategory::Preference) {
         return false;
     }
+    lifecycle_conflict_overlap_count(candidate_content, existing_content)
+        >= LIFECYCLE_CONFLICT_MIN_OVERLAP
+}
+
+const LIFECYCLE_CONFLICT_MIN_OVERLAP: usize = 3;
+
+fn lifecycle_conflict_overlap_count(candidate_content: &str, existing_content: &str) -> usize {
     let candidate_terms =
         lifecycle_significant_terms(candidate_content).into_iter().collect::<BTreeSet<_>>();
     let existing_terms =
         lifecycle_significant_terms(existing_content).into_iter().collect::<BTreeSet<_>>();
-    let overlap_count = candidate_terms.intersection(&existing_terms).take(3).count();
-
-    overlap_count >= 3
+    candidate_terms.intersection(&existing_terms).take(LIFECYCLE_CONFLICT_MIN_OVERLAP).count()
 }
 
 fn should_replace_lifecycle_duplicate_content(

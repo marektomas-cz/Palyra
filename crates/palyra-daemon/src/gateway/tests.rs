@@ -4214,6 +4214,45 @@ async fn memory_retain_tool_replaces_near_duplicate_preference_content() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn memory_retain_tool_replaces_conflicting_preference_when_search_terms_shift() {
+    let state = build_test_runtime_state(false);
+    let context = routines_tool_test_context();
+    let initial = br#"{"content_text":"E2E preference: use TypeScript, Vitest, and concise Czech reports for E2E tests.","scope":"principal","confidence":0.9}"#;
+    let initial_outcome =
+        execute_memory_retain_tool(&state, context, "01ARZ3NDEKTSV4RRFFQ69G5FD6", initial).await;
+    assert!(initial_outcome.success, "initial preference should retain: {}", initial_outcome.error);
+
+    let correction = br#"{"content_text":"Correction: for E2E tests use Playwright, not Vitest. Keep concise Czech reports.","scope":"principal","confidence":0.9}"#;
+    let updated =
+        execute_memory_retain_tool(&state, context, "01ARZ3NDEKTSV4RRFFQ69G5FD7", correction).await;
+    assert!(updated.success, "correction retain should succeed: {}", updated.error);
+    let payload = parse_tool_output_json(&updated);
+    assert_eq!(payload.get("status").and_then(Value::as_str), Some("merged"));
+    assert_eq!(
+        payload.pointer("/item/content_text").and_then(Value::as_str),
+        Some("Correction: for E2E tests use Playwright, not Vitest. Keep concise Czech reports.")
+    );
+
+    let (items, _) = state
+        .list_memory_items(
+            None,
+            Some(10),
+            context.principal.to_owned(),
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+        )
+        .await
+        .expect("principal memories should list");
+    assert_eq!(items.len(), 1, "correction should replace the conflicting old preference");
+    assert!(
+        !items[0].content_text.contains("use TypeScript, Vitest"),
+        "old conflicting preference should not remain as a separate memory item"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn memory_retain_tool_principal_scope_writes_normal_preferences() {
     let state = build_test_runtime_state(false);
     let input_json =
