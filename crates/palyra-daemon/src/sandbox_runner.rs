@@ -35,6 +35,7 @@ const CAPTURE_POLL_INTERVAL_MS: u64 = 5;
 const CAPTURE_CHUNK_BYTES: usize = 4 * 1024;
 const PROCESS_FAILURE_OUTPUT_PREVIEW_BYTES: usize = 4 * 1024;
 const BACKGROUND_STARTUP_CHECK_MS: u64 = 250;
+const BACKGROUND_STARTUP_OUTPUT_DRAIN_MS: u64 = 1_000;
 const DEFAULT_BACKGROUND_PROCESS_LIFETIME_MS: u64 = 60_000;
 const MAX_BACKGROUND_PROCESS_LIFETIME_MS: u64 = 5 * 60_000;
 const SENSITIVE_URL_PATH_MARKERS: &[&str] =
@@ -191,6 +192,30 @@ impl BackgroundOutputMonitor {
             });
         (stdout, stderr)
     }
+
+    fn snapshot_after_startup_drain(&self, max_wait: Duration) -> (StreamCapture, StreamCapture) {
+        let started_at = Instant::now();
+        let mut snapshot = self.snapshot();
+        loop {
+            if background_snapshot_has_output_or_error(&snapshot)
+                || started_at.elapsed() >= max_wait
+            {
+                return snapshot;
+            }
+            thread::sleep(Duration::from_millis(CAPTURE_POLL_INTERVAL_MS));
+            snapshot = self.snapshot();
+        }
+    }
+}
+
+fn background_snapshot_has_output_or_error(snapshot: &(StreamCapture, StreamCapture)) -> bool {
+    let (stdout, stderr) = snapshot;
+    !stdout.bytes.is_empty()
+        || !stderr.bytes.is_empty()
+        || stdout.truncated
+        || stderr.truncated
+        || stdout.read_error.is_some()
+        || stderr.read_error.is_some()
 }
 
 pub fn run_constrained_process(
@@ -1567,7 +1592,9 @@ fn spawn_background_process(
             input.command
         ),
     })? {
-        let (stdout, stderr) = output_monitor.snapshot();
+        let (stdout, stderr) = output_monitor.snapshot_after_startup_drain(Duration::from_millis(
+            BACKGROUND_STARTUP_OUTPUT_DRAIN_MS,
+        ));
         return Err(SandboxProcessRunError {
             kind: SandboxProcessRunErrorKind::RuntimeFailure,
             message: format!(
@@ -1586,7 +1613,8 @@ fn spawn_background_process(
     let pid = child.id();
     let lifetime_ms = lifetime.as_millis() as u64;
     let cleanup = background_cleanup_metadata(pid, lifetime_ms);
-    let (stdout, stderr) = output_monitor.snapshot();
+    let (stdout, stderr) = output_monitor
+        .snapshot_after_startup_drain(Duration::from_millis(BACKGROUND_STARTUP_OUTPUT_DRAIN_MS));
     thread::spawn(move || {
         thread::sleep(lifetime);
         terminate_background_child(child);
