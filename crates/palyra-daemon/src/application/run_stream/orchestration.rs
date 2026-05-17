@@ -737,6 +737,7 @@ pub(crate) async fn process_run_stream_message(
         loop_state.start_payload(run_id.as_str()),
     )
     .await?;
+    let mut length_recovery_attempted = false;
 
     loop {
         let _turn_id = match loop_state.start_model_turn() {
@@ -930,6 +931,25 @@ pub(crate) async fn process_run_stream_message(
                 .await?;
             }
             RunStreamProviderResponseOutcome::Failed { message, provider_trace_ref, reason } => {
+                if let Some(recovery_prompt) = length_recovery_prompt(
+                    reason,
+                    message.as_str(),
+                    &loop_state,
+                    length_recovery_attempted,
+                ) {
+                    length_recovery_attempted = true;
+                    loop_state.append_user_guidance(recovery_prompt);
+                    append_agent_loop_tape_event(
+                        runtime_state,
+                        run_id.as_str(),
+                        tape_seq,
+                        "agent_loop.length_recovery_requested",
+                        loop_state
+                            .turn_payload(run_id.as_str(), "agent_loop.length_recovery_requested"),
+                    )
+                    .await?;
+                    continue;
+                }
                 terminate_run_stream_with_agent_loop_reason(
                     sender,
                     runtime_state,
@@ -1208,6 +1228,24 @@ fn truncated_final_answer_without_tools(output: &ProviderTurnOutput) -> Option<S
     })
 }
 
+fn length_recovery_prompt(
+    reason: AgentLoopTerminationReason,
+    message: &str,
+    loop_state: &AgentRunLoopState,
+    already_attempted: bool,
+) -> Option<&'static str> {
+    if already_attempted
+        || reason != AgentLoopTerminationReason::IncompleteFinalAnswer
+        || loop_state.remaining_model_turns() == 0
+        || !message.contains("finish_reason=length")
+    {
+        return None;
+    }
+    Some(
+        "The previous assistant output hit the provider output limit before a complete final answer or structured tool call. Continue now with no more explanatory prose. If the user requested files, code, tests, browser validation, research, or diagnostics, issue one concise tool call next using the available tool schema. Prefer palyra.fs.apply_patch for file writes and keep arguments minimal. If no tool is needed, answer in at most 120 words and do not claim unverified work.",
+    )
+}
+
 fn incomplete_final_answer_without_tools(text: Option<&str>) -> Option<String> {
     let text = text.unwrap_or_default().trim();
     if text.is_empty() {
@@ -1428,13 +1466,13 @@ async fn persist_run_stream_provider_turn_output(
 
 #[cfg(test)]
 mod tests {
-    use super::AgentRunLoopState;
     use super::{
         contains_raw_provider_tool_call_markup, incomplete_final_answer_without_tools,
-        incomplete_terminal_final_answer, terminal_tool_authorization_failure,
-        tool_result_to_provider_message, truncated_final_answer_without_tools,
-        RunStreamToolResultForModel,
+        incomplete_terminal_final_answer, length_recovery_prompt,
+        terminal_tool_authorization_failure, tool_result_to_provider_message,
+        truncated_final_answer_without_tools, RunStreamToolResultForModel,
     };
+    use super::{AgentLoopTerminationReason, AgentRunLoopState};
     use crate::model_provider::{
         ProviderFinishReason, ProviderMessage, ProviderMessageContentPart,
         ProviderOutputContentPart, ProviderRawProviderRefs, ProviderTurnOutput, ProviderUsage,
@@ -1679,6 +1717,38 @@ mod tests {
             .expect("length-finished output must not be accepted as final");
 
         assert!(message.contains("finish_reason=length"));
+    }
+
+    #[test]
+    fn length_finished_provider_output_gets_one_recovery_prompt() {
+        let mut loop_state = AgentRunLoopState::new(
+            vec![ProviderMessage::user_text("Create app files".to_owned())],
+            2,
+            8,
+            10_000,
+        );
+        loop_state.start_model_turn().expect("first turn should start");
+
+        let prompt = length_recovery_prompt(
+            AgentLoopTerminationReason::IncompleteFinalAnswer,
+            "model provider stopped because of an output token limit (finish_reason=length)",
+            &loop_state,
+            false,
+        )
+        .expect("first length failure with remaining turns should be recoverable");
+        assert!(prompt.contains("one concise tool call next"));
+        assert!(prompt.contains("palyra.fs.apply_patch"));
+
+        assert!(
+            length_recovery_prompt(
+                AgentLoopTerminationReason::IncompleteFinalAnswer,
+                "model provider stopped because of an output token limit (finish_reason=length)",
+                &loop_state,
+                true,
+            )
+            .is_none(),
+            "length recovery must be attempted at most once per run"
+        );
     }
 
     #[test]

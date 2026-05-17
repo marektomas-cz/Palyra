@@ -155,6 +155,10 @@ impl AgentRunLoopState {
         self.messages.push(ProviderMessage::assistant_from_output(output));
     }
 
+    pub(crate) fn append_user_guidance(&mut self, text: impl Into<String>) {
+        self.messages.push(ProviderMessage::user_text(text.into()));
+    }
+
     pub(crate) fn append_tool_result_messages(&mut self, messages: Vec<ProviderMessage>) {
         let added = messages.len().try_into().unwrap_or(u32::MAX);
         self.completed_tool_calls = self.completed_tool_calls.saturating_add(added);
@@ -167,6 +171,10 @@ impl AgentRunLoopState {
 
     pub(crate) fn remaining_tool_calls(&self) -> u32 {
         self.remaining_tool_calls
+    }
+
+    pub(crate) fn remaining_model_turns(&self) -> u32 {
+        self.remaining_model_turns
     }
 
     pub(crate) fn completed_tool_calls(&self) -> u32 {
