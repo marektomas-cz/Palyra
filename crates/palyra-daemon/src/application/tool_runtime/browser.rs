@@ -1319,6 +1319,15 @@ pub(crate) async fn execute_browser_tool(
                     error,
                 );
             }
+            if let Err(error) = attach_browser_caller_principal_metadata(&mut request, principal) {
+                return browser_tool_execution_outcome(
+                    proposal_id,
+                    input_json,
+                    false,
+                    b"{}".to_vec(),
+                    error,
+                );
+            }
             match client.export_pdf(request).await {
                 Ok(response) => {
                     let response = response.into_inner();
@@ -2666,6 +2675,26 @@ mod tests {
     #[test]
     fn browser_console_request_metadata_includes_caller_principal() {
         let mut request = Request::new(());
+
+        attach_browser_caller_principal_metadata(&mut request, " user:local ")
+            .expect("principal metadata should attach");
+
+        assert_eq!(
+            request
+                .metadata()
+                .get(BROWSER_CALLER_PRINCIPAL_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some("user:local")
+        );
+    }
+
+    #[test]
+    fn browser_pdf_request_metadata_includes_caller_principal() {
+        let mut request = Request::new(browser_v1::ExportPdfRequest {
+            v: CANONICAL_PROTOCOL_MAJOR,
+            session_id: None,
+            max_bytes: 0,
+        });
 
         attach_browser_caller_principal_metadata(&mut request, " user:local ")
             .expect("principal metadata should attach");
