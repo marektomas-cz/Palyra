@@ -83,6 +83,26 @@ fn browser_url_uses_file_scheme(raw_url: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn browser_session_profile_id_from_payload(
+    payload: &serde_json::Map<String, Value>,
+) -> Result<(Option<common_v1::CanonicalId>, Option<String>), String> {
+    let Some(value) = payload.get("profile_id") else {
+        return Ok((None, None));
+    };
+    let Value::String(raw) = value else {
+        return Err("palyra.browser.session.create field 'profile_id' must be a string".to_owned());
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok((None, None));
+    }
+    if validate_canonical_id(trimmed).is_ok() {
+        return Ok((Some(common_v1::CanonicalId { ulid: trimmed.to_owned() }), None));
+    }
+
+    Ok((None, Some(trimmed.to_owned())))
+}
+
 async fn validate_browser_file_url_workspace_scope(
     runtime_state: &Arc<GatewayRuntimeState>,
     context: ToolRuntimeExecutionContext<'_>,
@@ -236,40 +256,19 @@ pub(crate) async fn execute_browser_tool(
             let idle_ttl_ms = payload.get("idle_ttl_ms").and_then(Value::as_u64).unwrap_or(0);
             let allow_private_targets =
                 payload.get("allow_private_targets").and_then(Value::as_bool).unwrap_or(false);
-            let profile_id = match payload.get("profile_id") {
-                Some(Value::String(raw)) => {
-                    let trimmed = raw.trim();
-                    if trimmed.is_empty() {
-                        None
-                    } else {
-                        match validate_canonical_id(trimmed) {
-                            Ok(_) => Some(common_v1::CanonicalId { ulid: trimmed.to_owned() }),
-                            Err(error) => {
-                                return browser_tool_execution_outcome(
-                                    proposal_id,
-                                    input_json,
-                                    false,
-                                    b"{}".to_vec(),
-                                    format!(
-                                        "palyra.browser.session.create profile_id is invalid: {error}"
-                                    ),
-                                );
-                            }
-                        }
+            let (profile_id, ignored_profile_id) =
+                match browser_session_profile_id_from_payload(&payload) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return browser_tool_execution_outcome(
+                            proposal_id,
+                            input_json,
+                            false,
+                            b"{}".to_vec(),
+                            error,
+                        );
                     }
-                }
-                Some(_) => {
-                    return browser_tool_execution_outcome(
-                        proposal_id,
-                        input_json,
-                        false,
-                        b"{}".to_vec(),
-                        "palyra.browser.session.create field 'profile_id' must be a string"
-                            .to_owned(),
-                    );
-                }
-                None => None,
-            };
+                };
             let budget = payload.get("budget").and_then(Value::as_object).map(|value| {
                 browser_v1::SessionBudget {
                     max_navigation_timeout_ms: value
@@ -387,6 +386,11 @@ pub(crate) async fn execute_browser_tool(
                     let response = response.into_inner();
                     let session_id =
                         if let Some(value) = response.session_id { Some(value.ulid) } else { None };
+                    let profile_id_warning = ignored_profile_id.as_ref().map(|value| {
+                        format!(
+                            "ignored non-canonical profile_id '{value}'; session was created without a browser profile"
+                        )
+                    });
                     let output = json!({
                         "session_id": session_id,
                         "created_at_unix_ms": response.created_at_unix_ms,
@@ -412,6 +416,8 @@ pub(crate) async fn execute_browser_tool(
                         "persistence_id": response.persistence_id,
                         "state_restored": response.state_restored,
                         "profile_id": response.profile_id.map(|value| value.ulid),
+                        "ignored_profile_id": ignored_profile_id,
+                        "profile_id_warning": profile_id_warning,
                         "private_profile": response.private_profile,
                     });
                     (
@@ -2588,9 +2594,9 @@ mod tests {
     use super::{
         attach_browser_caller_principal_metadata, browser_console_entry_to_json,
         browser_file_url_to_path, browser_network_log_entry_to_json,
-        browser_observe_include_visible_text, browser_tool_execution_outcome,
-        browser_url_targets_loopback, canonical_file_path_is_inside_workspace_roots,
-        BROWSER_CALLER_PRINCIPAL_HEADER,
+        browser_observe_include_visible_text, browser_session_profile_id_from_payload,
+        browser_tool_execution_outcome, browser_url_targets_loopback,
+        canonical_file_path_is_inside_workspace_roots, BROWSER_CALLER_PRINCIPAL_HEADER,
     };
     use crate::transport::grpc::proto::palyra::browser::v1 as browser_v1;
     use palyra_common::CANONICAL_PROTOCOL_MAJOR;
@@ -2670,6 +2676,47 @@ mod tests {
             .as_str()
             .is_some_and(|hint| hint.contains("pass either selector or text")));
         assert!(outcome.error.contains("recovery_hint=wait_for_input_required"));
+    }
+
+    #[test]
+    fn browser_session_profile_id_accepts_existing_canonical_ids() {
+        let payload = json!({"profile_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV"});
+
+        let (profile_id, ignored) = browser_session_profile_id_from_payload(
+            payload.as_object().expect("payload must be an object"),
+        )
+        .expect("canonical profile id should parse");
+
+        assert_eq!(
+            profile_id.as_ref().map(|value| value.ulid.as_str()),
+            Some("01ARZ3NDEKTSV4RRFFQ69G5FAV")
+        );
+        assert_eq!(ignored, None);
+    }
+
+    #[test]
+    fn browser_session_profile_id_ignores_friendly_labels() {
+        let payload = json!({"profile_id": "scenario-s005-chat-demo"});
+
+        let (profile_id, ignored) = browser_session_profile_id_from_payload(
+            payload.as_object().expect("payload must be an object"),
+        )
+        .expect("friendly profile labels should not fail session creation");
+
+        assert!(profile_id.is_none());
+        assert_eq!(ignored.as_deref(), Some("scenario-s005-chat-demo"));
+    }
+
+    #[test]
+    fn browser_session_profile_id_rejects_non_string_values() {
+        let payload = json!({"profile_id": 42});
+
+        let error = browser_session_profile_id_from_payload(
+            payload.as_object().expect("payload must be an object"),
+        )
+        .expect_err("non-string profile id should fail");
+
+        assert!(error.contains("field 'profile_id' must be a string"));
     }
 
     #[test]

@@ -199,6 +199,16 @@ fn browser_session_create_returns_model_visible_handle() {
 }
 
 #[test]
+fn browser_session_create_schema_discourages_invented_profile_ids() {
+    let entry = registry_entry("palyra.browser.session.create").expect("browser create tool entry");
+
+    assert!(entry.input_schema["properties"]["profile_id"]["description"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("do not invent labels"));
+}
+
+#[test]
 fn workspace_file_schemas_accept_workspace_root_override() {
     let read_file = registry_entry("palyra.fs.read_file").expect("read file entry exists");
     let list_dir = registry_entry("palyra.fs.list_dir").expect("list dir entry exists");

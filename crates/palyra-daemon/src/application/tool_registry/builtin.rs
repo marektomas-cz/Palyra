@@ -727,7 +727,13 @@ fn browser_tool_schema(tool_name: &str) -> Value {
             properties.push(("poll_interval_ms", json!({"type":"integer","minimum":1})));
         }
         "palyra.browser.session.create" => {
-            properties.push(("profile_id", json!({"type":"string"})));
+            properties.push((
+                "profile_id",
+                json!({
+                    "type":"string",
+                    "description":"Optional existing browser profile_id returned by a profile list/create flow. Omit it for ordinary one-off sessions; do not invent labels or reuse scenario names as profile_id."
+                }),
+            ));
             properties.push(("private_profile", json!({"type":"boolean"})));
             properties.push(("allow_private_targets", json!({"type":"boolean"})));
             properties.push(("allow_downloads", json!({"type":"boolean"})));
