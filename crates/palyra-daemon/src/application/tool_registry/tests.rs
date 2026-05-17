@@ -141,6 +141,44 @@ fn anthropic_catalog_exposes_http_fetch_with_boolean_additional_properties() {
 }
 
 #[test]
+fn anthropic_catalog_exposes_browser_observe_without_default_keywords() {
+    let config = config(&["palyra.browser.observe"]);
+    let snapshot = build_model_visible_tool_catalog_snapshot(ToolCatalogBuildRequest {
+        config: &config,
+        browser_service_enabled: true,
+        request_context: &request_context(),
+        provider_kind: "anthropic",
+        provider_model_id: Some("minimax-m2.7"),
+        surface: ToolExposureSurface::RunStream,
+        remaining_tool_budget: 1,
+        created_at_unix_ms: 42,
+    });
+
+    let observe = snapshot
+        .tools
+        .iter()
+        .find(|tool| tool.name == "palyra.browser.observe")
+        .expect("browser observe should stay visible for Anthropic-compatible providers");
+    assert!(
+        !snapshot.filtered_tools.iter().any(|tool| {
+            tool.name == "palyra.browser.observe"
+                && tool.reason_code.as_str() == "provider_schema_incompatible"
+        }),
+        "browser observe must not be filtered for schema dialect incompatibility"
+    );
+    assert_eq!(
+        observe.provider_schema["properties"]["include_visible_text"]["type"],
+        serde_json::Value::String("boolean".to_owned())
+    );
+    assert!(observe.provider_schema["properties"]["include_visible_text"].get("default").is_none());
+
+    let payload = snapshot_to_provider_request_value(&snapshot);
+    let tools = provider_tools_from_catalog_snapshot(&payload, ToolSchemaDialect::Anthropic);
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0]["name"], "palyra.browser.observe");
+}
+
+#[test]
 fn browser_session_create_returns_model_visible_handle() {
     assert_eq!(
         projection_policy_for_tool("palyra.browser.session.create"),

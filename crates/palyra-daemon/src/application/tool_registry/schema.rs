@@ -38,6 +38,8 @@ fn normalize_schema_for_provider(
         return Ok(());
     };
 
+    object.remove("default");
+
     if dialect == ToolSchemaDialect::Anthropic
         && object.get("additionalProperties").is_some_and(Value::is_object)
     {
