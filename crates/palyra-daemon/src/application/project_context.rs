@@ -637,11 +637,27 @@ fn extract_absolute_prompt_paths(input_text: &str) -> Vec<String> {
 }
 
 fn looks_like_prompt_path_start(input_text: &str, start: usize, ch: char) -> bool {
+    if ch == '/' {
+        return prompt_path_start_has_boundary(input_text, start)
+            && input_text[start + ch.len_utf8()..]
+                .chars()
+                .next()
+                .is_some_and(|next| !next.is_whitespace() && !matches!(next, '/' | '\\'));
+    }
     if !ch.is_ascii_alphabetic() {
         return false;
     }
     let bytes = input_text.as_bytes();
-    bytes.get(start + 1) == Some(&b':') && matches!(bytes.get(start + 2), Some(b'\\' | b'/'))
+    prompt_path_start_has_boundary(input_text, start)
+        && bytes.get(start + 1) == Some(&b':')
+        && matches!(bytes.get(start + 2), Some(b'\\' | b'/'))
+}
+
+fn prompt_path_start_has_boundary(input_text: &str, start: usize) -> bool {
+    start == 0
+        || input_text[..start].chars().next_back().is_some_and(|ch| {
+            ch.is_whitespace() || matches!(ch, '"' | '\'' | '`' | '(' | '[' | '{' | '<' | '=')
+        })
 }
 
 fn preceding_quote(input_text: &str, start: usize) -> Option<char> {
