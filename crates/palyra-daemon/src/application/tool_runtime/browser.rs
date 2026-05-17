@@ -2161,6 +2161,40 @@ pub(crate) async fn execute_browser_tool(
     browser_tool_execution_outcome(proposal_id, input_json, outcome.0, outcome.1, outcome.2)
 }
 
+pub(crate) async fn close_browser_session_for_run_cleanup(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    session_id: &str,
+) -> Result<bool, String> {
+    if !runtime_state.config.browser_service.enabled {
+        return Err(
+            "palyra.browser.session cleanup skipped because browser service is disabled".to_owned()
+        );
+    }
+    let session_id = session_id.trim();
+    if session_id.is_empty() {
+        return Ok(false);
+    }
+    validate_canonical_id(session_id).map_err(|error| {
+        format!("palyra.browser.session cleanup session_id is invalid: {error}")
+    })?;
+
+    let mut client = connect_browser_service(runtime_state.config.browser_service.clone()).await?;
+    let mut request = Request::new(browser_v1::CloseSessionRequest {
+        v: CANONICAL_PROTOCOL_MAJOR,
+        session_id: Some(common_v1::CanonicalId { ulid: session_id.to_owned() }),
+    });
+    attach_browser_auth_metadata(
+        &mut request,
+        runtime_state.config.browser_service.auth_token.as_deref(),
+    )?;
+
+    client.close_session(request).await.map(|response| response.into_inner().closed).map_err(
+        |error| {
+            format!("palyra.browser.session cleanup failed: {}", sanitize_status_message(&error))
+        },
+    )
+}
+
 async fn connect_browser_service(
     config: BrowserServiceRuntimeConfig,
 ) -> Result<

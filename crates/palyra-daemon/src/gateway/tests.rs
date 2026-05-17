@@ -456,6 +456,22 @@ fn parse_tool_output_json(outcome: &super::ToolExecutionOutcome) -> Value {
     serde_json::from_slice(&outcome.output_json).expect("tool output should parse as JSON")
 }
 
+fn cleanup_test_tool_outcome(success: bool, output: Value) -> super::ToolExecutionOutcome {
+    super::ToolExecutionOutcome {
+        success,
+        output_json: serde_json::to_vec(&output).expect("test output should serialize"),
+        error: if success { String::new() } else { "failed".to_owned() },
+        attestation: crate::tool_protocol::ToolAttestation {
+            attestation_id: Ulid::new().to_string(),
+            execution_sha256: "cleanup-test".to_owned(),
+            executed_at_unix_ms: 0,
+            timed_out: false,
+            executor: "test".to_owned(),
+            sandbox_enforcement: "test".to_owned(),
+        },
+    }
+}
+
 async fn start_tool_program_test_run(
     state: &std::sync::Arc<GatewayRuntimeState>,
     session_id: &str,
@@ -3015,6 +3031,113 @@ async fn networked_worker_runtime_rejects_unsupported_context_tools() {
     assert!(!outcome.success);
     assert!(outcome.error.contains("backend.policy.tool_unsupported"));
     assert_eq!(outcome.attestation.executor, "networked_worker");
+}
+
+#[test]
+fn cleanup_resource_parsers_extract_run_owned_handles() {
+    let session_id = Ulid::new().to_string();
+    let process_output = serde_json::to_vec(&json!({
+        "background": true,
+        "pid": 111,
+        "process_handle": {
+            "kind": "pid",
+            "direct_process_pid": 222,
+        },
+    }))
+    .expect("process output should serialize");
+    assert_eq!(
+        super::background_process_pid_from_tool_output(process_output.as_slice()),
+        Some(222)
+    );
+
+    let foreground_output = serde_json::to_vec(&json!({
+        "background": false,
+        "pid": 333,
+    }))
+    .expect("foreground output should serialize");
+    assert_eq!(super::background_process_pid_from_tool_output(foreground_output.as_slice()), None);
+
+    let create_output =
+        serde_json::to_vec(&json!({ "session_id": session_id })).expect("output should serialize");
+    assert_eq!(
+        super::browser_session_id_from_create_output(create_output.as_slice()),
+        Some(session_id)
+    );
+}
+
+#[test]
+fn cleanup_resource_registry_deduplicates_and_drains_by_run() {
+    let state = build_test_runtime_state(false);
+    let run_id = Ulid::new().to_string();
+    let session_id = Ulid::new().to_string();
+
+    state.record_run_browser_session(run_id.as_str(), session_id.as_str());
+    state.record_run_browser_session(run_id.as_str(), session_id.as_str());
+    state.record_run_background_process(run_id.as_str(), 42);
+    state.record_run_background_process(run_id.as_str(), 42);
+
+    let resources = state.take_run_cleanup_resources(run_id.as_str());
+    assert_eq!(resources.browser_session_ids, vec![session_id]);
+    assert_eq!(resources.background_process_pids, vec![42]);
+    assert!(state.take_run_cleanup_resources(run_id.as_str()).is_empty());
+}
+
+#[test]
+fn tool_outcomes_record_and_forget_run_cleanup_resources() {
+    let state = build_test_runtime_state(false);
+    let run_id = Ulid::new().to_string();
+    let session_id = Ulid::new().to_string();
+    let context = super::ToolRuntimeExecutionContext {
+        principal: "user:ops",
+        device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        channel: Some("cli"),
+        session_id: "session-cleanup-resource-recording",
+        run_id: run_id.as_str(),
+        execution_backend: ExecutionBackendPreference::LocalSandbox,
+        backend_reason_code: "backend.default.local_sandbox",
+    };
+
+    let browser_outcome =
+        cleanup_test_tool_outcome(true, json!({ "session_id": session_id.as_str() }));
+    super::record_run_cleanup_resource_from_tool_outcome(
+        &state,
+        context,
+        super::BROWSER_SESSION_CREATE_TOOL_NAME,
+        b"{}",
+        &browser_outcome,
+    );
+
+    let process_outcome = cleanup_test_tool_outcome(
+        true,
+        json!({
+            "background": true,
+            "process_handle": {
+                "direct_process_pid": 1234,
+            },
+        }),
+    );
+    super::record_run_cleanup_resource_from_tool_outcome(
+        &state,
+        context,
+        super::PROCESS_RUNNER_TOOL_NAME,
+        b"{}",
+        &process_outcome,
+    );
+
+    let close_outcome = cleanup_test_tool_outcome(true, json!({ "closed": true }));
+    let close_input =
+        serde_json::to_vec(&json!({ "session_id": session_id })).expect("input should serialize");
+    super::record_run_cleanup_resource_from_tool_outcome(
+        &state,
+        context,
+        super::BROWSER_SESSION_CLOSE_TOOL_NAME,
+        close_input.as_slice(),
+        &close_outcome,
+    );
+
+    let resources = state.take_run_cleanup_resources(run_id.as_str());
+    assert!(resources.browser_session_ids.is_empty());
+    assert_eq!(resources.background_process_pids, vec![1234]);
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -461,6 +461,18 @@ pub(crate) struct RoutinesRuntimeConfig {
     pub timezone_mode: crate::cron::CronTimezoneMode,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct RunCleanupResources {
+    pub(crate) browser_session_ids: Vec<String>,
+    pub(crate) background_process_pids: Vec<u32>,
+}
+
+impl RunCleanupResources {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.browser_session_ids.is_empty() && self.background_process_pids.is_empty()
+    }
+}
+
 pub struct GatewayRuntimeState {
     pub(crate) started_at: Instant,
     pub(crate) build: BuildSnapshot,
@@ -479,6 +491,7 @@ pub struct GatewayRuntimeState {
     pub(crate) http_fetch_cache: Mutex<HashMap<String, CachedHttpFetchEntry>>,
     recent_context_assembly_traces: Mutex<Vec<Value>>,
     tool_approval_cache: Mutex<HashMap<String, CachedToolApprovalDecision>>,
+    run_cleanup_resources: Mutex<HashMap<String, RunCleanupResources>>,
     worker_fleet: RwLock<WorkerFleetManager>,
     pub(crate) provider_leases: ProviderLeaseManager,
     pub(crate) retrieval_backend: Arc<dyn RetrievalBackend>,
@@ -1360,6 +1373,7 @@ impl GatewayRuntimeState {
             http_fetch_cache: Mutex::new(HashMap::new()),
             recent_context_assembly_traces: Mutex::new(Vec::new()),
             tool_approval_cache: Mutex::new(HashMap::new()),
+            run_cleanup_resources: Mutex::new(HashMap::new()),
             worker_fleet: RwLock::new(WorkerFleetManager::default()),
             provider_leases: ProviderLeaseManager::default(),
             retrieval_backend,
@@ -1385,6 +1399,99 @@ impl GatewayRuntimeState {
 
     pub fn record_admin_status_request(&self) {
         self.counters.admin_status_requests.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_run_browser_session(&self, run_id: &str, session_id: &str) {
+        let run_id = run_id.trim();
+        let session_id = session_id.trim();
+        if run_id.is_empty() || session_id.is_empty() {
+            return;
+        }
+
+        match self.run_cleanup_resources.lock() {
+            Ok(mut resources_by_run) => {
+                let resources = resources_by_run.entry(run_id.to_owned()).or_default();
+                if !resources.browser_session_ids.iter().any(|existing| existing == session_id) {
+                    resources.browser_session_ids.push(session_id.to_owned());
+                }
+            }
+            Err(error) => {
+                warn!(
+                    run_id,
+                    error = %error,
+                    "failed to record browser session for run cleanup"
+                );
+            }
+        }
+    }
+
+    pub(crate) fn forget_run_browser_session(&self, run_id: &str, session_id: &str) {
+        let run_id = run_id.trim();
+        let session_id = session_id.trim();
+        if run_id.is_empty() || session_id.is_empty() {
+            return;
+        }
+
+        match self.run_cleanup_resources.lock() {
+            Ok(mut resources_by_run) => {
+                if let Some(resources) = resources_by_run.get_mut(run_id) {
+                    resources.browser_session_ids.retain(|existing| existing != session_id);
+                    if resources.is_empty() {
+                        resources_by_run.remove(run_id);
+                    }
+                }
+            }
+            Err(error) => {
+                warn!(
+                    run_id,
+                    error = %error,
+                    "failed to forget browser session for run cleanup"
+                );
+            }
+        }
+    }
+
+    pub(crate) fn record_run_background_process(&self, run_id: &str, pid: u32) {
+        let run_id = run_id.trim();
+        if run_id.is_empty() || pid == 0 {
+            return;
+        }
+
+        match self.run_cleanup_resources.lock() {
+            Ok(mut resources_by_run) => {
+                let resources = resources_by_run.entry(run_id.to_owned()).or_default();
+                if !resources.background_process_pids.contains(&pid) {
+                    resources.background_process_pids.push(pid);
+                }
+            }
+            Err(error) => {
+                warn!(
+                    run_id,
+                    pid,
+                    error = %error,
+                    "failed to record background process for run cleanup"
+                );
+            }
+        }
+    }
+
+    pub(crate) fn take_run_cleanup_resources(&self, run_id: &str) -> RunCleanupResources {
+        let run_id = run_id.trim();
+        if run_id.is_empty() {
+            return RunCleanupResources::default();
+        }
+
+        match self.run_cleanup_resources.lock() {
+            Ok(mut resources_by_run) => resources_by_run.remove(run_id).unwrap_or_default(),
+            Err(error) => {
+                warn!(
+                    run_id,
+                    error = %error,
+                    "failed to take run cleanup resources"
+                );
+                RunCleanupResources::default()
+            }
+        }
     }
 
     #[must_use]

@@ -2,6 +2,7 @@
 
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
+    process::Command,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex, RwLock,
@@ -35,7 +36,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use tonic::{Status, Streaming};
-use tracing::warn;
+use tracing::{info, warn};
 use ulid::Ulid;
 
 #[cfg(test)]
@@ -662,14 +663,22 @@ pub(crate) async fn execute_tool_with_runtime_dispatch(
         )
         .await
     } else if tool_name.starts_with("palyra.browser.") {
-        crate::application::tool_runtime::browser::execute_browser_tool(
+        let outcome = crate::application::tool_runtime::browser::execute_browser_tool(
             runtime_state,
             context,
             tool_name,
             proposal_id,
             input_json,
         )
-        .await
+        .await;
+        record_run_cleanup_resource_from_tool_outcome(
+            runtime_state,
+            context,
+            tool_name,
+            input_json,
+            &outcome,
+        );
+        outcome
     } else if tool_name == WORKSPACE_PATCH_TOOL_NAME {
         crate::application::tool_runtime::workspace_patch::execute_workspace_patch_tool(
             runtime_state,
@@ -683,10 +692,83 @@ pub(crate) async fn execute_tool_with_runtime_dispatch(
     } else if tool_name == PROCESS_RUNNER_TOOL_NAME {
         let config =
             process_runner_tool_config_for_session(runtime_state, context, input_json).await;
-        execute_tool_call(&config, proposal_id, tool_name, input_json).await
+        let outcome = execute_tool_call(&config, proposal_id, tool_name, input_json).await;
+        record_run_cleanup_resource_from_tool_outcome(
+            runtime_state,
+            context,
+            tool_name,
+            input_json,
+            &outcome,
+        );
+        outcome
     } else {
         execute_tool_call(&runtime_state.config.tool_call, proposal_id, tool_name, input_json).await
     }
+}
+
+fn record_run_cleanup_resource_from_tool_outcome(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    context: ToolRuntimeExecutionContext<'_>,
+    tool_name: &str,
+    input_json: &[u8],
+    outcome: &ToolExecutionOutcome,
+) {
+    if !outcome.success {
+        return;
+    }
+
+    match tool_name {
+        PROCESS_RUNNER_TOOL_NAME => {
+            if let Some(pid) =
+                background_process_pid_from_tool_output(outcome.output_json.as_slice())
+            {
+                runtime_state.record_run_background_process(context.run_id, pid);
+            }
+        }
+        BROWSER_SESSION_CREATE_TOOL_NAME => {
+            if let Some(session_id) =
+                browser_session_id_from_create_output(outcome.output_json.as_slice())
+            {
+                runtime_state.record_run_browser_session(context.run_id, session_id.as_str());
+            }
+        }
+        BROWSER_SESSION_CLOSE_TOOL_NAME => {
+            if let Some(session_id) = browser_session_id_from_tool_input(input_json) {
+                runtime_state.forget_run_browser_session(context.run_id, session_id.as_str());
+            }
+        }
+        _ => {}
+    }
+}
+
+fn background_process_pid_from_tool_output(output_json: &[u8]) -> Option<u32> {
+    let payload = serde_json::from_slice::<Value>(output_json).ok()?;
+    if payload.get("background").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    let pid = payload
+        .pointer("/process_handle/direct_process_pid")
+        .and_then(Value::as_u64)
+        .or_else(|| payload.get("pid").and_then(Value::as_u64))?;
+    u32::try_from(pid).ok().filter(|pid| *pid > 0)
+}
+
+fn browser_session_id_from_create_output(output_json: &[u8]) -> Option<String> {
+    let payload = serde_json::from_slice::<Value>(output_json).ok()?;
+    let session_id = payload.get("session_id").and_then(Value::as_str)?.trim();
+    if session_id.is_empty() || validate_canonical_id(session_id).is_err() {
+        return None;
+    }
+    Some(session_id.to_owned())
+}
+
+fn browser_session_id_from_tool_input(input_json: &[u8]) -> Option<String> {
+    let payload = serde_json::from_slice::<Value>(input_json).ok()?;
+    let session_id = payload.get("session_id").and_then(Value::as_str)?.trim();
+    if session_id.is_empty() || validate_canonical_id(session_id).is_err() {
+        return None;
+    }
+    Some(session_id.to_owned())
 }
 
 async fn process_runner_tool_config_for_session(
@@ -919,6 +1001,110 @@ pub(crate) async fn finalize_run_failure(input: RunFailureFinalization<'_>) {
         input.reason,
     )
     .await;
+    cleanup_run_resources(input.runtime_state, run_id, input.reason).await;
+}
+
+pub(crate) async fn cleanup_run_resources(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    run_id: &str,
+    reason: &str,
+) {
+    let resources = runtime_state.take_run_cleanup_resources(run_id);
+    if resources.is_empty() {
+        return;
+    }
+
+    let browser_session_count = resources.browser_session_ids.len();
+    let background_process_count = resources.background_process_pids.len();
+    for session_id in resources.browser_session_ids {
+        match crate::application::tool_runtime::browser::close_browser_session_for_run_cleanup(
+            runtime_state,
+            session_id.as_str(),
+        )
+        .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                warn!(
+                    run_id,
+                    session_id, reason, "browser session cleanup reported no session closed"
+                );
+            }
+            Err(error) => {
+                warn!(
+                    run_id,
+                    session_id,
+                    reason,
+                    error = %error,
+                    "failed to clean up browser session for terminal run"
+                );
+            }
+        }
+    }
+
+    for pid in resources.background_process_pids {
+        if let Err(error) = terminate_run_background_process(pid).await {
+            warn!(
+                run_id,
+                pid,
+                reason,
+                error = %error,
+                "failed to clean up background process for terminal run"
+            );
+        }
+    }
+
+    info!(
+        run_id,
+        reason,
+        browser_session_count,
+        background_process_count,
+        "cleaned up run-owned resources after terminal run"
+    );
+}
+
+async fn terminate_run_background_process(pid: u32) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || terminate_run_background_process_blocking(pid))
+        .await
+        .map_err(|error| format!("background process cleanup task failed: {error}"))?
+}
+
+#[cfg(windows)]
+fn terminate_run_background_process_blocking(pid: u32) -> Result<(), String> {
+    let pid_arg = pid.to_string();
+    let output = Command::new("taskkill")
+        .args(["/PID", pid_arg.as_str(), "/T", "/F"])
+        .output()
+        .map_err(|error| format!("failed to invoke taskkill for pid {pid}: {error}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    Err(format!(
+        "taskkill failed for pid {pid} with status {}; stdout={:?}; stderr={:?}",
+        output.status,
+        String::from_utf8_lossy(output.stdout.as_slice()),
+        String::from_utf8_lossy(output.stderr.as_slice())
+    ))
+}
+
+#[cfg(not(windows))]
+fn terminate_run_background_process_blocking(pid: u32) -> Result<(), String> {
+    let pid_arg = pid.to_string();
+    let output = Command::new("kill")
+        .args(["-TERM", pid_arg.as_str()])
+        .output()
+        .map_err(|error| format!("failed to invoke kill for pid {pid}: {error}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    Err(format!(
+        "kill failed for pid {pid} with status {}; stdout={:?}; stderr={:?}",
+        output.status,
+        String::from_utf8_lossy(output.stdout.as_slice()),
+        String::from_utf8_lossy(output.stderr.as_slice())
+    ))
 }
 
 async fn record_run_failure_journal_event(

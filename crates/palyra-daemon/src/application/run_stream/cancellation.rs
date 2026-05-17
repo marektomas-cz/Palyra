@@ -4,7 +4,7 @@ use tokio::sync::mpsc;
 use tonic::Status;
 
 use crate::{
-    gateway::{GatewayRuntimeState, CANCELLED_REASON},
+    gateway::{cleanup_run_resources, GatewayRuntimeState, CANCELLED_REASON},
     orchestrator::{RunLifecycleState, RunStateMachine, RunTransition},
     self_healing::WorkHeartbeatKind,
     transport::grpc::proto::palyra::common::v1 as common_v1,
@@ -43,5 +43,6 @@ pub(crate) async fn transition_run_stream_to_cancelled(
     {
         let _ = sender.send(Err(error)).await;
     }
+    cleanup_run_resources(runtime_state, run_id, CANCELLED_REASON).await;
     Ok(())
 }

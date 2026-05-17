@@ -25,7 +25,7 @@ use crate::{
     },
     delegation::DelegationSnapshot,
     gateway::{
-        canonical_id, current_unix_ms, ingest_memory_best_effort, non_empty,
+        canonical_id, cleanup_run_resources, current_unix_ms, ingest_memory_best_effort, non_empty,
         record_message_router_journal_event, security_requests_json_mode, truncate_with_ellipsis,
         GatewayRuntimeState,
     },
@@ -469,7 +469,7 @@ async fn terminate_run_stream_with_agent_loop_reason(
         )
         .await?;
     runtime_state.clear_self_healing_heartbeat(WorkHeartbeatKind::Run, run_id);
-    send_status_with_tape(
+    let status_result = send_status_with_tape(
         sender,
         runtime_state,
         run_id,
@@ -477,7 +477,9 @@ async fn terminate_run_stream_with_agent_loop_reason(
         common_v1::stream_status::StatusKind::Failed,
         message.as_str(),
     )
-    .await
+    .await;
+    cleanup_run_resources(runtime_state, run_id, message.as_str()).await;
+    status_result
 }
 
 #[allow(clippy::result_large_err)]
