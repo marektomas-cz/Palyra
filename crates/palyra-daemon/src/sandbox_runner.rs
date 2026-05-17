@@ -994,10 +994,13 @@ fn resolve_working_directory(
 fn validate_argument_workspace_scope(
     workspace_root: &Path,
     cwd: &Path,
-    _command: &str,
+    command: &str,
     args: &[String],
 ) -> Result<(), SandboxProcessRunError> {
     for arg in args {
+        if is_windows_taskkill_switch(command, arg.as_str()) {
+            continue;
+        }
         if let Some(file_url_path) = parse_file_url_path(arg.as_str())? {
             let _ = resolve_scoped_path(workspace_root, cwd, file_url_path.as_str(), false)?;
             continue;
@@ -1031,6 +1034,13 @@ fn validate_argument_workspace_scope(
         let _ = resolve_scoped_path(workspace_root, cwd, arg.as_str(), false)?;
     }
     Ok(())
+}
+
+fn is_windows_taskkill_switch(command: &str, arg: &str) -> bool {
+    if !cfg!(windows) || !command.trim().eq_ignore_ascii_case("taskkill") {
+        return false;
+    }
+    matches!(arg.trim().to_ascii_uppercase().as_str(), "/PID" | "/T" | "/F")
 }
 
 fn option_assignment_value(arg: &str) -> Option<&str> {
@@ -2341,6 +2351,26 @@ mod tests {
 
         assert_eq!(error.kind, SandboxProcessRunErrorKind::WorkspaceScopeDenied);
         assert!(error.message.contains("escapes workspace"), "{}", error.message);
+
+        let _ = fs::remove_dir_all(workspace.as_path());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn validate_argument_workspace_scope_allows_taskkill_cleanup_switches() {
+        let workspace = unique_temp_dir("workspace-taskkill-switches");
+        fs::create_dir_all(workspace.as_path()).expect("workspace directory should be created");
+        let canonical_workspace = canonical_workspace_root(workspace.as_path())
+            .expect("workspace root should canonicalize");
+        let args = vec!["/PID".to_owned(), "41176".to_owned(), "/T".to_owned(), "/F".to_owned()];
+
+        validate_argument_workspace_scope(
+            canonical_workspace.as_path(),
+            canonical_workspace.as_path(),
+            "taskkill",
+            args.as_slice(),
+        )
+        .expect("taskkill cleanup switches should not be treated as absolute paths");
 
         let _ = fs::remove_dir_all(workspace.as_path());
     }
