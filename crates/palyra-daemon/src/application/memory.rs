@@ -6,9 +6,7 @@ use tonic::Status;
 use ulid::Ulid;
 
 use crate::{
-    application::service_authorization::{
-        authorize_memory_action, principal_has_sensitive_service_role, SensitiveServiceRole,
-    },
+    application::service_authorization::authorize_memory_action,
     gateway::{
         current_unix_ms_status, non_empty, GatewayRuntimeState, MAX_MEMORY_SEARCH_TOP_K,
         MAX_MEMORY_TOOL_TAGS,
@@ -759,17 +757,8 @@ pub(crate) fn classify_memory_write(
         MemoryWriteSensitivity::Sensitive => reason_codes.push("sensitivity:sensitive".to_owned()),
         MemoryWriteSensitivity::HighRisk => reason_codes.push("sensitivity:high_risk".to_owned()),
     }
-    if !principal_has_sensitive_service_role(
-        input.principal.as_str(),
-        SensitiveServiceRole::AdminOrSystem,
-    ) && matches!(category, MemoryWriteCategory::Procedure | MemoryWriteCategory::Constraint)
-    {
-        reason_codes.push("policy:operator_review_for_runtime_rule".to_owned());
-    }
-
     let approval_state = if input.confidence < MEMORY_RETAIN_LOW_CONFIDENCE_THRESHOLD
         || sensitivity != MemoryWriteSensitivity::Normal
-        || reason_codes.iter().any(|reason| reason == "policy:operator_review_for_runtime_rule")
     {
         MemoryWriteApprovalState::Required
     } else {

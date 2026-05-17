@@ -4080,6 +4080,33 @@ async fn memory_retain_tool_principal_scope_writes_normal_preferences() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn memory_retain_tool_principal_scope_writes_normal_workflow_rules() {
+    let state = build_test_runtime_state(false);
+    let input_json = br#"{"content_text":"Workflow rules for E2E memory capacity: always inspect files, run available tests, and write concise Czech reports.","scope":"principal","confidence":0.9,"tags":["e2e-s035-rules"]}"#;
+    let outcome = execute_memory_retain_tool(
+        &state,
+        routines_tool_test_context(),
+        "01ARZ3NDEKTSV4RRFFQ69G5FD3",
+        input_json,
+    )
+    .await;
+    assert!(
+        outcome.success,
+        "normal workflow rules should be retained without manual review: {}",
+        outcome.error
+    );
+    let payload = parse_tool_output_json(&outcome);
+    assert_eq!(payload.get("status").and_then(Value::as_str), Some("retained"));
+    assert_eq!(payload.get("durable_memory_write").and_then(Value::as_bool), Some(true));
+    assert_eq!(payload.get("review_state").and_then(Value::as_str), Some("written"));
+    assert_eq!(payload.get("approval_required").and_then(Value::as_bool), Some(false));
+    assert_eq!(
+        payload.pointer("/write_classification/category").and_then(Value::as_str),
+        Some("procedure")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn memory_retain_tool_principal_scope_requires_review_for_high_risk_content() {
     let state = build_test_runtime_state(false);
     let input_json =
