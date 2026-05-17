@@ -268,15 +268,36 @@ pub(crate) async fn run_memory_async(
                 .context("memory GetMemoryItem returned empty item payload before replace")?;
 
             let replacement_tags = if tag.is_empty() { existing.tags.clone() } else { tag };
+            let replacement_source = source.map(memory_source_to_proto).unwrap_or(existing.source);
+            let replacement_channel = existing.channel.clone();
+            let replacement_session_id = existing.session_id.clone();
+            let replacement_confidence = replacement_confidence.unwrap_or(existing.confidence);
+            let replacement_ttl_unix_ms = ttl_unix_ms.unwrap_or(existing.ttl_unix_ms);
+            let mut delete_request = Request::new(memory_v1::DeleteMemoryItemRequest {
+                v: CANONICAL_PROTOCOL_MAJOR,
+                memory_id: Some(memory_id),
+            });
+            inject_run_stream_metadata(delete_request.metadata_mut(), &connection)?;
+            let delete_response = client
+                .delete_memory_item(delete_request)
+                .await
+                .context("failed to call memory DeleteMemoryItem before replacement ingest")?
+                .into_inner();
+            if !delete_response.deleted {
+                return Err(anyhow!(
+                    "memory replace did not delete the original item; replacement ingest was not attempted"
+                ));
+            }
+
             let mut ingest_request = Request::new(memory_v1::IngestMemoryRequest {
                 v: CANONICAL_PROTOCOL_MAJOR,
-                source: source.map(memory_source_to_proto).unwrap_or(existing.source),
+                source: replacement_source,
                 content_text: content,
-                channel: existing.channel.clone(),
-                session_id: existing.session_id.clone(),
+                channel: replacement_channel,
+                session_id: replacement_session_id,
                 tags: replacement_tags,
-                confidence: replacement_confidence.unwrap_or(existing.confidence),
-                ttl_unix_ms: ttl_unix_ms.unwrap_or(existing.ttl_unix_ms),
+                confidence: replacement_confidence,
+                ttl_unix_ms: replacement_ttl_unix_ms,
             });
             inject_run_stream_metadata(ingest_request.metadata_mut(), &connection)?;
             let replacement = client
@@ -286,17 +307,6 @@ pub(crate) async fn run_memory_async(
                 .into_inner()
                 .item
                 .context("memory IngestMemory returned empty replacement item payload")?;
-
-            let mut delete_request = Request::new(memory_v1::DeleteMemoryItemRequest {
-                v: CANONICAL_PROTOCOL_MAJOR,
-                memory_id: Some(memory_id),
-            });
-            inject_run_stream_metadata(delete_request.metadata_mut(), &connection)?;
-            let delete_response = client
-                .delete_memory_item(delete_request)
-                .await
-                .context("failed to call memory DeleteMemoryItem after replacement ingest")?
-                .into_inner();
 
             let payload = json!({
                 "replaced_memory_id": replaced_memory_ulid,
