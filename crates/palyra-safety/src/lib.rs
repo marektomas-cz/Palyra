@@ -736,10 +736,67 @@ fn detect_sensitive_assignment(line: &str, lowered: &str) -> Option<&'static str
     let separator_index = line.find(['=', ':'])?;
     let key = lowered.get(..separator_index)?.trim().trim_matches(['"', '\'']);
     let value = line.get(separator_index + 1..)?.trim();
-    if value.is_empty() || key.ends_with("_ref") {
+    if value.is_empty() || key.ends_with("_ref") || is_safe_secret_reference_value(value) {
         return None;
     }
     SENSITIVE_ASSIGNMENT_KEYS.iter().find(|candidate| key.contains(**candidate)).copied()
+}
+
+fn is_safe_secret_reference_value(value: &str) -> bool {
+    let normalized = value.trim().trim_end_matches(';').trim();
+    if normalized.is_empty() {
+        return false;
+    }
+    let normalized = normalized.trim_matches(|ch| ch == '(' || ch == ')').trim();
+    is_env_member_reference(normalized)
+        || is_env_getter_reference(normalized, "Deno.env.get")
+        || is_env_getter_reference(normalized, "std::env::var")
+        || is_env_getter_reference(normalized, "env::var")
+        || is_env_getter_reference(normalized, "os.getenv")
+        || is_os_environ_index_reference(normalized)
+}
+
+fn is_env_member_reference(value: &str) -> bool {
+    ["import.meta.env.", "process.env.", "env."]
+        .iter()
+        .any(|prefix| value.strip_prefix(prefix).is_some_and(is_env_identifier))
+}
+
+fn is_env_getter_reference(value: &str, prefix: &str) -> bool {
+    let Some(inner) = value.strip_prefix(prefix).and_then(|rest| rest.strip_prefix('(')) else {
+        return false;
+    };
+    let Some(inner) = inner.strip_suffix(')') else {
+        return false;
+    };
+    is_quoted_env_identifier(inner.trim())
+}
+
+fn is_os_environ_index_reference(value: &str) -> bool {
+    let Some(inner) = value.strip_prefix("os.environ[").and_then(|rest| rest.strip_suffix(']'))
+    else {
+        return false;
+    };
+    is_quoted_env_identifier(inner.trim())
+}
+
+fn is_quoted_env_identifier(value: &str) -> bool {
+    if let Some(inner) = value.strip_prefix('"').and_then(|rest| rest.strip_suffix('"')) {
+        return is_env_identifier(inner);
+    }
+    if let Some(inner) = value.strip_prefix('\'').and_then(|rest| rest.strip_suffix('\'')) {
+        return is_env_identifier(inner);
+    }
+    false
+}
+
+fn is_env_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
 fn detect_prefixed_secret_token(line: &str) -> Option<&'static str> {
@@ -1170,6 +1227,27 @@ mod tests {
             .finding_codes()
             .iter()
             .any(|code| code == "secret_leak.assignment.api_key"));
+    }
+
+    #[test]
+    fn source_env_secret_references_are_not_redacted_as_secret_literals() {
+        let source = "const apiKey = import.meta.env.PRIVATE_API_KEY;\n\
+                      const token = process.env.ACCESS_TOKEN;\n\
+                      const fallback = Deno.env.get(\"CLIENT_SECRET\");";
+        let outcome = redact_text_for_export(
+            source,
+            SafetySourceKind::Workspace,
+            SafetyContentKind::WorkspaceDocument,
+            TrustLabel::TrustedLocal,
+        );
+
+        assert!(!outcome.redacted);
+        assert_eq!(outcome.redacted_text, source);
+        assert!(!outcome
+            .scan
+            .finding_codes()
+            .iter()
+            .any(|code| code.starts_with("secret_leak.assignment.")));
     }
 
     #[test]
