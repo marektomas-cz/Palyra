@@ -35,6 +35,9 @@ const CAPTURE_POLL_INTERVAL_MS: u64 = 5;
 const CAPTURE_CHUNK_BYTES: usize = 4 * 1024;
 const PROCESS_FAILURE_OUTPUT_PREVIEW_BYTES: usize = 4 * 1024;
 const BACKGROUND_STARTUP_CHECK_MS: u64 = 250;
+#[cfg(windows)]
+const BACKGROUND_STARTUP_OUTPUT_DRAIN_MS: u64 = 4_000;
+#[cfg(not(windows))]
 const BACKGROUND_STARTUP_OUTPUT_DRAIN_MS: u64 = 1_000;
 const DEFAULT_BACKGROUND_PROCESS_LIFETIME_MS: u64 = 60_000;
 const MAX_BACKGROUND_PROCESS_LIFETIME_MS: u64 = 5 * 60_000;
@@ -2867,11 +2870,13 @@ mod tests {
         };
         let workspace = unique_temp_dir("workspace-background-startup-output");
         fs::create_dir_all(workspace.as_path()).expect("workspace directory should be created");
-        fs::write(
-            workspace.join("print_port.py"),
-            "import time\nprint('PORT=54321', flush=True)\ntime.sleep(2)\n",
-        )
-        .expect("startup output script should be written");
+        let script = if cfg!(windows) {
+            "import time\ntime.sleep(1.5)\nprint('PORT=54321', flush=True)\ntime.sleep(2)\n"
+        } else {
+            "import time\nprint('PORT=54321', flush=True)\ntime.sleep(2)\n"
+        };
+        fs::write(workspace.join("print_port.py"), script)
+            .expect("startup output script should be written");
         let mut policy =
             sandbox_policy_with_allowed_executables(workspace.clone(), vec![python.to_owned()]);
         policy.allow_interpreters = true;
