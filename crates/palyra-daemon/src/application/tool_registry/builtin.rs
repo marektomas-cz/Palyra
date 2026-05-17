@@ -422,7 +422,7 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
                         "background",
                         json!({
                             "type":"boolean",
-                            "description":"Start an allowlisted long-running local process and return immediately. Use this instead of shell background syntax or nohup for temporary dev servers. The runtime fails fast if the process exits during startup. For local browser verification, bind to 127.0.0.1 with an explicit port and set timeout_ms to a bounded verification window such as 60000."
+                            "description":"Start an allowlisted long-running local process and return immediately. Use this instead of shell background syntax or nohup for temporary dev servers. The runtime fails fast if the process exits during startup and returns bounded startup stdout/stderr snapshots, which may include a server URL or selected dynamic port. For local browser verification, prefer binding to 127.0.0.1 with an explicit port and set timeout_ms to a bounded verification window such as 60000."
                         }),
                     ),
                     (
@@ -784,6 +784,8 @@ mod tests {
             .and_then(serde_json::Value::as_str)
             .expect("background description should be visible to models");
         assert!(background_description.contains("fails fast"));
+        assert!(background_description.contains("startup stdout/stderr snapshots"));
+        assert!(background_description.contains("selected dynamic port"));
     }
 
     #[test]

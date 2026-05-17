@@ -7,7 +7,7 @@ use std::{
     process::{Child, Command, ExitStatus, Stdio},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     thread,
     time::{Duration, Instant},
@@ -162,11 +162,35 @@ struct ProcessExecutionCapture {
     duration_ms: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct StreamCapture {
     bytes: Vec<u8>,
     truncated: bool,
     read_error: Option<String>,
+}
+
+#[derive(Debug)]
+struct BackgroundOutputMonitor {
+    stdout: Arc<Mutex<StreamCapture>>,
+    stderr: Arc<Mutex<StreamCapture>>,
+}
+
+impl BackgroundOutputMonitor {
+    fn snapshot(&self) -> (StreamCapture, StreamCapture) {
+        let stdout =
+            self.stdout.lock().map(|capture| capture.clone()).unwrap_or_else(|_| StreamCapture {
+                bytes: Vec::new(),
+                truncated: false,
+                read_error: Some("background stdout capture lock poisoned".to_owned()),
+            });
+        let stderr =
+            self.stderr.lock().map(|capture| capture.clone()).unwrap_or_else(|_| StreamCapture {
+                bytes: Vec::new(),
+                truncated: false,
+                read_error: Some("background stderr capture lock poisoned".to_owned()),
+            });
+        (stdout, stderr)
+    }
 }
 
 pub fn run_constrained_process(
@@ -1524,17 +1548,18 @@ fn spawn_background_process(
     lifetime: Duration,
 ) -> Result<SandboxProcessRunSuccess, SandboxProcessRunError> {
     let mut command = build_process_command(policy, input, workspace_root, cwd)?;
-    command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     if !process_runner_allows_host_access(policy) {
         attach_resource_limits_unix(&mut command, policy);
     }
 
-    let child = command.spawn().map_err(|error| SandboxProcessRunError {
+    let mut child = command.spawn().map_err(|error| SandboxProcessRunError {
         kind: SandboxProcessRunErrorKind::SpawnFailed,
         message: format!("sandbox process spawn failed for command '{}': {error}", input.command),
     })?;
+    let output_monitor =
+        start_background_output_monitor(&mut child, policy.max_output_bytes as usize)?;
     thread::sleep(Duration::from_millis(BACKGROUND_STARTUP_CHECK_MS));
-    let mut child = child;
     if let Some(status) = child.try_wait().map_err(|error| SandboxProcessRunError {
         kind: SandboxProcessRunErrorKind::RuntimeFailure,
         message: format!(
@@ -1542,18 +1567,26 @@ fn spawn_background_process(
             input.command
         ),
     })? {
+        let (stdout, stderr) = output_monitor.snapshot();
         return Err(SandboxProcessRunError {
             kind: SandboxProcessRunErrorKind::RuntimeFailure,
             message: format!(
-                "sandbox background process exited before startup check (code={}) for command '{}'; use the cwd field instead of command-line cwd flags, verify the server command, and probe the expected port before browser navigation",
+                "sandbox background process exited before startup check (code={}) for command '{}'{}{}; use the cwd field instead of command-line cwd flags, verify the server command, and probe the expected port before browser navigation",
                 status.code().unwrap_or(-1),
-                input.command
+                input.command,
+                redacted_process_output_preview(stdout.bytes.as_slice())
+                    .map(|preview| format!(", stdout_preview={preview:?}"))
+                    .unwrap_or_default(),
+                redacted_process_output_preview(stderr.bytes.as_slice())
+                    .map(|preview| format!(", stderr_preview={preview:?}"))
+                    .unwrap_or_default(),
             ),
         });
     }
     let pid = child.id();
     let lifetime_ms = lifetime.as_millis() as u64;
     let cleanup = background_cleanup_metadata(pid, lifetime_ms);
+    let (stdout, stderr) = output_monitor.snapshot();
     thread::spawn(move || {
         thread::sleep(lifetime);
         terminate_background_child(child);
@@ -1561,10 +1594,11 @@ fn spawn_background_process(
 
     let output_json = serde_json::to_vec(&json!({
         "exit_code": 0,
-        "stdout": "",
-        "stderr": "",
-        "stdout_truncated": false,
-        "stderr_truncated": false,
+        "stdout": String::from_utf8_lossy(stdout.bytes.as_slice()).to_string(),
+        "stderr": String::from_utf8_lossy(stderr.bytes.as_slice()).to_string(),
+        "stdout_truncated": stdout.truncated,
+        "stderr_truncated": stderr.truncated,
+        "background_output_note": "stdout/stderr are bounded startup snapshots captured during the startup check; use an explicit fixed port if a dynamic port is not printed here",
         "duration_ms": 0,
         "background": true,
         "pid": pid,
@@ -1584,6 +1618,84 @@ fn spawn_background_process(
         message: format!("failed to serialize sandbox background process output JSON: {error}"),
     })?;
     Ok(SandboxProcessRunSuccess { output_json })
+}
+
+fn start_background_output_monitor(
+    child: &mut Child,
+    max_output_bytes: usize,
+) -> Result<BackgroundOutputMonitor, SandboxProcessRunError> {
+    let stdout = child.stdout.take().ok_or_else(|| SandboxProcessRunError {
+        kind: SandboxProcessRunErrorKind::RuntimeFailure,
+        message: "sandbox background process stdout pipe is unavailable".to_owned(),
+    })?;
+    let stderr = child.stderr.take().ok_or_else(|| SandboxProcessRunError {
+        kind: SandboxProcessRunErrorKind::RuntimeFailure,
+        message: "sandbox background process stderr pipe is unavailable".to_owned(),
+    })?;
+    let remaining_budget = Arc::new(AtomicUsize::new(max_output_bytes));
+    let quota_triggered = Arc::new(AtomicBool::new(false));
+    let stdout_capture = Arc::new(Mutex::new(StreamCapture {
+        bytes: Vec::new(),
+        truncated: false,
+        read_error: None,
+    }));
+    let stderr_capture = Arc::new(Mutex::new(StreamCapture {
+        bytes: Vec::new(),
+        truncated: false,
+        read_error: None,
+    }));
+    spawn_background_capture_reader(
+        stdout,
+        Arc::clone(&remaining_budget),
+        Arc::clone(&quota_triggered),
+        Arc::clone(&stdout_capture),
+    );
+    spawn_background_capture_reader(
+        stderr,
+        remaining_budget,
+        quota_triggered,
+        Arc::clone(&stderr_capture),
+    );
+    Ok(BackgroundOutputMonitor { stdout: stdout_capture, stderr: stderr_capture })
+}
+
+fn spawn_background_capture_reader<R>(
+    mut reader: R,
+    remaining_budget: Arc<AtomicUsize>,
+    quota_triggered: Arc<AtomicBool>,
+    capture: Arc<Mutex<StreamCapture>>,
+) where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut buffer = [0_u8; CAPTURE_CHUNK_BYTES];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(read_count) => {
+                    let granted = reserve_output_budget(remaining_budget.as_ref(), read_count);
+                    if let Ok(mut capture) = capture.lock() {
+                        if granted > 0 {
+                            capture.bytes.extend_from_slice(&buffer[..granted]);
+                        }
+                        if granted < read_count {
+                            capture.truncated = true;
+                        }
+                    }
+                    if granted < read_count {
+                        quota_triggered.store(true, Ordering::Relaxed);
+                        break;
+                    }
+                }
+                Err(error) => {
+                    if let Ok(mut capture) = capture.lock() {
+                        capture.read_error = Some(error.to_string());
+                    }
+                    break;
+                }
+            }
+        }
+    });
 }
 
 fn terminate_background_child(mut child: Child) {
@@ -2697,7 +2809,10 @@ mod tests {
             serde_json::from_slice(&result.output_json).expect("output should parse");
 
         assert_eq!(output.get("background").and_then(serde_json::Value::as_bool), Some(true));
-        assert_eq!(output.get("lifetime_ms").and_then(serde_json::Value::as_u64), Some(100));
+        assert_eq!(
+            output.get("lifetime_ms").and_then(serde_json::Value::as_u64),
+            Some(super::DEFAULT_BACKGROUND_PROCESS_LIFETIME_MS)
+        );
         assert!(output.get("pid").and_then(serde_json::Value::as_u64).is_some());
         assert_eq!(
             output
@@ -2706,6 +2821,63 @@ mod tests {
             output.get("pid").and_then(serde_json::Value::as_u64)
         );
         assert!(output.pointer("/cleanup/manual_command/command").is_some());
+
+        let _ = fs::remove_dir_all(workspace.as_path());
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn background_process_returns_startup_output_snapshot() {
+        let Some(python) = ["python3", "python", "py"].into_iter().find(|command| {
+            Command::new(command)
+                .arg("--version")
+                .output()
+                .map(|output| output.status.success())
+                .unwrap_or(false)
+        }) else {
+            return;
+        };
+        let workspace = unique_temp_dir("workspace-background-startup-output");
+        fs::create_dir_all(workspace.as_path()).expect("workspace directory should be created");
+        fs::write(
+            workspace.join("print_port.py"),
+            "import time\nprint('PORT=54321', flush=True)\ntime.sleep(2)\n",
+        )
+        .expect("startup output script should be written");
+        let mut policy =
+            sandbox_policy_with_allowed_executables(workspace.clone(), vec![python.to_owned()]);
+        policy.allow_interpreters = true;
+        policy.egress_enforcement_mode = EgressEnforcementMode::Preflight;
+        let input = serde_json::to_vec(&serde_json::json!({
+            "command": python,
+            "args": ["print_port.py"],
+            "background": true,
+            "timeout_ms": 60_000
+        }))
+        .expect("input should serialize");
+
+        let result =
+            run_constrained_process(&policy, input.as_slice(), Duration::from_millis(1_000))
+                .expect("background process should start");
+        let output: serde_json::Value =
+            serde_json::from_slice(&result.output_json).expect("output should parse");
+
+        assert_eq!(output.get("background").and_then(serde_json::Value::as_bool), Some(true));
+        let stdout = output
+            .get("stdout")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .replace("\r\n", "\n");
+        assert_eq!(stdout, "PORT=54321\n");
+        assert_eq!(
+            output.get("stdout_truncated").and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+        assert!(output
+            .get("background_output_note")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .contains("startup snapshots"));
 
         let _ = fs::remove_dir_all(workspace.as_path());
     }
