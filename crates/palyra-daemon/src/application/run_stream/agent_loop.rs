@@ -11,8 +11,10 @@ use crate::{
     model_provider::{ProviderMessage, ProviderResponse, ProviderTurnOutput},
 };
 
-pub(crate) const DEFAULT_AGENT_LOOP_MAX_MODEL_TURNS: u32 = 12;
-pub(crate) const DEFAULT_AGENT_LOOP_WALL_CLOCK_BUDGET_MS: u64 = 300_000;
+// The local setup configures 32 tool calls per run. App/browser workflows often
+// need one model turn per tool-result batch plus a final verification turn.
+pub(crate) const DEFAULT_AGENT_LOOP_MAX_MODEL_TURNS: u32 = 48;
+pub(crate) const DEFAULT_AGENT_LOOP_WALL_CLOCK_BUDGET_MS: u64 = 900_000;
 
 const BROWSER_SESSION_CREATE_TOOL_NAME: &str = "palyra.browser.session.create";
 const BROWSER_SESSION_CLOSE_TOOL_NAME: &str = "palyra.browser.session.close";
@@ -399,6 +401,23 @@ mod tests {
         let snapshot = state.snapshot("run-01", None);
 
         assert_eq!(snapshot.remaining_model_turns, DEFAULT_AGENT_LOOP_MAX_MODEL_TURNS);
+    }
+
+    #[test]
+    fn default_turn_budget_tracks_local_app_workflow_tool_budget() {
+        assert_eq!(AgentRunLoopState::default_model_turn_budget(32), 33);
+
+        let mut state =
+            AgentRunLoopState::new(vec![ProviderMessage::user_text("hello")], 33, 32, 10_000);
+        for expected_turn in 1..=33 {
+            assert_eq!(state.start_model_turn(), Ok(expected_turn));
+        }
+        assert_eq!(state.start_model_turn(), Err(AgentLoopTerminationReason::MaxTurns));
+    }
+
+    #[test]
+    fn wall_clock_budget_allows_longer_browser_verification_workflows() {
+        assert_eq!(DEFAULT_AGENT_LOOP_WALL_CLOCK_BUDGET_MS, 15 * 60 * 1_000);
     }
 
     #[test]
