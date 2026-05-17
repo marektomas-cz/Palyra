@@ -1,5 +1,5 @@
-use crate::gateway::current_unix_ms;
 use crate::gateway::ListOrchestratorSessionsRequest;
+use crate::gateway::{current_unix_ms, MEMORY_AUTO_INJECT_MIN_SCORE};
 use crate::journal::{
     MemoryRetentionPolicy, RecallArtifactCreateRequest, RecallArtifactListFilter,
     RecallArtifactRecord, SessionSearchOutcome, SessionSearchRequest, RECALL_ARTIFACT_KIND_PREVIEW,
@@ -13,6 +13,7 @@ use crate::{
         memory_provider_system_prompt_snapshot, run_memory_provider_reindex,
         MemoryProviderHookContext,
     },
+    application::provider_input::curated_memory_sources_for_prompt_context,
     application::recall::{
         preview_recall, recall_preview_console_payload, RecallPreviewEnvelope, RecallRequest,
     },
@@ -44,6 +45,10 @@ pub(crate) async fn console_memory_status_handler(
     let embeddings_status =
         state.runtime.memory_embeddings_status().await.map_err(runtime_status_response)?;
     let memory_config = state.runtime.memory_config_snapshot();
+    let auto_inject_sources = curated_memory_sources_for_prompt_context()
+        .into_iter()
+        .map(|source| source.as_str())
+        .collect::<Vec<_>>();
     let retrieval_config = state.runtime.retrieval_config_snapshot();
     let retrieval_backend =
         state.runtime.retrieval_backend_snapshot().map_err(runtime_status_response)?;
@@ -99,6 +104,13 @@ pub(crate) async fn console_memory_status_handler(
             "max_bytes": memory_config.retention_max_bytes,
             "ttl_days": memory_config.retention_ttl_days,
             "vacuum_schedule": memory_config.retention_vacuum_schedule,
+        },
+        "auto_inject": {
+            "enabled": memory_config.auto_inject_enabled,
+            "max_items": memory_config.auto_inject_max_items,
+            "min_score": MEMORY_AUTO_INJECT_MIN_SCORE,
+            "sources": auto_inject_sources,
+            "manual_ingest_visibility": "manual/import memories are eligible for automatic prompt context when enabled",
         },
         "maintenance": {
             "interval_ms": maintenance_interval_ms,

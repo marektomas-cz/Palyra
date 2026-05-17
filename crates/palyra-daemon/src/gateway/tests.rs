@@ -1785,6 +1785,86 @@ async fn memory_auto_inject_searches_principal_scope_across_sessions() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn default_memory_auto_inject_adds_manual_preference_to_fresh_session_prompt() {
+    let state = build_test_runtime_state(false);
+    assert!(
+        state.memory_config_snapshot().auto_inject_enabled,
+        "manual/import memory should be eligible for prompt auto-inject by default"
+    );
+
+    let context = RequestContext {
+        principal: "user:ops".to_owned(),
+        device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+        channel: Some("cli".to_owned()),
+    };
+    let current_session_id = "01ARZ3NDEKTSV4RRFFQ69G5FD0";
+    let current_run_id = "01ARZ3NDEKTSV4RRFFQ69G5FD1";
+    upsert_test_orchestrator_session(&state, &context, current_session_id);
+    state
+        .start_orchestrator_run(OrchestratorRunStartRequest {
+            run_id: current_run_id.to_owned(),
+            session_id: current_session_id.to_owned(),
+            origin_kind: "memory_auto_inject_default_test".to_owned(),
+            origin_run_id: None,
+            triggered_by_principal: Some(context.principal.clone()),
+            parameter_delta_json: None,
+        })
+        .await
+        .expect("test run should start");
+
+    state
+        .ingest_memory_item(MemoryItemCreateRequest {
+            memory_id: "01ARZ3NDEKTSV4RRFFQ69G5FD2".to_owned(),
+            principal: context.principal.clone(),
+            channel: context.channel.clone(),
+            session_id: None,
+            source: MemorySource::Manual,
+            content_text:
+                "E2E preference: for this test project prefer TypeScript, Playwright, and concise Czech reports."
+                    .to_owned(),
+            tags: vec!["e2e-preference".to_owned()],
+            confidence: Some(0.95),
+            ttl_unix_ms: None,
+        })
+        .await
+        .expect("manual memory ingest should seed default auto-inject recall");
+
+    let mut tape_seq = 1_i64;
+    let prepared = prepare_model_provider_input(
+        &state,
+        &context,
+        PrepareModelProviderInputRequest {
+            run_id: current_run_id,
+            tape_seq: &mut tape_seq,
+            session_id: current_session_id,
+            previous_run_id: None,
+            parameter_delta_json: None,
+            input_text: "For this E2E test project, what stack and report style should you prefer? Answer in one concise Czech sentence. Do not use tools unless needed.",
+            attachments: &[],
+            provider_kind_hint: None,
+            provider_model_id_hint: None,
+            tool_catalog_snapshot: None,
+            memory_ingest_reason: "memory_auto_inject_default_test",
+            memory_prompt_failure_mode: MemoryPromptFailureMode::Fail,
+            channel_for_log: "cli",
+        },
+    )
+    .await
+    .expect("provider input preparation should auto-inject matching manual memory by default");
+
+    assert!(
+        prepared.provider_input_text.contains("<memory_context"),
+        "fresh-session provider input should include automatic memory context: {}",
+        prepared.provider_input_text
+    );
+    assert!(
+        prepared.provider_input_text.contains("TypeScript, Playwright, and concise Czech reports"),
+        "stored preference should be available to the model without explicit recall: {}",
+        prepared.provider_input_text
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn memory_auto_inject_excludes_transient_tape_memory_sources() {
     let state = build_test_runtime_state(false);
     let context = RequestContext {

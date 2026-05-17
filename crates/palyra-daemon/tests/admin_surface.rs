@@ -2378,6 +2378,16 @@ fn console_memory_status_and_index_surface_return_operator_payloads() -> Result<
         status_response.get("retrieval").is_some(),
         "memory status response should include retrieval backend payload"
     );
+    assert_eq!(
+        status_response.pointer("/auto_inject/enabled").and_then(Value::as_bool),
+        Some(true),
+        "memory status should report the default prompt auto-inject posture"
+    );
+    assert_eq!(
+        status_response.pointer("/auto_inject/sources").and_then(Value::as_array).map(Vec::len),
+        Some(2),
+        "memory status should report which durable sources are eligible for auto-inject"
+    );
 
     let missing_csrf = client
         .post(format!("http://127.0.0.1:{admin_port}/console/v1/memory/index"))

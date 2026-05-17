@@ -417,7 +417,7 @@ pub(crate) async fn run_memory_async(
                 println!("{}", serde_json::to_string_pretty(&payload)?);
             } else {
                 println!(
-                    "memory.ingest id={} source={} created_at_ms={} agent_visibility=explicit_recall_required recall_hint=\"palyra memory recall <query> --json\"",
+                    "memory.ingest id={} source={} created_at_ms={} agent_visibility=auto_inject_eligible recall_hint=\"palyra memory recall <query> --json\"",
                     item.memory_id.map(|value| value.ulid).unwrap_or_default(),
                     memory_source_to_text(item.source),
                     item.created_at_unix_ms
@@ -1120,6 +1120,18 @@ fn emit_memory_status(payload: &Value, json_output: bool) -> Result<()> {
         .pointer("/maintenance/next_vacuum_due_at_unix_ms")
         .and_then(Value::as_i64)
         .map_or("none".to_owned(), |v| v.to_string());
+    let auto_inject_enabled =
+        payload.pointer("/auto_inject/enabled").and_then(Value::as_bool).unwrap_or(false);
+    let auto_inject_max_items =
+        payload.pointer("/auto_inject/max_items").and_then(Value::as_u64).unwrap_or(0);
+    let auto_inject_min_score =
+        payload.pointer("/auto_inject/min_score").and_then(Value::as_f64).unwrap_or(0.0);
+    let auto_inject_sources = payload
+        .pointer("/auto_inject/sources")
+        .and_then(Value::as_array)
+        .map(|sources| sources.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(","))
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "unknown".to_owned());
 
     println!(
         "memory.status entries={} approx_bytes={} embeddings_mode={} target_model={} target_dims={} target_version={} indexed={} pending={}",
@@ -1128,6 +1140,10 @@ fn emit_memory_status(payload: &Value, json_output: bool) -> Result<()> {
     println!(
         "memory.retention max_entries={} max_bytes={} ttl_days={} vacuum_schedule={}",
         max_entries, max_bytes, ttl_days, vacuum_schedule
+    );
+    println!(
+        "memory.auto_inject enabled={} max_items={} min_score={:.3} sources={}",
+        auto_inject_enabled, auto_inject_max_items, auto_inject_min_score, auto_inject_sources
     );
     println!(
         "memory.maintenance interval_ms={} last_run_at_unix_ms={} last_deleted_total={} next_run_at_unix_ms={} next_vacuum_due_at_unix_ms={}",
@@ -1318,7 +1334,8 @@ fn attach_manual_ingest_visibility(payload: &mut Value) {
         "agent_visibility".to_owned(),
         json!({
             "manual_ingest_auto_attached_by_command": false,
-            "normal_agent_run_context": "manual memory ingest stores searchable memory; it does not itself attach recall evidence to later agent prompts",
+            "auto_inject_default_enabled": true,
+            "normal_agent_run_context": "manual memory ingest stores searchable memory that is eligible for automatic prompt context when memory.auto_inject.enabled is true; use explicit recall for deterministic preview",
             "recall_for_prompt_preview": "palyra memory recall <query> --json",
         }),
     );
@@ -1399,6 +1416,10 @@ mod tests {
         assert_eq!(
             payload.pointer("/agent_visibility/manual_ingest_auto_attached_by_command"),
             Some(&json!(false))
+        );
+        assert_eq!(
+            payload.pointer("/agent_visibility/auto_inject_default_enabled"),
+            Some(&json!(true))
         );
         assert_eq!(
             payload.pointer("/agent_visibility/recall_for_prompt_preview"),
