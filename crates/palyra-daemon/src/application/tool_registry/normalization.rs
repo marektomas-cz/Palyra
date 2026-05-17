@@ -74,6 +74,7 @@ pub(crate) fn validate_tool_call_against_catalog_snapshot(
     }
 
     let mut steps = Vec::new();
+    let raw_value = normalize_tool_specific_argument_aliases(tool_name, raw_value, &mut steps);
     let normalized_value =
         normalize_value_against_schema(raw_value, &tool.schema, "", None, &mut steps).map_err(
             |message| ToolCallRejection {
@@ -135,6 +136,110 @@ fn normalize_legacy_policy_passthrough(
             steps: Vec::new(),
         },
     })
+}
+
+fn normalize_tool_specific_argument_aliases(
+    tool_name: &str,
+    value: Value,
+    steps: &mut Vec<ToolArgumentNormalizationStep>,
+) -> Value {
+    if tool_name != "palyra.fs.apply_patch" {
+        return value;
+    }
+    normalize_apply_patch_raw_alias(value, steps)
+}
+
+fn normalize_apply_patch_raw_alias(
+    value: Value,
+    steps: &mut Vec<ToolArgumentNormalizationStep>,
+) -> Value {
+    let mut input = match value {
+        Value::Object(input) => input,
+        other => return other,
+    };
+    if input.contains_key("patch") {
+        return Value::Object(input);
+    }
+
+    let Some(raw) = input.remove("raw") else {
+        return Value::Object(input);
+    };
+    match raw {
+        Value::String(raw_text) => {
+            let patch = extract_xmlish_parameter(raw_text.as_str(), "patch")
+                .unwrap_or_else(|| raw_text.trim().to_owned());
+            if !patch.is_empty() {
+                input.insert("patch".to_owned(), Value::String(patch));
+                steps.push(ToolArgumentNormalizationStep {
+                    json_pointer: "/raw".to_owned(),
+                    from_type: "string".to_owned(),
+                    to_type: "object.patch".to_owned(),
+                    reason_code: "tool_call.arguments.apply_patch_raw_alias".to_owned(),
+                });
+            }
+            if !input.contains_key("workspace_root") {
+                if let Some(workspace_root) =
+                    extract_xmlish_parameter(raw_text.as_str(), "workspace_root")
+                {
+                    if !workspace_root.trim().is_empty() {
+                        input.insert("workspace_root".to_owned(), Value::String(workspace_root));
+                        steps.push(ToolArgumentNormalizationStep {
+                            json_pointer: "/raw".to_owned(),
+                            from_type: "string".to_owned(),
+                            to_type: "object.workspace_root".to_owned(),
+                            reason_code: "tool_call.arguments.apply_patch_raw_workspace_root_alias"
+                                .to_owned(),
+                        });
+                    }
+                }
+            }
+        }
+        Value::Object(mut raw_object) => {
+            if let Some(patch) = raw_object.remove("patch").filter(Value::is_string) {
+                input.insert("patch".to_owned(), patch);
+                steps.push(ToolArgumentNormalizationStep {
+                    json_pointer: "/raw/patch".to_owned(),
+                    from_type: "string".to_owned(),
+                    to_type: "object.patch".to_owned(),
+                    reason_code: "tool_call.arguments.apply_patch_nested_patch_alias".to_owned(),
+                });
+            }
+            if !input.contains_key("workspace_root") {
+                if let Some(workspace_root) =
+                    raw_object.remove("workspace_root").filter(Value::is_string)
+                {
+                    input.insert("workspace_root".to_owned(), workspace_root);
+                    steps.push(ToolArgumentNormalizationStep {
+                        json_pointer: "/raw/workspace_root".to_owned(),
+                        from_type: "string".to_owned(),
+                        to_type: "object.workspace_root".to_owned(),
+                        reason_code: "tool_call.arguments.apply_patch_nested_workspace_root_alias"
+                            .to_owned(),
+                    });
+                }
+            }
+        }
+        other => {
+            input.insert("raw".to_owned(), other);
+        }
+    }
+    Value::Object(input)
+}
+
+fn extract_xmlish_parameter(input: &str, name: &str) -> Option<String> {
+    let double_quoted = format!(r#"<parameter name="{name}">"#);
+    let single_quoted = format!("<parameter name='{name}'>");
+    let (start, marker_len) = input
+        .find(double_quoted.as_str())
+        .map(|start| (start, double_quoted.len()))
+        .or_else(|| input.find(single_quoted.as_str()).map(|start| (start, single_quoted.len())))?;
+    let rest = &input[start + marker_len..];
+    let end = rest
+        .find("</parameter>")
+        .or_else(|| rest.find(r#"<parameter name=""#))
+        .or_else(|| rest.find("<parameter name='"))
+        .unwrap_or(rest.len());
+    Some(rest[..end].trim().to_owned())
 }
 
 pub(crate) fn tool_call_rejection_error_payload(rejection: &ToolCallRejection) -> Value {
