@@ -39,6 +39,7 @@ const BACKGROUND_STARTUP_CHECK_MS: u64 = 250;
 const BACKGROUND_STARTUP_OUTPUT_DRAIN_MS: u64 = 4_000;
 #[cfg(not(windows))]
 const BACKGROUND_STARTUP_OUTPUT_DRAIN_MS: u64 = 1_000;
+const BACKGROUND_POST_OUTPUT_EXIT_CHECK_MS: u64 = 250;
 const DEFAULT_BACKGROUND_PROCESS_LIFETIME_MS: u64 = 60_000;
 const MAX_BACKGROUND_PROCESS_LIFETIME_MS: u64 = 5 * 60_000;
 const SENSITIVE_URL_PATH_MARKERS: &[&str] =
@@ -1598,26 +1599,19 @@ fn spawn_background_process(
         let (stdout, stderr) = output_monitor.snapshot_after_startup_drain(Duration::from_millis(
             BACKGROUND_STARTUP_OUTPUT_DRAIN_MS,
         ));
-        return Err(SandboxProcessRunError {
-            kind: SandboxProcessRunErrorKind::RuntimeFailure,
-            message: format!(
-                "sandbox background process exited before startup check (code={}) for command '{}'{}{}; use the cwd field instead of command-line cwd flags, verify the server command, and probe the expected port before browser navigation",
-                status.code().unwrap_or(-1),
-                input.command,
-                redacted_process_output_preview(stdout.bytes.as_slice())
-                    .map(|preview| format!(", stdout_preview={preview:?}"))
-                    .unwrap_or_default(),
-                redacted_process_output_preview(stderr.bytes.as_slice())
-                    .map(|preview| format!(", stderr_preview={preview:?}"))
-                    .unwrap_or_default(),
-            ),
-        });
+        return Err(background_process_startup_failure(input, status, &stdout, &stderr));
     }
     let pid = child.id();
     let lifetime_ms = lifetime.as_millis() as u64;
     let cleanup = background_cleanup_metadata(pid, lifetime_ms);
     let (stdout, stderr) = output_monitor
         .snapshot_after_startup_drain(Duration::from_millis(BACKGROUND_STARTUP_OUTPUT_DRAIN_MS));
+    if let Some(status) = wait_for_background_process_exit(
+        &mut child,
+        Duration::from_millis(BACKGROUND_POST_OUTPUT_EXIT_CHECK_MS),
+    )? {
+        return Err(background_process_startup_failure(input, status, &stdout, &stderr));
+    }
     thread::spawn(move || {
         thread::sleep(lifetime);
         terminate_background_child(child);
@@ -1649,6 +1643,50 @@ fn spawn_background_process(
         message: format!("failed to serialize sandbox background process output JSON: {error}"),
     })?;
     Ok(SandboxProcessRunSuccess { output_json })
+}
+
+fn wait_for_background_process_exit(
+    child: &mut Child,
+    max_wait: Duration,
+) -> Result<Option<ExitStatus>, SandboxProcessRunError> {
+    let started_at = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(Some(status)),
+            Ok(None) if started_at.elapsed() < max_wait => {
+                thread::sleep(Duration::from_millis(CAPTURE_POLL_INTERVAL_MS));
+            }
+            Ok(None) => return Ok(None),
+            Err(error) => {
+                return Err(SandboxProcessRunError {
+                    kind: SandboxProcessRunErrorKind::RuntimeFailure,
+                    message: format!("sandbox background process exit check failed: {error}"),
+                });
+            }
+        }
+    }
+}
+
+fn background_process_startup_failure(
+    input: &ProcessRunnerInput,
+    status: ExitStatus,
+    stdout: &StreamCapture,
+    stderr: &StreamCapture,
+) -> SandboxProcessRunError {
+    SandboxProcessRunError {
+        kind: SandboxProcessRunErrorKind::RuntimeFailure,
+        message: format!(
+            "sandbox background process exited before startup check (code={}) for command '{}'{}{}; use the cwd field instead of command-line cwd flags, verify the server command, and probe the expected port before browser navigation",
+            status.code().unwrap_or(-1),
+            input.command,
+            redacted_process_output_preview(stdout.bytes.as_slice())
+                .map(|preview| format!(", stdout_preview={preview:?}"))
+                .unwrap_or_default(),
+            redacted_process_output_preview(stderr.bytes.as_slice())
+                .map(|preview| format!(", stderr_preview={preview:?}"))
+                .unwrap_or_default(),
+        ),
+    }
 }
 
 fn start_background_output_monitor(
@@ -2939,6 +2977,48 @@ mod tests {
 
         assert_eq!(error.kind, SandboxProcessRunErrorKind::RuntimeFailure);
         assert!(error.message.contains("exited before startup check"), "{}", error.message);
+
+        let _ = fs::remove_dir_all(workspace.as_path());
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn run_constrained_process_rejects_background_process_that_exits_after_startup_output() {
+        let Some(python) = ["python3", "python", "py"].into_iter().find(|command| {
+            Command::new(command)
+                .arg("--version")
+                .output()
+                .map(|output| output.status.success())
+                .unwrap_or(false)
+        }) else {
+            return;
+        };
+        let workspace = unique_temp_dir("workspace-background-delayed-failure");
+        fs::create_dir_all(workspace.as_path()).expect("workspace directory should be created");
+        fs::write(
+            workspace.join("delayed_fail.py"),
+            "import sys, time\ntime.sleep(0.35)\nprint('Unknown command: \"node\"', flush=True)\nsys.exit(1)\n",
+        )
+        .expect("delayed failure script should be written");
+        let mut policy =
+            sandbox_policy_with_allowed_executables(workspace.clone(), vec![python.to_owned()]);
+        policy.allow_interpreters = true;
+        policy.egress_enforcement_mode = EgressEnforcementMode::Preflight;
+        let input = serde_json::to_vec(&serde_json::json!({
+            "command": python,
+            "args": ["delayed_fail.py"],
+            "background": true,
+            "timeout_ms": 60_000
+        }))
+        .expect("input should serialize");
+
+        let error =
+            run_constrained_process(&policy, input.as_slice(), Duration::from_millis(1_000))
+                .expect_err("background startup should reject delayed immediate failures");
+
+        assert_eq!(error.kind, SandboxProcessRunErrorKind::RuntimeFailure);
+        assert!(error.message.contains("exited before startup check"), "{}", error.message);
+        assert!(error.message.contains("Unknown command"), "{}", error.message);
 
         let _ = fs::remove_dir_all(workspace.as_path());
     }
