@@ -13288,6 +13288,8 @@ impl JournalStore {
         let now = current_unix_ms()?;
         let top_k = request.top_k.clamp(1, MAX_MEMORY_ITEMS_LIST_LIMIT);
         let candidate_limit = top_k.saturating_mul(8).clamp(top_k, MAX_MEMORY_SEARCH_CANDIDATES);
+        let normalized_query_terms = normalized_fts_terms(query_text.as_str());
+        let allow_vector_only_candidates = normalized_query_terms.len() > 1;
         let fts_queries = build_memory_fts_queries(query_text.as_str());
         let query_embedding = self.query_embedding_for_search(
             query_text.as_str(),
@@ -13463,6 +13465,7 @@ impl JournalStore {
             if !memory_tags_match(item.tags.as_slice(), requested_tags.as_slice()) {
                 continue;
             }
+            let key = item.memory_id.clone();
             let dims = row.get::<_, Option<i64>>(13)?.unwrap_or_default() as usize;
             let vector_blob: Option<Vec<u8>> = row.get(15)?;
             let vector_raw = vector_blob
@@ -13474,14 +13477,16 @@ impl JournalStore {
             if vector_raw <= 0.0 {
                 continue;
             }
-            let recency_raw = recency_score(now, item.created_at_unix_ms);
-            let snippet = memory_snippet(item.content_text.as_str(), query_text.as_str());
-            let key = item.memory_id.clone();
             if let Some(existing) = candidates_by_id.get_mut(key.as_str()) {
                 existing.vector_raw = existing.vector_raw.max(vector_raw);
                 existing.vector_candidate = true;
                 continue;
             }
+            if !allow_vector_only_candidates {
+                continue;
+            }
+            let recency_raw = recency_score(now, item.created_at_unix_ms);
+            let snippet = memory_snippet(item.content_text.as_str(), query_text.as_str());
             candidates_by_id.insert(
                 key,
                 MemorySearchCandidateRecord {
@@ -22505,6 +22510,57 @@ mod tests {
         assert!(
             hits.first().map(|hit| hit.item.content_text.contains("Playwright")).unwrap_or(false),
             "manual preference should be the top hit: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn memory_search_does_not_return_vector_only_hits_for_single_terms() {
+        let db_path = temp_db_path();
+        let store = JournalStore::open(test_journal_config(db_path, false))
+            .expect("journal store should open");
+        store
+            .create_memory_item(&sample_memory_request(
+                "01ARZ3NDEKTSV4RRFFQ69G5FCK",
+                "user:ops",
+                None,
+                None,
+                MemorySource::Manual,
+                "For this E2E harness, prefer TypeScript and Playwright for UI smoke tests.",
+            ))
+            .expect("manual preference memory should be created");
+
+        let old_framework_hits = store
+            .search_memory(&MemorySearchRequest {
+                principal: "user:ops".to_owned(),
+                channel: None,
+                session_id: None,
+                query: "Vitest".to_owned(),
+                top_k: 5,
+                min_score: 0.0,
+                tags: Vec::new(),
+                sources: Vec::new(),
+            })
+            .expect("single-term memory search should succeed");
+        assert!(
+            old_framework_hits.is_empty(),
+            "single-term audit queries should require a lexical match, not a vector-only hit"
+        );
+
+        let current_framework_hits = store
+            .search_memory(&MemorySearchRequest {
+                principal: "user:ops".to_owned(),
+                channel: None,
+                session_id: None,
+                query: "Playwright".to_owned(),
+                top_k: 5,
+                min_score: 0.0,
+                tags: Vec::new(),
+                sources: Vec::new(),
+            })
+            .expect("single-term memory search should still return lexical matches");
+        assert_eq!(
+            current_framework_hits.first().map(|hit| hit.item.memory_id.as_str()),
+            Some("01ARZ3NDEKTSV4RRFFQ69G5FCK")
         );
     }
 

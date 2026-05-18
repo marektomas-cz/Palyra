@@ -406,16 +406,21 @@ async fn retain_memory_candidate(
     {
         let replace_duplicate_content =
             should_replace_lifecycle_duplicate_content(&classification, &duplicate);
-        let merged_tags =
-            merge_memory_tags(duplicate.item.tags.as_slice(), request.tags.as_slice());
+        let replacement_content = replace_duplicate_content
+            .then(|| lifecycle_replacement_content(&classification, request.content_text.as_str()));
+        let tags = if replace_duplicate_content {
+            normalize_lifecycle_tags(request.tags.as_slice())
+        } else {
+            merge_memory_tags(duplicate.item.tags.as_slice(), request.tags.as_slice())
+        };
         let updated = runtime_state
             .update_memory_item_lifecycle(MemoryItemLifecycleUpdateRequest {
                 memory_id: duplicate.item.memory_id.clone(),
                 principal: request.principal.clone(),
                 channel: duplicate.item.channel.clone(),
                 session_id: duplicate.item.session_id.clone(),
-                content_text: replace_duplicate_content.then(|| request.content_text.clone()),
-                tags: merged_tags,
+                content_text: replacement_content,
+                tags,
                 confidence: Some(
                     duplicate.item.confidence.unwrap_or(0.0).max(confidence).clamp(0.0, 1.0),
                 ),
@@ -722,6 +727,131 @@ fn should_replace_lifecycle_duplicate_content(
             classification.category,
             MemoryWriteCategory::Correction | MemoryWriteCategory::Preference
         )
+}
+
+fn lifecycle_replacement_content(
+    classification: &MemoryWriteClassification,
+    content_text: &str,
+) -> String {
+    if classification.category != MemoryWriteCategory::Correction {
+        return compact_memory_text(content_text);
+    }
+    let without_prefix =
+        strip_ascii_prefix_ignore_case(content_text.trim(), "Correction:").unwrap_or(content_text);
+    let without_parentheticals = remove_old_preference_parentheticals(without_prefix);
+    let without_negated_segments = remove_old_preference_segments(without_parentheticals.as_str());
+    let compact = compact_memory_text(without_negated_segments.as_str());
+    if compact.is_empty() {
+        compact_memory_text(content_text)
+    } else {
+        capitalize_first_ascii(compact)
+    }
+}
+
+fn strip_ascii_prefix_ignore_case<'a>(input: &'a str, prefix: &str) -> Option<&'a str> {
+    let trimmed = input.trim_start();
+    let candidate = trimmed.get(..prefix.len())?;
+    if candidate.eq_ignore_ascii_case(prefix) {
+        Some(trimmed[prefix.len()..].trim_start())
+    } else {
+        None
+    }
+}
+
+fn remove_old_preference_parentheticals(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(open_index) = rest.find('(') {
+        let Some(close_offset) = rest[open_index + 1..].find(')') else {
+            break;
+        };
+        let close_index = open_index + 1 + close_offset;
+        let note = &rest[open_index + 1..close_index];
+        let normalized_note = note.to_ascii_lowercase();
+        if normalized_note.contains("instead of ")
+            || normalized_note.contains("rather than ")
+            || normalized_note.trim_start().starts_with("not ")
+        {
+            output.push_str(rest[..open_index].trim_end());
+            rest = &rest[close_index + 1..];
+        } else {
+            output.push_str(&rest[..=close_index]);
+            rest = &rest[close_index + 1..];
+        }
+    }
+    output.push_str(rest);
+    output
+}
+
+fn remove_old_preference_segments(input: &str) -> String {
+    [", not ", "; not ", " - not ", " instead of ", " rather than "]
+        .into_iter()
+        .fold(input.to_owned(), |current, marker| {
+            remove_old_preference_segments_for_marker(current.as_str(), marker)
+        })
+}
+
+fn remove_old_preference_segments_for_marker(input: &str, marker: &str) -> String {
+    let mut current = input.to_owned();
+    loop {
+        let normalized = current.to_ascii_lowercase();
+        let Some(start_index) = normalized.find(marker) else {
+            break;
+        };
+        let segment_start = start_index + marker.len();
+        let mut segment_end = current.len();
+        let mut boundary = None;
+        for (offset, character) in current[segment_start..].char_indices() {
+            if matches!(character, '.' | ',' | ';') {
+                segment_end = segment_start + offset;
+                boundary = Some(character);
+                break;
+            }
+        }
+        let suffix_start = match boundary {
+            Some('.') => segment_end,
+            Some(character) => segment_end + character.len_utf8(),
+            None => segment_end,
+        };
+        let mut next = String::with_capacity(current.len());
+        next.push_str(current[..start_index].trim_end());
+        next.push_str(current[suffix_start..].trim_start_matches(' '));
+        current = next;
+    }
+    current
+}
+
+fn compact_memory_text(input: &str) -> String {
+    let mut compact = input.split_whitespace().collect::<Vec<_>>().join(" ");
+    for _ in 0..3 {
+        compact = compact
+            .replace(" ,", ",")
+            .replace(" .", ".")
+            .replace(" ;", ";")
+            .replace(", ,", ",")
+            .replace(", .", ".")
+            .replace("; .", ".")
+            .replace(",,", ",")
+            .replace("..", ".");
+    }
+    compact
+        .trim_matches(|character: char| {
+            character.is_whitespace() || matches!(character, ',' | ';' | '-' | ':')
+        })
+        .to_owned()
+}
+
+fn capitalize_first_ascii(input: String) -> String {
+    let Some(first) = input.chars().next() else {
+        return input;
+    };
+    if !first.is_ascii_lowercase() {
+        return input;
+    }
+    let mut output = String::with_capacity(input.len());
+    output.push(first.to_ascii_uppercase());
+    output.push_str(&input[first.len_utf8()..]);
+    output
 }
 
 fn resolve_lifecycle_write_scope(
@@ -1409,6 +1539,28 @@ mod tests {
             "E2E testovací projekt má používat TypeScript a Playwright; Vitest už nepoužívat.",
             "E2E preference: for this test project use TypeScript, Vitest, and concise Czech reports.",
         ));
+    }
+
+    #[test]
+    fn replacement_content_removes_old_preference_markers() {
+        let classification = classify_memory_write(classification_input(
+            "Correction: for E2E tests use Playwright, not Vitest. Keep concise Czech reports.",
+        ));
+
+        assert_eq!(
+            lifecycle_replacement_content(
+                &classification,
+                "Correction: for E2E tests use Playwright, not Vitest. Keep concise Czech reports.",
+            ),
+            "For E2E tests use Playwright. Keep concise Czech reports."
+        );
+        assert_eq!(
+            lifecycle_replacement_content(
+                &classification,
+                "Prefer TypeScript, Playwright (instead of Vitest), and concise Czech summaries.",
+            ),
+            "Prefer TypeScript, Playwright, and concise Czech summaries."
+        );
     }
 
     #[test]

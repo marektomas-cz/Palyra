@@ -4244,7 +4244,7 @@ async fn memory_retain_tool_replaces_near_duplicate_preference_content() {
     assert_eq!(payload.get("status").and_then(Value::as_str), Some("merged"));
     assert_eq!(
         payload.pointer("/item/content_text").and_then(Value::as_str),
-        Some("Correction: project UI smoke tests prefer Playwright, not Vitest")
+        Some("Project UI smoke tests prefer Playwright")
     );
 
     let hits = state
@@ -4265,8 +4265,12 @@ async fn memory_retain_tool_replaces_near_duplicate_preference_content() {
         .map(|hit| hit.item.content_text.as_str())
         .expect("corrected preference should be the top search hit");
     assert!(
-        top_content.contains("prefer Playwright, not Vitest"),
+        top_content.contains("prefer Playwright"),
         "corrected canonical memory should be top search hit: {hits:?}"
+    );
+    assert!(
+        !top_content.contains("Vitest"),
+        "canonical memory should not keep the old preference marker: {hits:?}"
     );
 }
 
@@ -4274,12 +4278,12 @@ async fn memory_retain_tool_replaces_near_duplicate_preference_content() {
 async fn memory_retain_tool_replaces_conflicting_preference_when_search_terms_shift() {
     let state = build_test_runtime_state(false);
     let context = routines_tool_test_context();
-    let initial = br#"{"content_text":"E2E preference: use TypeScript, Vitest, and concise Czech reports for E2E tests.","scope":"principal","confidence":0.9}"#;
+    let initial = br#"{"content_text":"E2E preference: use TypeScript, Vitest, and concise Czech reports for E2E tests.","scope":"principal","confidence":0.9,"tags":["vitest","e2e-preference"]}"#;
     let initial_outcome =
         execute_memory_retain_tool(&state, context, "01ARZ3NDEKTSV4RRFFQ69G5FD6", initial).await;
     assert!(initial_outcome.success, "initial preference should retain: {}", initial_outcome.error);
 
-    let correction = br#"{"content_text":"Correction: for E2E tests use Playwright, not Vitest. Keep concise Czech reports.","scope":"principal","confidence":0.9}"#;
+    let correction = br#"{"content_text":"Correction: for E2E tests use Playwright, not Vitest. Keep concise Czech reports.","scope":"principal","confidence":0.9,"tags":["playwright","e2e-preference"]}"#;
     let updated =
         execute_memory_retain_tool(&state, context, "01ARZ3NDEKTSV4RRFFQ69G5FD7", correction).await;
     assert!(updated.success, "correction retain should succeed: {}", updated.error);
@@ -4287,7 +4291,7 @@ async fn memory_retain_tool_replaces_conflicting_preference_when_search_terms_sh
     assert_eq!(payload.get("status").and_then(Value::as_str), Some("merged"));
     assert_eq!(
         payload.pointer("/item/content_text").and_then(Value::as_str),
-        Some("Correction: for E2E tests use Playwright, not Vitest. Keep concise Czech reports.")
+        Some("For E2E tests use Playwright. Keep concise Czech reports.")
     );
 
     let (items, _) = state
@@ -4306,6 +4310,38 @@ async fn memory_retain_tool_replaces_conflicting_preference_when_search_terms_sh
     assert!(
         !items[0].content_text.contains("use TypeScript, Vitest"),
         "old conflicting preference should not remain as a separate memory item"
+    );
+    assert!(
+        !items[0].content_text.contains("Vitest"),
+        "canonical replacement content should not keep the old preference marker"
+    );
+    assert!(
+        items[0].tags.iter().any(|tag| tag == "playwright"),
+        "replacement tags should include the new preference marker: {:?}",
+        items[0].tags
+    );
+    assert!(
+        !items[0].tags.iter().any(|tag| tag == "vitest"),
+        "replacement tags should not keep stale old preference tags: {:?}",
+        items[0].tags
+    );
+
+    let old_preference_hits = state
+        .search_memory(MemorySearchRequest {
+            principal: context.principal.to_owned(),
+            channel: None,
+            session_id: None,
+            query: "Vitest".to_owned(),
+            top_k: 5,
+            min_score: 0.0,
+            tags: Vec::new(),
+            sources: Vec::new(),
+        })
+        .await
+        .expect("old preference search should succeed");
+    assert!(
+        old_preference_hits.is_empty(),
+        "old preference audit search should not return the canonical replacement: {old_preference_hits:?}"
     );
 }
 
