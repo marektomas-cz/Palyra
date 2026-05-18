@@ -1,5 +1,6 @@
 use super::{
-    browser_v1, chromium_active_tab_for_session, chromium_new_tab_error_is_retryable,
+    browser_v1, build_accessibility_tree_snapshot, build_dom_snapshot,
+    chromium_active_tab_for_session, chromium_new_tab_error_is_retryable,
     default_browserd_state_dir_from_env, derive_state_encryption_key, encrypt_state_blob,
     enforce_non_loopback_bind_auth, navigate_with_guards, parse_daemon_bind_socket,
     persisted_snapshot_hash, persisted_snapshot_legacy_hash, record_chromium_remote_ip_incident,
@@ -207,6 +208,53 @@ fn query_redaction_treats_oauth_code_and_state_as_sensitive() {
     assert!(
         !redacted.contains("oauth123") && !redacted.contains("abc123"),
         "sensitive values must not leak: {redacted}"
+    );
+}
+
+#[test]
+fn observe_snapshots_preserve_case_sensitive_selector_attributes() {
+    let html = r#"
+        <html>
+          <body>
+            <button id="btnStart" class="primaryAction" aria-label="Start Flow">Start</button>
+            <input id="stateValue" name="workflowState" placeholder="Queued">
+          </body>
+        </html>
+    "#;
+
+    let (dom_snapshot, dom_truncated) = build_dom_snapshot(html, 8 * 1024);
+    assert!(!dom_truncated, "small DOM snapshot should not truncate");
+    assert!(
+        dom_snapshot.contains(r#"id="btnStart""#),
+        "DOM snapshot must preserve id value case: {dom_snapshot}"
+    );
+    assert!(
+        dom_snapshot.contains(r#"class="primaryAction""#),
+        "DOM snapshot must preserve class value case: {dom_snapshot}"
+    );
+    assert!(
+        dom_snapshot.contains(r#"name="workflowState""#),
+        "DOM snapshot must preserve name value case: {dom_snapshot}"
+    );
+    assert!(
+        !dom_snapshot.contains("btnstart") && !dom_snapshot.contains("workflowstate"),
+        "DOM snapshot must not expose lowercased reusable selectors: {dom_snapshot}"
+    );
+
+    let (accessibility_tree, accessibility_truncated) =
+        build_accessibility_tree_snapshot(html, 8 * 1024);
+    assert!(!accessibility_truncated, "small accessibility tree should not truncate");
+    assert!(
+        accessibility_tree.contains("selector=#btnStart"),
+        "accessibility selector must remain click-compatible: {accessibility_tree}"
+    );
+    assert!(
+        accessibility_tree.contains("selector=#stateValue"),
+        "accessibility selector must preserve input id case: {accessibility_tree}"
+    );
+    assert!(
+        !accessibility_tree.contains("#btnstart") && !accessibility_tree.contains("#statevalue"),
+        "accessibility tree must not suggest lowercased ids: {accessibility_tree}"
     );
 }
 

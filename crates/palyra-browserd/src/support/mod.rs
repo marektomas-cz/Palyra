@@ -481,7 +481,7 @@ fn build_dom_line(index: usize, tag: &str) -> String {
         "alt",
         "placeholder",
     ] {
-        let Some(value) = extract_attr_value(tag_lower.as_str(), attr_name) else {
+        let Some(value) = extract_attr_value_case_insensitive(tag, attr_name) else {
             continue;
         };
         let sanitized = sanitize_snapshot_attribute(attr_name, value.as_str());
@@ -530,15 +530,15 @@ pub(crate) fn build_accessibility_tree_snapshot(
 
 fn build_accessibility_line(index: usize, tag: &str) -> Option<String> {
     let tag_lower = tag.to_ascii_lowercase();
-    let role = accessibility_role_for_tag(tag_lower.as_str())?;
+    let role = accessibility_role_for_tag(tag, tag_lower.as_str())?;
     let tag_name = html_tag_name(tag_lower.as_str()).unwrap_or("unknown");
-    let name = accessibility_name_for_tag(tag_lower.as_str());
-    let selector = accessibility_selector_for_tag(tag_lower.as_str());
+    let name = accessibility_name_for_tag(tag);
+    let selector = accessibility_selector_for_tag(tag);
     Some(format!("{index:04} role={role}; name={name}; tag={tag_name}; selector={selector}"))
 }
 
-fn accessibility_role_for_tag(tag_lower: &str) -> Option<String> {
-    if let Some(explicit_role) = extract_attr_value(tag_lower, "role")
+fn accessibility_role_for_tag(tag: &str, tag_lower: &str) -> Option<String> {
+    if let Some(explicit_role) = extract_attr_value_case_insensitive(tag, "role")
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
     {
@@ -578,9 +578,9 @@ fn accessibility_role_for_tag(tag_lower: &str) -> Option<String> {
     Some(inferred.to_owned())
 }
 
-fn accessibility_name_for_tag(tag_lower: &str) -> String {
+fn accessibility_name_for_tag(tag: &str) -> String {
     for attr_name in ["aria-label", "title", "alt", "placeholder", "name", "id"] {
-        if let Some(value) = extract_attr_value(tag_lower, attr_name)
+        if let Some(value) = extract_attr_value_case_insensitive(tag, attr_name)
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty())
         {
@@ -590,7 +590,7 @@ fn accessibility_name_for_tag(tag_lower: &str) -> String {
             return truncate_utf8_bytes(value.as_str(), 128);
         }
     }
-    if let Some(href) = extract_attr_value(tag_lower, "href")
+    if let Some(href) = extract_attr_value_case_insensitive(tag, "href")
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
     {
@@ -599,20 +599,20 @@ fn accessibility_name_for_tag(tag_lower: &str) -> String {
     "-".to_owned()
 }
 
-fn accessibility_selector_for_tag(tag_lower: &str) -> String {
-    if let Some(id) = extract_attr_value(tag_lower, "id")
+fn accessibility_selector_for_tag(tag: &str) -> String {
+    if let Some(id) = extract_attr_value_case_insensitive(tag, "id")
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
     {
         return format!("#{}", truncate_utf8_bytes(id.as_str(), 96));
     }
-    if let Some(name) = extract_attr_value(tag_lower, "name")
+    if let Some(name) = extract_attr_value_case_insensitive(tag, "name")
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
     {
         return format!("[name={}]", truncate_utf8_bytes(name.as_str(), 96));
     }
-    if let Some(class) = extract_attr_value(tag_lower, "class")
+    if let Some(class) = extract_attr_value_case_insensitive(tag, "class")
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
     {
