@@ -776,6 +776,7 @@ pub(crate) async fn process_run_stream_message(
     )
     .await?;
     let mut length_recovery_attempted = false;
+    let mut final_answer_recovery_attempted = false;
 
     loop {
         let _turn_id = match loop_state.start_model_turn() {
@@ -923,6 +924,34 @@ pub(crate) async fn process_run_stream_message(
                     if let Some(message) =
                         incomplete_terminal_final_answer(final_reply_text.as_deref(), &loop_state)
                     {
+                        if let Some(recovery_prompt) = final_answer_recovery_prompt(
+                            message.as_str(),
+                            &loop_state,
+                            final_answer_recovery_attempted,
+                        ) {
+                            final_answer_recovery_attempted = true;
+                            loop_state.append_user_guidance(recovery_prompt);
+                            append_agent_loop_tape_event(
+                                runtime_state,
+                                run_id.as_str(),
+                                tape_seq,
+                                "agent_loop.final_answer_recovery_requested",
+                                loop_state.turn_payload(
+                                    run_id.as_str(),
+                                    "agent_loop.final_answer_recovery_requested",
+                                ),
+                            )
+                            .await?;
+                            send_agent_loop_progress_status(
+                                sender,
+                                runtime_state,
+                                run_id.as_str(),
+                                tape_seq,
+                                "agent_loop.final_answer_recovery_requested",
+                            )
+                            .await?;
+                            continue;
+                        }
                         terminate_run_stream_with_agent_loop_reason(
                             sender,
                             runtime_state,
@@ -1332,6 +1361,31 @@ fn length_recovery_prompt(
     )
 }
 
+fn final_answer_recovery_prompt(
+    message: &str,
+    loop_state: &AgentRunLoopState,
+    already_attempted: bool,
+) -> Option<&'static str> {
+    if already_attempted
+        || loop_state.completed_tool_calls() == 0
+        || loop_state.remaining_model_turns() == 0
+    {
+        return None;
+    }
+
+    let normalized = message.to_ascii_lowercase();
+    if !(normalized.contains("empty final answer after tool execution")
+        || normalized.contains("bare acknowledgement instead of a final answer")
+        || normalized.contains("without matching tool evidence"))
+    {
+        return None;
+    }
+
+    Some(
+        "The previous assistant turn did not provide a usable final answer after tool execution. Continue now using the existing tool evidence. If the requested work is complete, answer with a concise summary that lists changed files, validation results, and any unresolved partial state. If work is incomplete, issue the next minimal tool call needed to inspect, finish, validate, or clean up. Do not claim PASS or completion without direct successful tool evidence.",
+    )
+}
+
 fn incomplete_final_answer_without_tools(text: Option<&str>) -> Option<String> {
     let text = text.unwrap_or_default().trim();
     if text.is_empty() {
@@ -1555,10 +1609,10 @@ async fn persist_run_stream_provider_turn_output(
 mod tests {
     use super::{
         agent_loop_budget_exhausted_message, contains_raw_provider_tool_call_markup,
-        incomplete_final_answer_without_tools, incomplete_terminal_final_answer,
-        length_recovery_prompt, terminal_tool_authorization_failure,
-        tool_result_to_provider_message, truncated_final_answer_without_tools,
-        RunStreamToolResultForModel,
+        final_answer_recovery_prompt, incomplete_final_answer_without_tools,
+        incomplete_terminal_final_answer, length_recovery_prompt,
+        terminal_tool_authorization_failure, tool_result_to_provider_message,
+        truncated_final_answer_without_tools, RunStreamToolResultForModel,
     };
     use super::{AgentLoopTerminationReason, AgentRunLoopState};
     use crate::model_provider::{
@@ -1853,6 +1907,33 @@ mod tests {
             )
             .is_none(),
             "length recovery must be attempted at most once per run"
+        );
+    }
+
+    #[test]
+    fn empty_final_after_tool_execution_gets_one_recovery_prompt() {
+        let state = loop_state_after_tool(
+            "Refactor src/reporting.ts into smaller modules and summarize changed files.",
+            "palyra.fs.apply_patch",
+        );
+
+        let prompt = final_answer_recovery_prompt(
+            "model returned an empty final answer after tool execution",
+            &state,
+            false,
+        )
+        .expect("empty final answer after tool execution should be recoverable once");
+
+        assert!(prompt.contains("changed files"));
+        assert!(prompt.contains("partial state"));
+        assert!(
+            final_answer_recovery_prompt(
+                "model returned an empty final answer after tool execution",
+                &state,
+                true,
+            )
+            .is_none(),
+            "final-answer recovery must be attempted at most once per run"
         );
     }
 
