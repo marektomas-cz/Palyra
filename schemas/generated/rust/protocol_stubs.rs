@@ -226,6 +226,10 @@ pub mod palyra_browser_v1 {
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct SetPermissionsResponse;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct SetViewportRequest;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct SetViewportResponse;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct SwitchTabRequest;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct SwitchTabResponse;
@@ -269,6 +273,7 @@ pub mod palyra_browser_v1 {
         fn Select(&self);
         fn SetActiveProfile(&self);
         fn SetPermissions(&self);
+        fn SetViewport(&self);
         fn SwitchTab(&self);
         fn Type(&self);
         fn WaitFor(&self);

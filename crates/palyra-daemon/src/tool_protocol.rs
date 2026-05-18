@@ -380,6 +380,9 @@ pub fn tool_metadata(tool_name: &str) -> Option<ToolMetadata> {
         "palyra.browser.select" => {
             Some(ToolMetadata { capabilities: NETWORK_TOOL_CAPABILITIES, default_sensitive: true })
         }
+        "palyra.browser.viewport" => {
+            Some(ToolMetadata { capabilities: NETWORK_TOOL_CAPABILITIES, default_sensitive: true })
+        }
         "palyra.browser.highlight" => {
             Some(ToolMetadata { capabilities: NETWORK_TOOL_CAPABILITIES, default_sensitive: true })
         }
@@ -775,6 +778,7 @@ async fn run_allowlisted_tool(
         | "palyra.browser.type"
         | "palyra.browser.press"
         | "palyra.browser.select"
+        | "palyra.browser.viewport"
         | "palyra.browser.highlight"
         | "palyra.browser.scroll"
         | "palyra.browser.wait_for"
@@ -840,6 +844,7 @@ fn is_runtime_supported_tool(tool_name: &str) -> bool {
             | "palyra.browser.type"
             | "palyra.browser.press"
             | "palyra.browser.select"
+            | "palyra.browser.viewport"
             | "palyra.browser.highlight"
             | "palyra.browser.scroll"
             | "palyra.browser.wait_for"
@@ -927,6 +932,7 @@ fn tool_input_limit_bytes(tool_name: &str) -> usize {
         | "palyra.browser.type"
         | "palyra.browser.press"
         | "palyra.browser.select"
+        | "palyra.browser.viewport"
         | "palyra.browser.highlight"
         | "palyra.browser.scroll"
         | "palyra.browser.wait_for"
@@ -1531,6 +1537,7 @@ mod tests {
         assert!(tool_requires_approval("palyra.browser.type"));
         assert!(tool_requires_approval("palyra.browser.press"));
         assert!(tool_requires_approval("palyra.browser.select"));
+        assert!(tool_requires_approval("palyra.browser.viewport"));
         assert!(tool_requires_approval("palyra.browser.highlight"));
         assert!(tool_requires_approval("palyra.browser.scroll"));
         assert!(tool_requires_approval("palyra.browser.wait_for"));

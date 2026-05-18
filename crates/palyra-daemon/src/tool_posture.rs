@@ -804,6 +804,14 @@ pub const TOOL_CATALOG: &[ToolCatalogEntry] = &[
         recommend_always_allow: false,
     },
     ToolCatalogEntry {
+        tool_name: "palyra.browser.viewport",
+        title: "Browser viewport",
+        description: "Sets active browser viewport dimensions for responsive layout verification.",
+        category: "browser",
+        risk_level: ApprovalRiskLevel::Medium,
+        recommend_always_allow: true,
+    },
+    ToolCatalogEntry {
         tool_name: "palyra.browser.highlight",
         title: "Browser highlight",
         description: "Highlights a DOM target for operator inspection.",
@@ -994,6 +1002,10 @@ const PRESET_BROWSER_ASSIST: &[ToolPosturePresetAssignment] = &[
         state: ToolPostureState::AlwaysAllow,
     },
     ToolPosturePresetAssignment {
+        tool_name: "palyra.browser.viewport",
+        state: ToolPostureState::AlwaysAllow,
+    },
+    ToolPosturePresetAssignment {
         tool_name: "palyra.browser.tabs.list",
         state: ToolPostureState::AlwaysAllow,
     },
@@ -1030,6 +1042,10 @@ const PRESET_READ_MOSTLY_RESEARCH: &[ToolPosturePresetAssignment] = &[
     },
     ToolPosturePresetAssignment {
         tool_name: "palyra.browser.observe",
+        state: ToolPostureState::AlwaysAllow,
+    },
+    ToolPosturePresetAssignment {
+        tool_name: "palyra.browser.viewport",
         state: ToolPostureState::AlwaysAllow,
     },
     ToolPosturePresetAssignment {
@@ -1070,6 +1086,10 @@ const PRESET_AUTOMATION_REVIEW: &[ToolPosturePresetAssignment] = &[
     ToolPosturePresetAssignment {
         tool_name: "palyra.browser.navigate",
         state: ToolPostureState::AskEachTime,
+    },
+    ToolPosturePresetAssignment {
+        tool_name: "palyra.browser.viewport",
+        state: ToolPostureState::AlwaysAllow,
     },
     ToolPosturePresetAssignment {
         tool_name: "palyra.browser.click",

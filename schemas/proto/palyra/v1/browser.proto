@@ -21,6 +21,7 @@ service BrowserService {
   rpc Type(TypeRequest) returns (TypeResponse);
   rpc Press(PressRequest) returns (PressResponse);
   rpc Select(SelectRequest) returns (SelectResponse);
+  rpc SetViewport(SetViewportRequest) returns (SetViewportResponse);
   rpc Highlight(HighlightRequest) returns (HighlightResponse);
   rpc Scroll(ScrollRequest) returns (ScrollResponse);
   rpc WaitFor(WaitForRequest) returns (WaitForResponse);
@@ -407,6 +408,31 @@ message SelectResponse {
   string failure_screenshot_mime_type = 7;
 
   reserved 8 to 14;
+}
+
+message SetViewportRequest {
+  uint32 v = 1;
+  palyra.common.v1.CanonicalId session_id = 2;
+  uint32 width = 3;
+  uint32 height = 4;
+  double device_scale_factor = 5;
+  bool mobile = 6;
+  uint64 timeout_ms = 7;
+
+  reserved 8 to 14;
+}
+
+message SetViewportResponse {
+  uint32 v = 1;
+  bool success = 2;
+  uint32 width = 3;
+  uint32 height = 4;
+  double device_scale_factor = 5;
+  bool mobile = 6;
+  string error = 7;
+  BrowserActionLogEntry action_log = 8;
+
+  reserved 9 to 14;
 }
 
 message HighlightRequest {

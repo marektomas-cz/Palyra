@@ -1,5 +1,9 @@
 use crate::*;
-use headless_chrome::{browser::tab::ModifierKey, types::PrintToPdfOptions};
+use headless_chrome::protocol::cdp::Emulation;
+use headless_chrome::{
+    browser::tab::ModifierKey,
+    types::{Bounds, PrintToPdfOptions},
+};
 
 #[derive(Debug)]
 pub(crate) struct ChromiumActionOutcome {
@@ -14,6 +18,16 @@ pub(crate) struct ChromiumScrollOutcome {
     pub(crate) success: bool,
     pub(crate) scroll_x: i64,
     pub(crate) scroll_y: i64,
+    pub(crate) error: String,
+}
+
+#[derive(Debug)]
+pub(crate) struct ChromiumViewportOutcome {
+    pub(crate) success: bool,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) device_scale_factor: f64,
+    pub(crate) mobile: bool,
     pub(crate) error: String,
 }
 
@@ -851,6 +865,32 @@ fn decode_chromium_json_script_value(value: serde_json::Value) -> serde_json::Va
             .unwrap_or(serde_json::Value::Null),
         value => value,
     }
+}
+
+fn parse_chromium_viewport_metrics(
+    value: serde_json::Value,
+    requested_width: u32,
+    requested_height: u32,
+    requested_device_scale_factor: f64,
+) -> (u32, u32, f64) {
+    let actual_width = value
+        .get("width")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(requested_width);
+    let actual_height = value
+        .get("height")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(requested_height);
+    let actual_device_scale_factor = value
+        .get("device_scale_factor")
+        .and_then(serde_json::Value::as_f64)
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(requested_device_scale_factor);
+    (actual_width, actual_height, actual_device_scale_factor)
 }
 
 fn parse_chromium_console_entries(value: serde_json::Value) -> Vec<BrowserConsoleEntryInternal> {
@@ -1744,13 +1784,127 @@ pub(crate) async fn export_pdf_with_chromium(
     Ok(pdf)
 }
 
+pub(crate) async fn set_viewport_with_chromium(
+    runtime: &BrowserRuntimeState,
+    session_id: &str,
+    width: u32,
+    height: u32,
+    device_scale_factor: f64,
+    mobile: bool,
+) -> ChromiumViewportOutcome {
+    if let Err(error) = enforce_chromium_remote_ip_guard(runtime, session_id).await {
+        return ChromiumViewportOutcome {
+            success: false,
+            width: 0,
+            height: 0,
+            device_scale_factor: 0.0,
+            mobile,
+            error,
+        };
+    }
+    let (_tab_id, tab) = match chromium_active_tab_for_session(runtime, session_id).await {
+        Ok(value) => value,
+        Err(error) => {
+            return ChromiumViewportOutcome {
+                success: false,
+                width: 0,
+                height: 0,
+                device_scale_factor: 0.0,
+                mobile,
+                error,
+            }
+        }
+    };
+    let result = run_chromium_blocking("chromium set viewport", move || {
+        let _ = tab.set_bounds(Bounds::Normal {
+            left: None,
+            top: None,
+            width: Some(f64::from(width)),
+            height: Some(f64::from(height)),
+        });
+        tab.call_method(Emulation::SetDeviceMetricsOverride {
+            width,
+            height,
+            device_scale_factor,
+            mobile,
+            scale: None,
+            screen_width: Some(width),
+            screen_height: Some(height),
+            position_x: None,
+            position_y: None,
+            dont_set_visible_size: None,
+            screen_orientation: None,
+            viewport: None,
+            display_feature: None,
+            device_posture: None,
+        })
+        .map_err(|error| format!("failed to set Chromium viewport metrics: {error}"))?;
+        tab.call_method(Emulation::SetTouchEmulationEnabled {
+            enabled: mobile,
+            max_touch_points: Some(if mobile { 1 } else { 0 }),
+        })
+        .map_err(|error| format!("failed to set Chromium touch emulation: {error}"))?;
+        let _ = tab.call_method(Emulation::SetVisibleSize { width, height });
+        let value = tab
+            .evaluate(
+                r#"JSON.stringify({
+                    width: Math.trunc(window.innerWidth || 0),
+                    height: Math.trunc(window.innerHeight || 0),
+                    device_scale_factor: Number(window.devicePixelRatio || 1)
+                })"#,
+                false,
+            )
+            .map_err(|error| format!("failed to verify Chromium viewport metrics: {error}"))?
+            .value
+            .unwrap_or(serde_json::Value::Null);
+        Ok(parse_chromium_viewport_metrics(
+            decode_chromium_json_script_value(value),
+            width,
+            height,
+            device_scale_factor,
+        ))
+    })
+    .await;
+
+    match result {
+        Ok((actual_width, actual_height, actual_device_scale_factor)) => {
+            if let Err(error) = enforce_chromium_remote_ip_guard(runtime, session_id).await {
+                return ChromiumViewportOutcome {
+                    success: false,
+                    width: actual_width,
+                    height: actual_height,
+                    device_scale_factor: actual_device_scale_factor,
+                    mobile,
+                    error,
+                };
+            }
+            ChromiumViewportOutcome {
+                success: true,
+                width: actual_width,
+                height: actual_height,
+                device_scale_factor: actual_device_scale_factor,
+                mobile,
+                error: String::new(),
+            }
+        }
+        Err(error) => ChromiumViewportOutcome {
+            success: false,
+            width: 0,
+            height: 0,
+            device_scale_factor: 0.0,
+            mobile,
+            error,
+        },
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{
         chromium_transport_idle_timeout, clamp_chromium_snapshot,
         decode_chromium_console_entries_value, decode_chromium_json_script_value,
-        parse_chromium_console_entries, ChromiumObserveSnapshot,
+        parse_chromium_console_entries, parse_chromium_viewport_metrics, ChromiumObserveSnapshot,
     };
     use crate::DEFAULT_SESSION_IDLE_TTL_MS;
     use std::time::Duration;
@@ -1804,6 +1958,18 @@ mod tests {
 
         assert_eq!(decoded["status"], "selected");
         assert_eq!(decoded["value"], "north");
+    }
+
+    #[test]
+    fn parse_chromium_viewport_metrics_falls_back_to_requested_values() {
+        let raw = serde_json::Value::String(r#"{"width":375,"height":667}"#.to_owned());
+
+        let (width, height, device_scale_factor) =
+            parse_chromium_viewport_metrics(decode_chromium_json_script_value(raw), 390, 844, 2.0);
+
+        assert_eq!(width, 375);
+        assert_eq!(height, 667);
+        assert_eq!(device_scale_factor, 2.0);
     }
 }
 

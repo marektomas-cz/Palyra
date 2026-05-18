@@ -33,7 +33,7 @@ use crate::{
         BROWSER_SESSION_CLOSE_TOOL_NAME, BROWSER_SESSION_CREATE_TOOL_NAME,
         BROWSER_TABS_CLOSE_TOOL_NAME, BROWSER_TABS_LIST_TOOL_NAME, BROWSER_TABS_OPEN_TOOL_NAME,
         BROWSER_TABS_SWITCH_TOOL_NAME, BROWSER_TITLE_TOOL_NAME, BROWSER_TYPE_TOOL_NAME,
-        BROWSER_WAIT_FOR_TOOL_NAME, MAX_BROWSER_TOOL_INPUT_BYTES,
+        BROWSER_VIEWPORT_TOOL_NAME, BROWSER_WAIT_FOR_TOOL_NAME, MAX_BROWSER_TOOL_INPUT_BYTES,
     },
     sandbox_runner::process_runner_allows_host_access,
     tool_protocol::{ToolAttestation, ToolExecutionOutcome},
@@ -940,6 +940,94 @@ pub(crate) async fn execute_browser_tool(
                     false,
                     b"{}".to_vec(),
                     format!("palyra.browser.select failed: {}", sanitize_status_message(&error)),
+                ),
+            }
+        }
+        BROWSER_VIEWPORT_TOOL_NAME => {
+            let session_id = match parse_browser_tool_session_id(&payload) {
+                Ok(value) => value,
+                Err(error) => {
+                    return browser_tool_execution_outcome(
+                        proposal_id,
+                        input_json,
+                        false,
+                        b"{}".to_vec(),
+                        error,
+                    );
+                }
+            };
+            let Some(width) = payload
+                .get("width")
+                .and_then(Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok())
+            else {
+                return browser_tool_execution_outcome(
+                    proposal_id,
+                    input_json,
+                    false,
+                    b"{}".to_vec(),
+                    "palyra.browser.viewport requires integer field 'width'".to_owned(),
+                );
+            };
+            let Some(height) = payload
+                .get("height")
+                .and_then(Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok())
+            else {
+                return browser_tool_execution_outcome(
+                    proposal_id,
+                    input_json,
+                    false,
+                    b"{}".to_vec(),
+                    "palyra.browser.viewport requires integer field 'height'".to_owned(),
+                );
+            };
+            let mut request = Request::new(browser_v1::SetViewportRequest {
+                v: CANONICAL_PROTOCOL_MAJOR,
+                session_id: Some(common_v1::CanonicalId { ulid: session_id }),
+                width,
+                height,
+                device_scale_factor: payload
+                    .get("device_scale_factor")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0),
+                mobile: payload.get("mobile").and_then(Value::as_bool).unwrap_or(false),
+                timeout_ms: payload.get("timeout_ms").and_then(Value::as_u64).unwrap_or(0),
+            });
+            if let Err(error) = attach_browser_auth_metadata(
+                &mut request,
+                runtime_state.config.browser_service.auth_token.as_deref(),
+            ) {
+                return browser_tool_execution_outcome(
+                    proposal_id,
+                    input_json,
+                    false,
+                    b"{}".to_vec(),
+                    error,
+                );
+            }
+            match client.set_viewport(request).await {
+                Ok(response) => {
+                    let response = response.into_inner();
+                    let output = json!({
+                        "success": response.success,
+                        "width": response.width,
+                        "height": response.height,
+                        "device_scale_factor": response.device_scale_factor,
+                        "mobile": response.mobile,
+                        "error": response.error,
+                        "action_log": response.action_log.map(browser_action_log_to_json),
+                    });
+                    (
+                        response.success,
+                        serde_json::to_vec(&output).unwrap_or_else(|_| b"{}".to_vec()),
+                        if response.success { String::new() } else { response.error },
+                    )
+                }
+                Err(error) => (
+                    false,
+                    b"{}".to_vec(),
+                    format!("palyra.browser.viewport failed: {}", sanitize_status_message(&error)),
                 ),
             }
         }

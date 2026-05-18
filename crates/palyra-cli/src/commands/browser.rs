@@ -48,6 +48,7 @@ const BROWSER_GATEWAY_TOOL_NAMES: &[&str] = &[
     "palyra.browser.type",
     "palyra.browser.press",
     "palyra.browser.select",
+    "palyra.browser.viewport",
     "palyra.browser.highlight",
     "palyra.browser.scroll",
     "palyra.browser.wait_for",

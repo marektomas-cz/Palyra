@@ -198,6 +198,7 @@ pub(crate) const BROWSER_CLICK_TOOL_NAME: &str = "palyra.browser.click";
 pub(crate) const BROWSER_TYPE_TOOL_NAME: &str = "palyra.browser.type";
 pub(crate) const BROWSER_PRESS_TOOL_NAME: &str = "palyra.browser.press";
 pub(crate) const BROWSER_SELECT_TOOL_NAME: &str = "palyra.browser.select";
+pub(crate) const BROWSER_VIEWPORT_TOOL_NAME: &str = "palyra.browser.viewport";
 pub(crate) const BROWSER_HIGHLIGHT_TOOL_NAME: &str = "palyra.browser.highlight";
 pub(crate) const BROWSER_SCROLL_TOOL_NAME: &str = "palyra.browser.scroll";
 pub(crate) const BROWSER_WAIT_FOR_TOOL_NAME: &str = "palyra.browser.wait_for";

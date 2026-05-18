@@ -678,6 +678,7 @@ const LOCAL_DESKTOP_DEFAULT_ALLOWED_TOOLS: &[&str] = &[
     "palyra.browser.type",
     "palyra.browser.press",
     "palyra.browser.select",
+    "palyra.browser.viewport",
     "palyra.browser.highlight",
     "palyra.browser.scroll",
     "palyra.browser.wait_for",

@@ -1211,6 +1211,29 @@ async fn browser_service_click_type_and_wait_for_on_fixture_page() {
     assert_eq!(typed.typed_bytes, "agent@example.com".len() as u64);
     assert_eq!(typed.action_log.as_ref().map(|value| value.action_name.as_str()), Some("type"));
 
+    let viewport = service
+        .set_viewport(Request::new(browser_v1::SetViewportRequest {
+            v: 1,
+            session_id: Some(proto::palyra::common::v1::CanonicalId { ulid: session_id.clone() }),
+            width: 375,
+            height: 667,
+            device_scale_factor: 2.0,
+            mobile: true,
+            timeout_ms: 500,
+        }))
+        .await
+        .expect("viewport should execute")
+        .into_inner();
+    assert!(viewport.success, "viewport action should succeed: {}", viewport.error);
+    assert_eq!(viewport.width, 375);
+    assert_eq!(viewport.height, 667);
+    assert_eq!(viewport.device_scale_factor, 2.0);
+    assert!(viewport.mobile);
+    assert_eq!(
+        viewport.action_log.as_ref().map(|value| value.action_name.as_str()),
+        Some("viewport")
+    );
+
     let waited = service
         .wait_for(Request::new(browser_v1::WaitForRequest {
             v: 1,

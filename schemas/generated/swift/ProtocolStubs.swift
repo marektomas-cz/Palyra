@@ -326,6 +326,12 @@ public enum PalyraBrowserV1 {
     public struct SetPermissionsResponse: Equatable {
         public init() {}
     }
+    public struct SetViewportRequest: Equatable {
+        public init() {}
+    }
+    public struct SetViewportResponse: Equatable {
+        public init() {}
+    }
     public struct SwitchTabRequest: Equatable {
         public init() {}
     }
@@ -376,6 +382,7 @@ public enum PalyraBrowserV1 {
         func select()
         func setActiveProfile()
         func setPermissions()
+        func setViewport()
         func switchTab()
         func type()
         func waitFor()

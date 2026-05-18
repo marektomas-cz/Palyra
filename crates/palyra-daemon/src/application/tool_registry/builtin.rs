@@ -623,6 +623,7 @@ fn browser_tool_names() -> &'static [&'static str] {
         "palyra.browser.type",
         "palyra.browser.press",
         "palyra.browser.select",
+        "palyra.browser.viewport",
         "palyra.browser.highlight",
         "palyra.browser.scroll",
         "palyra.browser.wait_for",
@@ -651,6 +652,7 @@ fn browser_tool_description(tool_name: &str) -> &'static str {
         "palyra.browser.type" => "Type text in a brokered browser session.",
         "palyra.browser.press" => "Press a key in a brokered browser session.",
         "palyra.browser.select" => "Select an option in a brokered browser session.",
+        "palyra.browser.viewport" => "Set the active browser viewport dimensions.",
         "palyra.browser.highlight" => "Highlight an element in a brokered browser session.",
         "palyra.browser.scroll" => "Scroll a brokered browser session.",
         "palyra.browser.wait_for" => "Wait for a browser condition.",
@@ -735,6 +737,25 @@ fn browser_tool_schema(tool_name: &str) -> Value {
             ));
             properties.push(("value", json!({"type":"string"})));
             required.extend(["selector", "value"]);
+        }
+        "palyra.browser.viewport" => {
+            properties.push((
+                "width",
+                json!({"type":"integer","minimum":50,"maximum":10000,"description":"Viewport width in CSS pixels. Use values like 375 for mobile, 768 for tablet, or 1440 for desktop verification."}),
+            ));
+            properties.push((
+                "height",
+                json!({"type":"integer","minimum":50,"maximum":10000,"description":"Viewport height in CSS pixels. Pair with width before screenshot or observe when verifying responsive layouts."}),
+            ));
+            properties.push((
+                "device_scale_factor",
+                json!({"type":"number","exclusiveMinimum":0,"maximum":8,"default":1}),
+            ));
+            properties.push((
+                "mobile",
+                json!({"type":"boolean","description":"Enable mobile device metrics and touch emulation for responsive/mobile layout checks."}),
+            ));
+            required.extend(["width", "height"]);
         }
         "palyra.browser.scroll" => {
             properties.push(("delta_x", json!({"type":"integer"})));
@@ -904,5 +925,21 @@ mod tests {
         let screenshot =
             registry_entry("palyra.browser.screenshot").expect("screenshot entry exists");
         assert!(screenshot.description.contains("do not use it alone"));
+
+        let viewport = registry_entry("palyra.browser.viewport").expect("viewport entry exists");
+        assert_eq!(
+            viewport.input_schema.pointer("/required/1").and_then(serde_json::Value::as_str),
+            Some("width")
+        );
+        assert_eq!(
+            viewport.input_schema.pointer("/required/2").and_then(serde_json::Value::as_str),
+            Some("height")
+        );
+        let mobile_description = viewport
+            .input_schema
+            .pointer("/properties/mobile/description")
+            .and_then(serde_json::Value::as_str)
+            .expect("viewport mobile description should be visible to models");
+        assert!(mobile_description.contains("mobile"));
     }
 }

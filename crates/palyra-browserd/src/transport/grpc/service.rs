@@ -4,6 +4,12 @@ use crate::*;
 struct RelayPrivateTargetBlock;
 
 const MINIMAL_SIMULATED_PDF: &[u8] = b"%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n";
+const MIN_VIEWPORT_WIDTH: u32 = 50;
+const MAX_VIEWPORT_WIDTH: u32 = 10_000;
+const MIN_VIEWPORT_HEIGHT: u32 = 50;
+const MAX_VIEWPORT_HEIGHT: u32 = 10_000;
+const DEFAULT_DEVICE_SCALE_FACTOR: f64 = 1.0;
+const MAX_DEVICE_SCALE_FACTOR: f64 = 8.0;
 
 #[derive(Clone)]
 pub(crate) struct BrowserServiceImpl {
@@ -1722,6 +1728,128 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
             action_log,
             failure_screenshot_bytes,
             failure_screenshot_mime_type,
+        }))
+    }
+
+    async fn set_viewport(
+        &self,
+        request: Request<browser_v1::SetViewportRequest>,
+    ) -> Result<Response<browser_v1::SetViewportResponse>, Status> {
+        self.runtime.authorize(request.metadata()).await?;
+        let mut payload = request.into_inner();
+        let session_id = parse_session_id_from_proto(payload.session_id.take())
+            .map_err(Status::invalid_argument)?;
+        if !(MIN_VIEWPORT_WIDTH..=MAX_VIEWPORT_WIDTH).contains(&payload.width) {
+            return Err(Status::invalid_argument(format!(
+                "viewport width must be between {MIN_VIEWPORT_WIDTH} and {MAX_VIEWPORT_WIDTH}"
+            )));
+        }
+        if !(MIN_VIEWPORT_HEIGHT..=MAX_VIEWPORT_HEIGHT).contains(&payload.height) {
+            return Err(Status::invalid_argument(format!(
+                "viewport height must be between {MIN_VIEWPORT_HEIGHT} and {MAX_VIEWPORT_HEIGHT}"
+            )));
+        }
+        let device_scale_factor = if payload.device_scale_factor == 0.0 {
+            DEFAULT_DEVICE_SCALE_FACTOR
+        } else if payload.device_scale_factor.is_finite()
+            && payload.device_scale_factor > 0.0
+            && payload.device_scale_factor <= MAX_DEVICE_SCALE_FACTOR
+        {
+            payload.device_scale_factor
+        } else {
+            return Err(Status::invalid_argument(format!(
+                "device_scale_factor must be greater than 0 and at most {MAX_DEVICE_SCALE_FACTOR}"
+            )));
+        };
+
+        let context = match consume_action_budget_and_snapshot(
+            self.runtime.as_ref(),
+            session_id.as_str(),
+            true,
+        )
+        .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                return Ok(Response::new(browser_v1::SetViewportResponse {
+                    v: CANONICAL_PROTOCOL_MAJOR,
+                    success: false,
+                    width: 0,
+                    height: 0,
+                    device_scale_factor: 0.0,
+                    mobile: payload.mobile,
+                    error,
+                    action_log: None,
+                }));
+            }
+        };
+
+        let _timeout_ms =
+            request_timeout_ms(payload.timeout_ms, context.budget.max_action_timeout_ms);
+        let started_at_unix_ms = current_unix_ms();
+        let (success, width, height, device_scale_factor, mobile, outcome, error) =
+            match self.runtime.engine_mode {
+                BrowserEngineMode::Simulated => (
+                    true,
+                    payload.width,
+                    payload.height,
+                    device_scale_factor,
+                    payload.mobile,
+                    "viewport_set".to_owned(),
+                    String::new(),
+                ),
+                BrowserEngineMode::Chromium => {
+                    let result = set_viewport_with_chromium(
+                        self.runtime.as_ref(),
+                        session_id.as_str(),
+                        payload.width,
+                        payload.height,
+                        device_scale_factor,
+                        payload.mobile,
+                    )
+                    .await;
+                    (
+                        result.success,
+                        result.width,
+                        result.height,
+                        result.device_scale_factor,
+                        result.mobile,
+                        if result.success {
+                            "viewport_set".to_owned()
+                        } else {
+                            "viewport_failed".to_owned()
+                        },
+                        result.error,
+                    )
+                }
+            };
+
+        let (action_log, _, _) = finalize_session_action(
+            self.runtime.as_ref(),
+            session_id.as_str(),
+            FinalizeActionRequest {
+                action_name: "viewport",
+                selector: "",
+                success,
+                outcome: outcome.as_str(),
+                error: error.as_str(),
+                started_at_unix_ms,
+                attempts: 1,
+                capture_failure_screenshot: false,
+                max_failure_screenshot_bytes: 0,
+            },
+        )
+        .await;
+
+        Ok(Response::new(browser_v1::SetViewportResponse {
+            v: CANONICAL_PROTOCOL_MAJOR,
+            success,
+            width,
+            height,
+            device_scale_factor,
+            mobile,
+            error,
+            action_log,
         }))
     }
 
