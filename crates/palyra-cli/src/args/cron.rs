@@ -44,7 +44,10 @@ pub enum CronCommand {
     Add {
         #[arg(long)]
         name: String,
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Single-line prompt text. Use --prompt-stdin for multi-line or blank-line separated prompts."
+        )]
         prompt: Option<String>,
         #[arg(long, default_value_t = false)]
         prompt_stdin: bool,
@@ -88,7 +91,10 @@ pub enum CronCommand {
         id: String,
         #[arg(long)]
         name: Option<String>,
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Single-line prompt text. Use --prompt-stdin for multi-line or blank-line separated prompts."
+        )]
         prompt: Option<String>,
         #[arg(long, default_value_t = false, conflicts_with = "prompt")]
         prompt_stdin: bool,

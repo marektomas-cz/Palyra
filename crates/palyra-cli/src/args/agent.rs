@@ -27,7 +27,10 @@ pub enum AgentCommand {
         reset_session: bool,
         #[arg(long)]
         run_id: Option<String>,
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Single-line prompt text. Use --prompt-stdin for multi-line or blank-line separated prompts."
+        )]
         prompt: Option<String>,
         #[arg(long, default_value_t = false)]
         prompt_stdin: bool,

@@ -46,7 +46,10 @@ pub struct AcpShimArgs {
     pub session_defaults: AcpSessionDefaultsArgs,
     #[arg(long)]
     pub run_id: Option<String>,
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Single-line prompt text. Use --prompt-stdin for multi-line or blank-line separated prompts."
+    )]
     pub prompt: Option<String>,
     #[arg(long, default_value_t = false)]
     pub prompt_stdin: bool,

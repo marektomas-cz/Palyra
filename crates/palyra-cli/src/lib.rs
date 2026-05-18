@@ -3921,7 +3921,16 @@ fn resolve_optional_prompt_input(
         return Ok(Some(prompt));
     }
 
-    Ok(prompt.map(|value| value.trim().to_owned()))
+    prompt.map(normalize_prompt_arg).transpose()
+}
+
+fn normalize_prompt_arg(value: String) -> Result<String> {
+    if value.contains(['\r', '\n']) {
+        anyhow::bail!(
+            "--prompt accepts single-line text only; pipe multi-line or blank-line separated prompts with --prompt-stdin to preserve the complete prompt"
+        );
+    }
+    Ok(value.trim().to_owned())
 }
 
 fn normalize_prompt_stdin_bytes(input: &[u8]) -> Result<String> {
@@ -4023,7 +4032,7 @@ fn decode_windows_code_page(code_page: u32, input: &[u8]) -> Option<String> {
 
 #[cfg(test)]
 mod prompt_stdin_decode_tests {
-    use super::{decode_prompt_stdin_bytes, normalize_prompt_stdin_bytes};
+    use super::{decode_prompt_stdin_bytes, normalize_prompt_arg, normalize_prompt_stdin_bytes};
 
     #[test]
     fn prompt_stdin_decode_accepts_utf8_czech_text() {
@@ -4055,6 +4064,24 @@ mod prompt_stdin_decode_tests {
             prompt,
             "Plan:\r\n  - keep nested indentation\r\n  - preserve shell-safe multiline text"
         );
+    }
+
+    #[test]
+    fn prompt_arg_rejects_multiline_text_with_stdin_hint() {
+        let error = normalize_prompt_arg("first paragraph\n\n1. keep this rule".to_owned())
+            .expect_err("multiline --prompt should be rejected");
+
+        let message = error.to_string();
+        assert!(message.contains("--prompt accepts single-line text only"));
+        assert!(message.contains("--prompt-stdin"));
+    }
+
+    #[test]
+    fn prompt_arg_trims_single_line_text() {
+        let prompt = normalize_prompt_arg("  Reply exactly OK  ".to_owned())
+            .expect("single-line prompt should be accepted");
+
+        assert_eq!(prompt, "Reply exactly OK");
     }
 
     #[cfg(windows)]
