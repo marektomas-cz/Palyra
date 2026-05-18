@@ -404,11 +404,16 @@ async fn retain_memory_candidate(
     )
     .await?
     {
-        let replace_duplicate_content =
-            should_replace_lifecycle_duplicate_content(&classification, &duplicate);
-        let replacement_content = replace_duplicate_content
-            .then(|| lifecycle_replacement_content(&classification, request.content_text.as_str()));
-        let tags = if replace_duplicate_content {
+        let replacement_content = lifecycle_duplicate_replacement_content(
+            &classification,
+            &duplicate,
+            request.content_text.as_str(),
+        );
+        let replaces_with_correction = replacement_content.is_some()
+            && classification.category == MemoryWriteCategory::Correction;
+        let merges_preference_content = replacement_content.is_some()
+            && classification.category == MemoryWriteCategory::Preference;
+        let tags = if replaces_with_correction {
             normalize_lifecycle_tags(request.tags.as_slice())
         } else {
             merge_memory_tags(duplicate.item.tags.as_slice(), request.tags.as_slice())
@@ -435,8 +440,10 @@ async fn retain_memory_candidate(
             };
             let reason = if duplicate.exact {
                 "exact duplicate memory updated with lifecycle metadata"
-            } else if replace_duplicate_content {
+            } else if replaces_with_correction {
                 "near-duplicate memory updated with replacement lifecycle content"
+            } else if merges_preference_content {
+                "near-duplicate preference merged while preserving existing lifecycle content"
             } else {
                 "near-duplicate memory merged into existing lifecycle record"
             };
@@ -718,15 +725,24 @@ fn lifecycle_conflict_overlap_count(candidate_content: &str, existing_content: &
     candidate_terms.intersection(&existing_terms).take(LIFECYCLE_CONFLICT_MIN_OVERLAP).count()
 }
 
-fn should_replace_lifecycle_duplicate_content(
+fn lifecycle_duplicate_replacement_content(
     classification: &MemoryWriteClassification,
     duplicate: &LifecycleDuplicate,
-) -> bool {
-    !duplicate.exact
-        && matches!(
-            classification.category,
-            MemoryWriteCategory::Correction | MemoryWriteCategory::Preference
-        )
+    content_text: &str,
+) -> Option<String> {
+    if duplicate.exact {
+        return None;
+    }
+    match classification.category {
+        MemoryWriteCategory::Correction => {
+            Some(lifecycle_replacement_content(classification, content_text))
+        }
+        MemoryWriteCategory::Preference => Some(lifecycle_preference_merge_content(
+            duplicate.item.content_text.as_str(),
+            content_text,
+        )),
+        _ => None,
+    }
 }
 
 fn lifecycle_replacement_content(
@@ -745,6 +761,27 @@ fn lifecycle_replacement_content(
         compact_memory_text(content_text)
     } else {
         capitalize_first_ascii(compact)
+    }
+}
+
+fn lifecycle_preference_merge_content(existing_content: &str, requested_content: &str) -> String {
+    let existing = compact_memory_text(existing_content);
+    let requested = compact_memory_text(requested_content);
+    if existing.is_empty() {
+        return requested;
+    }
+    if requested.is_empty() {
+        return existing;
+    }
+
+    let normalized_existing = normalize_lifecycle_content(existing.as_str()).to_ascii_lowercase();
+    let normalized_requested = normalize_lifecycle_content(requested.as_str()).to_ascii_lowercase();
+    if normalized_existing.contains(normalized_requested.as_str()) {
+        existing
+    } else if normalized_requested.contains(normalized_existing.as_str()) {
+        requested
+    } else {
+        format!("{existing}\n{requested}")
     }
 }
 
@@ -1560,6 +1597,25 @@ mod tests {
                 "Prefer TypeScript, Playwright (instead of Vitest), and concise Czech summaries.",
             ),
             "Prefer TypeScript, Playwright, and concise Czech summaries."
+        );
+    }
+
+    #[test]
+    fn preference_merge_content_preserves_existing_and_requested_preferences() {
+        let merged = lifecycle_preference_merge_content(
+            "For this E2E test project prefer TypeScript, Playwright, and concise Czech reports. Do not use Vitest for E2E UI smoke tests.",
+            "E2E harness project rules (S035): 1) Czech concise reports. 2) Sandbox boundary tests write only inside workspace.",
+        );
+
+        assert!(
+            merged.contains("TypeScript")
+                && merged.contains("Playwright")
+                && merged.contains("Do not use Vitest"),
+            "merged preference should retain prior S034 facts: {merged}"
+        );
+        assert!(
+            merged.contains("S035") && merged.contains("Sandbox boundary tests"),
+            "merged preference should include requested S035 rules: {merged}"
         );
     }
 
