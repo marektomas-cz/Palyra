@@ -1,4 +1,4 @@
-use clap::{Subcommand, ValueEnum};
+use clap::{ArgGroup, Subcommand, ValueEnum};
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum CronCommand {
@@ -36,11 +36,18 @@ pub enum CronCommand {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    #[command(group(
+        ArgGroup::new("cron_add_prompt_source")
+            .required(true)
+            .args(["prompt", "prompt_stdin"])
+    ))]
     Add {
         #[arg(long)]
         name: String,
         #[arg(long)]
-        prompt: String,
+        prompt: Option<String>,
+        #[arg(long, default_value_t = false)]
+        prompt_stdin: bool,
         #[arg(long, value_enum)]
         schedule_type: CronScheduleTypeArg,
         #[arg(
@@ -83,6 +90,8 @@ pub enum CronCommand {
         name: Option<String>,
         #[arg(long)]
         prompt: Option<String>,
+        #[arg(long, default_value_t = false, conflicts_with = "prompt")]
+        prompt_stdin: bool,
         #[arg(long, value_enum, requires = "schedule")]
         schedule_type: Option<CronScheduleTypeArg>,
         #[arg(

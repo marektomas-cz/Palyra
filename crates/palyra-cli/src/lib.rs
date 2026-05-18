@@ -3892,6 +3892,18 @@ fn parse_acp_shim_input_line(
 }
 
 fn resolve_prompt_input(prompt: Option<String>, prompt_stdin: bool) -> Result<String> {
+    let prompt = resolve_optional_prompt_input(prompt, prompt_stdin)?
+        .context("missing prompt: use --prompt or --prompt-stdin")?;
+    if prompt.trim().is_empty() {
+        anyhow::bail!("prompt cannot be empty");
+    }
+    Ok(prompt)
+}
+
+fn resolve_optional_prompt_input(
+    prompt: Option<String>,
+    prompt_stdin: bool,
+) -> Result<Option<String>> {
     if prompt_stdin {
         if prompt.is_some() {
             anyhow::bail!("cannot use --prompt together with --prompt-stdin");
@@ -3902,23 +3914,18 @@ fn resolve_prompt_input(prompt: Option<String>, prompt_stdin: bool) -> Result<St
             .read_to_end(&mut input)
             .context("failed to read prompt from stdin")?;
         let prompt = normalize_prompt_stdin_bytes(input.as_slice())?;
-        if prompt.is_empty() {
+        if prompt.trim().is_empty() {
             anyhow::bail!("prompt from stdin is empty; pipe text into stdin or use --prompt");
         }
-        return Ok(prompt);
+        return Ok(Some(prompt));
     }
 
-    let prompt = prompt.context("missing prompt: use --prompt or --prompt-stdin")?;
-    let prompt = prompt.trim();
-    if prompt.is_empty() {
-        anyhow::bail!("prompt cannot be empty");
-    }
-    Ok(prompt.to_owned())
+    Ok(prompt.map(|value| value.trim().to_owned()))
 }
 
 fn normalize_prompt_stdin_bytes(input: &[u8]) -> Result<String> {
     let input = decode_prompt_stdin_bytes(input)?;
-    Ok(input.trim_end_matches(['\r', '\n']).trim().to_owned())
+    Ok(input.trim_end_matches(['\r', '\n']).to_owned())
 }
 
 fn decode_prompt_stdin_bytes(input: &[u8]) -> Result<String> {
@@ -4033,6 +4040,20 @@ mod prompt_stdin_decode_tests {
         .expect("multiline prompt should normalize");
 
         assert_eq!(prompt, "Intro line\r\n1. Preserve this rule\r\n2. Preserve this rule too");
+    }
+
+    #[test]
+    fn prompt_stdin_normalization_preserves_leading_indentation() {
+        let prompt = normalize_prompt_stdin_bytes(
+            "Plan:\r\n  - keep nested indentation\r\n  - preserve shell-safe multiline text\r\n"
+                .as_bytes(),
+        )
+        .expect("multiline prompt should normalize without trimming indentation");
+
+        assert_eq!(
+            prompt,
+            "Plan:\r\n  - keep nested indentation\r\n  - preserve shell-safe multiline text"
+        );
     }
 
     #[cfg(windows)]

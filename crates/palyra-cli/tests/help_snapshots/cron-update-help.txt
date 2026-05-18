@@ -7,6 +7,8 @@ Options:
 
       --prompt <PROMPT>
 
+      --prompt-stdin
+
       --schedule-type <SCHEDULE_TYPE>
           [possible values: cron, every, at]
       --schedule <SCHEDULE>

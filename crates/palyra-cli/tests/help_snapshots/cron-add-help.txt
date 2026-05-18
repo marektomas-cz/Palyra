@@ -1,9 +1,11 @@
-Usage: palyra cron add [OPTIONS] --name <NAME> --prompt <PROMPT> --schedule-type <SCHEDULE_TYPE> --schedule <SCHEDULE>
+Usage: palyra cron add [OPTIONS] --name <NAME> --schedule-type <SCHEDULE_TYPE> --schedule <SCHEDULE> <--prompt <PROMPT>|--prompt-stdin>
 
 Options:
       --name <NAME>
 
       --prompt <PROMPT>
+
+      --prompt-stdin
 
       --schedule-type <SCHEDULE_TYPE>
           [possible values: cron, every, at]

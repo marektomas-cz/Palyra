@@ -1037,7 +1037,7 @@ category = "nested_surface"
 status = "done"
 summary = "Cron update workflow with edit alias."
 required_aliases = ["edit"]
-required_flags = ["id"]
+required_flags = ["id", "prompt-stdin"]
 
 [entries.snapshot]
 path = "cron update"
@@ -1048,7 +1048,7 @@ path = "cron add"
 category = "nested_surface"
 status = "done"
 summary = "Cron creation contract."
-required_flags = ["name", "prompt", "schedule-type", "schedule"]
+required_flags = ["name", "prompt", "prompt-stdin", "schedule-type", "schedule"]
 
 [entries.snapshot]
 path = "cron add"

@@ -1532,7 +1532,8 @@ fn parse_cron_add() {
         Command::Cron {
             command: CronCommand::Add {
                 name: "Health summary".to_owned(),
-                prompt: "Summarize status".to_owned(),
+                prompt: Some("Summarize status".to_owned()),
+                prompt_stdin: false,
                 schedule_type: CronScheduleTypeArg::Cron,
                 schedule: "*/5 * * * *".to_owned(),
                 enabled: true,
@@ -1571,7 +1572,47 @@ fn parse_cron_add_defaults_to_disabled() {
         Command::Cron {
             command: CronCommand::Add {
                 name: "Draft summary".to_owned(),
-                prompt: "Summarize status".to_owned(),
+                prompt: Some("Summarize status".to_owned()),
+                prompt_stdin: false,
+                schedule_type: CronScheduleTypeArg::Every,
+                schedule: "1h".to_owned(),
+                enabled: false,
+                concurrency: CronConcurrencyPolicyArg::Forbid,
+                retry_max_attempts: 1,
+                retry_backoff_ms: 1000,
+                misfire: CronMisfirePolicyArg::Skip,
+                jitter_ms: 0,
+                owner: None,
+                channel: None,
+                session_key: None,
+                session_label: None,
+                json: false,
+            }
+        }
+    );
+}
+
+#[test]
+fn parse_cron_add_with_prompt_stdin() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "cron",
+        "add",
+        "--name",
+        "Draft summary",
+        "--prompt-stdin",
+        "--schedule-type",
+        "every",
+        "--schedule",
+        "1h",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Cron {
+            command: CronCommand::Add {
+                name: "Draft summary".to_owned(),
+                prompt: None,
+                prompt_stdin: true,
                 schedule_type: CronScheduleTypeArg::Every,
                 schedule: "1h".to_owned(),
                 enabled: false,
@@ -1632,6 +1673,7 @@ fn parse_cron_update() {
                 id: "01ARZ3NDEKTSV4RRFFQ69G5FB0".to_owned(),
                 name: Some("Health summary v2".to_owned()),
                 prompt: None,
+                prompt_stdin: false,
                 schedule_type: Some(CronScheduleTypeArg::Every),
                 schedule: Some("60000".to_owned()),
                 enabled: Some(true),

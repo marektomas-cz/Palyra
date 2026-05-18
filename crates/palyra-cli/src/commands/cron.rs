@@ -51,6 +51,7 @@ pub(crate) async fn run_cron_async(command: CronCommand) -> Result<()> {
         CronCommand::Add {
             name,
             prompt,
+            prompt_stdin,
             schedule_type,
             schedule,
             enabled,
@@ -65,6 +66,7 @@ pub(crate) async fn run_cron_async(command: CronCommand) -> Result<()> {
             session_label,
             json,
         } => {
+            let prompt = resolve_prompt_input(prompt, prompt_stdin)?;
             let payload = build_schedule_routine_payload(
                 None,
                 ScheduleRoutineConfig {
@@ -91,6 +93,7 @@ pub(crate) async fn run_cron_async(command: CronCommand) -> Result<()> {
             id,
             name,
             prompt,
+            prompt_stdin,
             schedule_type,
             schedule,
             enabled,
@@ -109,6 +112,7 @@ pub(crate) async fn run_cron_async(command: CronCommand) -> Result<()> {
             let routine = existing
                 .pointer("/routine")
                 .ok_or_else(|| anyhow!("routine response is missing the routine payload"))?;
+            let prompt = resolve_optional_prompt_input(prompt, prompt_stdin)?;
             let payload = build_schedule_routine_payload(
                 Some(routine),
                 ScheduleRoutineConfig {
