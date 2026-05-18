@@ -4905,6 +4905,10 @@ mod agent_stream_output_tests {
         assert_eq!(value["input_json"]["token"], REDACTED);
         assert_eq!(value["prompt"]["details_json"]["api_key"], REDACTED);
         assert_eq!(value["prompt"]["details_json"]["reason"], "needs patch token=<redacted>");
+        assert!(
+            value.get("cli_hint").is_none(),
+            "approval request events should not include a noninteractive prompt hint"
+        );
         let encoded = value.to_string();
         assert!(!encoded.contains("raw-token"), "{encoded}");
         assert!(!encoded.contains("details-secret"), "{encoded}");
@@ -5066,7 +5070,6 @@ fn agent_event_json_value(event: &common_v1::RunStreamEvent) -> serde_json::Valu
                     "details_json": stream_json_payload_value(prompt.details_json.as_slice()),
             })),
             "input_json": stream_json_payload_value(approval_request.input_json.as_slice()),
-            "cli_hint": approval_required_cli_hint(),
         }),
         Some(common_v1::run_stream_event::Body::ToolApprovalResponse(approval_response)) => json!({
             "type": "tool.approval.response",
