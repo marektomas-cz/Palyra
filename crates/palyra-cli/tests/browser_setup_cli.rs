@@ -36,6 +36,15 @@ fn browser_setup_configures_gateway_and_browserd_prerequisites() -> Result<()> {
         "setup should succeed before browser setup: {}",
         String::from_utf8_lossy(&setup_config.stderr)
     );
+    let initial_config_toml =
+        fs::read_to_string(&config_path).context("failed to read initial setup config")?;
+    assert!(
+        initial_config_toml.contains("[tool_call.browser_service]")
+            && initial_config_toml.contains("enabled = true")
+            && initial_config_toml.contains("auth_token = \"palyra_browser_")
+            && initial_config_toml.contains("state_key_vault_ref = \"global/browser_state_key\""),
+        "local setup should configure browser prerequisites by default: {initial_config_toml}"
+    );
 
     let browser_setup = run_cli(
         &workdir,

@@ -1869,6 +1869,22 @@ fn apply_onboarding_plan(
             .with_context(|| format!("failed to write {}", context.config_path.display()))?;
     }
 
+    if plan.deployment_profile == palyra_common::deployment_profiles::DeploymentProfileId::Local {
+        app::update_active_profile_paths(
+            Some(context.config_path.as_path()),
+            Some(context.state_root.as_path()),
+        )?;
+        super::browser::configure_local_browser_prerequisites(Some(
+            context.config_path.display().to_string(),
+        ))
+        .with_context(|| {
+            format!(
+                "failed to configure local browser prerequisites for {}",
+                context.config_path.display()
+            )
+        })?;
+    }
+
     if matches!(plan.service_install_mode, ServiceInstallMode::InstallNow) {
         let daemon_bin = super::daemon::resolve_palyrad_binary(None)?;
         let request = support::service::GatewayServiceInstallRequest {

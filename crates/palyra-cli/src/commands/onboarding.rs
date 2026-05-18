@@ -69,6 +69,8 @@ struct OnboardingSignals {
     chat_model: Option<String>,
     memory_embeddings_configured: bool,
     memory_embeddings_message: String,
+    browser_prerequisites_configured: bool,
+    browser_prerequisites_message: String,
     first_success_completed: bool,
 }
 
@@ -259,6 +261,8 @@ fn collect_onboarding_signals(
         chat_model.as_deref(),
         memory_embeddings_configured,
     );
+    let (browser_prerequisites_configured, browser_prerequisites_message) =
+        browser_prerequisites_status(document);
 
     Ok(OnboardingSignals {
         config_exists: config_path != "defaults"
@@ -288,6 +292,8 @@ fn collect_onboarding_signals(
         chat_model,
         memory_embeddings_configured,
         memory_embeddings_message,
+        browser_prerequisites_configured,
+        browser_prerequisites_message,
         first_success_completed: cli_first_success_completed()?,
     })
 }
@@ -458,6 +464,27 @@ fn build_onboarding_steps(
         )
     };
 
+    let browser_step = if signals.browser_prerequisites_configured {
+        done_step(
+            "browser_harness",
+            "Browser harness",
+            signals.browser_prerequisites_message.clone(),
+            Some(run_cli_action("Inspect browser status", "palyra browser status".to_owned())),
+        )
+    } else {
+        actionable_step(
+            "browser_harness",
+            "Browser harness",
+            signals.browser_prerequisites_message.clone(),
+            control_plane::OnboardingStepStatus::Todo,
+            Some(run_cli_action(
+                "Configure browser harness",
+                format!("palyra browser setup --path {}", signals.config_path),
+            )),
+            StepPresentation::required(Some("missing_browser_prerequisites".to_owned())),
+        )
+    };
+
     let agent_step = if signals.default_agent_configured {
         done_step(
             "agent_identity",
@@ -559,6 +586,7 @@ fn build_onboarding_steps(
         config_step.status,
         remote_step.status,
         provider_step.status,
+        browser_step.status,
         agent_step.status,
         verification_step.status,
     ]
@@ -612,6 +640,7 @@ fn build_onboarding_steps(
                 config_step,
                 provider_step,
                 memory_embeddings_step,
+                browser_step,
                 agent_step,
                 verification_step,
                 first_success_step,
@@ -624,6 +653,7 @@ fn build_onboarding_steps(
                 remote_step,
                 provider_step,
                 memory_embeddings_step,
+                browser_step,
                 agent_step,
                 verification_step,
                 first_success_step,
@@ -726,7 +756,7 @@ fn derive_posture_status(
     if steps.iter().all(|step| step.status == control_plane::OnboardingStepStatus::Todo) {
         return control_plane::OnboardingPostureState::NotStarted;
     }
-    if first_success_completed {
+    if ready_for_first_success && first_success_completed {
         return control_plane::OnboardingPostureState::Complete;
     }
     if ready_for_first_success {
@@ -853,6 +883,44 @@ fn memory_embeddings_onboarding_message(
     }
     "No embeddings-capable provider/model is selected; memory recall remains usable with hash fallback, but semantic recall quality is degraded until you configure embeddings, restart the gateway, and run `palyra memory index --until-complete`."
         .to_owned()
+}
+
+fn browser_prerequisites_status(document: &toml::Value) -> (bool, String) {
+    let enabled = get_bool_at_path(document, "tool_call.browser_service.enabled").unwrap_or(false);
+    let auth_configured = get_string_at_path(document, "tool_call.browser_service.auth_token")
+        .is_some()
+        || get_string_at_path(document, "tool_call.browser_service.auth_token_secret_ref")
+            .is_some();
+    let state_key_configured =
+        get_string_at_path(document, "tool_call.browser_service.state_key_vault_ref").is_some()
+            || get_string_at_path(document, "tool_call.browser_service.state_key_secret_ref")
+                .is_some();
+
+    if enabled && auth_configured && state_key_configured {
+        return (
+            true,
+            "Browser service prerequisites are configured for local browser-backed agent workflows."
+                .to_owned(),
+        );
+    }
+
+    let mut missing = Vec::new();
+    if !enabled {
+        missing.push("tool_call.browser_service.enabled");
+    }
+    if !auth_configured {
+        missing.push("tool_call.browser_service.auth_token");
+    }
+    if !state_key_configured {
+        missing.push("tool_call.browser_service.state_key_vault_ref");
+    }
+    (
+        false,
+        format!(
+            "Browser-backed agent workflows need local browser prerequisites before onboarding is complete; missing {}.",
+            missing.join(", ")
+        ),
+    )
 }
 
 fn minimax_chat_provider_configured(
@@ -1189,6 +1257,8 @@ kind = "anthropic"
                 memory_embeddings_configured: false,
                 memory_embeddings_message: "MiniMax chat is configured; memory uses hash fallback"
                     .to_owned(),
+                browser_prerequisites_configured: true,
+                browser_prerequisites_message: "browser ready".to_owned(),
                 first_success_completed: false,
             },
         );
@@ -1222,6 +1292,8 @@ kind = "anthropic"
             memory_embeddings_configured: false,
             memory_embeddings_message: "MiniMax chat is configured; memory uses hash fallback"
                 .to_owned(),
+            browser_prerequisites_configured: true,
+            browser_prerequisites_message: "browser ready".to_owned(),
             first_success_completed: false,
         });
 
@@ -1256,6 +1328,8 @@ kind = "anthropic"
                 memory_embeddings_configured: false,
                 memory_embeddings_message: "MiniMax chat is configured; memory uses hash fallback"
                     .to_owned(),
+                browser_prerequisites_configured: true,
+                browser_prerequisites_message: "browser ready".to_owned(),
                 first_success_completed: false,
             },
         );
@@ -1309,6 +1383,8 @@ kind = "anthropic"
                 memory_embeddings_configured: false,
                 memory_embeddings_message: "MiniMax chat is configured; memory uses hash fallback"
                     .to_owned(),
+                browser_prerequisites_configured: true,
+                browser_prerequisites_message: "browser ready".to_owned(),
                 first_success_completed: false,
             },
         );
@@ -1387,6 +1463,11 @@ anthropic_api_key = "sk-inline-minimax"
 kind = "anthropic"
 anthropic_model = "MiniMax-M2.7"
 anthropic_api_key_vault_ref = "global/minimax_api_key"
+
+[tool_call.browser_service]
+enabled = true
+auth_token = "browser-token"
+state_key_vault_ref = "global/browser_state_key"
 "#;
         fs::create_dir_all(config_path.parent().expect("config parent"))?;
         fs::write(config_path.as_path(), config)?;
@@ -1430,6 +1511,60 @@ agent_id = "local-default"
         assert_eq!(
             derive_posture_status(&steps, onboarding_prerequisites_ready(&steps), true),
             control_plane::OnboardingPostureState::Complete
+        );
+
+        app::clear_root_context_for_tests();
+        Ok(())
+    }
+
+    #[test]
+    fn first_success_marker_does_not_complete_without_browser_prerequisites() -> Result<()> {
+        let _guard = app::test_env_lock_for_tests().lock().expect("env lock");
+        app::clear_root_context_for_tests();
+
+        let temp = tempdir()?;
+        let state_root = temp.path().join("state-root");
+        let config_path = temp.path().join("config").join("palyra.toml");
+        let config = r#"
+[model_provider]
+kind = "anthropic"
+anthropic_model = "MiniMax-M2.7"
+anthropic_api_key_vault_ref = "global/minimax_api_key"
+"#;
+        fs::create_dir_all(config_path.parent().expect("config parent"))?;
+        fs::write(config_path.as_path(), config)?;
+        record_cli_first_success(&state_root, "01ARZ3NDEKTSV4RRFFQ69G5FAV")?;
+        fs::write(
+            state_root.join("agents.toml"),
+            r#"
+version = 1
+default_agent_id = "local-default"
+
+[[agents]]
+agent_id = "local-default"
+"#,
+        )?;
+
+        let _context = app::install_root_context(RootOptions {
+            config_path: Some(config_path.display().to_string()),
+            state_root: Some(state_root.display().to_string()),
+            ..RootOptions::default()
+        })?;
+        let document: toml::Value = toml::from_str(config)?;
+        let signals = collect_onboarding_signals(
+            &document,
+            config_path.display().to_string(),
+            OnboardingVariant::Quickstart,
+        )?;
+        let steps = build_onboarding_steps(OnboardingVariant::Quickstart, &signals);
+        let browser_step =
+            steps.iter().find(|step| step.step_id == "browser_harness").expect("browser step");
+
+        assert_eq!(browser_step.status, control_plane::OnboardingStepStatus::Todo);
+        assert_eq!(recommended_onboarding_step_id(&steps).as_deref(), Some("browser_harness"));
+        assert_eq!(
+            derive_posture_status(&steps, onboarding_prerequisites_ready(&steps), false),
+            control_plane::OnboardingPostureState::Blocked
         );
 
         app::clear_root_context_for_tests();

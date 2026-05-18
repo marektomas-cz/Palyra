@@ -755,6 +755,10 @@ fn configure_browser_setup(
     })
 }
 
+pub(crate) fn configure_local_browser_prerequisites(path: Option<String>) -> Result<()> {
+    configure_browser_setup(path, None, false).map(|_| ())
+}
+
 fn ensure_browser_gateway_tools_allowed(document: &mut toml::Value) -> Result<Vec<String>> {
     let mut allowed_tools = document_string_array(Some(document), "tool_call.allowed_tools");
     let mut normalized =

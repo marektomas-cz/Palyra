@@ -82,6 +82,14 @@ pub(crate) fn run_init(
     fs::write(config_path.as_path(), rendered)
         .with_context(|| format!("failed to write init config {}", config_path.display()))?;
     app::update_active_profile_paths(Some(config_path.as_path()), Some(state_root.as_path()))?;
+    if mode == InitMode::LocalDesktop {
+        super::browser::configure_local_browser_prerequisites(Some(
+            config_path.display().to_string(),
+        ))
+        .with_context(|| {
+            format!("failed to configure local browser prerequisites for {}", config_path.display())
+        })?;
+    }
 
     if output::preferred_json(json) {
         return output::print_json_pretty(

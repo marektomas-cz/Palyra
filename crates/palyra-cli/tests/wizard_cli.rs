@@ -297,6 +297,14 @@ fn setup_non_wizard_emits_json_summary() -> Result<()> {
         "setup JSON should include next steps: {payload}"
     );
     assert!(config_path.exists(), "setup should create config file");
+    let config_toml = fs::read_to_string(&config_path).context("failed to read setup config")?;
+    assert!(
+        config_toml.contains("[tool_call.browser_service]")
+            && config_toml.contains("enabled = true")
+            && config_toml.contains("auth_token = \"palyra_browser_")
+            && config_toml.contains("state_key_vault_ref = \"global/browser_state_key\""),
+        "local setup should configure browser prerequisites by default: {config_toml}"
+    );
     Ok(())
 }
 
