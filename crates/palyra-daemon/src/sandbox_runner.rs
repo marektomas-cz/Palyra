@@ -2,7 +2,7 @@
 
 use std::{
     fs,
-    io::Read,
+    io::{self, Read},
     path::{Component, Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
     sync::{
@@ -12,9 +12,6 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-
-#[cfg(windows)]
-use std::io;
 
 use palyra_common::{
     process_runner_input::{parse_process_runner_tool_input, ProcessRunnerToolInput},
@@ -312,7 +309,7 @@ pub fn run_constrained_process(
         return Err(SandboxProcessRunError {
             kind: SandboxProcessRunErrorKind::TimedOut,
             message: format!(
-                "sandbox process timed out after {}ms and was terminated",
+                "sandbox process timed out after {}ms and was terminated; for dev servers or other long-running commands, rerun with background=true and an explicit timeout_ms lifetime",
                 per_call_timeout.as_millis()
             ),
         });
@@ -1606,6 +1603,7 @@ fn execute_process(
     timeout: Duration,
 ) -> Result<ProcessExecutionCapture, SandboxProcessRunError> {
     let mut command = build_process_command(policy, input, workspace_root, cwd)?;
+    configure_child_process_group(&mut command);
     command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     if !process_runner_allows_host_access(policy) {
         attach_resource_limits_unix(&mut command, policy);
@@ -1619,6 +1617,16 @@ fn execute_process(
     capture_child_output(&mut child, timeout, policy.max_output_bytes as usize)
 }
 
+#[cfg(unix)]
+fn configure_child_process_group(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn configure_child_process_group(_command: &mut Command) {}
+
 fn spawn_background_process(
     policy: &SandboxProcessRunnerPolicy,
     input: &ProcessRunnerInput,
@@ -1627,6 +1635,7 @@ fn spawn_background_process(
     lifetime: Duration,
 ) -> Result<SandboxProcessRunSuccess, SandboxProcessRunError> {
     let mut command = build_process_command(policy, input, workspace_root, cwd)?;
+    configure_child_process_group(&mut command);
     command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     if !process_runner_allows_host_access(policy) {
         attach_resource_limits_unix(&mut command, policy);
@@ -1818,19 +1827,8 @@ fn spawn_background_capture_reader<R>(
 }
 
 fn terminate_background_child(mut child: Child) {
-    #[cfg(windows)]
-    {
-        let pid = child.id();
-        if terminate_windows_process_tree(pid).is_err() {
-            let _ = child.kill();
-        }
-        let _ = child.wait();
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = child.kill();
-        let _ = child.wait();
-    }
+    terminate_child_process_tree(&mut child);
+    let _ = child.wait();
 }
 
 #[cfg(windows)]
@@ -1845,15 +1843,41 @@ fn terminate_windows_process_tree(pid: u32) -> io::Result<()> {
     if status.success() {
         return Ok(());
     }
-    Err(io::Error::other(format!(
-        "taskkill failed for background process tree rooted at pid {pid}: {status}"
-    )))
+    Err(io::Error::other(format!("taskkill failed for process tree rooted at pid {pid}: {status}")))
+}
+
+#[cfg(unix)]
+fn terminate_unix_process_group(pid: u32) -> io::Result<()> {
+    let process_group_id = pid as libc::pid_t;
+    let result = unsafe { libc::kill(-process_group_id, libc::SIGKILL) };
+    if result == 0 {
+        return Ok(());
+    }
+    Err(io::Error::last_os_error())
+}
+
+fn terminate_child_process_tree(child: &mut Child) {
+    #[cfg(windows)]
+    {
+        let pid = child.id();
+        if terminate_windows_process_tree(pid).is_ok() {
+            return;
+        }
+    }
+    #[cfg(unix)]
+    {
+        let pid = child.id();
+        if terminate_unix_process_group(pid).is_ok() {
+            return;
+        }
+    }
+    let _ = child.kill();
 }
 
 fn background_cleanup_metadata(pid: u32, lifetime_ms: u64) -> serde_json::Value {
     json!({
         "auto_kill_after_ms": lifetime_ms,
-        "process_tree": cfg!(windows),
+        "process_tree": cfg!(any(unix, windows)),
         "manual_command": background_cleanup_command(pid),
         "note": background_cleanup_note(),
     })
@@ -1871,7 +1895,7 @@ fn background_cleanup_command(pid: u32) -> serde_json::Value {
     {
         json!({
             "command": "kill",
-            "args": ["-TERM", pid.to_string()],
+            "args": ["-TERM", format!("-{pid}")],
         })
     }
 }
@@ -1883,7 +1907,7 @@ fn background_cleanup_note() -> &'static str {
     }
     #[cfg(not(windows))]
     {
-        "Use the manual command to terminate the direct process if the run fails before the automatic lifetime cleanup runs."
+        "Use the manual command to terminate the direct process group if the run fails before the automatic lifetime cleanup runs."
     }
 }
 
@@ -2253,14 +2277,21 @@ fn capture_child_output(
     let started_at = Instant::now();
     let mut timed_out = false;
     let mut quota_exceeded = false;
+    let mut termination_requested = false;
     let exit_status = loop {
         if quota_triggered.load(Ordering::Relaxed) {
             quota_exceeded = true;
-            let _ = child.kill();
+            if !termination_requested {
+                terminate_child_process_tree(child);
+                termination_requested = true;
+            }
         }
         if started_at.elapsed() > timeout {
             timed_out = true;
-            let _ = child.kill();
+            if !termination_requested {
+                terminate_child_process_tree(child);
+                termination_requested = true;
+            }
         }
 
         match child.try_wait() {
@@ -3119,12 +3150,12 @@ mod tests {
             metadata.get("auto_kill_after_ms").and_then(serde_json::Value::as_u64),
             Some(60_000)
         );
-        assert_eq!(
-            metadata.pointer("/manual_command/args/1").and_then(serde_json::Value::as_str),
-            Some("1234")
-        );
         #[cfg(windows)]
         {
+            assert_eq!(
+                metadata.pointer("/manual_command/args/1").and_then(serde_json::Value::as_str),
+                Some("1234")
+            );
             assert_eq!(
                 metadata.pointer("/manual_command/command").and_then(serde_json::Value::as_str),
                 Some("taskkill")
@@ -3145,8 +3176,12 @@ mod tests {
                 Some("kill")
             );
             assert_eq!(
+                metadata.pointer("/manual_command/args/1").and_then(serde_json::Value::as_str),
+                Some("-1234")
+            );
+            assert_eq!(
                 metadata.get("process_tree").and_then(serde_json::Value::as_bool),
-                Some(false)
+                Some(true)
             );
         }
     }
@@ -3191,6 +3226,44 @@ mod tests {
         assert_eq!(
             output.get("stdout").and_then(serde_json::Value::as_str),
             Some("PALYRA_PROCESS_OK\n")
+        );
+
+        let _ = fs::remove_dir_all(workspace.as_path());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn run_constrained_process_timeout_terminates_node_process_tree_when_available() {
+        if Command::new("node").arg("--version").output().is_err() {
+            return;
+        }
+        let workspace = unique_temp_dir("workspace-node-timeout-tree");
+        fs::create_dir_all(workspace.as_path()).expect("workspace directory should be created");
+        let mut policy =
+            sandbox_policy_with_allowed_executables(workspace.clone(), vec!["node".to_owned()]);
+        policy.allow_interpreters = true;
+        policy.egress_enforcement_mode = EgressEnforcementMode::None;
+        let script = "const { spawn } = require('child_process'); \
+            const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: ['ignore', 'inherit', 'inherit'] }); \
+            child.unref(); \
+            setInterval(() => {}, 1000);";
+        let input = serde_json::to_vec(&serde_json::json!({
+            "command": "node",
+            "args": ["-e", script],
+            "timeout_ms": 200
+        }))
+        .expect("input should serialize");
+
+        let started_at = std::time::Instant::now();
+        let error =
+            run_constrained_process(&policy, input.as_slice(), Duration::from_millis(2_000))
+                .expect_err("foreground process tree should be terminated at timeout");
+
+        assert_eq!(error.kind, SandboxProcessRunErrorKind::TimedOut);
+        assert!(error.message.contains("background=true"), "{}", error.message);
+        assert!(
+            started_at.elapsed() < Duration::from_secs(5),
+            "process tree cleanup should not hang on inherited stdout/stderr handles"
         );
 
         let _ = fs::remove_dir_all(workspace.as_path());
