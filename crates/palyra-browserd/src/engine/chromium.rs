@@ -140,6 +140,77 @@ const CHROMIUM_PAGE_DIAGNOSTICS_SCRIPT: &str = r#"
       ""
     );
   });
+  state.network_entries = Array.isArray(state.network_entries) ? state.network_entries : [];
+  const normalizeNetworkUrl = (raw) => {
+    try {
+      return new URL(String(raw || ""), window.location.href).href;
+    } catch (_) {
+      return String(raw || "");
+    }
+  };
+  const pushNetwork = (requestUrl, statusCode, startedAt, headers) => {
+    try {
+      state.network_entries.push({
+        request_url: normalizeNetworkUrl(requestUrl),
+        status_code: Number(statusCode || 0),
+        latency_ms: Math.max(0, Date.now() - Number(startedAt || Date.now())),
+        captured_at_unix_ms: Date.now(),
+        headers: Array.isArray(headers) ? headers.slice(0, 24) : []
+      });
+      if (state.network_entries.length > 512) {
+        state.network_entries.splice(0, state.network_entries.length - 512);
+      }
+    } catch (_) {}
+  };
+  const responseHeaders = (headers) => {
+    const output = [];
+    try {
+      if (headers && typeof headers.forEach === "function") {
+        headers.forEach((value, name) => output.push({ name: String(name || ""), value: String(value || "") }));
+      }
+    } catch (_) {}
+    return output;
+  };
+  if (typeof window.fetch === "function" && !state.original_fetch) {
+    state.original_fetch = window.fetch.bind(window);
+    window.fetch = (...args) => {
+      const input = args[0];
+      const requestUrl = input && typeof input === "object" && "url" in input ? input.url : input;
+      const startedAt = Date.now();
+      return state.original_fetch(...args).then((response) => {
+        pushNetwork(response && response.url ? response.url : requestUrl, response && response.status, startedAt, responseHeaders(response && response.headers));
+        return response;
+      }, (error) => {
+        pushNetwork(requestUrl, 0, startedAt, []);
+        throw error;
+      });
+    };
+  }
+  if (typeof window.XMLHttpRequest === "function" && !state.original_xhr_open) {
+    state.original_xhr_open = window.XMLHttpRequest.prototype.open;
+    state.original_xhr_send = window.XMLHttpRequest.prototype.send;
+    window.XMLHttpRequest.prototype.open = function(_method, url, ...rest) {
+      this.__palyraNetwork = { url: normalizeNetworkUrl(url), started_at: 0 };
+      return state.original_xhr_open.call(this, _method, url, ...rest);
+    };
+    window.XMLHttpRequest.prototype.send = function(...args) {
+      const details = this.__palyraNetwork || { url: "", started_at: 0 };
+      details.started_at = Date.now();
+      this.addEventListener("loadend", () => {
+        const headers = [];
+        try {
+          String(this.getAllResponseHeaders() || "").split(/\r?\n/).forEach((line) => {
+            const index = line.indexOf(":");
+            if (index > 0) {
+              headers.push({ name: line.slice(0, index).trim(), value: line.slice(index + 1).trim() });
+            }
+          });
+        } catch (_) {}
+        pushNetwork(this.responseURL || details.url, this.status || 0, details.started_at, headers);
+      }, { once: true });
+      return state.original_xhr_send.apply(this, args);
+    };
+  }
   return true;
 })()
 "#;
@@ -151,6 +222,17 @@ const CHROMIUM_READ_CONSOLE_LOG_SCRIPT: &str = r#"
     return "[]";
   }
   return JSON.stringify(state.entries);
+})()
+"#;
+
+const CHROMIUM_DRAIN_NETWORK_LOG_SCRIPT: &str = r#"
+(() => {
+  const state = window.__palyraDiagnostics;
+  if (!state || !Array.isArray(state.network_entries)) {
+    return "[]";
+  }
+  const entries = state.network_entries.splice(0, state.network_entries.length);
+  return JSON.stringify(entries);
 })()
 "#;
 
@@ -490,6 +572,7 @@ pub(crate) fn chromium_loopback_remote_ip_is_expected_proxy_hop(
 pub(crate) fn configure_chromium_tab(
     tab: &Arc<HeadlessTab>,
     allow_private_targets: Arc<AtomicBool>,
+    network_log: Arc<std::sync::Mutex<VecDeque<NetworkLogEntryInternal>>>,
     timeout: Duration,
     security_incident: Arc<std::sync::Mutex<Option<String>>>,
 ) -> Result<(), String> {
@@ -513,6 +596,20 @@ pub(crate) fn configure_chromium_tab(
     tab.enable_request_interception(request_interceptor).map_err(|error| {
         format!("failed to register Chromium request interception callback: {error}")
     })?;
+    let network_log_buffer = Arc::clone(&network_log);
+    tab.register_response_handling(
+        CHROMIUM_NETWORK_LOG_HANDLER_NAME,
+        Box::new(move |response, _fetch_body| {
+            let entry = chromium_network_log_entry_from_response(&response);
+            if let Ok(mut guard) = network_log_buffer.lock() {
+                guard.push_back(entry);
+                while guard.len() > CHROMIUM_PENDING_NETWORK_LOG_MAX_ENTRIES {
+                    let _ = guard.pop_front();
+                }
+            }
+        }),
+    )
+    .map_err(|error| format!("failed to register Chromium network log callback: {error}"))?;
     tab.call_method(Page::AddScriptToEvaluateOnNewDocument {
         source: CHROMIUM_PAGE_DIAGNOSTICS_SCRIPT.to_owned(),
         world_name: None,
@@ -538,6 +635,52 @@ pub(crate) fn configure_chromium_tab(
     Ok(())
 }
 
+fn chromium_network_log_entry_from_response(
+    response: &Network::events::ResponseReceivedEventParams,
+) -> NetworkLogEntryInternal {
+    let latency_ms =
+        response.response.timing.as_ref().map(chromium_response_latency_ms).unwrap_or(0);
+    NetworkLogEntryInternal {
+        request_url: normalize_url_with_redaction(response.response.url.as_str()),
+        status_code: response.response.status.min(u32::from(u16::MAX)) as u16,
+        timing_bucket: timing_bucket_for_latency(latency_ms).to_owned(),
+        latency_ms,
+        captured_at_unix_ms: current_unix_ms(),
+        headers: chromium_network_log_headers(&response.response.headers),
+    }
+}
+
+fn chromium_response_latency_ms(timing: &Network::ResourceTiming) -> u64 {
+    if timing.receive_headers_end.is_sign_positive() {
+        timing.receive_headers_end.round().max(0.0) as u64
+    } else {
+        0
+    }
+}
+
+fn chromium_network_log_headers(headers: &Network::Headers) -> Vec<NetworkLogHeaderInternal> {
+    let Some(value) = headers.0.as_ref() else {
+        return Vec::new();
+    };
+    let Some(object) = value.as_object() else {
+        return Vec::new();
+    };
+    let mut output = object
+        .iter()
+        .take(MAX_NETWORK_LOG_HEADER_COUNT)
+        .map(|(name, value)| {
+            let header_name = name.to_ascii_lowercase();
+            let raw_value =
+                value.as_str().map(ToOwned::to_owned).unwrap_or_else(|| value.to_string());
+            let sanitized =
+                sanitize_single_network_header(header_name.as_str(), raw_value.as_str());
+            NetworkLogHeaderInternal { name: header_name, value: sanitized }
+        })
+        .collect::<Vec<_>>();
+    output.sort_by(|left, right| left.name.cmp(&right.name));
+    output
+}
+
 pub(crate) fn chromium_new_tab_error_is_retryable(message: &str) -> bool {
     let normalized = message.to_ascii_lowercase();
     normalized.contains("event waited for never came")
@@ -549,6 +692,7 @@ pub(crate) fn chromium_new_tab_error_is_retryable(message: &str) -> bool {
 pub(crate) fn create_configured_chromium_tab_with_retry(
     browser: &Arc<HeadlessBrowser>,
     allow_private_targets: Arc<AtomicBool>,
+    network_log: Arc<std::sync::Mutex<VecDeque<NetworkLogEntryInternal>>>,
     timeout: Duration,
     security_incident: Arc<std::sync::Mutex<Option<String>>>,
     failure_prefix: &str,
@@ -559,6 +703,7 @@ pub(crate) fn create_configured_chromium_tab_with_retry(
                 configure_chromium_tab(
                     &tab,
                     Arc::clone(&allow_private_targets),
+                    Arc::clone(&network_log),
                     timeout,
                     security_incident,
                 )?;
@@ -619,19 +764,24 @@ pub(crate) async fn initialize_chromium_session_runtime(
                     format!("failed to launch Chromium browser process: {error}")
                 })?);
             let mut tabs = HashMap::new();
+            let mut network_logs = HashMap::new();
             for tab_id in tab_order.iter() {
+                let network_log = Arc::new(std::sync::Mutex::new(VecDeque::new()));
                 let tab = create_configured_chromium_tab_with_retry(
                     &browser,
                     Arc::clone(&allow_private_targets_policy),
+                    Arc::clone(&network_log),
                     navigation_timeout,
                     Arc::clone(&security_incident),
                     "failed to create Chromium tab for session restore",
                 )?;
                 tabs.insert(tab_id.clone(), tab);
+                network_logs.insert(tab_id.clone(), network_log);
             }
             Ok(ChromiumSessionState {
                 browser,
                 tabs,
+                network_logs,
                 allow_private_targets: allow_private_targets_policy,
                 security_incident,
                 _profile_dir: profile_dir,
@@ -674,20 +824,25 @@ pub(crate) async fn chromium_open_tab_runtime(
         )
     };
     let tab = run_chromium_blocking("chromium open tab", move || {
-        create_configured_chromium_tab_with_retry(
+        let network_log = Arc::new(std::sync::Mutex::new(VecDeque::new()));
+        let tab = create_configured_chromium_tab_with_retry(
             &browser,
             allow_private_targets,
+            Arc::clone(&network_log),
             Duration::from_millis(timeout_ms),
             security_incident,
             "failed to allocate Chromium tab",
-        )
+        )?;
+        Ok((tab, network_log))
     })
     .await?;
+    let (tab, network_log) = tab;
     let mut chromium_sessions = runtime.chromium_sessions.lock().await;
     let Some(chromium_session) = chromium_sessions.get_mut(session_id) else {
         return Err("chromium_session_not_found".to_owned());
     };
     chromium_session.tabs.insert(tab_id.to_owned(), tab);
+    chromium_session.network_logs.insert(tab_id.to_owned(), network_log);
     Ok(())
 }
 
@@ -701,6 +856,7 @@ pub(crate) async fn chromium_close_tab_runtime(
         let Some(chromium_session) = chromium_sessions.get_mut(session_id) else {
             return Err("chromium_session_not_found".to_owned());
         };
+        chromium_session.network_logs.remove(tab_id);
         chromium_session.tabs.remove(tab_id)
     };
     if let Some(tab) = tab {
@@ -753,6 +909,28 @@ pub(crate) async fn chromium_tab_for_session(
         return Err("chromium_session_not_found".to_owned());
     };
     chromium_session.tabs.get(tab_id).cloned().ok_or_else(|| "chromium_tab_not_found".to_owned())
+}
+
+pub(crate) async fn chromium_drain_pending_network_log(
+    runtime: &BrowserRuntimeState,
+    session_id: &str,
+    tab_id: &str,
+) -> Result<Vec<NetworkLogEntryInternal>, String> {
+    let network_log = {
+        let chromium_sessions = runtime.chromium_sessions.lock().await;
+        let Some(chromium_session) = chromium_sessions.get(session_id) else {
+            return Err("chromium_session_not_found".to_owned());
+        };
+        chromium_session
+            .network_logs
+            .get(tab_id)
+            .cloned()
+            .ok_or_else(|| "chromium_network_log_not_found".to_owned())?
+    };
+    let mut guard = network_log
+        .lock()
+        .map_err(|_| "failed to inspect Chromium network log state".to_owned())?;
+    Ok(guard.drain(..).collect())
 }
 
 pub(crate) async fn chromium_tab_and_private_target_policy_for_session(
@@ -850,6 +1028,26 @@ async fn chromium_read_console_log(
     Ok(parse_chromium_console_entries(value))
 }
 
+async fn chromium_drain_page_network_log(
+    runtime: &BrowserRuntimeState,
+    session_id: &str,
+    tab_id: &str,
+) -> Result<Vec<NetworkLogEntryInternal>, String> {
+    enforce_chromium_remote_ip_guard(runtime, session_id).await?;
+    let tab = chromium_tab_for_session(runtime, session_id, tab_id).await?;
+    let value = run_chromium_blocking("chromium drain page network log", move || {
+        let value = tab
+            .evaluate(CHROMIUM_DRAIN_NETWORK_LOG_SCRIPT, false)
+            .map_err(|error| format!("failed to read Chromium page network diagnostics: {error}"))?
+            .value
+            .unwrap_or_else(|| serde_json::Value::String("[]".to_owned()));
+        Ok(decode_chromium_console_entries_value(value))
+    })
+    .await?;
+    enforce_chromium_remote_ip_guard(runtime, session_id).await?;
+    Ok(parse_chromium_page_network_entries(value))
+}
+
 fn decode_chromium_console_entries_value(value: serde_json::Value) -> serde_json::Value {
     match value {
         serde_json::Value::String(raw) => serde_json::from_str::<serde_json::Value>(raw.as_str())
@@ -865,6 +1063,68 @@ fn decode_chromium_json_script_value(value: serde_json::Value) -> serde_json::Va
             .unwrap_or(serde_json::Value::Null),
         value => value,
     }
+}
+
+fn parse_chromium_page_network_entries(value: serde_json::Value) -> Vec<NetworkLogEntryInternal> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let object = entry.as_object()?;
+            let request_url =
+                object.get("request_url").and_then(serde_json::Value::as_str).unwrap_or_default();
+            if request_url.trim().is_empty() {
+                return None;
+            }
+            let latency_ms =
+                object.get("latency_ms").and_then(serde_json::Value::as_u64).unwrap_or(0);
+            Some(NetworkLogEntryInternal {
+                request_url: normalize_url_with_redaction(request_url),
+                status_code: object
+                    .get("status_code")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|value| u16::try_from(value).ok())
+                    .unwrap_or(0),
+                timing_bucket: timing_bucket_for_latency(latency_ms).to_owned(),
+                latency_ms,
+                captured_at_unix_ms: object
+                    .get("captured_at_unix_ms")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or_else(current_unix_ms),
+                headers: parse_chromium_page_network_headers(object.get("headers")),
+            })
+        })
+        .collect()
+}
+
+fn parse_chromium_page_network_headers(
+    value: Option<&serde_json::Value>,
+) -> Vec<NetworkLogHeaderInternal> {
+    let mut output = value
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .take(MAX_NETWORK_LOG_HEADER_COUNT)
+        .filter_map(|header| {
+            let object = header.as_object()?;
+            let name = object
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_ascii_lowercase();
+            if name.is_empty() {
+                return None;
+            }
+            let raw_value =
+                object.get("value").and_then(serde_json::Value::as_str).unwrap_or_default();
+            let value = sanitize_single_network_header(name.as_str(), raw_value);
+            Some(NetworkLogHeaderInternal { name, value })
+        })
+        .collect::<Vec<_>>();
+    output.sort_by(|left, right| left.name.cmp(&right.name));
+    output
 }
 
 fn parse_chromium_viewport_metrics(
@@ -957,11 +1217,18 @@ pub(crate) async fn chromium_refresh_tab_snapshot(
     let snapshot = chromium_observe_snapshot(runtime, session_id, tab_id).await?;
     let console_log =
         chromium_read_console_log(runtime, session_id, tab_id).await.unwrap_or_default();
+    let mut network_log =
+        chromium_drain_pending_network_log(runtime, session_id, tab_id).await.unwrap_or_default();
+    network_log.extend(
+        chromium_drain_page_network_log(runtime, session_id, tab_id).await.unwrap_or_default(),
+    );
     enforce_chromium_remote_ip_guard(runtime, session_id).await?;
     let mut sessions = runtime.sessions.lock().await;
     let Some(session) = sessions.get_mut(session_id) else {
         return Err("session_not_found".to_owned());
     };
+    let max_network_log_entries = session.budget.max_network_log_entries;
+    let max_network_log_bytes = session.budget.max_network_log_bytes;
     let Some(tab) = session.tabs.get_mut(tab_id) else {
         return Err("tab_not_found".to_owned());
     };
@@ -972,6 +1239,12 @@ pub(crate) async fn chromium_refresh_tab_snapshot(
         console_log,
         DEFAULT_MAX_CONSOLE_LOG_ENTRIES,
         DEFAULT_MAX_CONSOLE_LOG_BYTES,
+    );
+    append_network_log_entries(
+        tab,
+        network_log.as_slice(),
+        max_network_log_entries,
+        max_network_log_bytes,
     );
     Ok(())
 }
@@ -1902,9 +2175,10 @@ pub(crate) async fn set_viewport_with_chromium(
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{
-        chromium_transport_idle_timeout, clamp_chromium_snapshot,
+        chromium_network_log_headers, chromium_transport_idle_timeout, clamp_chromium_snapshot,
         decode_chromium_console_entries_value, decode_chromium_json_script_value,
-        parse_chromium_console_entries, parse_chromium_viewport_metrics, ChromiumObserveSnapshot,
+        parse_chromium_console_entries, parse_chromium_page_network_entries,
+        parse_chromium_viewport_metrics, ChromiumObserveSnapshot,
     };
     use crate::DEFAULT_SESSION_IDLE_TTL_MS;
     use std::time::Duration;
@@ -1970,6 +2244,49 @@ mod tests {
         assert_eq!(width, 375);
         assert_eq!(height, 667);
         assert_eq!(device_scale_factor, 2.0);
+    }
+
+    #[test]
+    fn chromium_network_log_headers_redact_sensitive_values() {
+        let headers = crate::Network::Headers(Some(serde_json::json!({
+            "Set-Cookie": "session=abc123",
+            "Location": "https://example.test/callback?token=secret",
+            "X-Trace": "ok"
+        })));
+
+        let parsed = chromium_network_log_headers(&headers);
+
+        assert!(parsed
+            .iter()
+            .any(|header| { header.name == "set-cookie" && header.value == "<redacted>" }));
+        assert!(parsed.iter().any(|header| {
+            header.name == "location" && header.value.contains("token=<redacted>")
+        }));
+        assert!(parsed.iter().any(|header| header.name == "x-trace" && header.value == "ok"));
+    }
+
+    #[test]
+    fn parse_chromium_page_network_entries_preserves_failed_fetch_status() {
+        let raw = serde_json::json!([
+            {
+                "request_url": "http://127.0.0.1:4242/api/profile?token=secret",
+                "status_code": 500,
+                "latency_ms": 37,
+                "captured_at_unix_ms": 42,
+                "headers": [{"name": "Set-Cookie", "value": "session=abc123"}]
+            }
+        ]);
+
+        let entries = parse_chromium_page_network_entries(raw);
+
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].request_url.contains("token=<redacted>"));
+        assert_eq!(entries[0].status_code, 500);
+        assert_eq!(entries[0].latency_ms, 37);
+        assert!(entries[0]
+            .headers
+            .iter()
+            .any(|header| header.name == "set-cookie" && header.value == "<redacted>"));
     }
 }
 

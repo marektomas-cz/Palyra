@@ -2487,6 +2487,20 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
         let mut payload = request.into_inner();
         let session_id = parse_session_id_from_proto(payload.session_id.take())
             .map_err(Status::invalid_argument)?;
+        if self.runtime.engine_mode == BrowserEngineMode::Chromium {
+            let active_tab_id = {
+                let sessions = self.runtime.sessions.lock().await;
+                sessions.get(session_id.as_str()).map(|session| session.active_tab_id.clone())
+            };
+            if let Some(active_tab_id) = active_tab_id {
+                let _ = chromium_refresh_tab_snapshot(
+                    self.runtime.as_ref(),
+                    session_id.as_str(),
+                    active_tab_id.as_str(),
+                )
+                .await;
+            }
+        }
         let mut sessions = self.runtime.sessions.lock().await;
         let Some(session) = sessions.get_mut(session_id.as_str()) else {
             return Ok(Response::new(browser_v1::NetworkLogResponse {
