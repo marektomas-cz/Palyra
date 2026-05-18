@@ -845,6 +845,14 @@ fn decode_chromium_console_entries_value(value: serde_json::Value) -> serde_json
     }
 }
 
+fn decode_chromium_json_script_value(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::String(raw) => serde_json::from_str::<serde_json::Value>(raw.as_str())
+            .unwrap_or(serde_json::Value::Null),
+        value => value,
+    }
+}
+
 fn parse_chromium_console_entries(value: serde_json::Value) -> Vec<BrowserConsoleEntryInternal> {
     value
         .as_array()
@@ -1246,13 +1254,7 @@ pub(crate) async fn type_with_chromium(
                 })?
                 .value
                 .unwrap_or(serde_json::Value::Null);
-            let value = match raw_value {
-                serde_json::Value::String(raw) => {
-                    serde_json::from_str::<serde_json::Value>(raw.as_str())
-                        .unwrap_or(serde_json::Value::Null)
-                }
-                value => value,
-            };
+            let value = decode_chromium_json_script_value(raw_value);
             let status =
                 value.get("status").and_then(serde_json::Value::as_str).unwrap_or_default();
             match status {
@@ -1539,35 +1541,36 @@ pub(crate) async fn select_with_chromium(
 (() => {{
   const selector = {selector_json};
   const value = {value_json};
+  const respond = (payload) => JSON.stringify(payload);
   const element = document.querySelector(selector);
   if (!element) {{
-    return {{ status: "not_found" }};
+    return respond({{ status: "not_found" }});
   }}
   if ((element.tagName || "").toLowerCase() !== "select") {{
-    return {{ status: "not_select" }};
+    return respond({{ status: "not_select" }});
   }}
   if (element.disabled) {{
-    return {{ status: "disabled" }};
+    return respond({{ status: "disabled" }});
   }}
   const option = Array.from(element.options || []).find((candidate) => candidate.value === value);
   if (!option) {{
-    return {{ status: "value_not_found" }};
+    return respond({{ status: "value_not_found" }});
   }}
   element.value = value;
   element.dispatchEvent(new Event("input", {{ bubbles: true }}));
   element.dispatchEvent(new Event("change", {{ bubbles: true }}));
-  return {{ status: "selected", value: element.value }};
+  return respond({{ status: "selected", value: element.value }});
 }})()
 "#
     );
     let result = run_chromium_blocking("chromium select", move || {
         tab.set_default_timeout(Duration::from_millis(timeout_ms.max(1)));
         let value = tab
-            .evaluate(script.as_str(), false)
+            .evaluate(script.as_str(), true)
             .map_err(|error| format!("failed to execute Chromium select script: {error}"))?
             .value
             .unwrap_or(serde_json::Value::Null);
-        Ok(value)
+        Ok(decode_chromium_json_script_value(value))
     })
     .await;
     match result {
@@ -1746,8 +1749,8 @@ pub(crate) async fn export_pdf_with_chromium(
 mod tests {
     use super::{
         chromium_transport_idle_timeout, clamp_chromium_snapshot,
-        decode_chromium_console_entries_value, parse_chromium_console_entries,
-        ChromiumObserveSnapshot,
+        decode_chromium_console_entries_value, decode_chromium_json_script_value,
+        parse_chromium_console_entries, ChromiumObserveSnapshot,
     };
     use crate::DEFAULT_SESSION_IDLE_TTL_MS;
     use std::time::Duration;
@@ -1791,6 +1794,16 @@ mod tests {
         assert_eq!(entries[0].message, "boom");
         assert_eq!(entries[0].source, "console.error");
         assert_eq!(entries[0].captured_at_unix_ms, 42);
+    }
+
+    #[test]
+    fn decode_chromium_json_script_value_accepts_stringified_status() {
+        let raw = serde_json::Value::String(r#"{"status":"selected","value":"north"}"#.to_owned());
+
+        let decoded = decode_chromium_json_script_value(raw);
+
+        assert_eq!(decoded["status"], "selected");
+        assert_eq!(decoded["value"], "north");
     }
 }
 
