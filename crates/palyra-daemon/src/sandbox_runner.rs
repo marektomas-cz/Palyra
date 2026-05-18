@@ -37,8 +37,8 @@ const BACKGROUND_STARTUP_OUTPUT_DRAIN_MS: u64 = 4_000;
 #[cfg(not(windows))]
 const BACKGROUND_STARTUP_OUTPUT_DRAIN_MS: u64 = 1_000;
 const BACKGROUND_POST_OUTPUT_EXIT_CHECK_MS: u64 = 250;
-const DEFAULT_BACKGROUND_PROCESS_LIFETIME_MS: u64 = 60_000;
-const MAX_BACKGROUND_PROCESS_LIFETIME_MS: u64 = 5 * 60_000;
+const DEFAULT_BACKGROUND_PROCESS_LIFETIME_MS: u64 = 10 * 60_000;
+const MAX_BACKGROUND_PROCESS_LIFETIME_MS: u64 = 30 * 60_000;
 const SENSITIVE_URL_PATH_MARKERS: &[&str] =
     &["token", "secret", "key", "password", "credential", "session"];
 #[cfg(windows)]
@@ -1687,6 +1687,10 @@ fn spawn_background_process(
         "background": true,
         "pid": pid,
         "lifetime_ms": lifetime_ms,
+        "max_lifetime_ms": MAX_BACKGROUND_PROCESS_LIFETIME_MS,
+        "background_lifetime_note": format!(
+            "Palyra will auto-terminate this background process after {lifetime_ms}ms; set timeout_ms higher up to {MAX_BACKGROUND_PROCESS_LIFETIME_MS}ms for long browser verification loops, and use cleanup.manual_command when finished."
+        ),
         "process_handle": {
             "kind": "pid",
             "direct_process_pid": pid,
@@ -3005,6 +3009,15 @@ mod tests {
             output.get("lifetime_ms").and_then(serde_json::Value::as_u64),
             Some(super::DEFAULT_BACKGROUND_PROCESS_LIFETIME_MS)
         );
+        assert_eq!(
+            output.get("max_lifetime_ms").and_then(serde_json::Value::as_u64),
+            Some(super::MAX_BACKGROUND_PROCESS_LIFETIME_MS)
+        );
+        assert!(output
+            .get("background_lifetime_note")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .contains("auto-terminate"));
         assert!(output.get("pid").and_then(serde_json::Value::as_u64).is_some());
         assert_eq!(
             output
@@ -3190,17 +3203,17 @@ mod tests {
     fn background_process_lifetime_uses_server_friendly_default() {
         let lifetime = super::background_process_lifetime(None, Duration::from_millis(750));
 
-        assert_eq!(lifetime, Duration::from_millis(60_000));
+        assert_eq!(lifetime, Duration::from_millis(10 * 60_000));
     }
 
     #[test]
     fn background_process_lifetime_floors_short_explicit_timeout() {
         let short = super::background_process_lifetime(Some(100), Duration::from_millis(750));
         let capped =
-            super::background_process_lifetime(Some(10 * 60_000), Duration::from_millis(750));
+            super::background_process_lifetime(Some(60 * 60_000), Duration::from_millis(750));
 
-        assert_eq!(short, Duration::from_millis(60_000));
-        assert_eq!(capped, Duration::from_millis(5 * 60_000));
+        assert_eq!(short, Duration::from_millis(10 * 60_000));
+        assert_eq!(capped, Duration::from_millis(30 * 60_000));
     }
 
     #[test]
