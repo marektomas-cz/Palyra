@@ -299,17 +299,22 @@ fn secrets_configure_openai_api_key_updates_config_and_audit() -> Result<()> {
         String::from_utf8_lossy(&audit_output.stderr)
     );
     let audit_stdout = String::from_utf8(audit_output.stdout).context("stdout was not UTF-8")?;
-    assert!(
-        audit_stdout.contains("\"blocking_findings\": 0"),
-        "audit should report zero blocking findings for configured secret refs: {audit_stdout}"
+    let audit_payload: serde_json::Value =
+        serde_json::from_str(&audit_stdout).context("secrets audit stdout was not JSON")?;
+    assert_eq!(
+        audit_payload.pointer("/summary/blocking_findings").and_then(serde_json::Value::as_u64),
+        Some(0),
+        "audit should report zero blocking findings for configured secret refs: {audit_payload}"
     );
-    assert!(
-        audit_stdout.contains("\"total_references\": 1"),
-        "audit should summarize the configured secret references: {audit_stdout}"
+    assert_eq!(
+        audit_payload.pointer("/summary/total_references").and_then(serde_json::Value::as_u64),
+        Some(2),
+        "audit should summarize the configured model and browser secret references: {audit_payload}"
     );
-    assert!(
-        audit_stdout.contains("\"resolved_references\": 1"),
-        "audit should summarize resolved secret references without echoing raw refs: {audit_stdout}"
+    assert_eq!(
+        audit_payload.pointer("/summary/resolved_references").and_then(serde_json::Value::as_u64),
+        Some(2),
+        "audit should summarize resolved secret references without echoing raw refs: {audit_payload}"
     );
 
     let apply_output = run_cli(
@@ -466,6 +471,8 @@ fn secrets_configure_browser_state_key_updates_config() -> Result<()> {
 fn secrets_configure_browser_state_key_rejects_empty_value() -> Result<()> {
     let workdir = TempDir::new().context("failed to create temporary workdir")?;
     let config_path = bootstrap_local_config(&workdir)?;
+    let original_config_toml =
+        fs::read_to_string(&config_path).context("failed to read original config")?;
 
     let output = run_cli_with_stdin(
         &workdir,
@@ -490,9 +497,9 @@ fn secrets_configure_browser_state_key_rejects_empty_value() -> Result<()> {
     );
 
     let config_toml = fs::read_to_string(&config_path).context("failed to read config")?;
-    assert!(
-        !config_toml.contains("state_key_vault_ref"),
-        "failed configure should not write a browser state key ref: {config_toml}"
+    assert_eq!(
+        config_toml, original_config_toml,
+        "failed configure should leave the existing browser state key config unchanged"
     );
     Ok(())
 }
