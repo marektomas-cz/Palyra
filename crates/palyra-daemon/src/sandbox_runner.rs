@@ -237,6 +237,7 @@ pub fn run_constrained_process(
     let input = parse_process_runner_input(input_json)?;
     validate_input_shape(&input)?;
     validate_allowed_executable(policy, input.command.as_str())?;
+    validate_process_termination_scope(input.command.as_str(), input.args.as_slice())?;
 
     let host_access = process_runner_allows_host_access(policy);
     let workspace_root = canonical_workspace_root(policy.workspace_root.as_path())?;
@@ -877,6 +878,55 @@ fn validate_allowed_executable(
         });
     }
     Ok(())
+}
+
+fn validate_process_termination_scope(
+    command: &str,
+    args: &[String],
+) -> Result<(), SandboxProcessRunError> {
+    let command = normalized_process_command_name(command);
+    if matches!(command.as_str(), "pkill" | "killall") {
+        return Err(broad_process_kill_error());
+    }
+    if command == "taskkill" && args_contain_switch(args, "/im") {
+        return Err(broad_process_kill_error());
+    }
+    if command == "stop-process" && args_contain_switch(args, "-name") {
+        return Err(broad_process_kill_error());
+    }
+    if matches!(command.as_str(), "powershell" | "pwsh") {
+        let joined = args.join(" ").to_ascii_lowercase();
+        let invokes_stop_process = joined.contains("stop-process");
+        let invokes_name_based_taskkill = joined.contains("taskkill") && joined.contains("/im");
+        let invokes_name_based_stop_process =
+            invokes_stop_process && (joined.contains("-name") || joined.contains("get-process"));
+        if invokes_name_based_taskkill || invokes_name_based_stop_process {
+            return Err(broad_process_kill_error());
+        }
+    }
+    Ok(())
+}
+
+fn normalized_process_command_name(command: &str) -> String {
+    let trimmed = command.trim().to_ascii_lowercase();
+    trimmed
+        .strip_suffix(".exe")
+        .or_else(|| trimmed.strip_suffix(".cmd"))
+        .or_else(|| trimmed.strip_suffix(".bat"))
+        .unwrap_or(trimmed.as_str())
+        .to_owned()
+}
+
+fn args_contain_switch(args: &[String], switch: &str) -> bool {
+    args.iter().any(|arg| arg.trim().eq_ignore_ascii_case(switch))
+}
+
+fn broad_process_kill_error() -> SandboxProcessRunError {
+    SandboxProcessRunError {
+        kind: SandboxProcessRunErrorKind::InvalidInput,
+        message: "palyra.process.run denied broad process-name termination; stop only a PID returned by this run, a known background process id, or a workspace-scoped service port"
+            .to_owned(),
+    }
 }
 
 fn validate_interpreter_argument_guardrails(
@@ -2317,9 +2367,9 @@ mod tests {
         redacted_process_output_preview, resolve_host_working_directory, resolve_working_directory,
         rewrite_host_virtual_workspace_args, run_constrained_process,
         validate_argument_workspace_scope, validate_interpreter_argument_guardrails,
-        validate_runtime_egress_enforcement, EgressEnforcementMode, ProcessRunnerInput,
-        SandboxProcessRunErrorKind, SandboxProcessRunnerPolicy, SandboxProcessRunnerTier,
-        StreamCapture,
+        validate_process_termination_scope, validate_runtime_egress_enforcement,
+        EgressEnforcementMode, ProcessRunnerInput, SandboxProcessRunErrorKind,
+        SandboxProcessRunnerPolicy, SandboxProcessRunnerTier, StreamCapture,
     };
 
     fn portable_test_memory_limit_bytes() -> u64 {
@@ -2619,6 +2669,48 @@ mod tests {
         assert!(error.message.contains("bare executable name"), "{}", error.message);
         assert!(error.message.contains("command=\"npm\""), "{}", error.message);
         assert!(error.message.contains("args=[\"test\"]"), "{}", error.message);
+    }
+
+    #[test]
+    fn run_constrained_process_rejects_name_based_taskkill() {
+        let workspace = std::env::current_dir().expect("workspace current_dir should resolve");
+        let mut policy = sandbox_policy_with_allowed_executables(workspace, vec!["*".to_owned()]);
+        policy.allow_interpreters = true;
+        let input = br#"{"command":"taskkill","args":["/IM","node.exe","/F"]}"#;
+
+        let error = run_constrained_process(&policy, input, Duration::from_millis(1_000))
+            .expect_err("name-based process termination should be denied before spawn");
+
+        assert_eq!(error.kind, SandboxProcessRunErrorKind::InvalidInput);
+        assert!(error.message.contains("broad process-name termination"));
+    }
+
+    #[test]
+    fn run_constrained_process_rejects_powershell_name_based_stop_process() {
+        let workspace = std::env::current_dir().expect("workspace current_dir should resolve");
+        let mut policy = sandbox_policy_with_allowed_executables(workspace, vec!["*".to_owned()]);
+        policy.allow_interpreters = true;
+        let input = br#"{"command":"pwsh","args":["Get-Process","-Name","node","|","Stop-Process","-Force"]}"#;
+
+        let error = run_constrained_process(&policy, input, Duration::from_millis(1_000))
+            .expect_err("pipeline-based process-name termination should be denied before spawn");
+
+        assert_eq!(error.kind, SandboxProcessRunErrorKind::InvalidInput);
+        assert!(error.message.contains("known background process id"));
+    }
+
+    #[test]
+    fn process_termination_scope_allows_pid_based_cleanup() {
+        validate_process_termination_scope(
+            "taskkill",
+            &["/PID".to_owned(), "12345".to_owned(), "/T".to_owned(), "/F".to_owned()],
+        )
+        .expect("pid-based taskkill cleanup should stay available");
+        validate_process_termination_scope(
+            "pwsh",
+            &["Stop-Process".to_owned(), "-Id".to_owned(), "12345".to_owned()],
+        )
+        .expect("PowerShell Stop-Process by id should stay available");
     }
 
     #[test]
