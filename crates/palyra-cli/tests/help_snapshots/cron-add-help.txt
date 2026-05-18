@@ -4,7 +4,7 @@ Options:
       --name <NAME>
 
       --prompt <PROMPT>
-
+          Single-line prompt text. Use --prompt-stdin for multi-line or blank-line separated prompts.
       --prompt-stdin
 
       --schedule-type <SCHEDULE_TYPE>
