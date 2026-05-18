@@ -1259,7 +1259,6 @@ async fn browser_service_chromium_network_log_includes_same_origin_fetch_failure
     let Some(chromium_path) = resolve_chromium_path_for_tests() else {
         return;
     };
-    let (url, handle) = spawn_fetch_failure_http_server();
     let runtime = std::sync::Arc::new(
         BrowserRuntimeState::new(&Args {
             bind: "127.0.0.1".to_owned(),
@@ -1303,6 +1302,7 @@ async fn browser_service_chromium_network_log_includes_same_origin_fetch_failure
     .expect("create_session should succeed for chromium network-log test");
     let session_id = created.session_id.expect("session id should exist");
 
+    let (url, handle) = spawn_fetch_failure_http_server();
     let navigate = service
         .navigate(Request::new(browser_v1::NavigateRequest {
             v: 1,
@@ -4835,7 +4835,7 @@ fn spawn_fetch_failure_http_server() -> (String, thread::JoinHandle<()>) {
         let started_at = std::time::Instant::now();
         let mut root_requests = 0usize;
         let mut api_seen = false;
-        while started_at.elapsed() < Duration::from_secs(10) && !(api_seen && root_requests >= 2) {
+        while started_at.elapsed() < Duration::from_secs(10) && !(api_seen && root_requests >= 1) {
             match listener.accept() {
                 Ok((mut stream, _)) => {
                     stream.set_nonblocking(false).expect("accepted stream should become blocking");
