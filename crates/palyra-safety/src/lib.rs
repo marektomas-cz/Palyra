@@ -732,14 +732,54 @@ fn detect_sensitive_header(line: &str, lowered: &str) -> Option<&'static str> {
     None
 }
 
-fn detect_sensitive_assignment(line: &str, lowered: &str) -> Option<&'static str> {
-    let separator_index = line.find(['=', ':'])?;
-    let key = lowered.get(..separator_index)?.trim().trim_matches(['"', '\'']);
+fn detect_sensitive_assignment(line: &str, _lowered: &str) -> Option<&'static str> {
+    let separator_index = sensitive_assignment_separator_index(line)?;
+    let key = assignment_key_identifier(line.get(..separator_index)?)?;
     let value = line.get(separator_index + 1..)?.trim();
     if value.is_empty() || key.ends_with("_ref") || is_safe_secret_reference_value(value) {
         return None;
     }
-    SENSITIVE_ASSIGNMENT_KEYS.iter().find(|candidate| key.contains(**candidate)).copied()
+    classify_sensitive_assignment_key(key.as_str())
+}
+
+fn sensitive_assignment_separator_index(line: &str) -> Option<usize> {
+    line.find('=').or_else(|| line.find(':'))
+}
+
+fn assignment_key_identifier(raw_key: &str) -> Option<String> {
+    let raw_key = raw_key.split(':').next().unwrap_or(raw_key);
+    raw_key
+        .trim()
+        .trim_matches(['"', '\''])
+        .rsplit(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '-'))
+        .find(|segment| !segment.trim_matches(['"', '\'']).is_empty())
+        .map(|segment| segment.trim_matches(['"', '\'']).to_ascii_lowercase())
+}
+
+fn classify_sensitive_assignment_key(key: &str) -> Option<&'static str> {
+    let compact = key.replace(['_', '-'], "");
+    if compact.contains("apikey") {
+        return Some("api_key");
+    }
+    if compact.contains("accesstoken") {
+        return Some("access_token");
+    }
+    if compact.contains("refreshtoken") {
+        return Some("refresh_token");
+    }
+    if compact.contains("clientsecret") {
+        return Some("client_secret");
+    }
+    if key == "password" || key.ends_with("_password") || key.ends_with("-password") {
+        return Some("password");
+    }
+    if key == "token" || key.ends_with("_token") || key.ends_with("-token") {
+        return Some("token");
+    }
+    if key == "secret" || key.ends_with("_secret") || key.ends_with("-secret") {
+        return Some("secret");
+    }
+    SENSITIVE_ASSIGNMENT_KEYS.iter().copied().find(|candidate| key == *candidate)
 }
 
 fn is_safe_secret_reference_value(value: &str) -> bool {
@@ -985,7 +1025,7 @@ fn redact_sensitive_header_or_assignment(line: &str) -> String {
         }
     }
     if detect_sensitive_assignment(line, &lowered).is_some() {
-        if let Some(separator) = line.find(['=', ':']) {
+        if let Some(separator) = sensitive_assignment_separator_index(line) {
             return redact_value_after_separator(line, separator);
         }
     }
@@ -1002,7 +1042,35 @@ fn redact_value_after_separator(line: &str, separator_index: usize) -> String {
         .map(|(index, ch)| index + ch.len_utf8())
         .last()
         .unwrap_or_default();
-    format!("{}{}", &line[..value_start + trailing_prefix_len], REDACTED_SECRET)
+    let prefix = &line[..value_start + trailing_prefix_len];
+    let value = &line[value_start + trailing_prefix_len..];
+    if let Some(quote) = value.chars().next().filter(|ch| matches!(ch, '"' | '\'' | '`')) {
+        if let Some((closing_index, quote_len)) = find_closing_quote(value, quote) {
+            let suffix = &value[closing_index + quote_len..];
+            return format!("{prefix}{quote}{REDACTED_SECRET}{quote}{suffix}");
+        }
+        return format!("{prefix}{quote}{REDACTED_SECRET}{quote}");
+    }
+    format!("{prefix}{REDACTED_SECRET}")
+}
+
+fn find_closing_quote(value: &str, quote: char) -> Option<(usize, usize)> {
+    let quote_len = quote.len_utf8();
+    let mut escaped = false;
+    for (index, ch) in value[quote_len..].char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch == quote {
+            return Some((quote_len + index, quote_len));
+        }
+    }
+    None
 }
 
 fn redact_prefixed_token(
@@ -1227,6 +1295,47 @@ mod tests {
             .finding_codes()
             .iter()
             .any(|code| code == "secret_leak.assignment.api_key"));
+    }
+
+    #[test]
+    fn quoted_sensitive_assignments_preserve_source_syntax() {
+        let source = "const apiKey: string = \"super-secret-value\";\n\
+                      const settings = {\n\
+                      \"client_secret\": 'local-dev-secret',\n\
+                      };";
+        let outcome = redact_text_for_export(
+            source,
+            SafetySourceKind::Workspace,
+            SafetyContentKind::WorkspaceDocument,
+            TrustLabel::TrustedLocal,
+        );
+
+        assert!(outcome.redacted);
+        assert!(outcome.redacted_text.contains("const apiKey: string = \"[REDACTED_SECRET]\";"));
+        assert!(outcome.redacted_text.contains("\"client_secret\": '[REDACTED_SECRET]',"));
+        assert!(!outcome.redacted_text.contains("= [REDACTED_SECRET];"));
+        assert!(!outcome.redacted_text.contains("super-secret-value"));
+        assert!(!outcome.redacted_text.contains("local-dev-secret"));
+    }
+
+    #[test]
+    fn benign_secret_config_identifiers_are_not_redacted_as_secret_values() {
+        let source = "const secretConfigPath = \"fixtures/secret-config.json\";\n\
+                      const tokenCount = 3;";
+        let outcome = redact_text_for_export(
+            source,
+            SafetySourceKind::Workspace,
+            SafetyContentKind::WorkspaceDocument,
+            TrustLabel::TrustedLocal,
+        );
+
+        assert!(!outcome.redacted);
+        assert_eq!(outcome.redacted_text, source);
+        assert!(!outcome
+            .scan
+            .finding_codes()
+            .iter()
+            .any(|code| code.starts_with("secret_leak.assignment.")));
     }
 
     #[test]
