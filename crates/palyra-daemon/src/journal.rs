@@ -13336,6 +13336,7 @@ impl JournalStore {
                         memory_items_fts MATCH ?1 AND
                         memory.principal = ?2 AND
                         (
+                            (?4 IS NULL AND ?3 IS NULL) OR
                             (?4 IS NOT NULL AND memory.session_ulid = ?4) OR
                             (
                                 memory.session_ulid IS NULL AND
@@ -13446,6 +13447,7 @@ impl JournalStore {
                     memory.principal = ?2 AND
                     (memory.ttl_unix_ms IS NULL OR memory.ttl_unix_ms > ?5) AND
                     (
+                        (?4 IS NULL AND ?3 IS NULL) OR
                         (?4 IS NOT NULL AND memory.session_ulid = ?4) OR
                         (
                             memory.session_ulid IS NULL AND
@@ -21972,6 +21974,16 @@ mod tests {
                 "CLI channel preference: keep local smoke checks short.",
             ))
             .expect("channel memory item should be created");
+        store
+            .create_memory_item(&sample_memory_request(
+                "01ARZ3NDEKTSV4RRFFQ69G5FE3",
+                "user:ops",
+                Some("cli"),
+                Some(session_id),
+                MemorySource::Manual,
+                "Session run note: rollback checklist captured in prior session.",
+            ))
+            .expect("session memory item should be created");
 
         let session_hits = store
             .search_memory(&MemorySearchRequest {
@@ -22003,8 +22015,27 @@ mod tests {
             })
             .expect("principal memory search should succeed");
         assert!(
-            principal_hits.iter().all(|hit| hit.item.memory_id != "01ARZ3NDEKTSV4RRFFQ69G5FE2"),
-            "principal-only searches must not leak channel-scoped memory"
+            principal_hits.iter().any(|hit| hit.item.memory_id == "01ARZ3NDEKTSV4RRFFQ69G5FE2"),
+            "principal-wide searches should include same-principal channel memory"
+        );
+
+        let principal_session_hits = store
+            .search_memory(&MemorySearchRequest {
+                principal: "user:ops".to_owned(),
+                channel: None,
+                session_id: None,
+                query: "rollback checklist".to_owned(),
+                top_k: 5,
+                min_score: 0.0,
+                tags: Vec::new(),
+                sources: Vec::new(),
+            })
+            .expect("principal memory search should include session hits");
+        assert!(
+            principal_session_hits
+                .iter()
+                .any(|hit| hit.item.memory_id == "01ARZ3NDEKTSV4RRFFQ69G5FE3"),
+            "principal-wide searches should include same-principal session memory"
         );
     }
 
