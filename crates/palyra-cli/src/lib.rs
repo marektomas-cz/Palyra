@@ -828,7 +828,7 @@ fn apply_local_desktop_tool_defaults(
         "tool_call.allowed_tools",
         string_array_value(LOCAL_DESKTOP_DEFAULT_ALLOWED_TOOLS),
     )?;
-    set_value_at_path(document, "tool_call.max_calls_per_run", toml::Value::Integer(32))?;
+    set_value_at_path(document, "tool_call.max_calls_per_run", toml::Value::Integer(96))?;
     set_value_at_path(document, "tool_call.execution_timeout_ms", toml::Value::Integer(120_000))?;
     set_value_at_path(document, "tool_call.process_runner.enabled", toml::Value::Boolean(true))?;
     set_value_at_path(
@@ -10694,7 +10694,7 @@ mod init_command_tests {
             "local init should allow gateway-mediated browser inspection when the service is enabled"
         );
         assert_eq!(read_bool(&document, "tool_call.process_runner.enabled"), Some(true));
-        assert_eq!(read_integer(&document, "tool_call.max_calls_per_run"), Some(32));
+        assert_eq!(read_integer(&document, "tool_call.max_calls_per_run"), Some(96));
         assert_eq!(read_integer(&document, "tool_call.execution_timeout_ms"), Some(120_000));
         assert_eq!(read_bool(&document, "tool_call.process_runner.allow_interpreters"), Some(true));
         assert_eq!(

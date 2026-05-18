@@ -781,13 +781,8 @@ pub(crate) async fn process_run_stream_message(
         let _turn_id = match loop_state.start_model_turn() {
             Ok(turn_id) => turn_id,
             Err(reason) => {
-                let message = match reason {
-                    AgentLoopTerminationReason::MaxTurns => "agent loop model turn limit reached",
-                    AgentLoopTerminationReason::WallClock => {
-                        "agent loop wall-clock budget exhausted"
-                    }
-                    _ => "agent loop budget exhausted",
-                };
+                let message =
+                    agent_loop_budget_exhausted_message(reason, &loop_state, run_id.as_str());
                 terminate_run_stream_with_agent_loop_reason(
                     sender,
                     runtime_state,
@@ -796,7 +791,7 @@ pub(crate) async fn process_run_stream_message(
                     tape_seq,
                     &loop_state,
                     reason,
-                    message,
+                    message.as_str(),
                     None,
                 )
                 .await?;
@@ -1300,6 +1295,25 @@ fn truncated_final_answer_without_tools(output: &ProviderTurnOutput) -> Option<S
     })
 }
 
+fn agent_loop_budget_exhausted_message(
+    reason: AgentLoopTerminationReason,
+    loop_state: &AgentRunLoopState,
+    run_id: &str,
+) -> String {
+    let snapshot = loop_state.snapshot(run_id, Some(reason));
+    let base = match reason {
+        AgentLoopTerminationReason::MaxTurns => "agent loop model turn limit reached",
+        AgentLoopTerminationReason::WallClock => "agent loop wall-clock budget exhausted",
+        _ => "agent loop budget exhausted",
+    };
+    let tool_result_label =
+        if snapshot.completed_tool_calls == 1 { "tool result" } else { "tool results" };
+    format!(
+        "{base} after {} model turns and {} {tool_result_label}; partial tool evidence is recorded on the run tape. Continue in the same session and ask to resume from run {run_id}; increase tool_call.max_calls_per_run for unusually large workflows.",
+        snapshot.current_turn, snapshot.completed_tool_calls
+    )
+}
+
 fn length_recovery_prompt(
     reason: AgentLoopTerminationReason,
     message: &str,
@@ -1540,10 +1554,11 @@ async fn persist_run_stream_provider_turn_output(
 #[cfg(test)]
 mod tests {
     use super::{
-        contains_raw_provider_tool_call_markup, incomplete_final_answer_without_tools,
-        incomplete_terminal_final_answer, length_recovery_prompt,
-        terminal_tool_authorization_failure, tool_result_to_provider_message,
-        truncated_final_answer_without_tools, RunStreamToolResultForModel,
+        agent_loop_budget_exhausted_message, contains_raw_provider_tool_call_markup,
+        incomplete_final_answer_without_tools, incomplete_terminal_final_answer,
+        length_recovery_prompt, terminal_tool_authorization_failure,
+        tool_result_to_provider_message, truncated_final_answer_without_tools,
+        RunStreamToolResultForModel,
     };
     use super::{AgentLoopTerminationReason, AgentRunLoopState};
     use crate::model_provider::{
@@ -1592,6 +1607,23 @@ mod tests {
         assert!(message.contains("palyra.process.run"));
         assert!(message.contains("toolu_approval_01"));
         assert!(message.contains("approval_response_error"));
+    }
+
+    #[test]
+    fn budget_exhausted_message_includes_resume_context() {
+        let state = loop_state_after_tool("build a browser app", "palyra.browser.navigate");
+
+        let message = agent_loop_budget_exhausted_message(
+            AgentLoopTerminationReason::MaxTurns,
+            &state,
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        );
+
+        assert!(message.contains("model turn limit reached"));
+        assert!(message.contains("1 tool result"));
+        assert!(message.contains("partial tool evidence"));
+        assert!(message.contains("resume from run 01ARZ3NDEKTSV4RRFFQ69G5FAV"));
+        assert!(message.contains("tool_call.max_calls_per_run"));
     }
 
     #[test]

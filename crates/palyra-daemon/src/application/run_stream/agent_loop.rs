@@ -11,9 +11,10 @@ use crate::{
     model_provider::{ProviderMessage, ProviderResponse, ProviderTurnOutput},
 };
 
-// The local setup configures 32 tool calls per run. App/browser workflows often
-// need one model turn per tool-result batch plus a final verification turn.
-pub(crate) const DEFAULT_AGENT_LOOP_MAX_MODEL_TURNS: u32 = 48;
+// The local setup configures a larger tool budget for app/browser workflows.
+// Keep extra model-turn headroom for recovery, final verification, and concise
+// partial summaries instead of failing immediately after the last tool batch.
+pub(crate) const DEFAULT_AGENT_LOOP_MAX_MODEL_TURNS: u32 = 128;
 pub(crate) const DEFAULT_AGENT_LOOP_WALL_CLOCK_BUDGET_MS: u64 = 900_000;
 
 const BROWSER_SESSION_CREATE_TOOL_NAME: &str = "palyra.browser.session.create";
@@ -134,7 +135,7 @@ impl AgentRunLoopState {
     }
 
     pub(crate) fn default_model_turn_budget(max_tool_calls: u32) -> u32 {
-        max_tool_calls.saturating_add(1).clamp(1, DEFAULT_AGENT_LOOP_MAX_MODEL_TURNS)
+        max_tool_calls.saturating_add(8).clamp(1, DEFAULT_AGENT_LOOP_MAX_MODEL_TURNS)
     }
 
     pub(crate) fn start_model_turn(&mut self) -> Result<u32, AgentLoopTerminationReason> {
@@ -391,13 +392,10 @@ mod tests {
 
     #[test]
     fn default_turn_budget_preserves_recovery_headroom() {
-        assert_eq!(
-            AgentRunLoopState::default_model_turn_budget(64),
-            DEFAULT_AGENT_LOOP_MAX_MODEL_TURNS
-        );
+        assert_eq!(AgentRunLoopState::default_model_turn_budget(64), 72);
 
         let state =
-            AgentRunLoopState::new(vec![ProviderMessage::user_text("hello")], 64, 2, 10_000);
+            AgentRunLoopState::new(vec![ProviderMessage::user_text("hello")], 192, 2, 10_000);
         let snapshot = state.snapshot("run-01", None);
 
         assert_eq!(snapshot.remaining_model_turns, DEFAULT_AGENT_LOOP_MAX_MODEL_TURNS);
@@ -405,11 +403,11 @@ mod tests {
 
     #[test]
     fn default_turn_budget_tracks_local_app_workflow_tool_budget() {
-        assert_eq!(AgentRunLoopState::default_model_turn_budget(32), 33);
+        assert_eq!(AgentRunLoopState::default_model_turn_budget(96), 104);
 
         let mut state =
-            AgentRunLoopState::new(vec![ProviderMessage::user_text("hello")], 33, 32, 10_000);
-        for expected_turn in 1..=33 {
+            AgentRunLoopState::new(vec![ProviderMessage::user_text("hello")], 104, 96, 10_000);
+        for expected_turn in 1..=104 {
             assert_eq!(state.start_model_turn(), Ok(expected_turn));
         }
         assert_eq!(state.start_model_turn(), Err(AgentLoopTerminationReason::MaxTurns));
