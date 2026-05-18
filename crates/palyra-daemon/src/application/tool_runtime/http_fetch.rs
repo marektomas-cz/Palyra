@@ -203,11 +203,46 @@ pub(crate) async fn execute_http_fetch_tool(
         .map(|value| value as usize)
         .unwrap_or(runtime_state.config.http_fetch.max_response_bytes)
         .clamp(1, MAX_HTTP_FETCH_BODY_BYTES);
-    let cache_enabled = payload
-        .get("cache")
-        .and_then(Value::as_bool)
-        .unwrap_or(runtime_state.config.http_fetch.cache_enabled)
-        && matches!(method.as_str(), "GET" | "HEAD");
+    let url = match Url::parse(url_raw.as_str()) {
+        Ok(value) => value,
+        Err(error) => {
+            return http_fetch_tool_execution_outcome(
+                proposal_id,
+                input_json,
+                false,
+                b"{}".to_vec(),
+                format!("palyra.http.fetch URL is invalid: {error}"),
+            );
+        }
+    };
+    if !matches!(url.scheme(), "http" | "https") {
+        return http_fetch_tool_execution_outcome(
+            proposal_id,
+            input_json,
+            false,
+            b"{}".to_vec(),
+            format!("palyra.http.fetch blocked URL scheme '{}'", url.scheme()),
+        );
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return http_fetch_tool_execution_outcome(
+            proposal_id,
+            input_json,
+            false,
+            b"{}".to_vec(),
+            "palyra.http.fetch URL credentials are not allowed".to_owned(),
+        );
+    }
+    let cache_request = payload.get("cache").and_then(Value::as_bool);
+    let cache_target_is_loopback = http_fetch_url_targets_loopback(&url);
+    let cache_enabled = matches!(method.as_str(), "GET" | "HEAD")
+        && cache_request.unwrap_or_else(|| {
+            runtime_state.config.http_fetch.cache_enabled && !cache_target_is_loopback
+        });
+    let cache_bypassed_loopback_default = matches!(method.as_str(), "GET" | "HEAD")
+        && cache_request.is_none()
+        && runtime_state.config.http_fetch.cache_enabled
+        && cache_target_is_loopback;
     let cache_ttl_ms = payload
         .get("cache_ttl_ms")
         .and_then(Value::as_u64)
@@ -270,36 +305,6 @@ pub(crate) async fn execute_http_fetch_tool(
         None => runtime_state.config.http_fetch.allowed_content_types.clone(),
     };
 
-    let url = match Url::parse(url_raw.as_str()) {
-        Ok(value) => value,
-        Err(error) => {
-            return http_fetch_tool_execution_outcome(
-                proposal_id,
-                input_json,
-                false,
-                b"{}".to_vec(),
-                format!("palyra.http.fetch URL is invalid: {error}"),
-            );
-        }
-    };
-    if !matches!(url.scheme(), "http" | "https") {
-        return http_fetch_tool_execution_outcome(
-            proposal_id,
-            input_json,
-            false,
-            b"{}".to_vec(),
-            format!("palyra.http.fetch blocked URL scheme '{}'", url.scheme()),
-        );
-    }
-    if !url.username().is_empty() || url.password().is_some() {
-        return http_fetch_tool_execution_outcome(
-            proposal_id,
-            input_json,
-            false,
-            b"{}".to_vec(),
-            "palyra.http.fetch URL credentials are not allowed".to_owned(),
-        );
-    }
     let allow_private_targets = http_fetch_allows_private_targets_for_url(
         runtime_state.config.http_fetch.allow_private_targets,
         &runtime_state.config.tool_call.process_runner,
@@ -367,7 +372,7 @@ pub(crate) async fn execute_http_fetch_tool(
                     proposal_id,
                     input_json,
                     true,
-                    cached.output_json.clone(),
+                    http_fetch_cached_output_with_hit_metadata(cached),
                     String::new(),
                 );
             }
@@ -588,6 +593,11 @@ pub(crate) async fn execute_http_fetch_tool(
             "body_text": body_export.body_text,
             "latency_ms": started_at.elapsed().as_millis() as u64,
             "request_headers": redacted_http_headers(request_headers.as_slice()),
+            "cache": {
+                "enabled": cache_enabled,
+                "status": http_fetch_cache_status(cache_enabled, cache_bypassed_loopback_default),
+                "ttl_ms": if cache_enabled { cache_ttl_ms } else { 0 },
+            },
             "safety": body_export.safety_json,
             "egress": {
                 "request_fingerprint_sha256": current_egress_verdict.request_fingerprint_sha256,
@@ -637,6 +647,34 @@ pub(crate) struct HttpFetchCachePolicy<'a> {
     pub(crate) max_redirects: usize,
     pub(crate) max_response_bytes: usize,
     pub(crate) allowed_content_types: &'a [String],
+}
+
+fn http_fetch_cache_status(cache_enabled: bool, bypassed_loopback_default: bool) -> &'static str {
+    if cache_enabled {
+        "miss"
+    } else if bypassed_loopback_default {
+        "bypassed_loopback_default"
+    } else {
+        "disabled"
+    }
+}
+
+fn http_fetch_cached_output_with_hit_metadata(cached: &CachedHttpFetchEntry) -> Vec<u8> {
+    let mut payload = serde_json::from_slice::<Value>(cached.output_json.as_slice())
+        .unwrap_or_else(|_| json!({}));
+    if let Value::Object(ref mut object) = payload {
+        object.insert(
+            "cache".to_owned(),
+            json!({
+                "enabled": true,
+                "status": "hit",
+                "expires_at_unix_ms": cached.expires_at_unix_ms,
+            }),
+        );
+        serde_json::to_vec(&payload).unwrap_or_else(|_| cached.output_json.clone())
+    } else {
+        cached.output_json.clone()
+    }
 }
 
 pub(crate) fn http_fetch_cache_key(

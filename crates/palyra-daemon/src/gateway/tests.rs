@@ -942,6 +942,63 @@ async fn http_fetch_truncates_response_at_size_cutoff() {
     handle.join().expect("static server should complete after single request");
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn http_fetch_does_not_default_cache_loopback_liveness_checks() {
+    let state = build_test_runtime_state_with_http_fetch_private_targets(false, true);
+    let (url, handle) = spawn_static_http_server("alive-once");
+    let input = serde_json::to_vec(&json!({ "url": url })).expect("input should serialize");
+
+    let first =
+        execute_http_fetch_tool(&state, "proposal-http-fetch-loopback-live-1", input.as_slice())
+            .await;
+    assert!(first.success, "first loopback fetch should reach the test server");
+    let first_output: Value =
+        serde_json::from_slice(first.output_json.as_slice()).expect("output should parse");
+    assert_eq!(
+        first_output["cache"]["status"].as_str(),
+        Some("bypassed_loopback_default"),
+        "loopback fetches should be live by default"
+    );
+    handle.join().expect("static server should complete after single request");
+
+    let second =
+        execute_http_fetch_tool(&state, "proposal-http-fetch-loopback-live-2", input.as_slice())
+            .await;
+    assert!(
+        !second.success,
+        "second fetch must not return a stale cached success after the loopback server exits"
+    );
+    assert!(
+        second.error.contains("request failed"),
+        "second failure should come from a real connection attempt: {}",
+        second.error
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn http_fetch_marks_explicit_cache_hits() {
+    let state = build_test_runtime_state_with_http_fetch_private_targets(false, true);
+    let (url, handle) = spawn_static_http_server("cache-me");
+    let input =
+        serde_json::to_vec(&json!({ "url": url, "cache": true })).expect("input should serialize");
+
+    let first =
+        execute_http_fetch_tool(&state, "proposal-http-fetch-cache-hit-1", input.as_slice()).await;
+    assert!(first.success, "explicitly cached fetch should reach the server first");
+    let first_output: Value =
+        serde_json::from_slice(first.output_json.as_slice()).expect("output should parse");
+    assert_eq!(first_output["cache"]["status"].as_str(), Some("miss"));
+    handle.join().expect("static server should complete after single request");
+
+    let second =
+        execute_http_fetch_tool(&state, "proposal-http-fetch-cache-hit-2", input.as_slice()).await;
+    assert!(second.success, "second explicit cache fetch should be served from cache");
+    let second_output: Value =
+        serde_json::from_slice(second.output_json.as_slice()).expect("output should parse");
+    assert_eq!(second_output["cache"]["status"].as_str(), Some("hit"));
+    assert_eq!(second_output["body_text"].as_str(), Some("cache-me"));
+}
+
 #[test]
 fn http_fetch_cache_key_includes_policy_dimensions() {
     let headers = vec![("accept".to_owned(), "text/plain".to_owned())];
