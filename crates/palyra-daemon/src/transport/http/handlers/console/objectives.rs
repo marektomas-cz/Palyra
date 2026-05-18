@@ -830,7 +830,7 @@ async fn load_objective_routine(
     let Some(job) =
         state.runtime.cron_job(routine_id.clone()).await.map_err(runtime_status_response)?
     else {
-        return Ok(None);
+        return Ok(objective_routine_snapshot_from_binding(objective));
     };
     Ok(Some(json!({
         "job_id": job.job_id,
@@ -847,6 +847,27 @@ async fn load_objective_routine(
         "last_run_at_unix_ms": job.last_run_at_unix_ms,
         "queued_run": job.queued_run,
     })))
+}
+
+fn objective_routine_snapshot_from_binding(objective: &ObjectiveRecord) -> Option<Value> {
+    let routine_id = objective.automation.routine_id.as_ref()?;
+    Some(json!({
+        "job_id": routine_id,
+        "name": objective.name.clone(),
+        "prompt": objective.prompt.clone(),
+        "enabled": objective.automation.enabled,
+        "channel": objective.channel.clone(),
+        "session_key": objective.workspace.session_key.clone(),
+        "session_label": objective.workspace.session_label.clone(),
+        "schedule_type": objective.automation.schedule_type.clone(),
+        "schedule_payload": serde_json::from_str::<Value>(objective.automation.schedule_payload_json.as_str())
+            .unwrap_or_else(|_| json!({ "raw": objective.automation.schedule_payload_json })),
+        "next_run_at_unix_ms": Value::Null,
+        "last_run_at_unix_ms": Value::Null,
+        "queued_run": Value::Null,
+        "archived_snapshot": objective.state == ObjectiveState::Archived,
+        "source": "objective_automation_binding",
+    }))
 }
 
 async fn latest_objective_run(
@@ -2059,8 +2080,9 @@ mod tests {
         apply_lifecycle_workspace_projection, compute_objective_health,
         default_objective_execution_posture, initial_objective_state, managed_entry,
         normalize_budget, normalize_lifecycle_reason, objective_attempts_for_view,
-        objective_record_block, owner_objective_block_updates, parse_objective_execution_config,
-        parse_objective_kind, parse_objective_priority, preserved_run_from_objective_attempt,
+        objective_record_block, objective_routine_snapshot_from_binding,
+        owner_objective_block_updates, parse_objective_execution_config, parse_objective_kind,
+        parse_objective_priority, preserved_run_from_objective_attempt,
         reconcile_objective_attempts_with_latest_run, render_objective_summary_markdown,
         ConsoleObjectiveBudgetPayload,
     };
@@ -2075,7 +2097,7 @@ mod tests {
         shadow_manual_schedule_payload_json, RoutineApprovalPolicy, RoutineDeliveryConfig,
         RoutineExecutionConfig, RoutineExecutionPosture, RoutineTriggerKind,
     };
-    use serde_json::json;
+    use serde_json::{json, Value};
     use ulid::Ulid;
 
     fn sample_objective() -> ObjectiveRecord {
@@ -2355,6 +2377,33 @@ mod tests {
         assert!(!objective.automation.enabled);
         assert_eq!(objective.automation.routine_id, routine_id);
         assert!(objective.lifecycle_history.is_empty());
+    }
+
+    #[test]
+    fn archived_objective_routine_snapshot_surfaces_deleted_job_binding() {
+        let mut objective = sample_objective();
+        objective.state = ObjectiveState::Archived;
+        objective.automation.enabled = false;
+        objective.archived_at_unix_ms = Some(42);
+        let routine_id = objective
+            .automation
+            .routine_id
+            .clone()
+            .expect("sample objective should have a routine");
+
+        let snapshot = objective_routine_snapshot_from_binding(&objective)
+            .expect("automation binding should produce a routine snapshot");
+
+        assert_eq!(snapshot.get("job_id").and_then(Value::as_str), Some(routine_id.as_str()));
+        assert_eq!(snapshot.get("archived_snapshot").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            snapshot.get("source").and_then(Value::as_str),
+            Some("objective_automation_binding")
+        );
+        assert_eq!(
+            snapshot.get("schedule_type").and_then(Value::as_str),
+            Some(objective.automation.schedule_type.as_str())
+        );
     }
 
     #[test]
