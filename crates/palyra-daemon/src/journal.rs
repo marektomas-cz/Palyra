@@ -13334,8 +13334,16 @@ impl JournalStore {
                     WHERE
                         memory_items_fts MATCH ?1 AND
                         memory.principal = ?2 AND
-                        (?3 IS NULL OR memory.channel = ?3) AND
-                        (?4 IS NULL OR memory.session_ulid = ?4) AND
+                        (
+                            (?4 IS NOT NULL AND memory.session_ulid = ?4) OR
+                            (
+                                memory.session_ulid IS NULL AND
+                                (
+                                    (?3 IS NOT NULL AND (memory.channel = ?3 OR memory.channel IS NULL)) OR
+                                    (?3 IS NULL AND memory.channel IS NULL)
+                                )
+                            )
+                        ) AND
                         (memory.ttl_unix_ms IS NULL OR memory.ttl_unix_ms > ?5)
                     ORDER BY lexical_rank ASC, memory.created_at_unix_ms DESC
                     LIMIT ?6
@@ -13435,9 +13443,17 @@ impl JournalStore {
                     ON vectors.memory_ulid = memory.memory_ulid
                 WHERE
                     memory.principal = ?2 AND
-                    (?3 IS NULL OR memory.channel = ?3) AND
-                    (?4 IS NULL OR memory.session_ulid = ?4) AND
                     (memory.ttl_unix_ms IS NULL OR memory.ttl_unix_ms > ?5) AND
+                    (
+                        (?4 IS NOT NULL AND memory.session_ulid = ?4) OR
+                        (
+                            memory.session_ulid IS NULL AND
+                            (
+                                (?3 IS NOT NULL AND (memory.channel = ?3 OR memory.channel IS NULL)) OR
+                                (?3 IS NULL AND memory.channel IS NULL)
+                            )
+                        )
+                    ) AND
                     COALESCE(vectors.embedding_model_id, vectors.embedding_model, '') = ?6 AND
                     COALESCE(vectors.embedding_dims, vectors.dims, 0) = ?7 AND
                     COALESCE(vectors.embedding_version, 0) = ?8
@@ -21911,6 +21927,68 @@ mod tests {
         assert!(
             hits.iter().any(|hit| hit.item.memory_id == "01ARZ3NDEKTSV4RRFFQ69G5FC1"),
             "search should return the matching memory item"
+        );
+    }
+
+    #[test]
+    fn memory_search_includes_broader_scope_memory_for_channel_and_session_queries() {
+        let db_path = temp_db_path();
+        let store = JournalStore::open(test_journal_config(db_path, false))
+            .expect("journal store should open");
+        let session_id = "01ARZ3NDEKTSV4RRFFQ69G5FAS";
+        store
+            .create_memory_item(&sample_memory_request(
+                "01ARZ3NDEKTSV4RRFFQ69G5FE1",
+                "user:ops",
+                None,
+                None,
+                MemorySource::Manual,
+                "E2E durable preference: use TypeScript Vitest Czech reports.",
+            ))
+            .expect("principal memory item should be created");
+        store
+            .create_memory_item(&sample_memory_request(
+                "01ARZ3NDEKTSV4RRFFQ69G5FE2",
+                "user:ops",
+                Some("cli"),
+                None,
+                MemorySource::Manual,
+                "CLI channel preference: keep local smoke checks short.",
+            ))
+            .expect("channel memory item should be created");
+
+        let session_hits = store
+            .search_memory(&MemorySearchRequest {
+                principal: "user:ops".to_owned(),
+                channel: Some("cli".to_owned()),
+                session_id: Some(session_id.to_owned()),
+                query: "TypeScript Vitest Czech reports".to_owned(),
+                top_k: 5,
+                min_score: 0.0,
+                tags: Vec::new(),
+                sources: Vec::new(),
+            })
+            .expect("session memory search should succeed");
+        assert!(
+            session_hits.iter().any(|hit| hit.item.memory_id == "01ARZ3NDEKTSV4RRFFQ69G5FE1"),
+            "session-scoped searches should include principal-scoped durable memory"
+        );
+
+        let principal_hits = store
+            .search_memory(&MemorySearchRequest {
+                principal: "user:ops".to_owned(),
+                channel: None,
+                session_id: None,
+                query: "local smoke checks".to_owned(),
+                top_k: 5,
+                min_score: 0.0,
+                tags: Vec::new(),
+                sources: Vec::new(),
+            })
+            .expect("principal memory search should succeed");
+        assert!(
+            principal_hits.iter().all(|hit| hit.item.memory_id != "01ARZ3NDEKTSV4RRFFQ69G5FE2"),
+            "principal-only searches must not leak channel-scoped memory"
         );
     }
 
