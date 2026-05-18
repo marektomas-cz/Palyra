@@ -501,7 +501,7 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
                         "patch",
                         json!({
                             "type":"string",
-                            "description":"A complete Palyra patch document. It must start with '*** Begin Patch', contain one or more '*** Add File:', '*** Replace File:', '*** Update File:', or '*** Delete File:' operations, and end with '*** End Patch'. The final non-whitespace line must be exactly '*** End Patch'; never send a partial or truncated patch. For large file creation or multi-file changes, split work into multiple smaller complete apply_patch calls. Add-file and replace-file body lines may start with '+'. For Add File, missing parent directories are created automatically; Replace File requires the target to exist and is the deterministic fallback after reading a file when update hunk context cannot be matched. Update-file operations require '@@' hunks whose lines start with ' ', '+', or '-'. Use forward-slash relative paths only, such as reports/report.md; never use host absolute paths."
+                            "description":"A complete Palyra patch document. It must start with '*** Begin Patch', contain one or more '*** Add File:', '*** Replace File:', '*** Update File:', or '*** Delete File:' operations, and end with '*** End Patch'. The final non-whitespace line must be exactly '*** End Patch'; never send a partial or truncated patch. For large file creation or multi-file changes, split work into multiple smaller complete apply_patch calls. Add-file and replace-file body lines may start with '+'. For Add File, missing parent directories are created automatically; Replace File requires the target to exist and is the deterministic fallback after reading a file when update hunk context cannot be matched. Update-file operations require '@@' hunks whose lines start with ' ', '+', or '-'. Never write redaction placeholders such as [REDACTED], [REDACTED_SECRET], or <redacted> into secret-bearing files like .env; preserve existing secret lines or update example/template files instead. Use forward-slash relative paths only, such as reports/report.md; never use host absolute paths."
                         }),
                     ),
                     (
@@ -860,6 +860,8 @@ mod tests {
         assert!(patch_description.contains("multiple smaller complete apply_patch calls"));
         assert!(patch_description.contains("context cannot be matched"));
         assert!(patch_description.contains("missing parent directories"));
+        assert!(patch_description.contains("Never write redaction placeholders"));
+        assert!(patch_description.contains("[REDACTED_SECRET]"));
         assert!(patch_description.contains("reports/report.md"));
         assert!(patch_description.contains("never use host absolute paths"));
     }

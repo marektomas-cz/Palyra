@@ -16,6 +16,10 @@ const DEFAULT_REDACTION_PATTERNS: &[&str] =
     &["api_key", "authorization", "bearer ", "secret", "token", "password"];
 const DEFAULT_SECRET_FILE_MARKERS: &[&str] =
     &[".env", "id_rsa", "id_ed25519", "credentials", "secrets/", "secret/", ".pem", ".key"];
+const REDACTION_PLACEHOLDER_MARKERS: &[&str] =
+    &["[redacted]", "[redacted_secret]", "<redacted>", "redacted_secret"];
+const NON_SECRET_ENV_FILE_SUFFIXES: &[&str] =
+    &[".example", ".sample", ".template", ".templates", ".dist", ".default", ".defaults"];
 
 /// Execution limits for workspace patch processing.
 ///
@@ -128,6 +132,10 @@ pub enum WorkspacePatchError {
     InvalidUtf8File { path: String },
     #[error("file '{path}' is not valid JSON after patch: {message}")]
     InvalidJsonFile { path: String, message: String },
+    #[error(
+        "file '{path}' is a secret-bearing env file and cannot store a redaction placeholder; preserve existing secret lines or update an example/template file instead"
+    )]
+    RedactionPlaceholderInSecretFile { path: String },
     #[error("patch hunk apply failed for '{path}': {message}")]
     HunkApplyFailed { path: String, message: String },
     #[error("{operation} '{path}' failed: {source}")]
@@ -944,7 +952,7 @@ fn build_patch_plan(
                 }
                 let after_bytes = render_add_file_bytes(lines.as_slice());
                 ensure_file_size(path, after_bytes.len(), limits.max_file_bytes)?;
-                ensure_structured_file_content(path, after_bytes.as_slice())?;
+                ensure_planned_file_content(path, after_bytes.as_slice())?;
 
                 touched_paths.insert(target.clone());
                 actions.push(PlannedAction::Write {
@@ -991,7 +999,7 @@ fn build_patch_plan(
                 let before_bytes = read_file_capped(target.as_path(), path, limits.max_file_bytes)?;
                 let after_bytes = render_add_file_bytes(lines.as_slice());
                 ensure_file_size(path, after_bytes.len(), limits.max_file_bytes)?;
-                ensure_structured_file_content(path, after_bytes.as_slice())?;
+                ensure_planned_file_content(path, after_bytes.as_slice())?;
 
                 touched_paths.insert(target.clone());
                 actions.push(PlannedAction::Write {
@@ -1044,10 +1052,10 @@ fn build_patch_plan(
                     destination_root = canonical_roots[destination_root_index].clone();
                     output_root_index = destination_root_index;
                     moved_from = Some(normalize_relative_path_display(&relative));
-                    ensure_structured_file_content(move_target, after_bytes.as_slice())?;
+                    ensure_planned_file_content(move_target, after_bytes.as_slice())?;
                     normalize_relative_path_display(&move_relative)
                 } else {
-                    ensure_structured_file_content(path, after_bytes.as_slice())?;
+                    ensure_planned_file_content(path, after_bytes.as_slice())?;
                     normalize_relative_path_display(&relative)
                 };
 
@@ -1242,6 +1250,60 @@ fn ensure_file_size(
         });
     }
     Ok(())
+}
+
+fn ensure_planned_file_content(path: &str, bytes: &[u8]) -> Result<(), WorkspacePatchError> {
+    ensure_secret_file_content_does_not_store_redaction_placeholder(path, bytes)?;
+    ensure_structured_file_content(path, bytes)
+}
+
+fn ensure_secret_file_content_does_not_store_redaction_placeholder(
+    path: &str,
+    bytes: &[u8],
+) -> Result<(), WorkspacePatchError> {
+    if !is_secret_bearing_env_file(path) {
+        return Ok(());
+    }
+    let text = std::str::from_utf8(bytes)
+        .map_err(|_| WorkspacePatchError::InvalidUtf8File { path: path.to_owned() })?;
+    if text.lines().any(env_assignment_stores_redaction_placeholder) {
+        return Err(WorkspacePatchError::RedactionPlaceholderInSecretFile {
+            path: path.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn is_secret_bearing_env_file(path: &str) -> bool {
+    let Some(file_name) = Path::new(path).file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let lower = file_name.to_ascii_lowercase();
+    if lower != ".env" && !lower.starts_with(".env.") {
+        return false;
+    }
+    !NON_SECRET_ENV_FILE_SUFFIXES.iter().any(|suffix| lower.ends_with(suffix))
+}
+
+fn env_assignment_stores_redaction_placeholder(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return false;
+    }
+    let assignment = trimmed.strip_prefix("export ").unwrap_or(trimmed);
+    let Some((_, value)) = assignment.split_once('=') else {
+        return false;
+    };
+    value_contains_redaction_placeholder(value)
+}
+
+fn value_contains_redaction_placeholder(value: &str) -> bool {
+    let trimmed = value.trim().trim_matches(['"', '\'']);
+    if trimmed.eq_ignore_ascii_case("redacted") {
+        return true;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    REDACTION_PLACEHOLDER_MARKERS.iter().any(|marker| lower.contains(marker))
 }
 
 fn ensure_structured_file_content(path: &str, bytes: &[u8]) -> Result<(), WorkspacePatchError> {
@@ -1727,6 +1789,81 @@ mod tests {
         assert_eq!(
             fs::read_to_string(workspace.join("public.txt")).expect("seed file should remain"),
             "alpha beta\n"
+        );
+    }
+
+    #[test]
+    fn apply_workspace_patch_rejects_redacted_placeholder_in_secret_env_file() {
+        let temp = tempdir().expect("tempdir should be created");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace should exist");
+        fs::write(
+            workspace.join(".env"),
+            "PRIVATE_BACKEND_TOKEN=original-test-token\nPUBLIC_MODE=old\n",
+        )
+        .expect("seed file should exist");
+
+        let patch = "*** Begin Patch\n*** Replace File: .env\n+PRIVATE_BACKEND_TOKEN=[REDACTED]\n+PUBLIC_MODE=new\n*** End Patch\n";
+        let error = apply_workspace_patch(
+            std::slice::from_ref(&workspace),
+            &default_request(patch, false),
+            &default_limits(),
+        )
+        .expect_err("secret env files must not store redaction placeholders");
+
+        assert!(matches!(error, WorkspacePatchError::RedactionPlaceholderInSecretFile { .. }));
+        assert!(
+            error.to_string().contains("preserve existing secret lines"),
+            "error should explain safe env-file recovery: {error}"
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.join(".env")).expect("seed file should remain"),
+            "PRIVATE_BACKEND_TOKEN=original-test-token\nPUBLIC_MODE=old\n"
+        );
+    }
+
+    #[test]
+    fn apply_workspace_patch_allows_secret_env_updates_without_placeholder() {
+        let temp = tempdir().expect("tempdir should be created");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace should exist");
+        fs::write(
+            workspace.join(".env.local"),
+            "PRIVATE_BACKEND_TOKEN=original-test-token\nPUBLIC_MODE=old\n",
+        )
+        .expect("seed file should exist");
+
+        let patch = "*** Begin Patch\n*** Update File: .env.local\n@@\n-PUBLIC_MODE=old\n+PUBLIC_MODE=new\n*** End Patch\n";
+        apply_workspace_patch(
+            std::slice::from_ref(&workspace),
+            &default_request(patch, false),
+            &default_limits(),
+        )
+        .expect("public env-key update should apply when secret value stays unchanged");
+
+        assert_eq!(
+            fs::read_to_string(workspace.join(".env.local")).expect("updated file should read"),
+            "PRIVATE_BACKEND_TOKEN=original-test-token\nPUBLIC_MODE=new\n"
+        );
+    }
+
+    #[test]
+    fn apply_workspace_patch_allows_redacted_placeholder_in_env_example() {
+        let temp = tempdir().expect("tempdir should be created");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace should exist");
+
+        let patch = "*** Begin Patch\n*** Add File: .env.example\n+PRIVATE_BACKEND_TOKEN=[REDACTED]\n*** End Patch\n";
+        apply_workspace_patch(
+            std::slice::from_ref(&workspace),
+            &default_request(patch, false),
+            &default_limits(),
+        )
+        .expect("env example files may document placeholder values");
+
+        assert_eq!(
+            fs::read_to_string(workspace.join(".env.example")).expect("example should read"),
+            "PRIVATE_BACKEND_TOKEN=[REDACTED]\n"
         );
     }
 
