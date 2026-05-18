@@ -108,6 +108,26 @@ pub(crate) async fn run_cron_async(command: CronCommand) -> Result<()> {
             session_label,
             json,
         } => {
+            let any_other_field = name.is_some()
+                || prompt.is_some()
+                || prompt_stdin
+                || schedule_type.is_some()
+                || schedule.is_some()
+                || concurrency.is_some()
+                || retry_max_attempts.is_some()
+                || retry_backoff_ms.is_some()
+                || misfire.is_some()
+                || jitter_ms.is_some()
+                || owner.is_some()
+                || channel.is_some()
+                || session_key.is_some()
+                || session_label.is_some();
+            if cron_update_only_changes_enabled(enabled, any_other_field) {
+                let enabled = enabled.expect("enabled-only update requires an enabled value");
+                let response =
+                    set_routine_enabled_value(&context.client, id.as_str(), enabled).await?;
+                return emit_cron_mutation("cron.update", &response, output::preferred_json(json));
+            }
             let existing = get_routine_value(&context.client, id.as_str()).await?;
             let routine = existing
                 .pointer("/routine")
@@ -633,6 +653,10 @@ fn cron_misfire_policy_text(value: CronMisfirePolicyArg) -> &'static str {
     }
 }
 
+fn cron_update_only_changes_enabled(enabled: Option<bool>, any_other_field: bool) -> bool {
+    enabled.is_some() && !any_other_field
+}
+
 struct ScheduleRoutineConfig {
     name: String,
     prompt: String,
@@ -648,4 +672,21 @@ struct ScheduleRoutineConfig {
     channel: Option<String>,
     session_key: Option<String>,
     session_label: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cron_update_only_changes_enabled;
+
+    #[test]
+    fn cron_update_enabled_only_uses_enabled_endpoint() {
+        assert!(cron_update_only_changes_enabled(Some(false), false));
+        assert!(cron_update_only_changes_enabled(Some(true), false));
+    }
+
+    #[test]
+    fn cron_update_with_other_fields_uses_full_upsert() {
+        assert!(!cron_update_only_changes_enabled(Some(false), true));
+        assert!(!cron_update_only_changes_enabled(None, false));
+    }
 }
