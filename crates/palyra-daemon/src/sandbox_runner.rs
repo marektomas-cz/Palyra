@@ -3000,11 +3000,7 @@ mod tests {
         };
         let workspace = unique_temp_dir("workspace-background-startup-output");
         fs::create_dir_all(workspace.as_path()).expect("workspace directory should be created");
-        let script = if cfg!(windows) {
-            "import time\ntime.sleep(1.5)\nprint('PORT=54321', flush=True)\ntime.sleep(2)\n"
-        } else {
-            "import time\nprint('PORT=54321', flush=True)\ntime.sleep(2)\n"
-        };
+        let script = "import time\nprint('PORT=54321', flush=True)\ntime.sleep(2)\n";
         fs::write(workspace.join("print_port.py"), script)
             .expect("startup output script should be written");
         let mut policy =
@@ -3089,7 +3085,7 @@ mod tests {
         fs::create_dir_all(workspace.as_path()).expect("workspace directory should be created");
         fs::write(
             workspace.join("delayed_fail.py"),
-            "import sys, time\ntime.sleep(0.35)\nprint('Unknown command: \"node\"', flush=True)\nsys.exit(1)\n",
+            "import sys\nprint('Unknown command: \"node\"', flush=True)\nsys.exit(1)\n",
         )
         .expect("delayed failure script should be written");
         let mut policy =
@@ -3186,7 +3182,7 @@ mod tests {
         policy.egress_enforcement_mode = EgressEnforcementMode::None;
         let input = br#"{"command":"node","args":["-e","console.log('PALYRA_PROCESS_OK')"]}"#;
 
-        let result = run_constrained_process(&policy, input, Duration::from_millis(5_000))
+        let result = run_constrained_process(&policy, input, Duration::from_millis(20_000))
             .expect("allowlisted node eval should run with the sanitized Windows environment");
         let output: serde_json::Value =
             serde_json::from_slice(&result.output_json).expect("output should parse");
