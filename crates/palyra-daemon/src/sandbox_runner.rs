@@ -442,12 +442,31 @@ fn redacted_process_output_text(value: &str) -> RedactedProcessOutputText {
         SafetyContentKind::PlainText,
         TrustLabel::TrustedLocal,
     );
+    let redacted_text =
+        restore_process_output_trailing_line_endings(value, export_redaction.redacted_text);
     let redacted = redacted_urls != value
         || redacted_auth != redacted_urls
         || redacted_paths != redacted_auth
-        || export_redaction.redacted;
+        || redacted_text != value;
 
-    RedactedProcessOutputText { text: export_redaction.redacted_text, redacted }
+    RedactedProcessOutputText { text: redacted_text, redacted }
+}
+
+fn restore_process_output_trailing_line_endings(original: &str, redacted: String) -> String {
+    let original_base_len = original.trim_end_matches(['\r', '\n']).len();
+    if original_base_len == original.len() {
+        return redacted;
+    }
+
+    let expected_suffix = &original[original_base_len..];
+    let redacted_base_len = redacted.trim_end_matches(['\r', '\n']).len();
+    if &redacted[redacted_base_len..] == expected_suffix {
+        return redacted;
+    }
+
+    let mut restored = redacted[..redacted_base_len].to_owned();
+    restored.push_str(expected_suffix);
+    restored
 }
 
 fn redact_sensitive_url_path_segments_in_text(value: &str) -> String {
