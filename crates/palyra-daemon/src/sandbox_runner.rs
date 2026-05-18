@@ -17,6 +17,7 @@ use palyra_common::{
     process_runner_input::{parse_process_runner_tool_input, ProcessRunnerToolInput},
     redaction::{redact_auth_error, redact_url_segments_in_text, REDACTED},
 };
+use palyra_safety::{redact_text_for_export, SafetyContentKind, SafetySourceKind, TrustLabel};
 use palyra_sandbox::{
     build_tier_c_command_plan, current_backend_capabilities, current_backend_executor,
     current_backend_kind, TierCBackendError, TierCCommandRequest, TierCPolicy,
@@ -346,14 +347,18 @@ pub fn run_constrained_process(
         });
     }
 
-    let stdout = String::from_utf8_lossy(&capture.stdout.bytes).to_string();
-    let stderr = String::from_utf8_lossy(&capture.stderr.bytes).to_string();
+    let RedactedProcessOutputText { text: stdout, redacted: stdout_redacted } =
+        redacted_process_output(capture.stdout.bytes.as_slice());
+    let RedactedProcessOutputText { text: stderr, redacted: stderr_redacted } =
+        redacted_process_output(capture.stderr.bytes.as_slice());
     let output_json = serde_json::to_vec(&json!({
         "exit_code": capture.exit_status.code().unwrap_or(0),
         "stdout": stdout,
         "stderr": stderr,
         "stdout_truncated": capture.stdout.truncated,
         "stderr_truncated": capture.stderr.truncated,
+        "stdout_redacted": stdout_redacted,
+        "stderr_redacted": stderr_redacted,
         "duration_ms": capture.duration_ms,
         "tier": policy.tier.as_str(),
         "sandbox_backend": if matches!(policy.tier, SandboxProcessRunnerTier::C) {
@@ -408,7 +413,7 @@ fn redacted_process_output_preview(output: &[u8]) -> Option<String> {
     }
     let redacted_urls = redact_url_segments_in_text(collapsed.as_str());
     let redacted = redact_auth_error(redacted_urls.as_str());
-    let redacted = redact_sensitive_url_path_segments(redacted.as_str());
+    let redacted = redact_sensitive_url_path_segments_in_text(redacted.as_str());
     if redacted.trim().is_empty() {
         None
     } else {
@@ -416,8 +421,51 @@ fn redacted_process_output_preview(output: &[u8]) -> Option<String> {
     }
 }
 
-fn redact_sensitive_url_path_segments(value: &str) -> String {
-    value.split_whitespace().map(redact_sensitive_url_path_token).collect::<Vec<_>>().join(" ")
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RedactedProcessOutputText {
+    text: String,
+    redacted: bool,
+}
+
+fn redacted_process_output(output: &[u8]) -> RedactedProcessOutputText {
+    let text = String::from_utf8_lossy(output).to_string();
+    redacted_process_output_text(text.as_str())
+}
+
+fn redacted_process_output_text(value: &str) -> RedactedProcessOutputText {
+    let redacted_urls = redact_url_segments_in_text(value);
+    let redacted_auth = redact_auth_error(redacted_urls.as_str());
+    let redacted_paths = redact_sensitive_url_path_segments_in_text(redacted_auth.as_str());
+    let export_redaction = redact_text_for_export(
+        redacted_paths.as_str(),
+        SafetySourceKind::ToolOutput,
+        SafetyContentKind::PlainText,
+        TrustLabel::TrustedLocal,
+    );
+    let redacted = redacted_urls != value
+        || redacted_auth != redacted_urls
+        || redacted_paths != redacted_auth
+        || export_redaction.redacted;
+
+    RedactedProcessOutputText { text: export_redaction.redacted_text, redacted }
+}
+
+fn redact_sensitive_url_path_segments_in_text(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut token = String::new();
+
+    for character in value.chars() {
+        if character.is_whitespace() {
+            output.push_str(redact_sensitive_url_path_token(token.as_str()).as_str());
+            token.clear();
+            output.push(character);
+            continue;
+        }
+        token.push(character);
+    }
+
+    output.push_str(redact_sensitive_url_path_token(token.as_str()).as_str());
+    output
 }
 
 fn redact_sensitive_url_path_token(token: &str) -> String {
@@ -490,12 +538,16 @@ fn execute_builtin_process_command(
         )?,
         _ => return Ok(None),
     };
+    let RedactedProcessOutputText { text: stdout, redacted: stdout_redacted } =
+        redacted_process_output_text(stdout.as_str());
     let output_json = serde_json::to_vec(&json!({
         "exit_code": 0,
         "stdout": stdout,
         "stderr": "",
         "stdout_truncated": false,
         "stderr_truncated": false,
+        "stdout_redacted": stdout_redacted,
+        "stderr_redacted": false,
         "duration_ms": 0,
         "tier": policy.tier.as_str(),
         "sandbox_backend": "builtin_portable",
@@ -1676,12 +1728,18 @@ fn spawn_background_process(
         terminate_background_child(child);
     });
 
+    let RedactedProcessOutputText { text: stdout_text, redacted: stdout_redacted } =
+        redacted_process_output(stdout.bytes.as_slice());
+    let RedactedProcessOutputText { text: stderr_text, redacted: stderr_redacted } =
+        redacted_process_output(stderr.bytes.as_slice());
     let output_json = serde_json::to_vec(&json!({
         "exit_code": 0,
-        "stdout": String::from_utf8_lossy(stdout.bytes.as_slice()).to_string(),
-        "stderr": String::from_utf8_lossy(stderr.bytes.as_slice()).to_string(),
+        "stdout": stdout_text,
+        "stderr": stderr_text,
         "stdout_truncated": stdout.truncated,
         "stderr_truncated": stderr.truncated,
+        "stdout_redacted": stdout_redacted,
+        "stderr_redacted": stderr_redacted,
         "background_output_note": "stdout/stderr are bounded startup snapshots captured during the startup check; use an explicit fixed port if a dynamic port is not printed here",
         "duration_ms": 0,
         "background": true,
@@ -2399,7 +2457,8 @@ mod tests {
     use super::{
         canonical_workspace_root, collect_requested_egress_hosts,
         cpu_rlimit_seconds_from_usage_micros, is_host_allowlisted, process_failure_message,
-        redacted_process_output_preview, resolve_host_working_directory, resolve_working_directory,
+        redacted_process_output_preview, redacted_process_output_text,
+        resolve_host_working_directory, resolve_working_directory,
         rewrite_host_virtual_workspace_args, run_constrained_process,
         validate_argument_workspace_scope, validate_interpreter_argument_guardrails,
         validate_process_termination_scope, validate_runtime_egress_enforcement,
@@ -2874,6 +2933,49 @@ mod tests {
             output.get("sandbox_backend").and_then(serde_json::Value::as_str),
             Some("builtin_portable")
         );
+
+        let _ = fs::remove_dir_all(workspace.as_path());
+    }
+
+    #[test]
+    fn process_output_text_redacts_secret_like_values() {
+        let redacted = redacted_process_output_text(
+            "MINIMAX_API_KEY=sk-test-secret-value\npublic_setting=true\n",
+        );
+
+        assert!(redacted.redacted, "{redacted:?}");
+        assert!(redacted.text.contains("public_setting=true"), "{}", redacted.text);
+        assert!(!redacted.text.contains("sk-test-secret-value"), "{}", redacted.text);
+        assert!(redacted.text.contains("REDACTED"), "{}", redacted.text);
+    }
+
+    #[test]
+    fn run_constrained_process_redacts_secret_like_builtin_stdout() {
+        let workspace = unique_temp_dir("workspace-cat-builtin-secret");
+        fs::create_dir_all(workspace.as_path()).expect("workspace directory should be created");
+        fs::write(
+            workspace.join(".env"),
+            b"MINIMAX_API_KEY=sk-test-secret-value\npublic_setting=true\n",
+        )
+        .expect("workspace env file should be created");
+        let policy =
+            sandbox_policy_with_allowed_executables(workspace.clone(), vec!["type".to_owned()]);
+        let input = br#"{"command":"type","args":[".env"]}"#;
+
+        let result = run_constrained_process(&policy, input, Duration::from_millis(1_000))
+            .expect("portable type builtin should redact secret-like stdout");
+        let output: serde_json::Value =
+            serde_json::from_slice(&result.output_json).expect("output should parse");
+        let stdout = output
+            .get("stdout")
+            .and_then(serde_json::Value::as_str)
+            .expect("stdout should be present in process output");
+
+        assert!(stdout.contains("public_setting=true"), "{stdout}");
+        assert!(!stdout.contains("sk-test-secret-value"), "{stdout}");
+        assert!(stdout.contains("REDACTED"), "{stdout}");
+        assert_eq!(output.get("stdout_redacted").and_then(serde_json::Value::as_bool), Some(true));
+        assert_eq!(output.get("stderr_redacted").and_then(serde_json::Value::as_bool), Some(false));
 
         let _ = fs::remove_dir_all(workspace.as_path());
     }
