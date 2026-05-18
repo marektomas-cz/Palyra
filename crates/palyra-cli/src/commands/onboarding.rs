@@ -13,6 +13,8 @@ use crate::*;
 
 const CLI_FIRST_SUCCESS_MARKER_RELATIVE_PATH: &str = "onboarding/first-success.json";
 const GATEWAY_RUNTIME_CONNECT_TIMEOUT_MS: u64 = 350;
+const BROWSER_RUNTIME_CONNECT_TIMEOUT_MS: u64 = 350;
+const DEFAULT_BROWSER_SERVICE_ENDPOINT: &str = "http://127.0.0.1:7543";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OnboardingVariant {
@@ -71,6 +73,8 @@ struct OnboardingSignals {
     memory_embeddings_message: String,
     browser_prerequisites_configured: bool,
     browser_prerequisites_message: String,
+    browser_runtime_reachable: bool,
+    browser_runtime_message: String,
     first_success_completed: bool,
 }
 
@@ -263,6 +267,15 @@ fn collect_onboarding_signals(
     );
     let (browser_prerequisites_configured, browser_prerequisites_message) =
         browser_prerequisites_status(document);
+    let (browser_runtime_reachable, browser_runtime_message) = if browser_prerequisites_configured {
+        browser_runtime_status(document)
+    } else {
+        (
+            false,
+            "browserd runtime reachability is not checked until browser prerequisites are configured"
+                .to_owned(),
+        )
+    };
 
     Ok(OnboardingSignals {
         config_exists: config_path != "defaults"
@@ -294,6 +307,8 @@ fn collect_onboarding_signals(
         memory_embeddings_message,
         browser_prerequisites_configured,
         browser_prerequisites_message,
+        browser_runtime_reachable,
+        browser_runtime_message,
         first_success_completed: cli_first_success_completed()?,
     })
 }
@@ -464,12 +479,38 @@ fn build_onboarding_steps(
         )
     };
 
-    let browser_step = if signals.browser_prerequisites_configured {
+    let browser_step = if signals.browser_prerequisites_configured
+        && signals.browser_runtime_reachable
+    {
         done_step(
             "browser_harness",
             "Browser harness",
-            signals.browser_prerequisites_message.clone(),
+            format!(
+                "{} {}",
+                signals.browser_prerequisites_message, signals.browser_runtime_message
+            ),
             Some(run_cli_action("Inspect browser status", "palyra browser status".to_owned())),
+        )
+    } else if signals.browser_prerequisites_configured {
+        actionable_step(
+            "browser_harness",
+            "Browser harness",
+            format!(
+                "{} {}",
+                signals.browser_prerequisites_message, signals.browser_runtime_message
+            ),
+            control_plane::OnboardingStepStatus::Blocked,
+            Some(run_cli_action(
+                "Start browserd",
+                "palyra browser start --wait-ms 20000 --json".to_owned(),
+            )),
+            StepPresentation::required(Some("browserd_not_running".to_owned())).with_blocked(
+                Some(blocked_reason(
+                    "browserd_not_running",
+                    signals.browser_runtime_message.as_str(),
+                    "Start browserd with `palyra browser start --wait-ms 20000 --json`, then rerun onboarding status before using browser-backed agent workflows.",
+                )),
+            ),
         )
     } else {
         actionable_step(
@@ -923,6 +964,25 @@ fn browser_prerequisites_status(document: &toml::Value) -> (bool, String) {
     )
 }
 
+fn browser_runtime_status(document: &toml::Value) -> (bool, String) {
+    let endpoint = get_string_at_path(document, "tool_call.browser_service.endpoint")
+        .unwrap_or_else(|| DEFAULT_BROWSER_SERVICE_ENDPOINT.to_owned());
+    match tcp_url_reachable(
+        endpoint.as_str(),
+        Duration::from_millis(BROWSER_RUNTIME_CONNECT_TIMEOUT_MS),
+        "browser service gRPC",
+    ) {
+        Ok(()) => (true, format!("browserd gRPC endpoint {endpoint} is reachable.")),
+        Err(error) => (
+            false,
+            format!(
+                "browserd gRPC endpoint {endpoint} is not reachable: {}",
+                sanitize_diagnostic_error(error.to_string().as_str())
+            ),
+        ),
+    }
+}
+
 fn minimax_chat_provider_configured(
     document: &toml::Value,
     provider_kind: &str,
@@ -963,6 +1023,7 @@ fn gateway_runtime_status() -> (bool, String) {
     match tcp_url_reachable(
         connection.grpc_url.as_str(),
         Duration::from_millis(GATEWAY_RUNTIME_CONNECT_TIMEOUT_MS),
+        "gateway gRPC",
     ) {
         Ok(()) => (true, format!("gateway gRPC endpoint {} is reachable", connection.grpc_url)),
         Err(error) => (
@@ -976,16 +1037,16 @@ fn gateway_runtime_status() -> (bool, String) {
     }
 }
 
-fn tcp_url_reachable(raw_url: &str, timeout: Duration) -> Result<()> {
+fn tcp_url_reachable(raw_url: &str, timeout: Duration, endpoint_label: &str) -> Result<()> {
     let url = reqwest::Url::parse(raw_url)
-        .with_context(|| format!("gateway gRPC URL is invalid: {raw_url}"))?;
-    let host = url.host_str().ok_or_else(|| anyhow!("gateway gRPC URL must include a host"))?;
+        .with_context(|| format!("{endpoint_label} URL is invalid: {raw_url}"))?;
+    let host = url.host_str().ok_or_else(|| anyhow!("{endpoint_label} URL must include a host"))?;
     let port = url
         .port_or_known_default()
-        .ok_or_else(|| anyhow!("gateway gRPC URL must include a port"))?;
+        .ok_or_else(|| anyhow!("{endpoint_label} URL must include a port"))?;
     let addresses = (host, port)
         .to_socket_addrs()
-        .with_context(|| format!("failed to resolve gateway gRPC endpoint {host}:{port}"))?;
+        .with_context(|| format!("failed to resolve {endpoint_label} endpoint {host}:{port}"))?;
     let mut last_error = None;
     for address in addresses {
         match TcpStream::connect_timeout(&address, timeout) {
@@ -1259,6 +1320,8 @@ kind = "anthropic"
                     .to_owned(),
                 browser_prerequisites_configured: true,
                 browser_prerequisites_message: "browser ready".to_owned(),
+                browser_runtime_reachable: true,
+                browser_runtime_message: "browserd reachable".to_owned(),
                 first_success_completed: false,
             },
         );
@@ -1294,6 +1357,8 @@ kind = "anthropic"
                 .to_owned(),
             browser_prerequisites_configured: true,
             browser_prerequisites_message: "browser ready".to_owned(),
+            browser_runtime_reachable: true,
+            browser_runtime_message: "browserd reachable".to_owned(),
             first_success_completed: false,
         });
 
@@ -1330,6 +1395,8 @@ kind = "anthropic"
                     .to_owned(),
                 browser_prerequisites_configured: true,
                 browser_prerequisites_message: "browser ready".to_owned(),
+                browser_runtime_reachable: true,
+                browser_runtime_message: "browserd reachable".to_owned(),
                 first_success_completed: false,
             },
         );
@@ -1385,6 +1452,8 @@ kind = "anthropic"
                     .to_owned(),
                 browser_prerequisites_configured: true,
                 browser_prerequisites_message: "browser ready".to_owned(),
+                browser_runtime_reachable: true,
+                browser_runtime_message: "browserd reachable".to_owned(),
                 first_success_completed: false,
             },
         );
@@ -1399,6 +1468,53 @@ kind = "anthropic"
             agent_step.blocked.as_ref().map(|blocked| blocked.code.as_str()),
             Some("gateway_not_running")
         );
+    }
+
+    #[test]
+    fn browser_step_blocks_when_prerequisites_exist_but_browserd_is_down() {
+        let steps = build_onboarding_steps(
+            OnboardingVariant::Quickstart,
+            &OnboardingSignals {
+                config_exists: true,
+                config_path: "C:/portable/palyra.toml".to_owned(),
+                workspace_root_configured: true,
+                remote_base_url_configured: false,
+                remote_verification_mode: None,
+                remote_posture_safe: true,
+                deployment_warning: None,
+                provider_auth_configured: true,
+                provider_model_selected: true,
+                provider_health_state: "configured".to_owned(),
+                provider_health_message: "configured".to_owned(),
+                model_discovery_ready: true,
+                model_discovery_message: "ready".to_owned(),
+                gateway_runtime_reachable: true,
+                gateway_runtime_message: "reachable".to_owned(),
+                default_agent_configured: true,
+                default_agent_message: "default agent `local-default` is configured".to_owned(),
+                workspace_root: Some("C:/portable".to_owned()),
+                chat_model: Some("MiniMax-M2.7".to_owned()),
+                memory_embeddings_configured: false,
+                memory_embeddings_message: "MiniMax chat is configured; memory uses hash fallback"
+                    .to_owned(),
+                browser_prerequisites_configured: true,
+                browser_prerequisites_message: "browser prerequisites configured".to_owned(),
+                browser_runtime_reachable: false,
+                browser_runtime_message:
+                    "browserd gRPC endpoint http://127.0.0.1:7543 is not reachable".to_owned(),
+                first_success_completed: false,
+            },
+        );
+        let browser_step =
+            steps.iter().find(|step| step.step_id == "browser_harness").expect("browser step");
+
+        assert_eq!(browser_step.status, control_plane::OnboardingStepStatus::Blocked);
+        assert_eq!(
+            browser_step.action.as_ref().map(|action| action.target.as_str()),
+            Some("palyra browser start --wait-ms 20000 --json")
+        );
+        assert_eq!(browser_step.verification_state.as_deref(), Some("browserd_not_running"));
+        assert_eq!(recommended_onboarding_step_id(&steps).as_deref(), Some("browser_harness"));
     }
 
     #[test]
@@ -1489,11 +1605,13 @@ agent_id = "local-default"
             ..RootOptions::default()
         })?;
         let document: toml::Value = toml::from_str(config)?;
-        let signals = collect_onboarding_signals(
+        let mut signals = collect_onboarding_signals(
             &document,
             config_path.display().to_string(),
             OnboardingVariant::Quickstart,
         )?;
+        signals.browser_runtime_reachable = true;
+        signals.browser_runtime_message = "browserd gRPC endpoint is reachable".to_owned();
         let steps = build_onboarding_steps(OnboardingVariant::Quickstart, &signals);
         let first_success =
             steps.iter().find(|step| step.step_id == "first_success").expect("first_success step");
