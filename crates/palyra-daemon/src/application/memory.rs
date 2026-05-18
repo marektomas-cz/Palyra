@@ -138,17 +138,6 @@ const MEMORY_WRITE_SENSITIVE_PATTERNS: &[&str] = &[
     "session token",
     "token",
 ];
-const MEMORY_WRITE_HIGH_RISK_PATTERNS: &[&str] = &[
-    "approval",
-    "auth",
-    "cryptography",
-    "deny",
-    "policy",
-    "private",
-    "remote bind",
-    "sandbox",
-    "security",
-];
 const MEMORY_TRANSIENT_TTL_MS: i64 = 24 * 60 * 60 * 1_000;
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -894,15 +883,120 @@ fn classify_memory_write_sensitivity(
     lowered: &str,
     scope: MemoryLifecycleScope,
 ) -> MemoryWriteSensitivity {
-    if contains_any(lowered, MEMORY_WRITE_SENSITIVE_PATTERNS) {
+    if contains_secret_value_like_memory_write(lowered) {
         MemoryWriteSensitivity::Sensitive
     } else if scope == MemoryLifecycleScope::Principal
-        && contains_any(lowered, MEMORY_WRITE_HIGH_RISK_PATTERNS)
+        && contains_high_risk_memory_write_intent(lowered)
     {
         MemoryWriteSensitivity::HighRisk
     } else {
         MemoryWriteSensitivity::Normal
     }
+}
+
+fn contains_secret_value_like_memory_write(lowered: &str) -> bool {
+    if contains_any(
+        lowered,
+        &[
+            "api_key=",
+            "api key:",
+            "bearer ",
+            "cookie:",
+            "cookie=",
+            "credential:",
+            "credential=",
+            "password:",
+            "password=",
+            "private key:",
+            "private key=",
+            "-----begin private key-----",
+            "secret:",
+            "secret=",
+            "session token:",
+            "session token=",
+            "token:",
+            "token=",
+        ],
+    ) {
+        return true;
+    }
+    if !contains_any(lowered, MEMORY_WRITE_SENSITIVE_PATTERNS) {
+        return false;
+    }
+    if contains_any(
+        lowered,
+        &[
+            "do not log",
+            "do not print",
+            "do not store",
+            "don't log",
+            "don't print",
+            "don't store",
+            "must not log",
+            "must not print",
+            "must not store",
+            "never log",
+            "never print",
+            "never store",
+            "no secrets",
+            "redact",
+        ],
+    ) {
+        return false;
+    }
+    contains_any(lowered, &["actual", "equals", " is ", "remember", "save ", "store ", "value"])
+}
+
+fn contains_high_risk_memory_write_intent(lowered: &str) -> bool {
+    if contains_any(
+        lowered,
+        &[
+            "bypass approval",
+            "disable approval",
+            "never require approval",
+            "skip approval",
+            "without approval",
+        ],
+    ) {
+        return true;
+    }
+    if contains_any(
+        lowered,
+        &[
+            "do not bypass",
+            "do not disable",
+            "do not ignore",
+            "must not bypass",
+            "must not disable",
+            "must not ignore",
+            "never bypass",
+            "never disable",
+            "never ignore",
+        ],
+    ) {
+        return false;
+    }
+    contains_any(
+        lowered,
+        &[
+            "allow insecure remote bind",
+            "allow remote bind",
+            "bypass auth",
+            "bypass policy",
+            "bypass sandbox",
+            "bypass security",
+            "disable auth",
+            "disable policy",
+            "disable sandbox",
+            "disable security",
+            "ignore auth",
+            "ignore policy",
+            "ignore sandbox",
+            "ignore security",
+            "public remote bind",
+            "weaken policy",
+        ],
+    )
 }
 
 fn memory_write_source_refs(
@@ -1259,6 +1353,23 @@ mod tests {
         assert_eq!(classification.approval_state, MemoryWriteApprovalState::Required);
         assert!(classification.reason_codes.iter().any(|reason| reason == "sensitivity:sensitive"));
         assert_eq!(classification.source_refs[0].source_kind, "orchestrator_tape");
+    }
+
+    #[test]
+    fn write_classifier_allows_safe_secret_handling_rules() {
+        let mut input = classification_input(
+            "Workflow rules: never log secrets, redact tokens, follow approval policy, and do not bypass sandbox guardrails.",
+        );
+        input.scope = MemoryLifecycleScope::Principal;
+
+        let classification = classify_memory_write(input);
+
+        assert_eq!(classification.sensitivity, MemoryWriteSensitivity::Normal);
+        assert_eq!(classification.approval_state, MemoryWriteApprovalState::NotRequired);
+        assert!(
+            !classification.reason_codes.iter().any(|reason| reason.starts_with("sensitivity:")),
+            "safe defensive rules should not be treated as secret storage or policy bypass"
+        );
     }
 
     #[test]

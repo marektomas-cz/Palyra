@@ -37,7 +37,7 @@ pub struct PolicyEvaluationConfig {
     pub tool_execute_channel_allowlist: Vec<String>,
 }
 
-const DEFAULT_SENSITIVE_ACTIONS: &[&str] = &["cron.delete", "memory.delete", "memory.purge"];
+const DEFAULT_SENSITIVE_ACTIONS: &[&str] = &["cron.delete", "memory.purge"];
 
 impl Default for PolicyEvaluationConfig {
     fn default() -> Self {
@@ -977,6 +977,24 @@ mod tests {
         assert!(
             evaluation.explanation.reason.contains("memory action allowed"),
             "memory allow reason should reflect dedicated memory policy"
+        );
+    }
+
+    #[test]
+    fn memory_delete_is_allowed_by_default() {
+        let request = PolicyRequest {
+            principal: "user:ops".to_owned(),
+            action: "memory.delete".to_owned(),
+            resource: "memory:item".to_owned(),
+        };
+
+        let evaluation =
+            evaluate_with_config(&request, &PolicyEvaluationConfig::default()).expect("evaluation");
+
+        assert_eq!(evaluation.decision, PolicyDecision::Allow);
+        assert!(
+            !evaluation.explanation.is_sensitive_action,
+            "single-item memory delete should remain a scoped cleanup action by default"
         );
     }
 

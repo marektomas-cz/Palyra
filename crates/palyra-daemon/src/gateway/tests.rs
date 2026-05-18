@@ -4332,7 +4332,7 @@ async fn memory_retain_tool_principal_scope_writes_normal_preferences() {
 #[tokio::test(flavor = "multi_thread")]
 async fn memory_retain_tool_principal_scope_writes_normal_workflow_rules() {
     let state = build_test_runtime_state(false);
-    let input_json = br#"{"content_text":"Workflow rules for E2E memory capacity: always inspect files, run available tests, and write concise Czech reports.","scope":"principal","confidence":0.9,"tags":["e2e-s035-rules"]}"#;
+    let input_json = br#"{"content_text":"Workflow rules for E2E memory capacity: always inspect files, run available tests, never log secrets, redact tokens, follow approval policy, do not bypass sandbox guardrails, and write concise Czech reports.","scope":"principal","confidence":0.9,"tags":["e2e-s035-rules"]}"#;
     let outcome = execute_memory_retain_tool(
         &state,
         routines_tool_test_context(),
@@ -4342,7 +4342,7 @@ async fn memory_retain_tool_principal_scope_writes_normal_workflow_rules() {
     .await;
     assert!(
         outcome.success,
-        "normal workflow rules should be retained without manual review: {}",
+        "safe defensive workflow rules should be retained without manual review: {}",
         outcome.error
     );
     let payload = parse_tool_output_json(&outcome);
