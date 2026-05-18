@@ -280,6 +280,10 @@ fn memory_session_search_schema_targets_prior_transcripts() {
         .contains("previous session"));
     assert_eq!(entry.input_schema["properties"]["top_k"]["maximum"], 24);
     assert_eq!(entry.input_schema["properties"]["window_before"]["maximum"], 8);
+    assert!(entry.input_schema["properties"]["include_current_session"]["description"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("current prompt"));
     assert_eq!(entry.projection_policy, ToolResultProjectionPolicy::InlineUnlessLarge);
 }
 

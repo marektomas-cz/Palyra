@@ -1231,6 +1231,7 @@ pub(crate) async fn console_session_search_handler(
             principal: session.context.principal.clone(),
             device_id: session.context.device_id.clone(),
             channel: channel.clone(),
+            exclude_session_id: None,
             query: search_query.to_owned(),
             top_k: query.top_k.unwrap_or(8).clamp(1, 24),
             min_score,

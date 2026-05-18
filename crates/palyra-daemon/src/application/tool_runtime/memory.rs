@@ -1017,11 +1017,18 @@ pub(crate) async fn execute_memory_session_search_tool(
             );
         }
     };
+    let include_current_session =
+        parsed.get("include_current_session").and_then(Value::as_bool).unwrap_or(false);
 
     let request = SessionSearchRequest {
         principal: context.principal.to_owned(),
         device_id: context.device_id.to_owned(),
         channel,
+        exclude_session_id: if include_current_session {
+            None
+        } else {
+            Some(context.session_id.to_owned())
+        },
         query,
         top_k,
         min_score,

@@ -2761,6 +2761,7 @@ pub struct SessionSearchRequest {
     pub principal: String,
     pub device_id: String,
     pub channel: Option<String>,
+    pub exclude_session_id: Option<String>,
     pub query: String,
     pub top_k: usize,
     pub min_score: f64,
@@ -15634,11 +15635,11 @@ fn load_session_search_candidates(
         "1 = 1".to_owned()
     } else {
         (0..like_needles.len())
-            .map(|index| format!("LOWER(tape.payload_json) LIKE ?{} ESCAPE '\\'", index + 5))
+            .map(|index| format!("LOWER(tape.payload_json) LIKE ?{} ESCAPE '\\'", index + 6))
             .collect::<Vec<_>>()
             .join(" OR ")
     };
-    let limit_parameter_index = like_needles.len() + 5;
+    let limit_parameter_index = like_needles.len() + 6;
     let sql = format!(
         r#"
             SELECT
@@ -15683,6 +15684,7 @@ fn load_session_search_candidates(
               AND sessions.device_id = ?2
               AND ((sessions.channel = ?3) OR (sessions.channel IS NULL AND ?3 IS NULL))
               AND (?4 = 1 OR sessions.archived_at_unix_ms IS NULL)
+              AND (?5 IS NULL OR sessions.session_ulid != ?5)
               AND tape.event_type IN ('message.received', 'queued.input', 'message.replied', 'rollback.marker')
               AND ({like_clause})
             ORDER BY tape.created_at_unix_ms DESC, tape.run_ulid DESC, tape.seq DESC
@@ -15693,16 +15695,18 @@ fn load_session_search_candidates(
     let now_unix_ms = current_unix_ms()?;
     let channel = request.channel.as_deref();
     let include_archived = if request.include_archived { 1_i64 } else { 0_i64 };
+    let exclude_session_id = request.exclude_session_id.as_deref();
     let scan_limit = scan_limit as i64;
     let like_patterns = like_needles
         .iter()
         .map(|needle| format!("%{}%", escape_sql_like(needle.as_str())))
         .collect::<Vec<_>>();
-    let mut parameters: Vec<&dyn ToSql> = Vec::with_capacity(5 + like_patterns.len());
+    let mut parameters: Vec<&dyn ToSql> = Vec::with_capacity(6 + like_patterns.len());
     parameters.push(&request.principal);
     parameters.push(&request.device_id);
     parameters.push(&channel);
     parameters.push(&include_archived);
+    parameters.push(&exclude_session_id);
     for pattern in &like_patterns {
         parameters.push(pattern);
     }
@@ -20733,6 +20737,7 @@ mod tests {
                 principal: "user:ops".to_owned(),
                 device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
                 channel: Some("cli".to_owned()),
+                exclude_session_id: None,
                 query: "cross session recall".to_owned(),
                 top_k: 4,
                 min_score: 0.0,
@@ -20781,14 +20786,25 @@ mod tests {
                 payload_json: r#"{"text":"Scénář S036. Dočasný feature flag se jmenuje PALYRA_E2E_BETA. Neukládej to do trvalé memory."}"#.to_owned(),
             })
             .expect("tape event should persist");
+        upsert_orchestrator_session(&store, "01ARZ3NDEKTSV4RRFFQ69G5SE2");
+        start_orchestrator_run(&store, "01ARZ3NDEKTSV4RRFFQ69G5SE2", "01ARZ3NDEKTSV4RRFFQ69G5RE2");
+        store
+            .append_orchestrator_tape_event(&OrchestratorTapeAppendRequest {
+                run_id: "01ARZ3NDEKTSV4RRFFQ69G5RE2".to_owned(),
+                seq: 0,
+                event_type: "message.received".to_owned(),
+                payload_json: r#"{"text":"V aktuální session se ptám na název dočasného feature flagu, ale hodnota tu není."}"#.to_owned(),
+            })
+            .expect("current-session tape event should persist");
 
         let outcome = store
             .search_orchestrator_session_windows(&SessionSearchRequest {
                 principal: "user:ops".to_owned(),
                 device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
                 channel: Some("cli".to_owned()),
+                exclude_session_id: Some("01ARZ3NDEKTSV4RRFFQ69G5SE2".to_owned()),
                 query: "název dočasného feature flagu".to_owned(),
-                top_k: 4,
+                top_k: 1,
                 min_score: 0.0,
                 window_before: 0,
                 window_after: 0,
