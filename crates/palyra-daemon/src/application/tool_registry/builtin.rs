@@ -625,6 +625,7 @@ fn browser_tool_names() -> &'static [&'static str] {
         "palyra.browser.navigate",
         "palyra.browser.click",
         "palyra.browser.type",
+        "palyra.browser.fill",
         "palyra.browser.press",
         "palyra.browser.select",
         "palyra.browser.viewport",
@@ -654,6 +655,7 @@ fn browser_tool_description(tool_name: &str) -> &'static str {
         "palyra.browser.navigate" => "Navigate a brokered browser session to a URL.",
         "palyra.browser.click" => "Click an element in a brokered browser session.",
         "palyra.browser.type" => "Type text in a brokered browser session.",
+        "palyra.browser.fill" => "Replace an element value in a brokered browser session.",
         "palyra.browser.press" => "Press a key in a brokered browser session.",
         "palyra.browser.select" => "Select an option in a brokered browser session.",
         "palyra.browser.viewport" => "Set the active browser viewport dimensions.",
@@ -722,12 +724,18 @@ fn browser_tool_schema(tool_name: &str) -> Value {
             ));
             required.push("selector");
         }
-        "palyra.browser.type" => {
+        "palyra.browser.type" | "palyra.browser.fill" => {
             properties.push((
                 "selector",
                 json!({"type":"string","description":"CSS selector grounded in a prior palyra.browser.observe result. Prefer stable input id/name/label evidence; if not found, call observe before retrying."}),
             ));
             properties.push(("text", json!({"type":"string"})));
+            if tool_name == "palyra.browser.type" {
+                properties.push((
+                    "clear_existing",
+                    json!({"type":"boolean","description":"Set true to replace the current input/textarea/contenteditable value before typing. Prefer palyra.browser.fill for form value replacement instead of click + Control+A + type."}),
+                ));
+            }
             required.extend(["selector", "text"]);
         }
         "palyra.browser.press" => {
@@ -894,6 +902,23 @@ mod tests {
             .and_then(serde_json::Value::as_str)
             .expect("type selector description should be visible to models");
         assert!(type_selector_description.contains("palyra.browser.observe"));
+        let clear_description = type_entry
+            .input_schema
+            .pointer("/properties/clear_existing/description")
+            .and_then(serde_json::Value::as_str)
+            .expect("type clear_existing description should be visible to models");
+        assert!(clear_description.contains("palyra.browser.fill"));
+
+        let fill_entry = registry_entry("palyra.browser.fill").expect("fill entry exists");
+        assert!(fill_entry.description.contains("Replace"));
+        assert_eq!(
+            fill_entry.input_schema.pointer("/required/1").and_then(serde_json::Value::as_str),
+            Some("selector")
+        );
+        assert_eq!(
+            fill_entry.input_schema.pointer("/required/2").and_then(serde_json::Value::as_str),
+            Some("text")
+        );
     }
 
     #[test]

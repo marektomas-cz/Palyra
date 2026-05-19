@@ -196,6 +196,7 @@ pub(crate) const BROWSER_SESSION_CLOSE_TOOL_NAME: &str = "palyra.browser.session
 pub(crate) const BROWSER_NAVIGATE_TOOL_NAME: &str = "palyra.browser.navigate";
 pub(crate) const BROWSER_CLICK_TOOL_NAME: &str = "palyra.browser.click";
 pub(crate) const BROWSER_TYPE_TOOL_NAME: &str = "palyra.browser.type";
+pub(crate) const BROWSER_FILL_TOOL_NAME: &str = "palyra.browser.fill";
 pub(crate) const BROWSER_PRESS_TOOL_NAME: &str = "palyra.browser.press";
 pub(crate) const BROWSER_SELECT_TOOL_NAME: &str = "palyra.browser.select";
 pub(crate) const BROWSER_VIEWPORT_TOOL_NAME: &str = "palyra.browser.viewport";

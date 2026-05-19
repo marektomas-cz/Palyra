@@ -26,14 +26,15 @@ use crate::{
     gateway::{
         current_unix_ms, truncate_with_ellipsis, BrowserServiceRuntimeConfig, GatewayRuntimeState,
         ToolRuntimeExecutionContext, BROWSER_CLICK_TOOL_NAME, BROWSER_CONSOLE_LOG_TOOL_NAME,
-        BROWSER_HIGHLIGHT_TOOL_NAME, BROWSER_NAVIGATE_TOOL_NAME, BROWSER_NETWORK_LOG_TOOL_NAME,
-        BROWSER_OBSERVE_TOOL_NAME, BROWSER_PDF_TOOL_NAME, BROWSER_PERMISSIONS_GET_TOOL_NAME,
-        BROWSER_PERMISSIONS_SET_TOOL_NAME, BROWSER_PRESS_TOOL_NAME, BROWSER_RESET_STATE_TOOL_NAME,
-        BROWSER_SCREENSHOT_TOOL_NAME, BROWSER_SCROLL_TOOL_NAME, BROWSER_SELECT_TOOL_NAME,
-        BROWSER_SESSION_CLOSE_TOOL_NAME, BROWSER_SESSION_CREATE_TOOL_NAME,
-        BROWSER_TABS_CLOSE_TOOL_NAME, BROWSER_TABS_LIST_TOOL_NAME, BROWSER_TABS_OPEN_TOOL_NAME,
-        BROWSER_TABS_SWITCH_TOOL_NAME, BROWSER_TITLE_TOOL_NAME, BROWSER_TYPE_TOOL_NAME,
-        BROWSER_VIEWPORT_TOOL_NAME, BROWSER_WAIT_FOR_TOOL_NAME, MAX_BROWSER_TOOL_INPUT_BYTES,
+        BROWSER_FILL_TOOL_NAME, BROWSER_HIGHLIGHT_TOOL_NAME, BROWSER_NAVIGATE_TOOL_NAME,
+        BROWSER_NETWORK_LOG_TOOL_NAME, BROWSER_OBSERVE_TOOL_NAME, BROWSER_PDF_TOOL_NAME,
+        BROWSER_PERMISSIONS_GET_TOOL_NAME, BROWSER_PERMISSIONS_SET_TOOL_NAME,
+        BROWSER_PRESS_TOOL_NAME, BROWSER_RESET_STATE_TOOL_NAME, BROWSER_SCREENSHOT_TOOL_NAME,
+        BROWSER_SCROLL_TOOL_NAME, BROWSER_SELECT_TOOL_NAME, BROWSER_SESSION_CLOSE_TOOL_NAME,
+        BROWSER_SESSION_CREATE_TOOL_NAME, BROWSER_TABS_CLOSE_TOOL_NAME,
+        BROWSER_TABS_LIST_TOOL_NAME, BROWSER_TABS_OPEN_TOOL_NAME, BROWSER_TABS_SWITCH_TOOL_NAME,
+        BROWSER_TITLE_TOOL_NAME, BROWSER_TYPE_TOOL_NAME, BROWSER_VIEWPORT_TOOL_NAME,
+        BROWSER_WAIT_FOR_TOOL_NAME, MAX_BROWSER_TOOL_INPUT_BYTES,
     },
     sandbox_runner::process_runner_allows_host_access,
     tool_protocol::{ToolAttestation, ToolExecutionOutcome},
@@ -46,6 +47,14 @@ const BROWSER_WAIT_FOR_INPUT_RECOVERY_HINT: &str =
     "wait_for_input_required: pass either selector or text; when unsure, call palyra.browser.observe first and wait for a visible text snippet or observed selector";
 const BROWSER_WAIT_FOR_TIMEOUT_RECOVERY_HINT: &str =
     "wait_for_timeout: call palyra.browser.observe to inspect the current step/state before retrying with a grounded selector or visible text";
+
+fn browser_text_entry_action_name(tool_name: &str) -> &'static str {
+    if tool_name == BROWSER_FILL_TOOL_NAME {
+        "fill"
+    } else {
+        "type"
+    }
+}
 
 fn browser_tool_allows_private_targets_for_url(
     runtime_state: &GatewayRuntimeState,
@@ -670,7 +679,7 @@ pub(crate) async fn execute_browser_tool(
                 ),
             }
         }
-        BROWSER_TYPE_TOOL_NAME => {
+        BROWSER_TYPE_TOOL_NAME | BROWSER_FILL_TOOL_NAME => {
             let session_id = match parse_browser_tool_session_id(&payload) {
                 Ok(value) => value,
                 Err(error) => {
@@ -685,33 +694,34 @@ pub(crate) async fn execute_browser_tool(
             };
             let Some(selector) = payload.get("selector").and_then(Value::as_str).map(str::trim)
             else {
+                let action = browser_text_entry_action_name(tool_name);
                 return browser_tool_execution_outcome(
                     proposal_id,
                     input_json,
                     false,
                     b"{}".to_vec(),
-                    "palyra.browser.type requires non-empty string field 'selector'".to_owned(),
+                    format!("palyra.browser.{action} requires non-empty string field 'selector'"),
                 );
             };
             if selector.is_empty() {
+                let action = browser_text_entry_action_name(tool_name);
                 return browser_tool_execution_outcome(
                     proposal_id,
                     input_json,
                     false,
                     b"{}".to_vec(),
-                    "palyra.browser.type requires non-empty string field 'selector'".to_owned(),
+                    format!("palyra.browser.{action} requires non-empty string field 'selector'"),
                 );
             }
             let text = payload.get("text").and_then(Value::as_str).unwrap_or_default();
+            let clear_existing = tool_name == BROWSER_FILL_TOOL_NAME
+                || payload.get("clear_existing").and_then(Value::as_bool).unwrap_or(false);
             let mut request = Request::new(browser_v1::TypeRequest {
                 v: CANONICAL_PROTOCOL_MAJOR,
                 session_id: Some(common_v1::CanonicalId { ulid: session_id }),
                 selector: selector.to_owned(),
                 text: text.to_owned(),
-                clear_existing: payload
-                    .get("clear_existing")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
+                clear_existing,
                 timeout_ms: payload.get("timeout_ms").and_then(Value::as_u64).unwrap_or(0),
                 capture_failure_screenshot: payload
                     .get("capture_failure_screenshot")
@@ -755,7 +765,11 @@ pub(crate) async fn execute_browser_tool(
                 Err(error) => (
                     false,
                     b"{}".to_vec(),
-                    format!("palyra.browser.type failed: {}", sanitize_status_message(&error)),
+                    format!(
+                        "palyra.browser.{} failed: {}",
+                        browser_text_entry_action_name(tool_name),
+                        sanitize_status_message(&error)
+                    ),
                 ),
             }
         }
