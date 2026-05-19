@@ -47,6 +47,9 @@ pub(crate) fn active_workspace_root_from_focus_paths(
             let Some(directory) = nearest_existing_directory(candidate.as_path(), root) else {
                 continue;
             };
+            let Ok(directory) = fs::canonicalize(directory) else {
+                continue;
+            };
             if directory == *root || !directory.starts_with(root) {
                 continue;
             }
@@ -152,6 +155,25 @@ mod tests {
             &active
         ));
         assert!(!relative_path_already_targets_active_root("package.json", &active));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn active_workspace_root_rejects_symlink_focus_outside_workspace() {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let workspace = tempdir.path().join("workspace");
+        let outside = tempdir.path().join("outside");
+        fs::create_dir_all(workspace.as_path()).expect("workspace directory should exist");
+        fs::create_dir_all(outside.as_path()).expect("outside directory should exist");
+        symlink(outside.as_path(), workspace.join("link").as_path())
+            .expect("symlink should be created");
+
+        let active =
+            active_workspace_root_from_focus_paths(&[workspace], &["link/secret.txt".to_owned()]);
+
+        assert_eq!(active, None);
     }
 
     #[test]
