@@ -19096,7 +19096,7 @@ fn redact_value(value: &mut Value, key_context: Option<&str>) -> bool {
         Value::Object(object) => {
             let mut redacted = false;
             for (key, child) in object.iter_mut() {
-                if is_sensitive_key(key) {
+                if is_sensitive_key(key) || is_binary_payload_key(key) {
                     *child = Value::String(REDACTED_MARKER.to_owned());
                     redacted = true;
                     continue;
@@ -19143,6 +19143,22 @@ fn redact_value(value: &mut Value, key_context: Option<&str>) -> bool {
         }
         _ => key_context.map(is_sensitive_key).unwrap_or(false),
     }
+}
+
+fn is_binary_payload_key(key: &str) -> bool {
+    let normalized = key.to_ascii_lowercase().replace(['-', '.'], "_");
+    matches!(
+        normalized.as_str(),
+        "bytes_base64"
+            | "image_base64"
+            | "pdf_base64"
+            | "inline_base64"
+            | "screenshot_base64"
+            | "failure_screenshot_base64"
+            | "failure_image_base64"
+    ) || normalized.ends_with("_image_base64")
+        || normalized.ends_with("_pdf_base64")
+        || normalized.ends_with("_screenshot_base64")
 }
 
 fn is_sensitive_key(key: &str) -> bool {
@@ -19509,6 +19525,21 @@ mod tests {
         assert!(!redacted.contains("S013_DUMMY_SECRET_SHOULD_NOT_APPEAR"));
         assert!(redacted.contains("README says"));
         assert!(redacted.contains("must be printed"));
+    }
+
+    #[test]
+    fn redact_payload_json_masks_binary_base64_fields() {
+        let redacted = super::redact_payload_json(
+            br#"{"mime_type":"image/png","image_base64":"QUJDREVGRw==","nested":{"pdf_base64":"SEVMTE8=","failure_screenshot_base64":"RkFJTA=="}}"#,
+        )
+        .expect("payload redaction should succeed");
+
+        assert!(redacted.contains(r#""image_base64":"<redacted>""#), "{redacted}");
+        assert!(redacted.contains(r#""pdf_base64":"<redacted>""#), "{redacted}");
+        assert!(redacted.contains(r#""failure_screenshot_base64":"<redacted>""#), "{redacted}");
+        assert!(!redacted.contains("QUJDREVGRw=="), "{redacted}");
+        assert!(!redacted.contains("SEVMTE8="), "{redacted}");
+        assert!(!redacted.contains("RkFJTA=="), "{redacted}");
     }
 
     fn sample_cron_job_request(job_id: &str) -> CronJobCreateRequest {
