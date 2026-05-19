@@ -96,6 +96,7 @@ impl cron_v1::cron_service_server::CronService for CronServiceImpl {
                 channel,
                 session_key,
                 session_label,
+                workdir: None,
                 schedule_type: schedule.schedule_type,
                 schedule_payload_json: schedule.schedule_payload_json,
                 enabled: payload.enabled,

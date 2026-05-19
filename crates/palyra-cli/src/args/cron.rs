@@ -82,6 +82,12 @@ pub enum CronCommand {
         session_key: Option<String>,
         #[arg(long)]
         session_label: Option<String>,
+        #[arg(
+            long,
+            value_name = "PATH",
+            help = "Project working directory for scheduled runs; relative paths resolve from the current directory and are stored as absolute paths"
+        )]
+        workdir: Option<String>,
         #[arg(long, default_value_t = false)]
         json: bool,
     },
@@ -126,6 +132,12 @@ pub enum CronCommand {
         session_key: Option<String>,
         #[arg(long)]
         session_label: Option<String>,
+        #[arg(
+            long,
+            value_name = "PATH",
+            help = "Update the project working directory for scheduled runs; relative paths resolve from the current directory"
+        )]
+        workdir: Option<String>,
         #[arg(long, default_value_t = false)]
         json: bool,
     },

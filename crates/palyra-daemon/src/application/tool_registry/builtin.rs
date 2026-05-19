@@ -201,7 +201,7 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
         ),
         entry(
             "palyra.routines.control",
-            "Create, update, pause, resume, or manually dispatch routines through the approval-aware runtime. For new reminders and monitors, omit routine_id and use operation=upsert with trigger_kind=schedule, name, prompt, and natural_language_schedule such as 'every 30 minutes' or 'every 40 seconds'. Scheduled routines default to execution_posture=sensitive_tools because future runs cannot prompt for per-tool approval; set execution_posture=standard only when the routine must stay read-only or approval-gated.",
+            "Create, update, pause, resume, or manually dispatch routines through the approval-aware runtime. For new reminders and monitors, omit routine_id and use operation=upsert with trigger_kind=schedule, name, prompt, and natural_language_schedule such as 'every 30 minutes' or 'every 40 seconds'. Use workdir for a scheduled project root that future runs should treat as their cwd and output base. Scheduled routines default to execution_posture=sensitive_tools because future runs cannot prompt for per-tool approval; set execution_posture=standard only when the routine must stay read-only or approval-gated.",
             object_schema(
                 &["operation"],
                 vec![
@@ -215,6 +215,10 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
                     ),
                     ("name", json!({"type":"string"})),
                     ("prompt", json!({"type":"string"})),
+                    (
+                        "workdir",
+                        json!({"type":"string","description":"Optional explicit project/root directory for scheduled runs; the run log and scheduled prompt metadata expose this value."}),
+                    ),
                     (
                         "trigger_kind",
                         json!({"type":"string","enum":["schedule","hook","webhook","system_event","manual"]}),

@@ -1,4 +1,8 @@
-use std::io::Write;
+use std::{
+    fs,
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 use serde_json::{json, Map, Value};
 
@@ -64,9 +68,11 @@ pub(crate) async fn run_cron_async(command: CronCommand) -> Result<()> {
             channel,
             session_key,
             session_label,
+            workdir,
             json,
         } => {
             let prompt = resolve_prompt_input(prompt, prompt_stdin)?;
+            let workdir = resolve_cron_workdir(workdir)?;
             let payload = build_schedule_routine_payload(
                 None,
                 ScheduleRoutineConfig {
@@ -84,6 +90,7 @@ pub(crate) async fn run_cron_async(command: CronCommand) -> Result<()> {
                     channel,
                     session_key,
                     session_label,
+                    workdir,
                 },
             )?;
             let response = upsert_routine_value(&context.client, &payload).await?;
@@ -106,6 +113,7 @@ pub(crate) async fn run_cron_async(command: CronCommand) -> Result<()> {
             channel,
             session_key,
             session_label,
+            workdir,
             json,
         } => {
             let any_other_field = name.is_some()
@@ -121,7 +129,8 @@ pub(crate) async fn run_cron_async(command: CronCommand) -> Result<()> {
                 || owner.is_some()
                 || channel.is_some()
                 || session_key.is_some()
-                || session_label.is_some();
+                || session_label.is_some()
+                || workdir.is_some();
             if cron_update_only_changes_enabled(enabled, any_other_field) {
                 let enabled = enabled.expect("enabled-only update requires an enabled value");
                 let response =
@@ -133,6 +142,7 @@ pub(crate) async fn run_cron_async(command: CronCommand) -> Result<()> {
                 .pointer("/routine")
                 .ok_or_else(|| anyhow!("routine response is missing the routine payload"))?;
             let prompt = resolve_optional_prompt_input(prompt, prompt_stdin)?;
+            let workdir = resolve_cron_workdir(workdir)?;
             let payload = build_schedule_routine_payload(
                 Some(routine),
                 ScheduleRoutineConfig {
@@ -174,6 +184,7 @@ pub(crate) async fn run_cron_async(command: CronCommand) -> Result<()> {
                     session_label: Some(session_label.unwrap_or_else(|| {
                         json_optional_string_at(routine, "/session_label").unwrap_or_default()
                     })),
+                    workdir: workdir.or_else(|| json_optional_string_at(routine, "/workdir")),
                 },
             )?;
             let response = upsert_routine_value(&context.client, &payload).await?;
@@ -271,6 +282,7 @@ fn build_schedule_routine_payload(
     insert_optional_string(&mut payload, "channel", config.channel);
     insert_optional_string(&mut payload, "session_key", config.session_key);
     insert_optional_string(&mut payload, "session_label", config.session_label);
+    insert_optional_string(&mut payload, "workdir", config.workdir);
     if let Some(enabled) = config.enabled {
         payload.insert("enabled".to_owned(), Value::Bool(enabled));
     }
@@ -296,6 +308,35 @@ fn build_schedule_routine_payload(
     }
 
     Ok(payload)
+}
+
+fn resolve_cron_workdir(workdir: Option<String>) -> Result<Option<String>> {
+    let Some(raw) = workdir.map(|value| value.trim().to_owned()).filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    if raw.contains('\0') {
+        anyhow::bail!("--workdir must not contain NUL bytes");
+    }
+    let path = PathBuf::from(raw.as_str());
+    let resolved = if path.is_absolute() { path } else { std::env::current_dir()?.join(path) };
+    let canonical = fs::canonicalize(resolved.as_path()).with_context(|| {
+        format!("failed to resolve --workdir {}", display_path(resolved.as_path()))
+    })?;
+    let metadata = fs::metadata(canonical.as_path()).with_context(|| {
+        format!("failed to inspect --workdir {}", display_path(canonical.as_path()))
+    })?;
+    if !metadata.is_dir() {
+        anyhow::bail!(
+            "--workdir must resolve to a directory: {}",
+            display_path(canonical.as_path())
+        );
+    }
+    Ok(Some(canonical.to_string_lossy().into_owned()))
+}
+
+fn display_path(path: &Path) -> String {
+    path.display().to_string()
 }
 
 fn preserve_existing_routine_fields(existing: &Value, payload: &mut Map<String, Value>) {
@@ -441,10 +482,11 @@ fn emit_cron_status(payload: &Value, json: bool) -> Result<()> {
     for job in &jobs_payload {
         let item = job.pointer("/job").unwrap_or(job);
         println!(
-            "cron.job id={} name={} enabled={} next_run_at_unix_ms={} last_status={} overdue={} due_soon={} late_by_ms={}",
+            "cron.job id={} name={} enabled={} workdir={} next_run_at_unix_ms={} last_status={} overdue={} due_soon={} late_by_ms={}",
             json_optional_string_at(item, "/routine_id").unwrap_or_else(|| "unknown".to_owned()),
             json_optional_string_at(item, "/name").unwrap_or_else(|| "unknown".to_owned()),
             json_bool_at(item, "/enabled").unwrap_or(false),
+            json_optional_string_at(item, "/workdir").unwrap_or_else(|| "none".to_owned()),
             json_i64_at(item, "/next_run_at_unix_ms").unwrap_or_default(),
             json_optional_string_at(job, "/last_status").unwrap_or_else(|| "none".to_owned()),
             json_bool_at(job, "/overdue").unwrap_or(false),
@@ -475,12 +517,13 @@ fn emit_cron_list(payload: &Value, json: bool) -> Result<()> {
     );
     for job in jobs {
         println!(
-            "cron.job id={} name={} enabled={} owner={} channel={} next_run_at_ms={}",
+            "cron.job id={} name={} enabled={} owner={} channel={} workdir={} next_run_at_ms={}",
             json_optional_string_at(job, "/routine_id").unwrap_or_else(|| "unknown".to_owned()),
             json_optional_string_at(job, "/name").unwrap_or_else(|| "unknown".to_owned()),
             json_bool_at(job, "/enabled").unwrap_or(false),
             json_optional_string_at(job, "/owner_principal").unwrap_or_default(),
             json_optional_string_at(job, "/channel").unwrap_or_default(),
+            json_optional_string_at(job, "/workdir").unwrap_or_else(|| "none".to_owned()),
             json_i64_at(job, "/next_run_at_unix_ms").unwrap_or_default(),
         );
     }
@@ -493,12 +536,13 @@ fn emit_cron_show(payload: &Value, json: bool) -> Result<()> {
         return output::print_json_pretty(routine, "failed to encode cron show output as JSON");
     }
     println!(
-        "cron.show id={} name={} enabled={} owner={} channel={} schedule_type={}",
+        "cron.show id={} name={} enabled={} owner={} channel={} workdir={} schedule_type={}",
         json_optional_string_at(routine, "/routine_id").unwrap_or_else(|| "unknown".to_owned()),
         json_optional_string_at(routine, "/name").unwrap_or_else(|| "unknown".to_owned()),
         json_bool_at(routine, "/enabled").unwrap_or(false),
         json_optional_string_at(routine, "/owner_principal").unwrap_or_default(),
         json_optional_string_at(routine, "/channel").unwrap_or_default(),
+        json_optional_string_at(routine, "/workdir").unwrap_or_else(|| "none".to_owned()),
         json_optional_string_at(routine, "/schedule_type").unwrap_or_else(|| "unknown".to_owned()),
     );
     std::io::stdout().flush().context("stdout flush failed")
@@ -510,11 +554,12 @@ fn emit_cron_mutation(event: &str, payload: &Value, json: bool) -> Result<()> {
         return output::print_json_pretty(routine, "failed to encode cron mutation output as JSON");
     }
     println!(
-        "{event} id={} enabled={} owner={} channel={}",
+        "{event} id={} enabled={} owner={} channel={} workdir={}",
         json_optional_string_at(routine, "/routine_id").unwrap_or_else(|| "unknown".to_owned()),
         json_bool_at(routine, "/enabled").unwrap_or(false),
         json_optional_string_at(routine, "/owner_principal").unwrap_or_default(),
         json_optional_string_at(routine, "/channel").unwrap_or_default(),
+        json_optional_string_at(routine, "/workdir").unwrap_or_else(|| "none".to_owned()),
     );
     std::io::stdout().flush().context("stdout flush failed")
 }
@@ -538,9 +583,12 @@ fn emit_cron_runs(id: &str, payload: &Value, json: bool) -> Result<()> {
     );
     for run in runs {
         println!(
-            "cron.run run_id={} status={} started_at_ms={} finished_at_ms={} tool_calls={} tool_denies={}",
+            "cron.run run_id={} status={} workdir={} started_at_ms={} finished_at_ms={} tool_calls={} tool_denies={}",
             json_optional_string_at(run, "/run_id").unwrap_or_else(|| "unknown".to_owned()),
             json_optional_string_at(run, "/status").unwrap_or_else(|| "unknown".to_owned()),
+            json_optional_string_at(run, "/trigger_payload/workdir")
+                .or_else(|| json_optional_string_at(run, "/workdir"))
+                .unwrap_or_else(|| "none".to_owned()),
             json_i64_at(run, "/started_at_unix_ms").unwrap_or_default(),
             json_i64_at(run, "/finished_at_unix_ms").unwrap_or_default(),
             json_i64_at(run, "/tool_calls").unwrap_or_default(),
@@ -672,6 +720,7 @@ struct ScheduleRoutineConfig {
     channel: Option<String>,
     session_key: Option<String>,
     session_label: Option<String>,
+    workdir: Option<String>,
 }
 
 #[cfg(test)]

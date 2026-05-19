@@ -68,6 +68,8 @@ pub(crate) struct ConsoleRoutineUpsertRequest {
     #[serde(default)]
     session_label: Option<String>,
     #[serde(default)]
+    workdir: Option<String>,
+    #[serde(default)]
     enabled: Option<bool>,
     trigger_kind: String,
     #[serde(default)]
@@ -351,6 +353,7 @@ pub(crate) async fn console_routine_import_handler(
             channel,
             session_key: bundle.job.session_key.clone(),
             session_label: bundle.job.session_label.clone(),
+            workdir: bundle.job.workdir.clone(),
             schedule_type: bundle.job.schedule_type,
             schedule_payload_json: bundle.job.schedule_payload_json.clone(),
             enabled: requested_enabled && !approval_required,
@@ -456,6 +459,11 @@ pub(crate) async fn console_routine_upsert_handler(
     let concurrency_policy = parse_concurrency_policy(payload.concurrency_policy.as_deref())?;
     let retry_policy = parse_retry_policy(payload.retry_max_attempts, payload.retry_backoff_ms)?;
     let misfire_policy = parse_misfire_policy(payload.misfire_policy.as_deref())?;
+    let workdir = if payload.workdir.is_some() {
+        normalize_optional_workdir(payload.workdir.as_deref())?
+    } else {
+        existing_job.as_ref().and_then(|job| job.workdir.clone())
+    };
     let approval_required = enabled
         && approval_policy.mode == RoutineApprovalMode::BeforeEnable
         && !routine_approval_granted(
@@ -474,6 +482,7 @@ pub(crate) async fn console_routine_upsert_handler(
             channel: channel.clone(),
             session_key: normalize_optional_text(payload.session_key.as_deref()),
             session_label: normalize_optional_text(payload.session_label.as_deref()),
+            workdir,
             schedule_type: schedule.schedule_type,
             schedule_payload_json: schedule.schedule_payload_json.clone(),
             enabled: enabled && !approval_required,
@@ -993,6 +1002,7 @@ struct RoutineJobUpsert {
     channel: String,
     session_key: Option<String>,
     session_label: Option<String>,
+    workdir: Option<String>,
     schedule_type: CronScheduleType,
     schedule_payload_json: String,
     enabled: bool,
@@ -1119,6 +1129,7 @@ async fn persist_routine_job(
                     channel: Some(request.channel),
                     session_key: Some(request.session_key),
                     session_label: Some(request.session_label),
+                    workdir: Some(request.workdir),
                     schedule_type: Some(request.schedule_type),
                     schedule_payload_json: Some(request.schedule_payload_json),
                     enabled: Some(request.enabled),
@@ -1143,6 +1154,7 @@ async fn persist_routine_job(
                 channel: request.channel,
                 session_key: request.session_key,
                 session_label: request.session_label,
+                workdir: request.workdir,
                 schedule_type: request.schedule_type,
                 schedule_payload_json: request.schedule_payload_json,
                 enabled: request.enabled,
@@ -1888,6 +1900,7 @@ fn routine_view_from_parts(job: &CronJobRecord, metadata: &RoutineMetadataRecord
         "channel": job.channel,
         "session_key": job.session_key,
         "session_label": job.session_label,
+        "workdir": job.workdir,
         "enabled": job.enabled,
         "schedule_type": job.schedule_type.as_str(),
         "schedule_payload": serde_json::from_str::<Value>(job.schedule_payload_json.as_str()).unwrap_or_else(|_| json!({ "raw": job.schedule_payload_json })),
@@ -2037,6 +2050,7 @@ fn build_console_schedule(
 fn build_schedule_trigger_payload(job: &CronJobRecord) -> String {
     json!({
         "schedule_type": job.schedule_type.as_str(),
+        "workdir": job.workdir,
         "schedule_payload": serde_json::from_str::<Value>(job.schedule_payload_json.as_str()).unwrap_or_else(|_| json!({ "raw": job.schedule_payload_json })),
     })
     .to_string()
@@ -2382,6 +2396,24 @@ fn normalize_channel(requested: Option<&str>, session_channel: Option<&str>) -> 
 
 fn normalize_optional_text(value: Option<&str>) -> Option<String> {
     value.map(str::trim).filter(|value| !value.is_empty()).map(ToOwned::to_owned)
+}
+
+#[allow(clippy::result_large_err)]
+fn normalize_optional_workdir(value: Option<&str>) -> Result<Option<String>, Response> {
+    let Some(workdir) = normalize_optional_text(value) else {
+        return Ok(None);
+    };
+    if workdir.len() > 4096 {
+        return Err(runtime_status_response(tonic::Status::invalid_argument(
+            "workdir must be 4096 characters or fewer",
+        )));
+    }
+    if workdir.contains('\0') {
+        return Err(runtime_status_response(tonic::Status::invalid_argument(
+            "workdir must not contain NUL bytes",
+        )));
+    }
+    Ok(Some(workdir))
 }
 
 #[allow(clippy::result_large_err)]

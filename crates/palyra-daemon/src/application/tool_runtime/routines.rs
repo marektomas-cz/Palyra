@@ -155,6 +155,7 @@ struct RoutineJobUpsert {
     channel: String,
     session_key: Option<String>,
     session_label: Option<String>,
+    workdir: Option<String>,
     schedule_type: crate::journal::CronScheduleType,
     schedule_payload_json: String,
     enabled: bool,
@@ -461,6 +462,11 @@ async fn upsert_routine(
     )?;
     let misfire_policy =
         parse_misfire_policy(optional_string_field(payload, "misfire_policy").as_deref())?;
+    let workdir = if payload.contains_key("workdir") {
+        normalize_optional_workdir(optional_string_field(payload, "workdir"))?
+    } else {
+        existing_job.as_ref().and_then(|job| job.workdir.clone())
+    };
     let approval_required = enabled
         && approval_policy.mode == RoutineApprovalMode::BeforeEnable
         && !routine_approval_granted(
@@ -479,6 +485,7 @@ async fn upsert_routine(
             channel: channel.clone(),
             session_key: optional_string_field(payload, "session_key"),
             session_label: optional_string_field(payload, "session_label"),
+            workdir,
             schedule_type: schedule.schedule_type,
             schedule_payload_json: schedule.schedule_payload_json.clone(),
             enabled: enabled && !approval_required,
@@ -1107,6 +1114,7 @@ async fn persist_routine_job(
                     channel: Some(request.channel),
                     session_key: Some(request.session_key),
                     session_label: Some(request.session_label),
+                    workdir: Some(request.workdir),
                     schedule_type: Some(request.schedule_type),
                     schedule_payload_json: Some(request.schedule_payload_json),
                     enabled: Some(request.enabled),
@@ -1130,6 +1138,7 @@ async fn persist_routine_job(
                 channel: request.channel,
                 session_key: request.session_key,
                 session_label: request.session_label,
+                workdir: request.workdir,
                 schedule_type: request.schedule_type,
                 schedule_payload_json: request.schedule_payload_json,
                 enabled: request.enabled,
@@ -1239,6 +1248,7 @@ fn routine_view_from_parts(job: &CronJobRecord, metadata: &RoutineMetadataRecord
         "channel": job.channel,
         "session_key": job.session_key,
         "session_label": job.session_label,
+        "workdir": job.workdir,
         "enabled": job.enabled,
         "schedule_type": job.schedule_type.as_str(),
         "schedule_payload": serde_json::from_str::<Value>(job.schedule_payload_json.as_str()).unwrap_or_else(|_| json!({ "raw": job.schedule_payload_json })),
@@ -1761,6 +1771,21 @@ fn normalize_channel(requested: Option<&str>, fallback_channel: Option<&str>) ->
         .map(ToOwned::to_owned)
         .or_else(|| fallback_channel.map(ToOwned::to_owned))
         .unwrap_or_else(|| DEFAULT_ROUTINE_CHANNEL.to_owned())
+}
+
+fn normalize_optional_workdir(value: Option<String>) -> Result<Option<String>, String> {
+    let Some(workdir) =
+        value.map(|value| value.trim().to_owned()).filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    if workdir.len() > 4096 {
+        return Err("workdir must be 4096 characters or fewer".to_owned());
+    }
+    if workdir.contains('\0') {
+        return Err("workdir must not contain NUL bytes".to_owned());
+    }
+    Ok(Some(workdir))
 }
 
 fn ensure_job_owner(job: &CronJobRecord, principal: &str) -> Result<(), String> {

@@ -207,6 +207,12 @@ pub struct RoutineUpsertCommand {
     pub session_key: Option<String>,
     #[arg(long)]
     pub session_label: Option<String>,
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Project working directory for scheduled runs; relative paths resolve from the current directory and are stored as absolute paths"
+    )]
+    pub workdir: Option<String>,
     #[arg(long)]
     pub enabled: Option<bool>,
     #[arg(long)]

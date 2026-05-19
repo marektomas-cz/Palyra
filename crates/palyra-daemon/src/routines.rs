@@ -1595,6 +1595,7 @@ pub fn natural_language_schedule_preview(
 fn build_schedule_trigger_payload(job: &CronJobRecord) -> Result<String, RoutineRegistryError> {
     serde_json::to_string(&json!({
         "schedule_type": job.schedule_type.as_str(),
+        "workdir": job.workdir.as_deref(),
         "schedule_payload": serde_json::from_str::<Value>(job.schedule_payload_json.as_str()).unwrap_or_else(|_| json!({ "raw": job.schedule_payload_json })),
     }))
     .map_err(Into::into)
@@ -2526,6 +2527,7 @@ mod tests {
             channel: "system:routines".to_owned(),
             session_key: None,
             session_label: None,
+            workdir: None,
             schedule_type: CronScheduleType::At,
             schedule_payload_json: shadow_manual_schedule_payload_json(),
             enabled: true,
@@ -2776,6 +2778,7 @@ mod tests {
                 channel: "system:routines".to_owned(),
                 session_key: None,
                 session_label: None,
+                workdir: None,
                 schedule_type: CronScheduleType::Every,
                 schedule_payload_json: json!({ "interval_ms": 3_600_000_u64 }).to_string(),
                 enabled: true,

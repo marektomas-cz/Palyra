@@ -1,7 +1,7 @@
 use std::{
     fs,
     io::{Read, Write},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use palyra_control_plane as control_plane;
@@ -81,6 +81,7 @@ pub(crate) async fn run_routines_async(command: RoutinesCommand) -> Result<()> {
                 channel,
                 session_key,
                 session_label,
+                workdir,
                 enabled,
                 natural_language_schedule,
                 schedule_type,
@@ -124,6 +125,7 @@ pub(crate) async fn run_routines_async(command: RoutinesCommand) -> Result<()> {
                 channel,
                 session_key,
                 session_label,
+                workdir: resolve_routine_workdir(workdir)?,
                 enabled,
                 natural_language_schedule,
                 schedule_type,
@@ -922,6 +924,7 @@ fn build_routine_upsert_payload(args: RoutineUpsertArgs) -> Result<Map<String, V
         channel,
         session_key,
         session_label,
+        workdir,
         enabled,
         natural_language_schedule,
         schedule_type,
@@ -966,6 +969,7 @@ fn build_routine_upsert_payload(args: RoutineUpsertArgs) -> Result<Map<String, V
     insert_optional_string(&mut payload, "channel", channel);
     insert_optional_string(&mut payload, "session_key", session_key);
     insert_optional_string(&mut payload, "session_label", session_label);
+    insert_optional_string(&mut payload, "workdir", workdir);
     insert_optional_bool(&mut payload, "enabled", enabled);
     insert_schedule_fields(
         &mut payload,
@@ -1019,6 +1023,26 @@ fn build_routine_upsert_payload(args: RoutineUpsertArgs) -> Result<Map<String, V
     payload.insert("approval_mode".to_owned(), Value::String(approval_mode.as_str().to_owned()));
     insert_optional_string(&mut payload, "template_id", template_id);
     Ok(payload)
+}
+
+fn resolve_routine_workdir(workdir: Option<String>) -> Result<Option<String>> {
+    let Some(raw) = workdir.map(|value| value.trim().to_owned()).filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    if raw.contains('\0') {
+        anyhow::bail!("--workdir must not contain NUL bytes");
+    }
+    let path = PathBuf::from(raw.as_str());
+    let resolved = if path.is_absolute() { path } else { std::env::current_dir()?.join(path) };
+    let canonical = fs::canonicalize(resolved.as_path())
+        .with_context(|| format!("failed to resolve --workdir {}", resolved.display()))?;
+    let metadata = fs::metadata(canonical.as_path())
+        .with_context(|| format!("failed to inspect --workdir {}", canonical.display()))?;
+    if !metadata.is_dir() {
+        anyhow::bail!("--workdir must resolve to a directory: {}", canonical.display());
+    }
+    Ok(Some(canonical.to_string_lossy().into_owned()))
 }
 
 fn build_template_upsert_payload(
@@ -1416,6 +1440,7 @@ struct RoutineUpsertArgs {
     channel: Option<String>,
     session_key: Option<String>,
     session_label: Option<String>,
+    workdir: Option<String>,
     enabled: Option<bool>,
     natural_language_schedule: Option<String>,
     schedule_type: Option<CronScheduleTypeArg>,

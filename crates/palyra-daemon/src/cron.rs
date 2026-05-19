@@ -2054,6 +2054,7 @@ fn build_effective_cron_execution_request(
             json!({
                 "routine": {
                     "routine_id": record.routine_id,
+                    "workdir": job.workdir,
                     "run_mode": record.execution.run_mode.as_str(),
                     "execution_posture": record.execution.execution_posture.as_str(),
                     "procedure_profile_id": record.execution.procedure_profile_id,
@@ -2384,12 +2385,18 @@ fn build_cron_prompt(job: &CronJobRecord, triggered_at_unix_ms: i64) -> String {
         .single()
         .map(|timestamp| timestamp.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
         .unwrap_or_else(|| "unavailable".to_owned());
+    let workdir_metadata = job
+        .workdir
+        .as_deref()
+        .map(|workdir| format!("         - workdir: {workdir}\n"))
+        .unwrap_or_default();
     format!(
         "[cron job {name}]\n\
          Scheduled trigger metadata:\n\
          - triggered_at_utc: {triggered_at_utc}\n\
          - triggered_at_unix_ms: {triggered_at_unix_ms}\n\n\
-         Use the trigger metadata as the current time for this scheduled run when the routine asks for dates or timestamps.\n\n\
+         {workdir_metadata}\
+         Use the trigger metadata as the current time for this scheduled run when the routine asks for dates or timestamps. If workdir is present, treat it as the project root for relative outputs and pass it as cwd to process tools.\n\n\
          {prompt}",
         name = job.name,
         prompt = job.prompt,
@@ -2451,6 +2458,7 @@ fn scheduled_routine_trigger_payload(job: &CronJobRecord) -> Value {
     json!({
         "source": "cron",
         "job_id": job.job_id.as_str(),
+        "workdir": job.workdir.as_deref(),
         "schedule_type": job.schedule_type.as_str(),
         "schedule_payload": serde_json::from_str::<Value>(job.schedule_payload_json.as_str())
             .unwrap_or_else(|_| json!({ "raw": job.schedule_payload_json.as_str() })),
@@ -2619,6 +2627,7 @@ mod tests {
             channel: "system:cron".to_owned(),
             session_key: None,
             session_label: None,
+            workdir: None,
             schedule_type: CronScheduleType::Every,
             schedule_payload_json: json!({ "interval_ms": 1_000_i64 }).to_string(),
             enabled: true,
@@ -2938,6 +2947,7 @@ mod tests {
             channel: "system:cron".to_owned(),
             session_key: None,
             session_label: None,
+            workdir: None,
             schedule_type: CronScheduleType::Every,
             schedule_payload_json: json!({ "interval_ms": 1_000_i64 }).to_string(),
             enabled: true,
@@ -3030,6 +3040,7 @@ mod tests {
             channel: "system:cron".to_owned(),
             session_key: None,
             session_label: None,
+            workdir: None,
             schedule_type: CronScheduleType::Cron,
             schedule_payload_json: json!({ "expression": "0 * * * *" }).to_string(),
             enabled: true,
@@ -3059,6 +3070,7 @@ mod tests {
             channel: "system:cron".to_owned(),
             session_key: None,
             session_label: None,
+            workdir: None,
             schedule_type: CronScheduleType::Cron,
             schedule_payload_json: json!({
                 "expression": "0 * * * *",
@@ -3092,6 +3104,7 @@ mod tests {
             channel: "system:cron".to_owned(),
             session_key: None,
             session_label: None,
+            workdir: None,
             schedule_type: CronScheduleType::Every,
             schedule_payload_json: json!({ "interval_ms": 60_000_i64 }).to_string(),
             enabled: true,
@@ -3125,6 +3138,7 @@ mod tests {
             channel: "system:cron".to_owned(),
             session_key: None,
             session_label: None,
+            workdir: None,
             schedule_type: CronScheduleType::Every,
             schedule_payload_json: json!({ "interval_ms": 60_000_i64 }).to_string(),
             enabled: true,
@@ -3162,6 +3176,7 @@ mod tests {
             channel: "system:cron".to_owned(),
             session_key: None,
             session_label: None,
+            workdir: None,
             schedule_type: CronScheduleType::Every,
             schedule_payload_json: json!({ "interval_ms": 60_000_i64 }).to_string(),
             enabled: true,

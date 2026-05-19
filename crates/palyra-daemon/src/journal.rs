@@ -257,6 +257,7 @@ pub struct CronJobCreateRequest {
     pub channel: String,
     pub session_key: Option<String>,
     pub session_label: Option<String>,
+    pub workdir: Option<String>,
     pub schedule_type: CronScheduleType,
     pub schedule_payload_json: String,
     pub enabled: bool,
@@ -275,6 +276,7 @@ pub struct CronJobUpdatePatch {
     pub channel: Option<String>,
     pub session_key: Option<Option<String>>,
     pub session_label: Option<Option<String>>,
+    pub workdir: Option<Option<String>>,
     pub schedule_type: Option<CronScheduleType>,
     pub schedule_payload_json: Option<String>,
     pub enabled: Option<bool>,
@@ -297,6 +299,8 @@ pub struct CronJobRecord {
     pub session_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workdir: Option<String>,
     pub schedule_type: CronScheduleType,
     pub schedule_payload_json: String,
     pub enabled: bool,
@@ -4835,6 +4839,14 @@ const MIGRATIONS: &[Migration] = &[
             BEGIN
                 SELECT RAISE(ABORT, 'tool_job_tail_entries is append-only');
             END;
+        "#,
+    },
+    Migration {
+        version: 32,
+        name: "cron_job_workdir",
+        sql: r#"
+            ALTER TABLE cron_jobs
+                ADD COLUMN workdir TEXT;
         "#,
     },
 ];
@@ -11534,6 +11546,7 @@ impl JournalStore {
                     channel,
                     session_key,
                     session_label,
+                    workdir,
                     schedule_type,
                     schedule_payload_json,
                     enabled,
@@ -11547,7 +11560,7 @@ impl JournalStore {
                     created_at_unix_ms,
                     updated_at_unix_ms
                 ) VALUES (
-                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, NULL, 0, ?16, ?16
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, NULL, 0, ?17, ?17
                 )
             "#,
             params![
@@ -11558,6 +11571,7 @@ impl JournalStore {
                 request.channel,
                 request.session_key,
                 request.session_label,
+                request.workdir,
                 request.schedule_type.as_str(),
                 request.schedule_payload_json,
                 request.enabled as i64,
@@ -11606,6 +11620,7 @@ impl JournalStore {
         let channel = patch.channel.clone().unwrap_or(existing.channel);
         let session_key = patch.session_key.clone().unwrap_or(existing.session_key);
         let session_label = patch.session_label.clone().unwrap_or(existing.session_label);
+        let workdir = patch.workdir.clone().unwrap_or(existing.workdir);
         let schedule_type = patch.schedule_type.unwrap_or(existing.schedule_type);
         let schedule_payload_json =
             patch.schedule_payload_json.clone().unwrap_or(existing.schedule_payload_json);
@@ -11627,16 +11642,17 @@ impl JournalStore {
                     channel = ?5,
                     session_key = ?6,
                     session_label = ?7,
-                    schedule_type = ?8,
-                    schedule_payload_json = ?9,
-                    enabled = ?10,
-                    concurrency_policy = ?11,
-                    retry_policy_json = ?12,
-                    misfire_policy = ?13,
-                    jitter_ms = ?14,
-                    next_run_at_unix_ms = ?15,
-                    queued_run = ?16,
-                    updated_at_unix_ms = ?17
+                    workdir = ?8,
+                    schedule_type = ?9,
+                    schedule_payload_json = ?10,
+                    enabled = ?11,
+                    concurrency_policy = ?12,
+                    retry_policy_json = ?13,
+                    misfire_policy = ?14,
+                    jitter_ms = ?15,
+                    next_run_at_unix_ms = ?16,
+                    queued_run = ?17,
+                    updated_at_unix_ms = ?18
                 WHERE job_ulid = ?1
             "#,
             params![
@@ -11647,6 +11663,7 @@ impl JournalStore {
                 channel,
                 session_key,
                 session_label,
+                workdir,
                 schedule_type.as_str(),
                 schedule_payload_json,
                 enabled as i64,
@@ -11708,6 +11725,7 @@ impl JournalStore {
                     channel,
                     session_key,
                     session_label,
+                    workdir,
                     schedule_type,
                     schedule_payload_json,
                     enabled,
@@ -11762,6 +11780,7 @@ impl JournalStore {
                     channel,
                     session_key,
                     session_label,
+                    workdir,
                     schedule_type,
                     schedule_payload_json,
                     enabled,
@@ -17648,11 +17667,11 @@ fn seed_usage_pricing_catalog(connection: &mut Connection) -> Result<(), Journal
 }
 
 fn map_cron_job_row(row: &rusqlite::Row<'_>) -> Result<CronJobRecord, rusqlite::Error> {
-    let schedule_type_raw: String = row.get(7)?;
+    let schedule_type_raw: String = row.get(8)?;
     let schedule_type =
         CronScheduleType::from_str(schedule_type_raw.as_str()).ok_or_else(|| {
             rusqlite::Error::FromSqlConversionFailure(
-                7,
+                8,
                 rusqlite::types::Type::Text,
                 Box::new(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -17660,11 +17679,11 @@ fn map_cron_job_row(row: &rusqlite::Row<'_>) -> Result<CronJobRecord, rusqlite::
                 )),
             )
         })?;
-    let concurrency_policy_raw: String = row.get(10)?;
+    let concurrency_policy_raw: String = row.get(11)?;
     let concurrency_policy = CronConcurrencyPolicy::from_str(concurrency_policy_raw.as_str())
         .ok_or_else(|| {
             rusqlite::Error::FromSqlConversionFailure(
-                10,
+                11,
                 rusqlite::types::Type::Text,
                 Box::new(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -17672,11 +17691,11 @@ fn map_cron_job_row(row: &rusqlite::Row<'_>) -> Result<CronJobRecord, rusqlite::
                 )),
             )
         })?;
-    let retry_policy_json: String = row.get(11)?;
+    let retry_policy_json: String = row.get(12)?;
     let retry_policy: CronRetryPolicy =
         serde_json::from_str(retry_policy_json.as_str()).map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(
-                11,
+                12,
                 rusqlite::types::Type::Text,
                 Box::new(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -17684,11 +17703,11 @@ fn map_cron_job_row(row: &rusqlite::Row<'_>) -> Result<CronJobRecord, rusqlite::
                 )),
             )
         })?;
-    let misfire_policy_raw: String = row.get(12)?;
+    let misfire_policy_raw: String = row.get(13)?;
     let misfire_policy =
         CronMisfirePolicy::from_str(misfire_policy_raw.as_str()).ok_or_else(|| {
             rusqlite::Error::FromSqlConversionFailure(
-                12,
+                13,
                 rusqlite::types::Type::Text,
                 Box::new(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -17705,18 +17724,19 @@ fn map_cron_job_row(row: &rusqlite::Row<'_>) -> Result<CronJobRecord, rusqlite::
         channel: row.get(4)?,
         session_key: row.get(5)?,
         session_label: row.get(6)?,
+        workdir: row.get(7)?,
         schedule_type,
-        schedule_payload_json: row.get(8)?,
-        enabled: row.get::<_, i64>(9)? == 1,
+        schedule_payload_json: row.get(9)?,
+        enabled: row.get::<_, i64>(10)? == 1,
         concurrency_policy,
         retry_policy,
         misfire_policy,
-        jitter_ms: row.get::<_, i64>(13)? as u64,
-        next_run_at_unix_ms: row.get(14)?,
-        last_run_at_unix_ms: row.get(15)?,
-        queued_run: row.get::<_, i64>(16)? == 1,
-        created_at_unix_ms: row.get(17)?,
-        updated_at_unix_ms: row.get(18)?,
+        jitter_ms: row.get::<_, i64>(14)? as u64,
+        next_run_at_unix_ms: row.get(15)?,
+        last_run_at_unix_ms: row.get(16)?,
+        queued_run: row.get::<_, i64>(17)? == 1,
+        created_at_unix_ms: row.get(18)?,
+        updated_at_unix_ms: row.get(19)?,
     })
 }
 
@@ -17734,6 +17754,7 @@ fn load_cron_job_by_id(
                 channel,
                 session_key,
                 session_label,
+                workdir,
                 schedule_type,
                 schedule_payload_json,
                 enabled,
@@ -19497,6 +19518,7 @@ mod tests {
             channel: "system:cron".to_owned(),
             session_key: Some("cron:hourly-report".to_owned()),
             session_label: Some("Hourly report".to_owned()),
+            workdir: None,
             schedule_type: CronScheduleType::Every,
             schedule_payload_json: r#"{"interval_ms":60000}"#.to_owned(),
             enabled: true,

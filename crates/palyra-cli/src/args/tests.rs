@@ -1526,6 +1526,8 @@ fn parse_cron_add() {
         "cron:health",
         "--session-label",
         "Health",
+        "--workdir",
+        "scenarios/S028-cron-workdir",
     ]);
     assert_eq!(
         parsed.command,
@@ -1546,6 +1548,7 @@ fn parse_cron_add() {
                 channel: Some("system:cron".to_owned()),
                 session_key: Some("cron:health".to_owned()),
                 session_label: Some("Health".to_owned()),
+                workdir: Some("scenarios/S028-cron-workdir".to_owned()),
                 json: false,
             }
         }
@@ -1586,6 +1589,7 @@ fn parse_cron_add_defaults_to_disabled() {
                 channel: None,
                 session_key: None,
                 session_label: None,
+                workdir: None,
                 json: false,
             }
         }
@@ -1625,6 +1629,7 @@ fn parse_cron_add_with_prompt_stdin() {
                 channel: None,
                 session_key: None,
                 session_label: None,
+                workdir: None,
                 json: false,
             }
         }
@@ -1686,6 +1691,7 @@ fn parse_cron_update() {
                 channel: Some("system:cron".to_owned()),
                 session_key: Some("cron:health-v2".to_owned()),
                 session_label: Some("Health summary v2".to_owned()),
+                workdir: None,
                 json: false,
             }
         }
@@ -1857,6 +1863,7 @@ fn parse_routines_upsert() {
                 channel: None,
                 session_key: None,
                 session_label: None,
+                workdir: None,
                 enabled: Some(true),
                 natural_language_schedule: Some("every weekday at 9".to_owned()),
                 schedule_type: None,
