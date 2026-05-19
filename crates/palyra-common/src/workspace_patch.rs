@@ -20,6 +20,8 @@ const REDACTION_PLACEHOLDER_MARKERS: &[&str] =
     &["[redacted]", "[redacted_secret]", "<redacted>", "redacted_secret"];
 const NON_SECRET_ENV_FILE_SUFFIXES: &[&str] =
     &[".example", ".sample", ".template", ".templates", ".dist", ".default", ".defaults"];
+const SUSPICIOUS_REPLACE_MIN_BEFORE_BYTES: usize = 256;
+const SUSPICIOUS_REPLACE_MAX_NON_EMPTY_LINES: usize = 4;
 
 /// Execution limits for workspace patch processing.
 ///
@@ -136,6 +138,10 @@ pub enum WorkspacePatchError {
         "file '{path}' is a secret-bearing env file and cannot store a redaction placeholder; preserve existing secret lines or update an example/template file instead"
     )]
     RedactionPlaceholderInSecretFile { path: String },
+    #[error(
+        "replace-file operation for '{path}' looks partial: before_size_bytes={before_size_bytes}, after_size_bytes={after_size_bytes}; use Update File hunks or provide the complete replacement content"
+    )]
+    SuspiciousPartialReplace { path: String, before_size_bytes: usize, after_size_bytes: usize },
     #[error("patch hunk apply failed for '{path}': {message}")]
     HunkApplyFailed { path: String, message: String },
     #[error("{operation} '{path}' failed: {source}")]
@@ -776,7 +782,7 @@ fn parse_patch_document(patch: &str) -> Result<Vec<PatchOperation>, WorkspacePat
                     break;
                 }
                 reject_structural_marker_in_full_file_body(body_line, index + 1, "add-file")?;
-                let content = body_line.strip_prefix('+').unwrap_or(body_line);
+                let content = full_file_body_content(body_line);
                 add_lines.push(content.to_owned());
                 index = index.saturating_add(1);
             }
@@ -801,7 +807,7 @@ fn parse_patch_document(patch: &str) -> Result<Vec<PatchOperation>, WorkspacePat
                     break;
                 }
                 reject_structural_marker_in_full_file_body(body_line, index + 1, "replace-file")?;
-                let content = body_line.strip_prefix('+').unwrap_or(body_line);
+                let content = full_file_body_content(body_line);
                 replace_lines.push(content.to_owned());
                 index = index.saturating_add(1);
             }
@@ -948,6 +954,15 @@ fn is_patch_header_or_end(line: &str) -> bool {
     control_line == "*** End Patch" || control_line.starts_with("*** ")
 }
 
+fn full_file_body_content(line: &str) -> &str {
+    if let Some(rest) = line.strip_prefix("+ ") {
+        if rest.chars().next().is_some_and(|character| !character.is_whitespace()) {
+            return rest;
+        }
+    }
+    line.strip_prefix('+').unwrap_or(line)
+}
+
 fn patch_control_line(line: &str) -> &str {
     line.trim_end_matches([' ', '\t'])
 }
@@ -1023,6 +1038,12 @@ fn build_patch_plan(
                 let before_bytes = read_file_capped(target.as_path(), path, limits.max_file_bytes)?;
                 let after_bytes = render_add_file_bytes(lines.as_slice());
                 ensure_file_size(path, after_bytes.len(), limits.max_file_bytes)?;
+                ensure_replace_file_is_not_suspicious_partial(
+                    path,
+                    before_bytes.as_slice(),
+                    after_bytes.as_slice(),
+                    lines.as_slice(),
+                )?;
                 ensure_planned_file_content(path, after_bytes.as_slice())?;
 
                 touched_paths.insert(target.clone());
@@ -1274,6 +1295,30 @@ fn ensure_file_size(
         });
     }
     Ok(())
+}
+
+fn ensure_replace_file_is_not_suspicious_partial(
+    path: &str,
+    before_bytes: &[u8],
+    after_bytes: &[u8],
+    lines: &[String],
+) -> Result<(), WorkspacePatchError> {
+    if before_bytes.len() < SUSPICIOUS_REPLACE_MIN_BEFORE_BYTES {
+        return Ok(());
+    }
+    if after_bytes.len().saturating_mul(2) >= before_bytes.len() {
+        return Ok(());
+    }
+    let non_empty_lines = lines.iter().filter(|line| !line.trim().is_empty()).count();
+    if non_empty_lines > SUSPICIOUS_REPLACE_MAX_NON_EMPTY_LINES {
+        return Ok(());
+    }
+
+    Err(WorkspacePatchError::SuspiciousPartialReplace {
+        path: path.to_owned(),
+        before_size_bytes: before_bytes.len(),
+        after_size_bytes: after_bytes.len(),
+    })
 }
 
 fn ensure_planned_file_content(path: &str, bytes: &[u8]) -> Result<(), WorkspacePatchError> {
@@ -1788,6 +1833,58 @@ mod tests {
         assert_eq!(attestation.operation, "replace");
         assert!(attestation.before_sha256.is_some());
         assert!(attestation.after_sha256.is_some());
+    }
+
+    #[test]
+    fn apply_workspace_patch_normalizes_full_file_plus_space_prefixes() {
+        let temp = tempdir().expect("tempdir should be created");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace should exist");
+        fs::write(workspace.join("script.sh"), "echo old\n").expect("seed file should exist");
+
+        let patch = "*** Begin Patch\n*** Add File: report.md\n+ # Report\n+\n+    indented body\n*** Replace File: script.sh\n+ export PALYRA_READY=1\n+    echo done\n*** End Patch\n";
+        let outcome = apply_workspace_patch(
+            std::slice::from_ref(&workspace),
+            &default_request(patch, false),
+            &default_limits(),
+        )
+        .expect("full-file patches should normalize common '+ text' content lines");
+
+        assert_eq!(outcome.files_touched.len(), 2);
+        assert_eq!(
+            fs::read_to_string(workspace.join("report.md")).expect("created file should read"),
+            "# Report\n\n    indented body\n"
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.join("script.sh")).expect("replaced file should read"),
+            "export PALYRA_READY=1\n    echo done\n"
+        );
+    }
+
+    #[test]
+    fn apply_workspace_patch_rejects_suspicious_partial_replace_file() {
+        let temp = tempdir().expect("tempdir should be created");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace should exist");
+        let original = (0..40)
+            .map(|index| format!("line_{index:02}=this content keeps the file non-trivial\n"))
+            .collect::<String>();
+        fs::write(workspace.join("long.txt"), original.as_str()).expect("seed file should exist");
+
+        let patch =
+            "*** Begin Patch\n*** Replace File: long.txt\n+status: done\n+notes: partial\n*** End Patch\n";
+        let error = apply_workspace_patch(
+            std::slice::from_ref(&workspace),
+            &default_request(patch, false),
+            &default_limits(),
+        )
+        .expect_err("tiny replacements of larger files should be treated as likely partial edits");
+
+        assert!(matches!(error, WorkspacePatchError::SuspiciousPartialReplace { .. }));
+        assert_eq!(
+            fs::read_to_string(workspace.join("long.txt")).expect("seed file should remain"),
+            original
+        );
     }
 
     #[test]
