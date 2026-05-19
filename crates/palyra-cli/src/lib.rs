@@ -3796,6 +3796,7 @@ where
     let mut request_stream_closed = false;
     let mut failed_message = None::<String>;
     let mut completed = false;
+    let mut approval_mode = resolved.request.approval_mode;
     while let Some(event) = stream.next_event().await? {
         let reached_terminal_status = matches!(
             event.body.as_ref(),
@@ -3818,7 +3819,8 @@ where
         if let Some(common_v1::run_stream_event::Body::ToolApprovalRequest(approval)) =
             event.body.as_ref()
         {
-            let decision = prompt_tool_approval_decision(approval, resolved.request.approval_mode)?;
+            let decision =
+                prompt_tool_approval_decision_with_mode_state(approval, &mut approval_mode)?;
             stream
                 .send_tool_approval_response(
                     session_id.ulid.as_str(),
@@ -4198,6 +4200,17 @@ fn prompt_tool_approval_decision(
             reason: "approved_by_cli_approval_mode_allow_once".to_owned(),
         }),
     }
+}
+
+fn prompt_tool_approval_decision_with_mode_state(
+    approval: &common_v1::ToolApprovalRequest,
+    mode: &mut AgentApprovalMode,
+) -> Result<ToolApprovalDecision> {
+    let decision = prompt_tool_approval_decision(approval, *mode)?;
+    if *mode == AgentApprovalMode::AllowOnce && decision.approved {
+        *mode = AgentApprovalMode::Deny;
+    }
+    Ok(decision)
 }
 
 fn prompt_tool_approval_decision_from_terminal(
@@ -5056,6 +5069,20 @@ mod agent_stream_output_tests {
 
         assert!(decision.approved);
         assert_eq!(decision.reason, "approved_by_cli_approval_mode_allow_once");
+    }
+
+    #[test]
+    fn approval_mode_allow_once_is_consumed_after_first_approval() {
+        let mut mode = AgentApprovalMode::AllowOnce;
+        let first = prompt_tool_approval_decision_with_mode_state(&approval_request(), &mut mode)
+            .expect("allow-once should approve the first request");
+        let second = prompt_tool_approval_decision_with_mode_state(&approval_request(), &mut mode)
+            .expect("consumed allow-once should deny without prompting");
+
+        assert!(first.approved);
+        assert_eq!(mode, AgentApprovalMode::Deny);
+        assert!(!second.approved);
+        assert_eq!(second.reason, "denied_by_cli_approval_mode_deny");
     }
 
     #[test]
