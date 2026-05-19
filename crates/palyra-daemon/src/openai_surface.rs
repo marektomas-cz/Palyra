@@ -19,6 +19,7 @@ const MINIMAX_OAUTH_DEFAULT_BASE_URL: &str = "https://api.minimax.io";
 const MINIMAX_OAUTH_DEFAULT_CLIENT_ID: &str = "78257093-7e40-4613-99e0-527b14b39113";
 const MINIMAX_OAUTH_DEFAULT_SCOPES: &[&str] = &["group_id", "profile", "model.completion"];
 const MINIMAX_OAUTH_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:user_code";
+const MINIMAX_RESOURCE_URL_ALLOWED_DOMAINS: &[&str] = &["minimax.io", "minimaxi.com"];
 const OPENAI_OAUTH_CALLBACK_PATH: &str = "console/v1/auth/providers/openai/callback";
 
 #[allow(clippy::result_large_err)]
@@ -1600,7 +1601,7 @@ fn normalize_minimax_poll_interval_ms(interval: Option<u64>) -> u64 {
 fn normalize_minimax_resource_url(raw: &str) -> Option<String> {
     let trimmed = normalize_optional_text(raw)?;
     let mut url = Url::parse(trimmed).ok()?;
-    if url.scheme() != "https" || url.host_str().is_none() {
+    if url.scheme() != "https" || !minimax_resource_url_host_allowed(&url) {
         return None;
     }
     if !url.username().is_empty()
@@ -1618,6 +1619,16 @@ fn normalize_minimax_resource_url(raw: &str) -> Option<String> {
     Some(url.to_string().trim_end_matches('/').to_owned())
 }
 
+fn minimax_resource_url_host_allowed(url: &Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host.to_ascii_lowercase();
+    MINIMAX_RESOURCE_URL_ALLOWED_DOMAINS.iter().any(|domain| {
+        host == *domain || host.strip_suffix(domain).is_some_and(|prefix| prefix.ends_with('.'))
+    })
+}
+
 #[allow(clippy::result_large_err)]
 async fn persist_minimax_resource_base_url(
     state: &AppState,
@@ -1628,6 +1639,21 @@ async fn persist_minimax_resource_base_url(
     let path_ref = FsPath::new(path.as_str());
     ensure_console_config_parent_dir(path_ref)?;
     let (mut document, _) = load_console_document_for_mutation(path_ref)?;
+    let allow_private_base_url =
+        get_value_at_path(&document, "model_provider.allow_private_base_url")
+            .ok()
+            .flatten()
+            .and_then(toml::Value::as_bool)
+            .unwrap_or(false);
+    crate::model_provider::validate_openai_base_url_network_policy(
+        base_url,
+        allow_private_base_url,
+    )
+    .map_err(|error| {
+        runtime_status_response(tonic::Status::invalid_argument(format!(
+            "MiniMax OAuth resource_url rejected: {error}"
+        )))
+    })?;
     set_string_value_at_path(&mut document, "model_provider.anthropic_base_url", base_url)?;
     validate_daemon_compatible_document(&document)?;
     write_document_with_backups(path_ref, &document, OPENAI_DEFAULT_CONFIG_BACKUPS).map_err(
@@ -1708,9 +1734,29 @@ mod minimax_tests {
             Some("https://tenant.minimax.io/anthropic".to_owned())
         );
         assert_eq!(
+            normalize_minimax_resource_url("https://api.minimaxi.com"),
+            Some("https://api.minimaxi.com/anthropic".to_owned()),
+            "China MiniMax endpoint remains supported"
+        );
+        assert_eq!(
             normalize_minimax_resource_url("https://tenant.minimax.io/path?token=secret"),
             None,
             "resource URLs with query secrets must be rejected"
+        );
+        assert_eq!(
+            normalize_minimax_resource_url("https://attacker.example/collect"),
+            None,
+            "resource URLs outside trusted MiniMax domains must be rejected"
+        );
+        assert_eq!(
+            normalize_minimax_resource_url("https://evilminimax.io/collect"),
+            None,
+            "lookalike domains must not match the MiniMax suffix allowlist"
+        );
+        assert_eq!(
+            normalize_minimax_resource_url("https://127.0.0.1:8443/internal"),
+            None,
+            "resource URLs targeting private/local hosts must be rejected"
         );
     }
 
