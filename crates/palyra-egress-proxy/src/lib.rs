@@ -1,6 +1,9 @@
 use std::net::SocketAddr;
 
-use palyra_common::{netguard, secret_refs::SecretRef};
+use palyra_common::{
+    netguard,
+    secret_refs::{SecretRef, SecretSource},
+};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -59,6 +62,8 @@ pub enum EgressPolicyError {
     InvalidResponseBudget,
     #[error("credential binding '{header_name}' uses a disallowed header name")]
     InvalidCredentialHeader { header_name: String },
+    #[error("credential binding '{header_name}' cannot use exec-backed secret sources")]
+    ExecCredentialSourceForbidden { header_name: String },
 }
 
 #[derive(Debug, Default)]
@@ -182,6 +187,11 @@ fn validate_credential_bindings(
                 header_name: binding.header_name.clone(),
             });
         }
+        if matches!(binding.secret_ref.source, SecretSource::Exec { .. }) {
+            return Err(EgressPolicyError::ExecCredentialSourceForbidden {
+                header_name: binding.header_name.clone(),
+            });
+        }
     }
     Ok(())
 }
@@ -211,7 +221,9 @@ fn request_fingerprint(request: &EgressProxyRequest<'_>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use palyra_common::secret_refs::SecretRef;
+    use palyra_common::secret_refs::{
+        SecretRef, SecretRefreshPolicy, SecretSnapshotPolicy, SecretSource,
+    };
 
     use super::{
         validate_resolved_addrs, CredentialBindingPlan, EgressPolicyError,
@@ -222,6 +234,27 @@ mod tests {
         CredentialBindingPlan {
             header_name: header_name.to_owned(),
             secret_ref: SecretRef::from_legacy_vault_ref("global/example"),
+            required: true,
+        }
+    }
+
+    fn exec_binding(header_name: &str) -> CredentialBindingPlan {
+        CredentialBindingPlan {
+            header_name: header_name.to_owned(),
+            secret_ref: SecretRef {
+                source: SecretSource::Exec {
+                    command: vec!["echo".to_owned(), "secret".to_owned()],
+                    inherited_env: Vec::new(),
+                    cwd: None,
+                },
+                required: true,
+                refresh_policy: SecretRefreshPolicy::OnStartup,
+                snapshot_policy: SecretSnapshotPolicy::FreezeUntilReload,
+                max_bytes: None,
+                exec_timeout_ms: None,
+                redaction_label: None,
+                display_name: None,
+            },
             required: true,
         }
     }
@@ -242,6 +275,29 @@ mod tests {
         assert!(verdict.allowed);
         assert_eq!(verdict.reason_code, "egress.allowed");
         assert_eq!(verdict.host, "93.184.216.34");
+    }
+
+    #[test]
+    fn egress_proxy_rejects_exec_secret_credential_bindings() {
+        let service = EgressProxyPolicyService;
+        let request = EgressProxyRequest {
+            method: "GET",
+            url: "https://93.184.216.34/path",
+            allow_private_targets: false,
+            allowed_hosts: &["93.184.216.34".to_owned()],
+            allowed_dns_suffixes: &[],
+            max_response_bytes: 1024,
+            credential_bindings: &[exec_binding("x-palyra-secret")],
+        };
+        let error = service
+            .evaluate_request(&request)
+            .expect_err("exec-backed credential binding must be rejected before resolution");
+        assert_eq!(
+            error,
+            EgressPolicyError::ExecCredentialSourceForbidden {
+                header_name: "x-palyra-secret".to_owned()
+            }
+        );
     }
 
     #[test]
