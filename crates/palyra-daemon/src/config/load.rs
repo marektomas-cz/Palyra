@@ -4324,8 +4324,8 @@ mod tests {
             "wasm runtime http allowlist must default empty"
         );
         assert!(
-            config.http_fetch.allow_private_targets,
-            "http fetch must default to local/private target access for local agent validation"
+            !config.http_fetch.allow_private_targets,
+            "http fetch must default to blocking local/private target access unless explicitly enabled"
         );
         assert_eq!(config.http_fetch.max_response_bytes, 512 * 1024);
         assert_eq!(config.http_fetch.max_redirects, 3);
@@ -4359,7 +4359,7 @@ mod tests {
     #[test]
     fn http_fetch_config_defaults_enforce_safe_limits() {
         let config = HttpFetchConfig::default();
-        assert!(config.allow_private_targets);
+        assert!(!config.allow_private_targets);
         assert_eq!(config.connect_timeout_ms, 1_500);
         assert_eq!(config.request_timeout_ms, 10_000);
         assert_eq!(config.max_response_bytes, 512 * 1024);
