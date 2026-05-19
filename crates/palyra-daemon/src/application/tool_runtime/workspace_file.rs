@@ -1,3 +1,7 @@
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
+#[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
 use std::{
     fs::{self, File},
     io::{Read, Seek, SeekFrom},
@@ -670,8 +674,19 @@ fn read_workspace_file_from_roots(
     if requested.is_absolute() {
         let (workspace_root_index, canonical_target, display_path) =
             resolve_absolute_workspace_file(canonical_roots.as_slice(), requested, input)?;
+        let canonical_root = canonical_roots
+            .iter()
+            .find_map(|(index, root)| {
+                (*index == workspace_root_index).then_some(root.as_path())
+            })
+            .ok_or_else(|| {
+                format!(
+                    "{WORKSPACE_READ_FILE_TOOL_NAME} internal error resolving workspace root {workspace_root_index}"
+                )
+            })?;
         return read_workspace_file_chunk(
             workspace_root_index,
+            canonical_root,
             canonical_target,
             display_path,
             input,
@@ -704,6 +719,7 @@ fn read_workspace_file_from_roots(
             .unwrap_or_else(|_| input.path.clone());
         return read_workspace_file_chunk(
             *workspace_root_index,
+            canonical_root.as_path(),
             canonical_target,
             display_path,
             input,
@@ -1295,6 +1311,7 @@ fn redact_workspace_search_line(line: &str) -> (String, bool) {
 
 fn read_workspace_file_chunk(
     workspace_root_index: usize,
+    canonical_root: &Path,
     path: PathBuf,
     display_path: String,
     input: &WorkspaceReadFileInput,
@@ -1305,6 +1322,10 @@ fn read_workspace_file_chunk(
             input.path
         )
     })?;
+    let opened_path = canonicalize_open_file_path(&file, input.path.as_str())?;
+    if !opened_path.starts_with(canonical_root) {
+        return Err(format!("{WORKSPACE_READ_FILE_TOOL_NAME} path escapes agent workspace roots"));
+    }
     let size_bytes = file
         .metadata()
         .map_err(|error| {
@@ -1363,6 +1384,64 @@ fn read_workspace_file_chunk(
         bytes_base64,
         redacted,
     })
+}
+
+#[cfg(unix)]
+fn canonicalize_open_file_path(file: &File, input_path: &str) -> Result<PathBuf, String> {
+    #[cfg(target_os = "linux")]
+    let fd_path = format!("/proc/self/fd/{}", file.as_raw_fd());
+    #[cfg(not(target_os = "linux"))]
+    let fd_path = format!("/dev/fd/{}", file.as_raw_fd());
+
+    fs::canonicalize(fd_path.as_str()).map_err(|error| {
+        format!(
+            "{WORKSPACE_READ_FILE_TOOL_NAME} failed to resolve opened workspace file {input_path}: {error}"
+        )
+    })
+}
+
+#[cfg(windows)]
+fn canonicalize_open_file_path(file: &File, input_path: &str) -> Result<PathBuf, String> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFinalPathNameByHandleW, FILE_NAME_NORMALIZED, VOLUME_NAME_DOS,
+    };
+
+    let mut buffer = vec![0_u16; 260];
+    loop {
+        let length = unsafe {
+            // SAFETY: The file handle is borrowed from a live `File`, and `buffer` is a valid
+            // writable UTF-16 buffer with the length passed to the Win32 API.
+            GetFinalPathNameByHandleW(
+                file.as_raw_handle(),
+                buffer.as_mut_ptr(),
+                u32::try_from(buffer.len()).unwrap_or(u32::MAX),
+                FILE_NAME_NORMALIZED | VOLUME_NAME_DOS,
+            )
+        };
+        if length == 0 {
+            return Err(format!(
+                "{WORKSPACE_READ_FILE_TOOL_NAME} failed to resolve opened workspace file {input_path}: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let length = usize::try_from(length).map_err(|_| {
+            format!(
+                "{WORKSPACE_READ_FILE_TOOL_NAME} failed to resolve opened workspace file {input_path}: path length exceeds platform limits"
+            )
+        })?;
+        if length < buffer.len() {
+            buffer.truncate(length);
+            return Ok(PathBuf::from(String::from_utf16_lossy(buffer.as_slice())));
+        }
+        buffer.resize(length.saturating_add(1), 0);
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn canonicalize_open_file_path(_file: &File, input_path: &str) -> Result<PathBuf, String> {
+    Err(format!(
+        "{WORKSPACE_READ_FILE_TOOL_NAME} failed to resolve opened workspace file {input_path}: unsupported platform"
+    ))
 }
 
 fn is_false(value: &bool) -> bool {
@@ -1719,6 +1798,38 @@ mod tests {
 
         let error = read_workspace_file_from_roots(&[workspace], &input)
             .expect_err("host file reads outside workspace roots should be rejected");
+
+        assert!(error.contains("escapes agent workspace roots"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn read_workspace_file_chunk_rejects_opened_file_outside_root() {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let workspace = tempdir.path().join("workspace");
+        let outside = tempdir.path().join("outside");
+        fs::create_dir_all(workspace.as_path()).expect("workspace should exist");
+        fs::create_dir_all(outside.as_path()).expect("outside should exist");
+        let outside_file = outside.join("secret.txt");
+        fs::write(outside_file.as_path(), "outside secret\n").expect("outside file should exist");
+        let canonical_workspace =
+            fs::canonicalize(workspace.as_path()).expect("workspace should canonicalize");
+        let canonical_outside =
+            fs::canonicalize(outside_file.as_path()).expect("outside file should canonicalize");
+        let input = WorkspaceReadFileInput {
+            path: "inside.txt".to_owned(),
+            workspace_root: None,
+            offset_bytes: 0,
+            max_bytes: None,
+        };
+
+        let error = read_workspace_file_chunk(
+            0,
+            canonical_workspace.as_path(),
+            canonical_outside,
+            "inside.txt".to_owned(),
+            &input,
+        )
+        .expect_err("post-open path validation should reject outside files");
 
         assert!(error.contains("escapes agent workspace roots"), "unexpected error: {error}");
     }
