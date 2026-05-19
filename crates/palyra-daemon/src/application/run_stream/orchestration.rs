@@ -35,8 +35,8 @@ use crate::{
         OrchestratorTapeAppendRequest, OrchestratorUsageDelta,
     },
     model_provider::{
-        ProviderFinishReason, ProviderMessage, ProviderRequest, ProviderResponse,
-        ProviderTurnOutput,
+        ProviderFinishReason, ProviderMessage, ProviderMessageRole, ProviderRequest,
+        ProviderResponse, ProviderTurnOutput,
     },
     orchestrator::{is_cancel_command, RunLifecycleState, RunStateMachine, RunTransition},
     provider_leases::ProviderLeaseExecutionContext,
@@ -1388,14 +1388,17 @@ fn final_answer_recovery_prompt(
     )
 }
 
-fn incomplete_final_answer_without_tools(text: Option<&str>) -> Option<String> {
+fn incomplete_final_answer_without_tools(
+    text: Option<&str>,
+    messages: &[ProviderMessage],
+) -> Option<String> {
     let text = text.unwrap_or_default().trim();
     if text.is_empty() {
         return Some(
             "model returned an empty final answer without executing any requested tools".to_owned(),
         );
     }
-    if final_answer_is_minimal_ack(text) {
+    if final_answer_is_minimal_ack(text) && !user_requested_exact_minimal_answer(text, messages) {
         return Some("model returned a bare acknowledgement as the final answer".to_owned());
     }
     if final_answer_claims_tool_work_without_evidence(text) {
@@ -1411,8 +1414,9 @@ fn incomplete_terminal_final_answer(
     text: Option<&str>,
     loop_state: &AgentRunLoopState,
 ) -> Option<String> {
+    let messages = loop_state.messages();
     if loop_state.completed_tool_calls() == 0 {
-        return incomplete_final_answer_without_tools(text);
+        return incomplete_final_answer_without_tools(text, messages.as_slice());
     }
 
     let text = text.unwrap_or_default().trim();
@@ -1420,8 +1424,9 @@ fn incomplete_terminal_final_answer(
         return Some("model returned an empty final answer after tool execution".to_owned());
     }
 
-    let messages = loop_state.messages();
-    if final_answer_is_minimal_ack(text) {
+    if final_answer_is_minimal_ack(text)
+        && !user_requested_exact_minimal_answer(text, messages.as_slice())
+    {
         return Some(
             "model returned a bare acknowledgement instead of a final answer with tool evidence"
                 .to_owned(),
@@ -1456,6 +1461,82 @@ fn final_answer_is_minimal_ack(text: &str) -> bool {
         normalize_final_answer_text(text).as_str(),
         "ack" | "ok" | "okay" | "done" | "complete" | "completed"
     )
+}
+
+fn user_requested_exact_minimal_answer(answer: &str, messages: &[ProviderMessage]) -> bool {
+    let normalized_answer = normalize_final_answer_text(answer);
+    if !matches!(
+        normalized_answer.as_str(),
+        "ack" | "ok" | "okay" | "done" | "complete" | "completed"
+    ) {
+        return false;
+    }
+
+    messages.iter().filter(|message| message.role == ProviderMessageRole::User).any(|message| {
+        user_message_requests_exact_answer(
+            message.text_content().as_str(),
+            normalized_answer.as_str(),
+        )
+    })
+}
+
+fn user_message_requests_exact_answer(text: &str, normalized_answer: &str) -> bool {
+    let normalized = normalize_final_answer_text(text);
+    const EXACT_ANSWER_MARKERS: &[&str] = &[
+        "acknowledge exactly",
+        "answer exactly",
+        "output exactly",
+        "print exactly",
+        "reply exactly",
+        "respond exactly",
+        "return exactly",
+        "say exactly",
+    ];
+
+    EXACT_ANSWER_MARKERS.iter().any(|marker| {
+        let Some(marker_index) = normalized.find(marker) else {
+            return false;
+        };
+        if exact_answer_marker_is_negated(normalized[..marker_index].trim_end()) {
+            return false;
+        }
+        let requested = normalized[marker_index + marker.len()..]
+            .trim_start_matches(|character: char| {
+                character.is_whitespace()
+                    || matches!(character, ':' | '-' | '"' | '\'' | '`' | '\u{201c}' | '\u{201d}')
+            })
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .trim_matches(|character: char| {
+                matches!(
+                    character,
+                    '.' | ','
+                        | ';'
+                        | ':'
+                        | '!'
+                        | '?'
+                        | '"'
+                        | '\''
+                        | '`'
+                        | '\u{201c}'
+                        | '\u{201d}'
+                        | '('
+                        | ')'
+                        | '['
+                        | ']'
+                )
+            });
+        requested == normalized_answer
+    })
+}
+
+fn exact_answer_marker_is_negated(prefix: &str) -> bool {
+    prefix.ends_with("do not")
+        || prefix.ends_with("don't")
+        || prefix.ends_with("dont")
+        || prefix.ends_with("never")
+        || prefix.ends_with("not")
 }
 
 fn has_action_tool_evidence(messages: &[ProviderMessage]) -> bool {
@@ -1859,10 +1940,17 @@ mod tests {
 
     #[test]
     fn incomplete_final_answer_without_tools_detects_bare_ack() {
-        let message = incomplete_final_answer_without_tools(Some("done"))
+        let message = incomplete_final_answer_without_tools(Some("done"), &[])
             .expect("bare acknowledgement must not be accepted as a final answer");
 
         assert!(message.contains("bare acknowledgement"));
+    }
+
+    #[test]
+    fn incomplete_final_answer_without_tools_allows_requested_exact_ack() {
+        let messages = vec![ProviderMessage::user_text("Acknowledge exactly OK.".to_owned())];
+
+        assert!(incomplete_final_answer_without_tools(Some("OK"), messages.as_slice()).is_none());
     }
 
     #[test]
@@ -1953,18 +2041,21 @@ mod tests {
 
     #[test]
     fn incomplete_final_answer_without_tools_detects_unsupported_work_claims() {
-        let message =
-            incomplete_final_answer_without_tools(Some("I created the file and tests passed."))
-                .expect("tool-work claims need tool evidence");
+        let message = incomplete_final_answer_without_tools(
+            Some("I created the file and tests passed."),
+            &[],
+        )
+        .expect("tool-work claims need tool evidence");
 
         assert!(message.contains("without any successful tool results"));
     }
 
     #[test]
     fn incomplete_final_answer_without_tools_allows_plain_answers() {
-        assert!(incomplete_final_answer_without_tools(Some(
-            "Use `cargo test -p palyra-daemon` to run the daemon tests."
-        ))
+        assert!(incomplete_final_answer_without_tools(
+            Some("Use `cargo test -p palyra-daemon` to run the daemon tests."),
+            &[]
+        )
         .is_none());
     }
 
@@ -1978,6 +2069,16 @@ mod tests {
             .expect("bare ack must not complete a requested tool workflow");
 
         assert!(message.contains("bare acknowledgement"));
+    }
+
+    #[test]
+    fn incomplete_terminal_final_answer_allows_requested_exact_ack_after_tool() {
+        let state = loop_state_after_tool(
+            "Create fixtures/landing-page and acknowledge exactly OK.",
+            "palyra.fs.apply_patch",
+        );
+
+        assert!(incomplete_terminal_final_answer(Some("OK"), &state).is_none());
     }
 
     #[test]
