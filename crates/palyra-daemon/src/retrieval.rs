@@ -1243,14 +1243,7 @@ pub(crate) fn resolve_embeddings_provider_config(
     let default_model_id = registry
         .default_embeddings_model_id
         .clone()
-        .or_else(|| config.default_embeddings_model_id())
-        .or_else(|| {
-            if provider_can_use_production_embeddings(config, None) {
-                Some(DEFAULT_PRODUCTION_EMBEDDINGS_MODEL_ID.to_owned())
-            } else {
-                None
-            }
-        });
+        .or_else(|| config.openai_embeddings_model.clone());
     let Some(default_model_id) = default_model_id else {
         return Ok(None);
     };
@@ -1319,16 +1312,8 @@ fn resolve_desired_embeddings_target(
     config: &ModelProviderConfig,
 ) -> Result<Option<(String, Option<usize>)>> {
     let registry = config.normalized_registry()?;
-    let model_id = registry
-        .default_embeddings_model_id
-        .or_else(|| config.openai_embeddings_model.clone())
-        .or_else(|| {
-            if config.kind == ModelProviderKind::OpenAiCompatible {
-                Some(DEFAULT_PRODUCTION_EMBEDDINGS_MODEL_ID.to_owned())
-            } else {
-                None
-            }
-        });
+    let model_id =
+        registry.default_embeddings_model_id.or_else(|| config.openai_embeddings_model.clone());
     Ok(model_id.map(|model_id| {
         let dimensions = config
             .openai_embeddings_dims
@@ -1510,7 +1495,7 @@ mod tests {
     }
 
     #[test]
-    fn memory_embedding_selection_defaults_to_production_model_when_openai_credentials_exist() {
+    fn memory_embedding_selection_uses_hash_fallback_without_explicit_embeddings_configuration() {
         let config = ModelProviderConfig {
             kind: ModelProviderKind::OpenAiCompatible,
             openai_api_key: Some("sk-test".to_owned()),
@@ -1519,6 +1504,27 @@ mod tests {
 
         let selection = build_memory_embedding_runtime_selection(&config, false)
             .expect("embedding runtime selection should succeed");
+        assert!(!selection.profile.production_default_active);
+        assert_eq!(selection.profile.posture.as_str(), "degraded_config_fallback");
+        assert_eq!(selection.profile.desired_model_id, None);
+        assert_eq!(
+            selection.profile.degraded_reason_code.as_deref(),
+            Some("embeddings_model_not_configured")
+        );
+    }
+
+    #[test]
+    fn memory_embedding_selection_uses_production_provider_when_embeddings_model_is_explicit() {
+        let config = ModelProviderConfig {
+            kind: ModelProviderKind::OpenAiCompatible,
+            openai_api_key: Some("sk-test".to_owned()),
+            openai_embeddings_model: Some("text-embedding-3-small".to_owned()),
+            openai_embeddings_dims: Some(1_536),
+            ..ModelProviderConfig::default()
+        };
+
+        let selection = build_memory_embedding_runtime_selection(&config, false)
+            .expect("explicit embedding runtime selection should succeed");
         assert!(selection.profile.production_default_active);
         assert_eq!(selection.profile.desired_model_id.as_deref(), Some("text-embedding-3-small"));
         assert_eq!(selection.profile.active_dims, 1_536);
@@ -1529,6 +1535,8 @@ mod tests {
         let config = ModelProviderConfig {
             kind: ModelProviderKind::OpenAiCompatible,
             openai_api_key: Some("sk-test".to_owned()),
+            openai_embeddings_model: Some("text-embedding-3-small".to_owned()),
+            openai_embeddings_dims: Some(1_536),
             ..ModelProviderConfig::default()
         };
 
