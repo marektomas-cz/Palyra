@@ -4555,6 +4555,36 @@ async fn memory_retain_tool_principal_scope_requires_review_for_high_risk_conten
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn memory_retain_tool_review_command_uses_trusted_provenance() {
+    let state = build_test_runtime_state(false);
+    let context = routines_tool_test_context();
+    let input_json = br#"{"content_text":"Remember this only if an operator reviews it","scope":"session","confidence":0.1,"provenance":{"session_id":"01ARZ3NDEKTSV4RRFFQ69G5FAB; touch /tmp/pwned #","channel":"cli; touch /tmp/pwned #","source":"attacker"}}"#;
+    let outcome =
+        execute_memory_retain_tool(&state, context, "01ARZ3NDEKTSV4RRFFQ69G5FC4", input_json).await;
+
+    assert!(!outcome.success, "low-confidence retain should require review");
+    let payload = parse_tool_output_json(&outcome);
+    assert_eq!(payload.get("status").and_then(Value::as_str), Some("needs_review"));
+    assert_eq!(
+        payload.pointer("/provenance/session_id").and_then(Value::as_str),
+        Some(context.session_id)
+    );
+    assert_eq!(payload.pointer("/provenance/source").and_then(Value::as_str), Some("tool_call"));
+    let command = payload
+        .pointer("/review/completion_commands/0")
+        .and_then(Value::as_str)
+        .expect("needs-review retain should include a completion command");
+
+    assert!(
+        command.contains("--session 01ARZ3NDEKTSV4RRFFQ69G5FAB"),
+        "review command should keep trusted session context: {command}"
+    );
+    assert!(!command.contains("touch"), "review command leaked injected command: {command}");
+    assert!(!command.contains(';'), "review command contains shell metacharacters: {command}");
+    assert!(!command.contains('#'), "review command contains shell metacharacters: {command}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn memory_retain_tool_normalizes_unknown_source_to_manual() {
     let state = build_test_runtime_state(false);
     let context = routines_tool_test_context();

@@ -248,10 +248,7 @@ pub(crate) async fn execute_memory_retain_tool(
             );
         }
     };
-    let provenance = parsed
-        .get("provenance")
-        .cloned()
-        .unwrap_or_else(|| retain_tool_provenance(context, proposal_id));
+    let provenance = retain_tool_provenance(context, proposal_id);
 
     let provider = MemoryLifecycleProvider::new(Arc::clone(runtime_state));
     let outcome = match provider
@@ -1348,18 +1345,43 @@ fn memory_lifecycle_review_command(outcome: &MemoryLifecycleRetainOutcome) -> St
         "palyra memory ingest \"<reviewed memory content>\" --source manual --confidence 1.0"
             .to_owned();
     if outcome.scope == MemoryLifecycleScope::Session {
-        if let Some(session_id) = outcome.provenance.get("session_id").and_then(Value::as_str) {
+        if let Some(session_id) = outcome
+            .provenance
+            .get("session_id")
+            .and_then(Value::as_str)
+            .and_then(memory_lifecycle_review_command_arg)
+        {
             command.push_str(" --session ");
             command.push_str(session_id);
         }
     }
     if outcome.scope == MemoryLifecycleScope::Channel {
-        if let Some(channel) = outcome.provenance.get("channel").and_then(Value::as_str) {
+        if let Some(channel) = outcome
+            .provenance
+            .get("channel")
+            .and_then(Value::as_str)
+            .and_then(memory_lifecycle_review_command_arg)
+        {
             command.push_str(" --channel ");
             command.push_str(channel);
         }
     }
     command
+}
+
+fn memory_lifecycle_review_command_arg(raw: &str) -> Option<&str> {
+    let value = raw.trim();
+    if value.is_empty() || value.len() > 256 || value.len() != raw.len() {
+        return None;
+    }
+    if value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'-' | b'_' | b'.'))
+    {
+        Some(value)
+    } else {
+        None
+    }
 }
 
 fn memory_item_output_payload(item: &crate::journal::MemoryItemRecord) -> Value {
