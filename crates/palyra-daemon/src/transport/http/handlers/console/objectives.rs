@@ -1717,13 +1717,8 @@ fn parse_objective_execution_config(
     Ok(execution)
 }
 
-fn default_objective_execution_posture(kind: ObjectiveKind) -> RoutineExecutionPosture {
-    match kind {
-        ObjectiveKind::Heartbeat | ObjectiveKind::StandingOrder => {
-            RoutineExecutionPosture::SensitiveTools
-        }
-        ObjectiveKind::Objective | ObjectiveKind::Program => RoutineExecutionPosture::Standard,
-    }
+fn default_objective_execution_posture(_kind: ObjectiveKind) -> RoutineExecutionPosture {
+    RoutineExecutionPosture::Standard
 }
 
 #[allow(clippy::result_large_err)]
@@ -2168,17 +2163,21 @@ mod tests {
     }
 
     #[test]
-    fn heartbeat_and_standing_order_objectives_default_to_sensitive_tools() {
+    fn objective_execution_posture_defaults_to_standard_for_all_kinds() {
         assert_eq!(
             default_objective_execution_posture(ObjectiveKind::Heartbeat),
-            RoutineExecutionPosture::SensitiveTools
+            RoutineExecutionPosture::Standard
         );
         assert_eq!(
             default_objective_execution_posture(ObjectiveKind::StandingOrder),
-            RoutineExecutionPosture::SensitiveTools
+            RoutineExecutionPosture::Standard
         );
         assert_eq!(
             default_objective_execution_posture(ObjectiveKind::Objective),
+            RoutineExecutionPosture::Standard
+        );
+        assert_eq!(
+            default_objective_execution_posture(ObjectiveKind::Program),
             RoutineExecutionPosture::Standard
         );
     }
@@ -2190,6 +2189,18 @@ mod tests {
                 .expect("explicit standard posture should parse");
 
         assert_eq!(execution.execution_posture, RoutineExecutionPosture::Standard);
+    }
+
+    #[test]
+    fn objective_execution_posture_can_be_explicitly_sensitive_tools() {
+        let execution = parse_objective_execution_config(
+            Some("sensitive_tools"),
+            ObjectiveKind::Heartbeat,
+            None,
+        )
+        .expect("explicit sensitive_tools posture should parse");
+
+        assert_eq!(execution.execution_posture, RoutineExecutionPosture::SensitiveTools);
     }
 
     #[test]
