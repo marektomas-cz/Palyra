@@ -303,6 +303,23 @@ fn routines_control_schema_discourages_slug_ids_and_short_intervals() {
 }
 
 #[test]
+fn delegation_control_schema_does_not_expose_parent_run_id() {
+    let control =
+        registry_entry("palyra.delegation.control").expect("delegation control should register");
+    let query =
+        registry_entry("palyra.delegation.query").expect("delegation query should register");
+
+    assert!(
+        control.input_schema["properties"].get("parent_run_id").is_none(),
+        "control delegate operations must derive the parent run from execution context"
+    );
+    assert!(
+        query.input_schema["properties"].get("parent_run_id").is_some(),
+        "query operations may still filter by parent_run_id inside scoped task listing"
+    );
+}
+
+#[test]
 fn memory_session_search_schema_targets_prior_transcripts() {
     let entry = registry_entry("palyra.memory.session_search").expect("session search tool entry");
     let alias = registry_entry("palyra.session_search").expect("session search alias tool entry");

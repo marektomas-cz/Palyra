@@ -364,7 +364,6 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
                     ("objective", json!({"type":"string","maxLength":8192})),
                     ("profile_id", json!({"type":"string"})),
                     ("template_id", json!({"type":"string"})),
-                    ("parent_run_id", json!({"type":"string"})),
                     ("task_id", json!({"type":"string"})),
                     ("run_id", json!({"type":"string"})),
                     ("reason", json!({"type":"string","maxLength":2048})),

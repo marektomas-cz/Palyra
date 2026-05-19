@@ -147,8 +147,7 @@ async fn create_delegation(
     input: &DelegationToolInput,
 ) -> Result<Value, Status> {
     let objective = normalize_required(input.objective.as_deref(), "objective")?;
-    let parent_run_id = normalize_optional(input.parent_run_id.as_deref())
-        .unwrap_or_else(|| context.run_id.to_owned());
+    let parent_run_id = context.run_id.to_owned();
     let parent_budget_tokens = input
         .budget_tokens
         .map(|budget| budget.saturating_mul(2).max(1))
