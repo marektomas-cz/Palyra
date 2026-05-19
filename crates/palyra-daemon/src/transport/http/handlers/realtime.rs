@@ -5,7 +5,7 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         State,
     },
-    http::{HeaderMap, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -13,6 +13,7 @@ use palyra_common::runtime_contracts::{
     RealtimeCommandEnvelope, RealtimeErrorEnvelope, RealtimeHandshakeRequest, RealtimeSubscription,
     StableErrorEnvelope,
 };
+use reqwest::Url;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -23,6 +24,7 @@ use crate::{
         negotiate_realtime_handshake, realtime_method_descriptors, snapshot_refresh_event,
         RealtimeConnectionContext, RealtimeReplayOutcome, REALTIME_SDK_ABI_VERSION,
     },
+    runtime_status_response,
     transport::http::handlers::console::diagnostics::authorize_console_session,
 };
 
@@ -31,8 +33,65 @@ pub(crate) async fn realtime_ws_handler(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<Response, Response> {
+    validate_realtime_ws_origin(&headers)?;
     let session = authorize_console_session(&state, &headers, false)?;
     Ok(ws.on_upgrade(move |socket| realtime_socket(socket, state, session.context)).into_response())
+}
+
+fn validate_realtime_ws_origin(headers: &HeaderMap) -> Result<(), Response> {
+    let Some(origin_header) = headers.get(header::ORIGIN) else {
+        return Ok(());
+    };
+    let origin = origin_header
+        .to_str()
+        .map(str::trim)
+        .map_err(|_| realtime_origin_rejected_response("realtime WebSocket Origin is invalid"))?;
+    let origin_host_port = realtime_origin_host_port(origin)
+        .ok_or_else(|| realtime_origin_rejected_response("realtime WebSocket Origin is invalid"))?;
+    let host_header = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            realtime_origin_rejected_response(
+                "realtime WebSocket Host header is required when Origin is present",
+            )
+        })?;
+    let request_host_port = realtime_host_header_host_port(host_header).ok_or_else(|| {
+        realtime_origin_rejected_response("realtime WebSocket Host header is invalid")
+    })?;
+    if origin_host_port != request_host_port {
+        return Err(realtime_origin_rejected_response(
+            "realtime WebSocket Origin does not match the request host",
+        ));
+    }
+    Ok(())
+}
+
+fn realtime_origin_host_port(origin: &str) -> Option<String> {
+    let url = Url::parse(origin).ok()?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return None;
+    }
+    normalized_host_port(url.host_str()?, url.port_or_known_default()?)
+}
+
+fn realtime_host_header_host_port(host_header: &str) -> Option<String> {
+    let url = Url::parse(format!("http://{host_header}").as_str()).ok()?;
+    normalized_host_port(url.host_str()?, url.port_or_known_default()?)
+}
+
+fn normalized_host_port(host: &str, port: u16) -> Option<String> {
+    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    if host.is_empty() {
+        return None;
+    }
+    Some(format!("{host}:{port}"))
+}
+
+fn realtime_origin_rejected_response(message: &'static str) -> Response {
+    runtime_status_response(tonic::Status::permission_denied(message))
 }
 
 pub(crate) async fn realtime_methods_handler(
@@ -352,4 +411,46 @@ enum RealtimeClientFrame {
     Command(RealtimeCommandEnvelope),
     Ping(Value),
     Subscribe(RealtimeSubscription),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_realtime_ws_origin;
+    use axum::http::{header, HeaderMap, HeaderValue};
+
+    fn headers(host: &str, origin: Option<&str>) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_str(host).expect("host should parse"));
+        if let Some(origin) = origin {
+            headers.insert(
+                header::ORIGIN,
+                HeaderValue::from_str(origin).expect("origin should parse"),
+            );
+        }
+        headers
+    }
+
+    #[test]
+    fn realtime_ws_origin_allows_non_browser_clients_without_origin() {
+        let headers = headers("127.0.0.1:7142", None);
+        validate_realtime_ws_origin(&headers).expect("missing Origin should be allowed");
+    }
+
+    #[test]
+    fn realtime_ws_origin_allows_matching_request_host() {
+        let headers = headers("127.0.0.1:7142", Some("http://127.0.0.1:7142"));
+        validate_realtime_ws_origin(&headers).expect("matching Origin should be allowed");
+    }
+
+    #[test]
+    fn realtime_ws_origin_rejects_different_port() {
+        let headers = headers("127.0.0.1:7142", Some("http://127.0.0.1:4173"));
+        validate_realtime_ws_origin(&headers).expect_err("different Origin port must be rejected");
+    }
+
+    #[test]
+    fn realtime_ws_origin_rejects_invalid_origin() {
+        let headers = headers("127.0.0.1:7142", Some("null"));
+        validate_realtime_ws_origin(&headers).expect_err("invalid Origin must be rejected");
+    }
 }
