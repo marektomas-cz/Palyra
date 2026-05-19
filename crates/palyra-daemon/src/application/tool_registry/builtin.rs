@@ -739,7 +739,10 @@ fn browser_tool_schema(tool_name: &str) -> Value {
             required.extend(["selector", "text"]);
         }
         "palyra.browser.press" => {
-            properties.push(("key", json!({"type":"string"})));
+            properties.push((
+                "key",
+                json!({"type":"string","description":"Keyboard key or chord. Common names include Enter, Escape, Tab, Space, Spacebar, Ctrl+Space, and literal space."}),
+            ));
             required.push("key");
         }
         "palyra.browser.select" => {

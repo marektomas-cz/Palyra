@@ -1509,7 +1509,7 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
         let mut payload = request.into_inner();
         let session_id = parse_session_id_from_proto(payload.session_id.take())
             .map_err(Status::invalid_argument)?;
-        let key = payload.key.trim().to_owned();
+        let key = normalize_press_key_input(payload.key.as_str());
         if key.is_empty() {
             return Err(Status::invalid_argument("press requires non-empty key"));
         }
@@ -3497,10 +3497,19 @@ fn request_principal(metadata: &tonic::metadata::MetadataMap) -> Result<&str, St
     Ok(principal)
 }
 
+fn normalize_press_key_input(raw: &str) -> String {
+    if raw == " " {
+        " ".to_owned()
+    } else {
+        raw.trim().to_owned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        observe_byte_limit, request_timeout_ms, resolve_observe_inclusions, ObserveInclusions,
+        normalize_press_key_input, observe_byte_limit, request_timeout_ms,
+        resolve_observe_inclusions, ObserveInclusions,
     };
 
     #[test]
@@ -3533,6 +3542,13 @@ mod tests {
     #[test]
     fn request_timeout_remains_non_zero() {
         assert_eq!(request_timeout_ms(0, 0), 1);
+    }
+
+    #[test]
+    fn normalize_press_key_input_preserves_literal_space() {
+        assert_eq!(normalize_press_key_input(" "), " ");
+        assert_eq!(normalize_press_key_input(" Space "), "Space");
+        assert!(normalize_press_key_input(" \t ").is_empty());
     }
 
     #[test]

@@ -1721,6 +1721,9 @@ fn chromium_type_script(
 }
 
 fn parse_key_press_spec(raw: &str) -> Result<(String, Vec<ModifierKey>), String> {
+    if raw == " " {
+        return Ok((" ".to_owned(), Vec::new()));
+    }
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Err("key press requires non-empty key".to_owned());
@@ -1734,6 +1737,7 @@ fn parse_key_press_spec(raw: &str) -> Result<(String, Vec<ModifierKey>), String>
     if key.is_empty() {
         return Err("key press requires terminal key segment".to_owned());
     }
+    let key = normalize_key_press_terminal_key(key);
     let mut modifiers = Vec::new();
     for modifier in parts {
         let value = match modifier.to_ascii_lowercase().as_str() {
@@ -1747,7 +1751,14 @@ fn parse_key_press_spec(raw: &str) -> Result<(String, Vec<ModifierKey>), String>
         };
         modifiers.push(value);
     }
-    Ok((key.to_owned(), modifiers))
+    Ok((key, modifiers))
+}
+
+fn normalize_key_press_terminal_key(key: &str) -> String {
+    match key.to_ascii_lowercase().as_str() {
+        "space" | "spacebar" => " ".to_owned(),
+        _ => key.to_owned(),
+    }
 }
 
 pub(crate) async fn press_with_chromium(
@@ -2178,7 +2189,7 @@ mod tests {
         chromium_network_log_headers, chromium_transport_idle_timeout, clamp_chromium_snapshot,
         decode_chromium_console_entries_value, decode_chromium_json_script_value,
         parse_chromium_console_entries, parse_chromium_page_network_entries,
-        parse_chromium_viewport_metrics, ChromiumObserveSnapshot,
+        parse_chromium_viewport_metrics, parse_key_press_spec, ChromiumObserveSnapshot,
     };
     use crate::DEFAULT_SESSION_IDLE_TTL_MS;
     use std::time::Duration;
@@ -2244,6 +2255,30 @@ mod tests {
         assert_eq!(width, 375);
         assert_eq!(height, 667);
         assert_eq!(device_scale_factor, 2.0);
+    }
+
+    #[test]
+    fn parse_key_press_spec_accepts_common_space_aliases() {
+        let (key, modifiers) =
+            parse_key_press_spec("Space").expect("Space alias should be accepted");
+        assert_eq!(key, " ");
+        assert!(modifiers.is_empty());
+
+        let (key, modifiers) =
+            parse_key_press_spec("Spacebar").expect("Spacebar alias should be accepted");
+        assert_eq!(key, " ");
+        assert!(modifiers.is_empty());
+
+        let (key, modifiers) =
+            parse_key_press_spec("Ctrl+Space").expect("modified Space alias should be accepted");
+        assert_eq!(key, " ");
+        assert_eq!(modifiers.len(), 1);
+        assert_eq!(modifiers[0] as u32, 2);
+
+        let (key, modifiers) =
+            parse_key_press_spec(" ").expect("literal space key should be accepted");
+        assert_eq!(key, " ");
+        assert!(modifiers.is_empty());
     }
 
     #[test]

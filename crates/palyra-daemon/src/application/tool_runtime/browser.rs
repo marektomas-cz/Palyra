@@ -786,7 +786,7 @@ pub(crate) async fn execute_browser_tool(
                     );
                 }
             };
-            let Some(key) = payload.get("key").and_then(Value::as_str).map(str::trim) else {
+            let Some(raw_key) = payload.get("key").and_then(Value::as_str) else {
                 return browser_tool_execution_outcome(
                     proposal_id,
                     input_json,
@@ -795,6 +795,7 @@ pub(crate) async fn execute_browser_tool(
                     "palyra.browser.press requires non-empty string field 'key'".to_owned(),
                 );
             };
+            let key = normalize_browser_press_key_input(raw_key);
             if key.is_empty() {
                 return browser_tool_execution_outcome(
                     proposal_id,
@@ -2645,6 +2646,14 @@ fn browser_permissions_to_json(permissions: browser_v1::SessionPermissions) -> V
     })
 }
 
+fn normalize_browser_press_key_input(raw: &str) -> String {
+    if raw == " " {
+        " ".to_owned()
+    } else {
+        raw.trim().to_owned()
+    }
+}
+
 fn browser_recovery_hint(error: &str) -> Option<&'static str> {
     let normalized = error.to_ascii_lowercase();
     if normalized.contains("selector") && normalized.contains("not found") {
@@ -2732,7 +2741,8 @@ mod tests {
         browser_file_url_to_path, browser_network_log_entry_to_json,
         browser_observe_include_visible_text, browser_session_profile_id_from_payload,
         browser_tool_execution_outcome, browser_url_targets_loopback,
-        canonical_file_path_is_inside_workspace_roots, BROWSER_CALLER_PRINCIPAL_HEADER,
+        canonical_file_path_is_inside_workspace_roots, normalize_browser_press_key_input,
+        BROWSER_CALLER_PRINCIPAL_HEADER,
     };
     use crate::transport::grpc::proto::palyra::browser::v1 as browser_v1;
     use palyra_common::CANONICAL_PROTOCOL_MAJOR;
@@ -2812,6 +2822,13 @@ mod tests {
             .as_str()
             .is_some_and(|hint| hint.contains("pass either selector or text")));
         assert!(outcome.error.contains("recovery_hint=wait_for_input_required"));
+    }
+
+    #[test]
+    fn browser_press_key_input_preserves_literal_space() {
+        assert_eq!(normalize_browser_press_key_input(" "), " ");
+        assert_eq!(normalize_browser_press_key_input(" Space "), "Space");
+        assert!(normalize_browser_press_key_input(" \t ").is_empty());
     }
 
     #[test]
