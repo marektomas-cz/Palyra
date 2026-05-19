@@ -25,9 +25,10 @@ use crate::agents::AgentCreateRequest;
 use crate::journal::{
     ApprovalCreateRequest, ApprovalDecision, ApprovalDecisionScope, ApprovalPolicySnapshot,
     ApprovalPromptOption, ApprovalPromptRecord, ApprovalResolveRequest, ApprovalRiskLevel,
-    ApprovalSubjectType, CronRunStatus, JournalAppendRequest, JournalConfig, JournalStore,
-    MemoryItemCreateRequest, MemoryItemRecord, MemoryScoreBreakdown, MemorySearchHit,
-    MemorySearchRequest, MemorySource, OrchestratorRunStartRequest,
+    ApprovalSubjectType, CronConcurrencyPolicy, CronJobCreateRequest, CronMisfirePolicy,
+    CronRetryPolicy, CronRunStartRequest, CronRunStatus, CronScheduleType, JournalAppendRequest,
+    JournalConfig, JournalStore, MemoryItemCreateRequest, MemoryItemRecord, MemoryScoreBreakdown,
+    MemorySearchHit, MemorySearchRequest, MemorySource, OrchestratorRunStartRequest,
     OrchestratorSessionResolveRequest, OrchestratorSessionUpsertRequest,
     OrchestratorTapeAppendRequest,
 };
@@ -4029,6 +4030,91 @@ fn orchestrator_tape_snapshot_paginates_and_redacts_payloads() {
         second_page.events[0].payload_json.contains("<redacted>"),
         "redacted marker should be present in tape payloads"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn diagnostics_run_id_resolver_accepts_linked_cron_run_id() {
+    let state = build_test_runtime_state(false);
+    let session_id = "01ARZ3NDEKTSV4RRFFQ69G5FCA";
+    let cron_run_id = "01ARZ3NDEKTSV4RRFFQ69G5FCB";
+    let orchestrator_run_id = "01ARZ3NDEKTSV4RRFFQ69G5FCC";
+    let job_id = "01ARZ3NDEKTSV4RRFFQ69G5FCD";
+
+    state
+        .journal_store
+        .upsert_orchestrator_session(&OrchestratorSessionUpsertRequest {
+            session_id: session_id.to_owned(),
+            session_key: "session:diagnostics".to_owned(),
+            session_label: Some("Diagnostics run correlation".to_owned()),
+            principal: "user:ops".to_owned(),
+            device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+            channel: Some("cli".to_owned()),
+        })
+        .expect("orchestrator session should be upserted");
+    state
+        .start_orchestrator_run(OrchestratorRunStartRequest {
+            run_id: orchestrator_run_id.to_owned(),
+            session_id: session_id.to_owned(),
+            origin_kind: "routine".to_owned(),
+            origin_run_id: Some(cron_run_id.to_owned()),
+            triggered_by_principal: Some("user:ops".to_owned()),
+            parameter_delta_json: None,
+        })
+        .await
+        .expect("orchestrator run should start");
+    state
+        .create_cron_job(CronJobCreateRequest {
+            job_id: job_id.to_owned(),
+            name: "Diagnostics routine".to_owned(),
+            prompt: "report status".to_owned(),
+            owner_principal: "user:ops".to_owned(),
+            channel: "system:cron".to_owned(),
+            session_key: Some("cron:diagnostics".to_owned()),
+            session_label: Some("Diagnostics routine".to_owned()),
+            workdir: None,
+            schedule_type: CronScheduleType::Every,
+            schedule_payload_json: r#"{"interval_ms":60000}"#.to_owned(),
+            enabled: true,
+            concurrency_policy: CronConcurrencyPolicy::Forbid,
+            retry_policy: CronRetryPolicy { max_attempts: 1, backoff_ms: 0 },
+            misfire_policy: CronMisfirePolicy::Skip,
+            jitter_ms: 0,
+            next_run_at_unix_ms: None,
+        })
+        .await
+        .expect("cron job fixture should be created");
+    state
+        .start_cron_run(CronRunStartRequest {
+            run_id: cron_run_id.to_owned(),
+            job_id: job_id.to_owned(),
+            attempt: 1,
+            session_id: Some(session_id.to_owned()),
+            orchestrator_run_id: Some(orchestrator_run_id.to_owned()),
+            status: CronRunStatus::Running,
+            error_kind: None,
+            error_message_redacted: None,
+        })
+        .await
+        .expect("linked cron run should start");
+
+    let direct = state
+        .resolve_orchestrator_diagnostics_run_id(orchestrator_run_id.to_owned())
+        .await
+        .expect("direct orchestrator id should resolve");
+    assert_eq!(direct.as_deref(), Some(orchestrator_run_id));
+
+    let linked = state
+        .resolve_orchestrator_diagnostics_run_id(cron_run_id.to_owned())
+        .await
+        .expect("linked cron run id should resolve");
+    assert_eq!(linked.as_deref(), Some(orchestrator_run_id));
+
+    let snapshot = state
+        .orchestrator_run_status_snapshot(linked.expect("linked id should be present"))
+        .await
+        .expect("resolved orchestrator status lookup should succeed")
+        .expect("resolved orchestrator run should exist");
+    assert_eq!(snapshot.run_id, orchestrator_run_id);
 }
 
 #[tokio::test(flavor = "multi_thread")]

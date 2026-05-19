@@ -238,14 +238,15 @@ pub(crate) async fn admin_run_status_handler(
         runtime_status_response(tonic::Status::invalid_argument("run_id must be a canonical ULID"))
     })?;
     state.runtime.record_admin_status_request();
+    let diagnostics_run_id = resolve_admin_diagnostics_run_id(&state, run_id.as_str()).await?;
     let snapshot = state
         .runtime
-        .orchestrator_run_status_snapshot(run_id.clone())
+        .orchestrator_run_status_snapshot(diagnostics_run_id.clone())
         .await
         .map_err(runtime_status_response)?;
     let Some(snapshot) = snapshot else {
         return Err(runtime_status_response(tonic::Status::not_found(format!(
-            "orchestrator run not found: {run_id}"
+            "orchestrator run not found after resolving {run_id} to {diagnostics_run_id}"
         ))));
     };
     Ok(Json(snapshot))
@@ -269,12 +270,32 @@ pub(crate) async fn admin_run_tape_handler(
         runtime_status_response(tonic::Status::invalid_argument("run_id must be a canonical ULID"))
     })?;
     state.runtime.record_admin_status_request();
+    let diagnostics_run_id = resolve_admin_diagnostics_run_id(&state, run_id.as_str()).await?;
     let snapshot = state
         .runtime
-        .orchestrator_tape_snapshot(run_id, query.after_seq, query.limit)
+        .orchestrator_tape_snapshot(diagnostics_run_id, query.after_seq, query.limit)
         .await
         .map_err(runtime_status_response)?;
     Ok(Json(snapshot))
+}
+
+async fn resolve_admin_diagnostics_run_id(
+    state: &AppState,
+    requested_run_id: &str,
+) -> Result<String, Response> {
+    state
+        .runtime
+        .resolve_orchestrator_diagnostics_run_id(requested_run_id.to_owned())
+        .await
+        .map_err(runtime_status_response)?
+        .ok_or_else(|| {
+            runtime_status_response(tonic::Status::not_found(format!(
+                "orchestrator run not found: {requested_run_id}; gateway diagnostics accept \
+                 orchestrator_run_id and linked routine/cron run_id values. If this id came from \
+                 objective or routine output, use orchestrator_run_id when available or retry after \
+                 the run links one."
+            )))
+        })
 }
 
 pub(crate) async fn admin_run_cancel_handler(

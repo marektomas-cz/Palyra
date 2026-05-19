@@ -4377,6 +4377,40 @@ impl GatewayRuntimeState {
     }
 
     #[allow(clippy::result_large_err)]
+    fn resolve_orchestrator_diagnostics_run_id_blocking(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<String>, Status> {
+        let run_exists = self
+            .journal_store
+            .orchestrator_run_status_snapshot(run_id)
+            .map_err(|error| map_orchestrator_store_error("load orchestrator run snapshot", error))?
+            .is_some();
+        if run_exists {
+            return Ok(Some(run_id.to_owned()));
+        }
+
+        let cron_run = self
+            .journal_store
+            .cron_run(run_id)
+            .map_err(|error| map_cron_store_error("load cron run", error))?;
+        Ok(cron_run.and_then(|run| run.orchestrator_run_id))
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn resolve_orchestrator_diagnostics_run_id(
+        self: &Arc<Self>,
+        run_id: String,
+    ) -> Result<Option<String>, Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            state.resolve_orchestrator_diagnostics_run_id_blocking(run_id.as_str())
+        })
+        .await
+        .map_err(|_| Status::internal("orchestrator diagnostics run-id resolver worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
     pub async fn wait_for_orchestrator_run(
         self: &Arc<Self>,
         request: OrchestratorRunWaitRequest,
