@@ -70,34 +70,6 @@ fn normalize_repeated_command_argument(input: &mut ProcessRunnerToolInput) {
         input.args.remove(0);
         return;
     }
-
-    if input.args.len() != 1 {
-        return;
-    }
-    let argument = input.args[0].trim_start();
-    let Some((first_token, rest)) = argument.split_once(char::is_whitespace) else {
-        if executable_tokens_match(command, argument) {
-            input.args.clear();
-        }
-        return;
-    };
-    if !executable_tokens_match(command, first_token) {
-        return;
-    }
-    if command_line_fragment_requires_explicit_args(rest) {
-        return;
-    }
-    input.args =
-        rest.split_whitespace().filter(|arg| !arg.is_empty()).map(ToOwned::to_owned).collect();
-}
-
-fn command_line_fragment_requires_explicit_args(value: &str) -> bool {
-    value.chars().any(|character| {
-        matches!(
-            character,
-            '"' | '\'' | '`' | '<' | '>' | '|' | '&' | ';' | '(' | ')' | '[' | ']' | '{' | '}'
-        )
-    })
 }
 
 fn executable_tokens_match(command: &str, candidate: &str) -> bool {
@@ -148,13 +120,23 @@ mod tests {
     }
 
     #[test]
-    fn parse_process_runner_tool_input_normalizes_repeated_command_in_single_arg() {
+    fn parse_process_runner_tool_input_keeps_single_string_arg_unchanged() {
         let input = br#"{"command":"echo","args":["echo PALYRA_TERMINAL_OK"]}"#;
         let parsed = parse_process_runner_tool_input(input)
             .expect("valid process-runner payload should parse");
 
         assert_eq!(parsed.command, "echo");
-        assert_eq!(parsed.args, vec!["PALYRA_TERMINAL_OK"]);
+        assert_eq!(parsed.args, vec!["echo PALYRA_TERMINAL_OK"]);
+    }
+
+    #[test]
+    fn parse_process_runner_tool_input_does_not_split_single_arg_subexecution() {
+        let input = br#"{"command":"find","args":["find . -maxdepth 0 -exec sh -c id +"]}"#;
+        let parsed = parse_process_runner_tool_input(input)
+            .expect("valid process-runner payload should parse");
+
+        assert_eq!(parsed.command, "find");
+        assert_eq!(parsed.args, vec!["find . -maxdepth 0 -exec sh -c id +"]);
     }
 
     #[test]
