@@ -1310,7 +1310,7 @@ fn argument_is_non_path_option_assignment(arg: &str) -> bool {
 fn option_consumes_non_path_value(arg: &str) -> bool {
     matches!(
         arg.trim().to_ascii_lowercase().as_str(),
-        "--test-name-pattern" | "--testnamepattern" | "--grep" | "--grep-invert" | "-t"
+        "--test-name-pattern" | "--testnamepattern" | "--grep" | "--grep-invert"
     )
 }
 
@@ -2829,6 +2829,29 @@ mod tests {
         .expect("taskkill cleanup switches should not be treated as absolute paths");
 
         let _ = fs::remove_dir_all(workspace.as_path());
+    }
+
+    #[test]
+    fn validate_argument_workspace_scope_does_not_skip_path_after_short_t_flag() {
+        let workspace = unique_temp_dir("workspace-short-t-flag-path");
+        fs::create_dir_all(workspace.as_path()).expect("workspace directory should be created");
+        let canonical_workspace = canonical_workspace_root(workspace.as_path())
+            .expect("workspace root should canonicalize");
+        let outside = unique_temp_dir("outside-short-t-flag-path");
+        let args = vec!["-t".to_owned(), outside.display().to_string(), "inside.txt".to_owned()];
+
+        let error = validate_argument_workspace_scope(
+            canonical_workspace.as_path(),
+            canonical_workspace.as_path(),
+            "cp",
+            args.as_slice(),
+        )
+        .expect_err("paths following generic -t flag must still be workspace-scoped");
+
+        assert_eq!(error.kind, SandboxProcessRunErrorKind::WorkspaceScopeDenied);
+
+        let _ = fs::remove_dir_all(workspace.as_path());
+        let _ = fs::remove_dir_all(outside.as_path());
     }
 
     #[test]
