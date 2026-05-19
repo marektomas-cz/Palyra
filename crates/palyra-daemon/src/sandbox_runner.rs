@@ -2026,16 +2026,63 @@ fn terminate_background_child(mut child: Child) {
 #[cfg(windows)]
 fn terminate_windows_process_tree(pid: u32) -> io::Result<()> {
     let pid_arg = pid.to_string();
-    let status = Command::new("taskkill")
+    let system32_dir = trusted_windows_system32_dir()?;
+    let taskkill_path = system32_dir.join("taskkill.exe");
+    let mut command = Command::new(taskkill_path);
+    command
         .args(["/PID", pid_arg.as_str(), "/T", "/F"])
+        .env_clear()
+        .current_dir(system32_dir.as_path())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
+        .stderr(Stdio::null());
+    if let Some(windows_dir) = system32_dir.parent() {
+        command.env("SystemRoot", windows_dir).env("WINDIR", windows_dir);
+    }
+    let status = command.status()?;
     if status.success() {
         return Ok(());
     }
     Err(io::Error::other(format!("taskkill failed for process tree rooted at pid {pid}: {status}")))
+}
+
+#[cfg(windows)]
+fn trusted_windows_system32_dir() -> io::Result<PathBuf> {
+    use std::{ffi::OsString, os::windows::ffi::OsStringExt};
+    use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
+
+    const MAX_SYSTEM_DIRECTORY_CHARS: usize = 32_768;
+
+    let mut buffer = vec![0_u16; 260];
+    loop {
+        // SAFETY: `buffer` is a valid writable UTF-16 buffer for the provided length. The Win32
+        // call writes at most that many code units and returns either the copied length or the
+        // required length when the buffer is too small.
+        let written = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) };
+        if written == 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        let required = written as usize;
+        if required < buffer.len() {
+            let system32_dir = PathBuf::from(OsString::from_wide(&buffer[..required]));
+            if system32_dir.is_absolute() {
+                return Ok(system32_dir);
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Windows system directory is not absolute: {}", system32_dir.display()),
+            ));
+        }
+
+        if required >= MAX_SYSTEM_DIRECTORY_CHARS {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Windows system directory path exceeds supported length",
+            ));
+        }
+        buffer.resize(required + 1, 0);
+    }
 }
 
 #[cfg(unix)]
@@ -3526,6 +3573,25 @@ mod tests {
                 Some(true)
             );
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn trusted_windows_system32_dir_resolves_taskkill_without_search_path() {
+        let system32_dir = super::trusted_windows_system32_dir()
+            .expect("Windows system directory should resolve through Win32 API");
+
+        assert!(system32_dir.is_absolute(), "{}", system32_dir.display());
+        let taskkill_path = system32_dir.join("taskkill.exe");
+        assert_eq!(
+            taskkill_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_ascii_lowercase)
+                .as_deref(),
+            Some("taskkill.exe")
+        );
+        assert!(taskkill_path.is_file(), "{}", taskkill_path.display());
     }
 
     #[test]
