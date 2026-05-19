@@ -190,7 +190,7 @@ impl FlowCoordinator {
     }
 
     #[allow(clippy::result_large_err)]
-    async fn sync_external_step(
+    pub(crate) async fn sync_external_step(
         runtime: &Arc<GatewayRuntimeState>,
         flow: &FlowRecord,
         step: &FlowStepRecord,
@@ -206,6 +206,14 @@ impl FlowCoordinator {
             else {
                 return Ok(None);
             };
+            if !same_flow_scope(
+                flow,
+                task.owner_principal.as_str(),
+                task.device_id.as_str(),
+                task.channel.as_deref(),
+            ) {
+                return Ok(None);
+            }
             let Some(mapped_state) = map_auxiliary_task_state(task.state.as_str()) else {
                 return Ok(None);
             };
@@ -246,6 +254,14 @@ impl FlowCoordinator {
         if let Some(run_id) = lineage.child_run_id.as_deref() {
             let snapshot = runtime.orchestrator_run_status_snapshot(run_id.to_owned()).await?;
             if let Some(run) = snapshot {
+                if !same_flow_scope(
+                    flow,
+                    run.principal.as_str(),
+                    run.device_id.as_str(),
+                    run.channel.as_deref(),
+                ) {
+                    return Ok(None);
+                }
                 if let Some(mapped_state) = map_run_state(run.state.as_str()) {
                     if Some(mapped_state) != state {
                         runtime
@@ -285,6 +301,14 @@ impl FlowCoordinator {
             let Some(approval) = runtime.approval_record(approval_id.to_owned()).await? else {
                 return Ok(state);
             };
+            if !same_flow_scope(
+                flow,
+                approval.principal.as_str(),
+                approval.device_id.as_str(),
+                approval.channel.as_deref(),
+            ) {
+                return Ok(None);
+            }
             let mapped_state = match approval.decision {
                 Some(ApprovalDecision::Allow) => FlowStepState::Succeeded,
                 Some(ApprovalDecision::Deny | ApprovalDecision::Error) => FlowStepState::Failed,
@@ -820,6 +844,17 @@ fn map_run_state(value: &str) -> Option<FlowStepState> {
         "cancelled" | "canceled" => Some(FlowStepState::Cancelled),
         _ => None,
     }
+}
+
+fn same_flow_scope(
+    flow: &FlowRecord,
+    principal: &str,
+    device_id: &str,
+    channel: Option<&str>,
+) -> bool {
+    flow.owner_principal == principal
+        && flow.device_id == device_id
+        && flow.channel.as_deref() == channel
 }
 
 fn parse_lineage(step: &FlowStepRecord) -> FlowLineage {

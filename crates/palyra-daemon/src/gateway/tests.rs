@@ -12,7 +12,10 @@ use std::{
 };
 
 use axum::http::{header::AUTHORIZATION, HeaderMap, HeaderValue};
-use palyra_common::workspace_patch::WorkspacePatchRedactionPolicy;
+use palyra_common::{
+    runtime_contracts::{AuxiliaryTaskKind, AuxiliaryTaskState, FlowStepState},
+    workspace_patch::WorkspacePatchRedactionPolicy,
+};
 use reqwest::Url;
 use serde_json::{json, Value};
 use tokio::{
@@ -28,7 +31,8 @@ use crate::journal::{
     ApprovalSubjectType, CronConcurrencyPolicy, CronJobCreateRequest, CronMisfirePolicy,
     CronRetryPolicy, CronRunStartRequest, CronRunStatus, CronScheduleType, JournalAppendRequest,
     JournalConfig, JournalStore, MemoryItemCreateRequest, MemoryItemRecord, MemoryScoreBreakdown,
-    MemorySearchHit, MemorySearchRequest, MemorySource, OrchestratorRunStartRequest,
+    MemorySearchHit, MemorySearchRequest, MemorySource, OrchestratorBackgroundTaskCreateRequest,
+    OrchestratorBackgroundTaskUpdateRequest, OrchestratorRunStartRequest,
     OrchestratorSessionResolveRequest, OrchestratorSessionUpsertRequest,
     OrchestratorTapeAppendRequest,
 };
@@ -88,6 +92,7 @@ use crate::application::{
     },
 };
 use crate::execution_backends::{ExecutionBackendPreference, ExecutionBackendResolution};
+use crate::flows::{self, FlowCoordinator, FlowCreateDescriptor, FlowLineage, FlowMode};
 use crate::media::MediaRuntimeConfig;
 use crate::model_provider::ProviderImageInput;
 use crate::sandbox_runner::{
@@ -5124,6 +5129,198 @@ fn workspace_patch_metrics_from_output_extracts_files_and_rollback() {
     let serialized = serde_json::to_vec(&output).expect("metrics payload should serialize");
     assert_eq!(workspace_patch_metrics_from_output(&serialized), (2, true));
     assert_eq!(workspace_patch_metrics_from_output(b"{\"files_touched\":\"invalid\"}"), (0, false));
+}
+
+async fn create_completed_flow_background_task(
+    state: &std::sync::Arc<GatewayRuntimeState>,
+    owner_principal: &str,
+    device_id: &str,
+    channel: Option<&str>,
+    result_json: Value,
+) -> String {
+    let task_id = Ulid::new().to_string();
+    let session_id = Ulid::new().to_string();
+    state
+        .journal_store
+        .upsert_orchestrator_session(&OrchestratorSessionUpsertRequest {
+            session_id: session_id.clone(),
+            session_key: format!("flow-lineage:{session_id}"),
+            session_label: Some("Flow lineage scope test".to_owned()),
+            principal: owner_principal.to_owned(),
+            device_id: device_id.to_owned(),
+            channel: channel.map(str::to_owned),
+        })
+        .expect("background task session should be created");
+    state
+        .create_orchestrator_background_task(OrchestratorBackgroundTaskCreateRequest {
+            task_id: task_id.clone(),
+            task_kind: AuxiliaryTaskKind::Summary.as_str().to_owned(),
+            session_id,
+            parent_run_id: None,
+            target_run_id: None,
+            queued_input_id: None,
+            owner_principal: owner_principal.to_owned(),
+            device_id: device_id.to_owned(),
+            channel: channel.map(str::to_owned),
+            state: AuxiliaryTaskState::Queued.as_str().to_owned(),
+            priority: 0,
+            max_attempts: 1,
+            budget_tokens: 64,
+            delegation: None,
+            not_before_unix_ms: None,
+            expires_at_unix_ms: None,
+            notification_target_json: None,
+            input_text: None,
+            payload_json: None,
+        })
+        .await
+        .expect("background task should be created");
+    state
+        .update_orchestrator_background_task(OrchestratorBackgroundTaskUpdateRequest {
+            task_id: task_id.clone(),
+            state: Some(AuxiliaryTaskState::Succeeded.as_str().to_owned()),
+            result_json: Some(Some(result_json.to_string())),
+            started_at_unix_ms: Some(Some(100)),
+            completed_at_unix_ms: Some(Some(200)),
+            ..OrchestratorBackgroundTaskUpdateRequest::default()
+        })
+        .await
+        .expect("background task should be completed");
+    task_id
+}
+
+async fn create_running_flow_for_background_task(
+    state: &std::sync::Arc<GatewayRuntimeState>,
+    owner_principal: &str,
+    device_id: &str,
+    channel: Option<&str>,
+    task_id: String,
+) -> String {
+    let session_id = Ulid::new().to_string();
+    state
+        .journal_store
+        .upsert_orchestrator_session(&OrchestratorSessionUpsertRequest {
+            session_id: session_id.clone(),
+            session_key: format!("flow-lineage-flow:{session_id}"),
+            session_label: Some("Flow lineage scope test flow".to_owned()),
+            principal: owner_principal.to_owned(),
+            device_id: device_id.to_owned(),
+            channel: channel.map(str::to_owned),
+        })
+        .expect("flow session should be created");
+    let mut step = flows::build_flow_step(
+        0,
+        "routine",
+        "routine",
+        "Mirror background task".to_owned(),
+        json!({}),
+        FlowLineage { background_task_id: Some(task_id), ..FlowLineage::default() },
+    );
+    step.state = FlowStepState::Running.as_str().to_owned();
+    let flow = state
+        .create_flow(flows::build_flow_create_request(FlowCreateDescriptor {
+            owner_principal: owner_principal.to_owned(),
+            device_id: device_id.to_owned(),
+            channel: channel.map(str::to_owned),
+            title: "Mirrored task flow".to_owned(),
+            summary: "Mirrored task flow".to_owned(),
+            mode: FlowMode::Mirrored,
+            session_id: Some(session_id),
+            origin_run_id: None,
+            steps: vec![step],
+        }))
+        .await
+        .expect("flow should be created");
+    flow.flow_id
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn flow_background_lineage_sync_requires_matching_scope() {
+    let state = build_test_runtime_state(false);
+    let foreign_task_id = create_completed_flow_background_task(
+        &state,
+        "principal:victim",
+        "device:victim",
+        Some("console"),
+        json!({ "marker": "victim-result" }),
+    )
+    .await;
+    let foreign_flow_id = create_running_flow_for_background_task(
+        &state,
+        "principal:attacker",
+        "device:attacker",
+        Some("console"),
+        foreign_task_id,
+    )
+    .await;
+    let owned_task_id = create_completed_flow_background_task(
+        &state,
+        "principal:owner",
+        "device:owner",
+        Some("console"),
+        json!({ "marker": "owned-result" }),
+    )
+    .await;
+    let owned_flow_id = create_running_flow_for_background_task(
+        &state,
+        "principal:owner",
+        "device:owner",
+        Some("console"),
+        owned_task_id,
+    )
+    .await;
+
+    let foreign_bundle = state
+        .get_flow_bundle(foreign_flow_id.clone(), 32)
+        .await
+        .expect("foreign bundle lookup should succeed")
+        .expect("foreign flow should exist");
+    let foreign_step =
+        foreign_bundle.steps.first().expect("foreign flow should include a step").clone();
+    let foreign_sync =
+        FlowCoordinator::sync_external_step(&state, &foreign_bundle.flow, &foreign_step)
+            .await
+            .expect("foreign sync should not fail");
+    assert_eq!(foreign_sync, None);
+    let foreign_bundle = state
+        .get_flow_bundle(foreign_flow_id, 32)
+        .await
+        .expect("foreign bundle lookup should succeed")
+        .expect("foreign flow should exist");
+    let foreign_step = foreign_bundle.steps.first().expect("foreign flow should include a step");
+    assert_eq!(foreign_step.state, FlowStepState::Running.as_str());
+    assert_eq!(foreign_step.output_json, None);
+    assert!(
+        !foreign_bundle.events.iter().any(|event| event.event_type == "flow.step.external_sync"),
+        "cross-scope lineage must not emit a sync event"
+    );
+
+    let owned_bundle = state
+        .get_flow_bundle(owned_flow_id.clone(), 32)
+        .await
+        .expect("owned bundle lookup should succeed")
+        .expect("owned flow should exist");
+    let owned_step = owned_bundle.steps.first().expect("owned flow should include a step").clone();
+    let owned_sync = FlowCoordinator::sync_external_step(&state, &owned_bundle.flow, &owned_step)
+        .await
+        .expect("owned sync should not fail");
+    assert_eq!(owned_sync, Some(FlowStepState::Succeeded));
+    let owned_bundle = state
+        .get_flow_bundle(owned_flow_id, 32)
+        .await
+        .expect("owned bundle lookup should succeed")
+        .expect("owned flow should exist");
+    let owned_step = owned_bundle.steps.first().expect("owned flow should include a step");
+    assert_eq!(owned_step.state, FlowStepState::Succeeded.as_str());
+    let owned_output = serde_json::from_str::<Value>(
+        owned_step.output_json.as_deref().expect("owned output should be synced"),
+    )
+    .expect("owned output should remain JSON");
+    assert_eq!(owned_output.get("marker").and_then(Value::as_str), Some("owned-result"));
+    assert!(
+        owned_bundle.events.iter().any(|event| event.event_type == "flow.step.external_sync"),
+        "same-scope lineage should continue to sync"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

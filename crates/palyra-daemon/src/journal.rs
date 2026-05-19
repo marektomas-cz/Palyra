@@ -10716,6 +10716,7 @@ impl JournalStore {
             },
         )?;
         transaction.commit()?;
+        drop(guard);
 
         self.get_flow(request.flow_id.as_str())?
             .ok_or_else(|| JournalError::FlowNotFound { flow_id: request.flow_id.clone() })
@@ -11000,6 +11001,7 @@ impl JournalStore {
             },
         )?;
         transaction.commit()?;
+        drop(guard);
         self.get_flow(request.flow_id.as_str())?
             .ok_or_else(|| JournalError::FlowNotFound { flow_id: request.flow_id.clone() })
     }
@@ -11142,6 +11144,7 @@ impl JournalStore {
             },
         )?;
         transaction.commit()?;
+        drop(guard);
         self.get_flow_step(request.flow_id.as_str(), request.step_id.as_str())?.ok_or_else(|| {
             JournalError::FlowStepNotFound {
                 flow_id: request.flow_id.clone(),
