@@ -2160,8 +2160,8 @@ fn default_execution_posture_for_trigger_kind(
     trigger_kind: RoutineTriggerKind,
 ) -> RoutineExecutionPosture {
     match trigger_kind {
-        RoutineTriggerKind::Schedule => RoutineExecutionPosture::SensitiveTools,
-        RoutineTriggerKind::Hook
+        RoutineTriggerKind::Schedule
+        | RoutineTriggerKind::Hook
         | RoutineTriggerKind::Webhook
         | RoutineTriggerKind::SystemEvent
         | RoutineTriggerKind::Manual => RoutineExecutionPosture::Standard,
@@ -2582,11 +2582,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_execution_config_uses_schedule_fresh_session_default() {
+    fn parse_execution_config_uses_schedule_safe_defaults() {
+        let trigger_kind = RoutineTriggerKind::Schedule;
         let execution = parse_execution_config(
             None,
-            RoutineRunMode::FreshSession,
-            RoutineExecutionPosture::SensitiveTools,
+            super::default_run_mode_for_trigger_kind(trigger_kind),
+            super::default_execution_posture_for_trigger_kind(trigger_kind),
             None,
             None,
             None,
@@ -2595,7 +2596,7 @@ mod tests {
         .expect("execution config should parse");
 
         assert_eq!(execution.run_mode, RoutineRunMode::FreshSession);
-        assert_eq!(execution.execution_posture, RoutineExecutionPosture::SensitiveTools);
+        assert_eq!(execution.execution_posture, RoutineExecutionPosture::Standard);
     }
 
     #[test]
@@ -2629,6 +2630,22 @@ mod tests {
         .expect("execution config should parse");
 
         assert_eq!(execution.execution_posture, RoutineExecutionPosture::Standard);
+    }
+
+    #[test]
+    fn parse_execution_config_preserves_explicit_sensitive_tools_posture() {
+        let execution = parse_execution_config(
+            None,
+            RoutineRunMode::FreshSession,
+            RoutineExecutionPosture::Standard,
+            None,
+            None,
+            None,
+            Some("sensitive_tools"),
+        )
+        .expect("execution config should parse");
+
+        assert_eq!(execution.execution_posture, RoutineExecutionPosture::SensitiveTools);
     }
 
     #[test]
