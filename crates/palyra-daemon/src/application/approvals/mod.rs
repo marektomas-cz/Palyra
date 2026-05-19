@@ -325,20 +325,61 @@ fn workspace_patch_header_paths(patch: &str) -> Vec<String> {
     const PATH_PREFIXES: &[&str] =
         &["*** Add File: ", "*** Update File: ", "*** Delete File: ", "*** Move to: "];
     let mut paths = Vec::new();
-    for line in patch.lines() {
-        let Some(path) = PATH_PREFIXES.iter().find_map(|prefix| line.strip_prefix(prefix)) else {
-            continue;
-        };
-        let normalized = path.trim();
-        if normalized.is_empty() || paths.iter().any(|existing| existing == normalized) {
-            continue;
+    let lines = patch.lines().collect::<Vec<_>>();
+    let mut index = 0usize;
+    while index < lines.len() {
+        let line = lines[index];
+        if let Some(path) = PATH_PREFIXES.iter().find_map(|prefix| line.strip_prefix(prefix)) {
+            push_workspace_patch_path(&mut paths, path);
+        } else if let Some(old_path) = line.strip_prefix("--- ") {
+            if let Some(new_path) =
+                lines.get(index.saturating_add(1)).and_then(|line| line.strip_prefix("+++ "))
+            {
+                push_unified_diff_header_path(&mut paths, old_path, new_path);
+                index = index.saturating_add(1);
+            }
         }
-        paths.push(truncate_with_ellipsis(normalized.to_owned(), 256));
         if paths.len() >= 16 {
             break;
         }
+        index = index.saturating_add(1);
     }
     paths
+}
+
+fn push_unified_diff_header_path(paths: &mut Vec<String>, old_path: &str, new_path: &str) {
+    let old_path = parse_unified_diff_header_path(old_path);
+    let new_path = parse_unified_diff_header_path(new_path);
+    match (old_path, new_path) {
+        (_, Some(path)) => push_workspace_patch_path(paths, path.as_str()),
+        (Some(path), None) => push_workspace_patch_path(paths, path.as_str()),
+        (None, None) => {}
+    }
+}
+
+fn parse_unified_diff_header_path(path: &str) -> Option<String> {
+    let normalized = path.split('\t').next().unwrap_or(path).trim();
+    if normalized == "/dev/null" {
+        return None;
+    }
+    let normalized = normalized
+        .strip_prefix("a/")
+        .or_else(|| normalized.strip_prefix("b/"))
+        .unwrap_or(normalized)
+        .trim();
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized.to_owned())
+    }
+}
+
+fn push_workspace_patch_path(paths: &mut Vec<String>, path: &str) {
+    let normalized = path.trim();
+    if normalized.is_empty() || paths.iter().any(|existing| existing == normalized) {
+        return;
+    }
+    paths.push(truncate_with_ellipsis(normalized.to_owned(), 256));
 }
 
 pub(crate) fn approval_risk_for_tool(
@@ -707,6 +748,33 @@ mod tests {
                 .and_then(|paths| paths.first())
                 .and_then(Value::as_str),
             Some("crates/palyra-daemon/src/lib.rs")
+        );
+    }
+
+    #[test]
+    fn workspace_patch_approval_extracts_unified_diff_paths() {
+        let safety = workspace_patch_approval_context(
+            br#"{"patch":"--- /dev/null\n+++ b/docs/guide.md\n@@ -0,0 +1 @@\n+guide\n--- a/config/default.toml\n+++ /dev/null\n@@ -1 +0,0 @@\n-value\n"}"#,
+        );
+        let paths = safety
+            .get("paths")
+            .and_then(Value::as_array)
+            .expect("workspace safety context should include paths");
+        assert_eq!(
+            paths.iter().filter_map(Value::as_str).collect::<Vec<_>>(),
+            vec!["docs/guide.md", "config/default.toml"]
+        );
+        let hooks = safety
+            .get("policy_hooks")
+            .and_then(Value::as_array)
+            .expect("workspace safety context should include hooks");
+        assert!(
+            hooks.iter().any(|hook| hook.as_str() == Some("docs")),
+            "docs files should trigger docs policy hook"
+        );
+        assert!(
+            hooks.iter().any(|hook| hook.as_str() == Some("config")),
+            "toml files should trigger config policy hook"
         );
     }
 }
