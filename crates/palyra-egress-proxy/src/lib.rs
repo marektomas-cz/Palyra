@@ -12,6 +12,7 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CredentialBindingPlan {
     pub header_name: String,
+    /// Secret source to inject into the header. Egress policy only permits vault-backed refs.
     pub secret_ref: SecretRef,
     pub required: bool,
 }
@@ -64,6 +65,10 @@ pub enum EgressPolicyError {
     InvalidCredentialHeader { header_name: String },
     #[error("credential binding '{header_name}' cannot use exec-backed secret sources")]
     ExecCredentialSourceForbidden { header_name: String },
+    #[error("credential binding '{header_name}' cannot use {source_kind}-backed secret sources")]
+    CredentialSourceForbidden { header_name: String, source_kind: String },
+    #[error("credential binding '{header_name}' has invalid secret reference: {message}")]
+    InvalidCredentialSecretRef { header_name: String, message: String },
 }
 
 #[derive(Debug, Default)]
@@ -187,10 +192,26 @@ fn validate_credential_bindings(
                 header_name: binding.header_name.clone(),
             });
         }
-        if matches!(binding.secret_ref.source, SecretSource::Exec { .. }) {
-            return Err(EgressPolicyError::ExecCredentialSourceForbidden {
-                header_name: binding.header_name.clone(),
-            });
+        match &binding.secret_ref.source {
+            SecretSource::Vault { .. } => {
+                binding.secret_ref.validate().map_err(|error| {
+                    EgressPolicyError::InvalidCredentialSecretRef {
+                        header_name: binding.header_name.clone(),
+                        message: error.to_string(),
+                    }
+                })?;
+            }
+            SecretSource::Exec { .. } => {
+                return Err(EgressPolicyError::ExecCredentialSourceForbidden {
+                    header_name: binding.header_name.clone(),
+                });
+            }
+            source => {
+                return Err(EgressPolicyError::CredentialSourceForbidden {
+                    header_name: binding.header_name.clone(),
+                    source_kind: source.kind().to_owned(),
+                });
+            }
         }
     }
     Ok(())
@@ -259,6 +280,23 @@ mod tests {
         }
     }
 
+    fn env_binding(header_name: &str) -> CredentialBindingPlan {
+        CredentialBindingPlan {
+            header_name: header_name.to_owned(),
+            secret_ref: SecretRef {
+                source: SecretSource::Env { variable: "PALYRA_SECRET".to_owned() },
+                required: true,
+                refresh_policy: SecretRefreshPolicy::OnStartup,
+                snapshot_policy: SecretSnapshotPolicy::FreezeUntilReload,
+                max_bytes: None,
+                exec_timeout_ms: None,
+                redaction_label: None,
+                display_name: None,
+            },
+            required: true,
+        }
+    }
+
     #[test]
     fn egress_proxy_allows_explicit_allowlisted_host() {
         let service = EgressProxyPolicyService;
@@ -296,6 +334,30 @@ mod tests {
             error,
             EgressPolicyError::ExecCredentialSourceForbidden {
                 header_name: "x-palyra-secret".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn egress_proxy_rejects_non_vault_credential_bindings() {
+        let service = EgressProxyPolicyService;
+        let request = EgressProxyRequest {
+            method: "GET",
+            url: "https://93.184.216.34/path",
+            allow_private_targets: false,
+            allowed_hosts: &["93.184.216.34".to_owned()],
+            allowed_dns_suffixes: &[],
+            max_response_bytes: 1024,
+            credential_bindings: &[env_binding("x-palyra-secret")],
+        };
+        let error = service
+            .evaluate_request(&request)
+            .expect_err("env-backed credential binding must be rejected before resolution");
+        assert_eq!(
+            error,
+            EgressPolicyError::CredentialSourceForbidden {
+                header_name: "x-palyra-secret".to_owned(),
+                source_kind: "env".to_owned(),
             }
         );
     }

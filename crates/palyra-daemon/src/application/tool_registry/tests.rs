@@ -129,6 +129,16 @@ fn anthropic_catalog_exposes_http_fetch_with_boolean_additional_properties() {
         http_fetch.provider_schema["properties"]["headers"]["additionalProperties"],
         serde_json::Value::Bool(true)
     );
+    assert_eq!(
+        http_fetch.provider_schema["properties"]["credential_bindings"]["items"]["properties"]
+            ["secret_ref"]["properties"]["kind"]["enum"][0],
+        serde_json::Value::String("vault".to_owned())
+    );
+    assert_eq!(
+        http_fetch.provider_schema["properties"]["credential_bindings"]["items"]
+            ["additionalProperties"],
+        serde_json::Value::Bool(false)
+    );
 
     let payload = snapshot_to_provider_request_value(&snapshot);
     let tools = provider_tools_from_catalog_snapshot(&payload, ToolSchemaDialect::Anthropic);

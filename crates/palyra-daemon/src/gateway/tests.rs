@@ -364,6 +364,7 @@ fn build_test_runtime_state_with_runtime_overrides(
                     "if-modified-since".to_owned(),
                     "user-agent".to_owned(),
                 ],
+                allowed_credential_vault_refs: Vec::new(),
                 cache_enabled: true,
                 cache_ttl_ms: 30_000,
                 max_cache_entries: 256,

@@ -183,6 +183,7 @@ pub struct HttpFetchRuntimeConfig {
     pub max_redirects: usize,
     pub allowed_content_types: Vec<String>,
     pub allowed_request_headers: Vec<String>,
+    pub allowed_credential_vault_refs: Vec<String>,
     pub cache_enabled: bool,
     pub cache_ttl_ms: u64,
     pub max_cache_entries: usize,

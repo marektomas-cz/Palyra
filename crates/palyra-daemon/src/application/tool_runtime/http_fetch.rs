@@ -4,12 +4,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-use palyra_common::{netguard, redaction::redact_url};
+use palyra_common::{netguard, redaction::redact_url, secret_refs::SecretSource};
 use palyra_egress_proxy::{
     CredentialBindingPlan, EgressPolicyVerdict, EgressProxyPolicyService, EgressProxyRequest,
 };
 use palyra_safety::{redact_text_for_export, SafetyContentKind, SafetySourceKind, TrustLabel};
-use palyra_vault::SecretResolver;
+use palyra_vault::{SecretResolver, VaultRef};
 use reqwest::{header::HeaderValue, redirect::Policy, Url};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -157,7 +157,10 @@ pub(crate) async fn execute_http_fetch_tool(
         }
         None => Vec::new(),
     };
-    let credential_bindings = match parse_credential_bindings(&payload) {
+    let credential_bindings = match parse_credential_bindings(
+        &payload,
+        runtime_state.config.http_fetch.allowed_credential_vault_refs.as_slice(),
+    ) {
         Ok(bindings) => bindings,
         Err(error) => {
             return http_fetch_tool_execution_outcome(
@@ -234,8 +237,10 @@ pub(crate) async fn execute_http_fetch_tool(
         );
     }
     let cache_request = payload.get("cache").and_then(Value::as_bool);
+    let credential_bound_fetch = !credential_bindings.is_empty();
     let cache_target_is_loopback = http_fetch_url_targets_loopback(&url);
     let cache_enabled = matches!(method.as_str(), "GET" | "HEAD")
+        && !credential_bound_fetch
         && cache_request.unwrap_or_else(|| {
             runtime_state.config.http_fetch.cache_enabled && !cache_target_is_loopback
         });
@@ -754,18 +759,78 @@ pub(crate) fn validate_resolved_fetch_addresses(
 
 fn parse_credential_bindings(
     payload: &serde_json::Map<String, Value>,
+    allowed_credential_vault_refs: &[String],
 ) -> Result<Vec<CredentialBindingPlan>, String> {
     match payload.get("credential_bindings") {
-        Some(Value::Array(_)) => serde_json::from_value::<Vec<CredentialBindingPlan>>(
-            payload.get("credential_bindings").cloned().unwrap_or(Value::Null),
-        )
-        .map_err(|error| format!("palyra.http.fetch credential_bindings are invalid: {error}")),
+        Some(Value::Array(_)) => {
+            let bindings = serde_json::from_value::<Vec<CredentialBindingPlan>>(
+                payload.get("credential_bindings").cloned().unwrap_or(Value::Null),
+            )
+            .map_err(|error| {
+                format!("palyra.http.fetch credential_bindings are invalid: {error}")
+            })?;
+            if !bindings.is_empty() && allowed_credential_vault_refs.is_empty() {
+                return Err(
+                    "palyra.http.fetch credential_bindings require configured tool_call.http_fetch.allowed_credential_vault_refs"
+                        .to_owned(),
+                );
+            }
+            for binding in &bindings {
+                binding.secret_ref.validate().map_err(|error| {
+                    format!(
+                        "palyra.http.fetch credential binding '{}' has invalid secret_ref: {error}",
+                        binding.header_name
+                    )
+                })?;
+                let normalized_vault_ref =
+                    http_fetch_credential_vault_ref(binding).ok_or_else(|| {
+                        format!(
+                            "palyra.http.fetch credential binding '{}' must use a vault-backed secret_ref",
+                            binding.header_name
+                        )
+                    })??;
+                if !allowed_credential_vault_refs
+                    .iter()
+                    .any(|allowed| allowed == &normalized_vault_ref)
+                {
+                    return Err(format!(
+                        "palyra.http.fetch credential binding '{}' uses vault ref '{}' that is not allowed by tool_call.http_fetch.allowed_credential_vault_refs",
+                        binding.header_name, normalized_vault_ref
+                    ));
+                }
+            }
+            Ok(bindings)
+        }
         Some(_) => {
             Err("palyra.http.fetch credential_bindings must be an array of binding objects"
                 .to_owned())
         }
         None => Ok(Vec::new()),
     }
+}
+
+fn http_fetch_credential_vault_ref(
+    binding: &CredentialBindingPlan,
+) -> Option<Result<String, String>> {
+    let SecretSource::Vault { vault_ref } = &binding.secret_ref.source else {
+        return None;
+    };
+    Some(normalize_http_fetch_credential_vault_ref(
+        binding.header_name.as_str(),
+        vault_ref.as_str(),
+    ))
+}
+
+fn normalize_http_fetch_credential_vault_ref(
+    header_name: &str,
+    vault_ref: &str,
+) -> Result<String, String> {
+    let parsed = VaultRef::parse(vault_ref).map_err(|error| {
+        format!(
+            "palyra.http.fetch credential binding '{header_name}' has invalid vault ref: {error}"
+        )
+    })?;
+    Ok(format!("{}/{}", parsed.scope, parsed.key))
 }
 
 fn evaluate_http_fetch_egress(
@@ -954,7 +1019,9 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::export_http_fetch_body;
+    use serde_json::json;
+
+    use super::{export_http_fetch_body, parse_credential_bindings};
 
     #[test]
     fn http_fetch_export_redacts_sensitive_body_text() {
@@ -973,5 +1040,82 @@ mod tests {
             findings.contains(&"secret_leak.header.authorization"),
             "authorization header leak should be reported"
         );
+    }
+
+    #[test]
+    fn http_fetch_credential_bindings_require_configured_vault_ref_allowlist() {
+        let payload = json!({
+            "credential_bindings": [
+                {
+                    "header_name": "authorization",
+                    "secret_ref": {"kind": "vault", "vault_ref": "global/github_token"},
+                    "required": true
+                }
+            ]
+        });
+        let payload = payload.as_object().expect("payload should be an object");
+
+        let error = parse_credential_bindings(payload, &[])
+            .expect_err("credential binding must fail closed without configured vault refs");
+
+        assert!(error.contains("allowed_credential_vault_refs"));
+    }
+
+    #[test]
+    fn http_fetch_credential_bindings_reject_non_vault_sources() {
+        let payload = json!({
+            "credential_bindings": [
+                {
+                    "header_name": "authorization",
+                    "secret_ref": {"kind": "env", "variable": "PALYRA_SECRET"},
+                    "required": true
+                }
+            ]
+        });
+        let payload = payload.as_object().expect("payload should be an object");
+
+        let error = parse_credential_bindings(payload, &["global/github_token".to_owned()])
+            .expect_err("env-backed credential binding must be rejected");
+
+        assert!(error.contains("must use a vault-backed secret_ref"));
+    }
+
+    #[test]
+    fn http_fetch_credential_bindings_reject_unlisted_vault_refs() {
+        let payload = json!({
+            "credential_bindings": [
+                {
+                    "header_name": "authorization",
+                    "secret_ref": {"kind": "vault", "vault_ref": "global/unlisted_token"},
+                    "required": true
+                }
+            ]
+        });
+        let payload = payload.as_object().expect("payload should be an object");
+
+        let error = parse_credential_bindings(payload, &["global/github_token".to_owned()])
+            .expect_err("unlisted vault ref must be rejected");
+
+        assert!(error.contains("is not allowed"));
+    }
+
+    #[test]
+    fn http_fetch_credential_bindings_accept_allowed_vault_refs() {
+        let payload = json!({
+            "credential_bindings": [
+                {
+                    "header_name": "authorization",
+                    "secret_ref": {"kind": "vault", "vault_ref": "global/github_token"},
+                    "required": true
+                }
+            ]
+        });
+        let payload = payload.as_object().expect("payload should be an object");
+
+        let bindings = parse_credential_bindings(payload, &["global/github_token".to_owned()])
+            .expect("allowlisted vault ref should parse");
+
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].header_name, "authorization");
     }
 }

@@ -139,6 +139,8 @@ const PROCESS_RUNNER_CAPABILITIES: &[ToolCapability] = &[ToolCapability::Process
 const WORKSPACE_FILE_READ_CAPABILITIES: &[ToolCapability] = &[ToolCapability::FilesystemRead];
 const WORKSPACE_PATCH_CAPABILITIES: &[ToolCapability] = &[ToolCapability::FilesystemWrite];
 const NETWORK_TOOL_CAPABILITIES: &[ToolCapability] = &[ToolCapability::Network];
+const HTTP_FETCH_TOOL_CAPABILITIES: &[ToolCapability] =
+    &[ToolCapability::Network, ToolCapability::SecretsRead];
 const ARTIFACT_READ_CAPABILITIES: &[ToolCapability] = &[ToolCapability::ArtifactsRead];
 const WASM_PLUGIN_CAPABILITIES: &[ToolCapability] =
     &[ToolCapability::Network, ToolCapability::SecretsRead, ToolCapability::FilesystemWrite];
@@ -333,9 +335,10 @@ pub fn tool_metadata(tool_name: &str) -> Option<ToolMetadata> {
             capabilities: ARTIFACT_READ_CAPABILITIES,
             default_sensitive: false,
         }),
-        "palyra.http.fetch" => {
-            Some(ToolMetadata { capabilities: NETWORK_TOOL_CAPABILITIES, default_sensitive: true })
-        }
+        "palyra.http.fetch" => Some(ToolMetadata {
+            capabilities: HTTP_FETCH_TOOL_CAPABILITIES,
+            default_sensitive: true,
+        }),
         "palyra.process.run" => Some(ToolMetadata {
             capabilities: PROCESS_RUNNER_CAPABILITIES,
             default_sensitive: true,
@@ -1597,6 +1600,14 @@ mod tests {
         assert_eq!(metadata.capabilities, &[ToolCapability::ArtifactsRead]);
         assert!(!metadata.default_sensitive);
         assert!(!tool_requires_approval("palyra.artifact.read"));
+    }
+
+    #[test]
+    fn http_fetch_tool_exposes_network_and_secret_read_capabilities() {
+        let metadata = tool_metadata("palyra.http.fetch").expect("http fetch metadata");
+        assert_eq!(metadata.capabilities, &[ToolCapability::Network, ToolCapability::SecretsRead]);
+        assert!(metadata.default_sensitive);
+        assert!(tool_requires_approval("palyra.http.fetch"));
     }
 
     #[test]

@@ -484,6 +484,7 @@ pub struct HttpFetchConfig {
     pub max_redirects: u32,
     pub allowed_content_types: Vec<String>,
     pub allowed_request_headers: Vec<String>,
+    pub allowed_credential_vault_refs: Vec<String>,
     pub cache_enabled: bool,
     pub cache_ttl_ms: u64,
     pub max_cache_entries: u64,
@@ -730,6 +731,7 @@ impl Default for HttpFetchConfig {
                 .iter()
                 .map(|value| (*value).to_owned())
                 .collect(),
+            allowed_credential_vault_refs: Vec::new(),
             cache_enabled: DEFAULT_HTTP_FETCH_CACHE_ENABLED,
             cache_ttl_ms: DEFAULT_HTTP_FETCH_CACHE_TTL_MS,
             max_cache_entries: DEFAULT_HTTP_FETCH_MAX_CACHE_ENTRIES,

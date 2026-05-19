@@ -415,7 +415,44 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
                     ),
                     (
                         "credential_bindings",
-                        json!({"type":"array","items":{"type":"object","properties":{},"additionalProperties":true}}),
+                        json!({
+                            "type":"array",
+                            "maxItems":8,
+                            "items":{
+                                "type":"object",
+                                "required":["header_name","secret_ref"],
+                                "additionalProperties":false,
+                                "properties":{
+                                    "header_name":{
+                                        "type":"string",
+                                        "description":"Credential header to inject. Runtime allows authorization, x-*, *-token, *-api-key, and cookie."
+                                    },
+                                    "secret_ref":{
+                                        "type":"object",
+                                        "required":["kind","vault_ref"],
+                                        "additionalProperties":false,
+                                        "properties":{
+                                            "kind":{
+                                                "type":"string",
+                                                "enum":["vault"],
+                                                "description":"Only configured vault-backed secret refs are accepted for HTTP fetch."
+                                            },
+                                            "vault_ref":{
+                                                "type":"string",
+                                                "description":"Vault ref that must exactly match tool_call.http_fetch.allowed_credential_vault_refs."
+                                            },
+                                            "required":{"type":"boolean"},
+                                            "refresh_policy":{"type":"string","enum":["on_startup","on_reload","per_run","per_use"]},
+                                            "snapshot_policy":{"type":"string","enum":["freeze_until_reload","refresh_per_run","refresh_per_use"]},
+                                            "max_bytes":{"type":"integer","minimum":1},
+                                            "redaction_label":{"type":"string","maxLength":128},
+                                            "display_name":{"type":"string","maxLength":128}
+                                        }
+                                    },
+                                    "required":{"type":"boolean"}
+                                }
+                            }
+                        }),
                     ),
                 ],
                 false,

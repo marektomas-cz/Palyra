@@ -862,6 +862,15 @@ pub fn load_config() -> Result<LoadedConfig> {
                         "tool_call.http_fetch.allowed_request_headers",
                     )?;
                 }
+                if let Some(allowed_credential_vault_refs) =
+                    file_http_fetch.allowed_credential_vault_refs
+                {
+                    tool_call.http_fetch.allowed_credential_vault_refs =
+                        parse_exact_vault_ref_allowlist(
+                            allowed_credential_vault_refs.join(",").as_str(),
+                            "tool_call.http_fetch.allowed_credential_vault_refs",
+                        )?;
+                }
                 if let Some(cache_enabled) = file_http_fetch.cache_enabled {
                     tool_call.http_fetch.cache_enabled = cache_enabled;
                 }
@@ -1575,6 +1584,15 @@ pub fn load_config() -> Result<LoadedConfig> {
             "PALYRA_HTTP_FETCH_ALLOWED_HEADERS",
         )?;
         source.push_str(" +env(PALYRA_HTTP_FETCH_ALLOWED_HEADERS)");
+    }
+    if let Ok(allowed_credential_vault_refs) =
+        env::var("PALYRA_HTTP_FETCH_ALLOWED_CREDENTIAL_VAULT_REFS")
+    {
+        tool_call.http_fetch.allowed_credential_vault_refs = parse_exact_vault_ref_allowlist(
+            allowed_credential_vault_refs.as_str(),
+            "PALYRA_HTTP_FETCH_ALLOWED_CREDENTIAL_VAULT_REFS",
+        )?;
+        source.push_str(" +env(PALYRA_HTTP_FETCH_ALLOWED_CREDENTIAL_VAULT_REFS)");
     }
     if let Ok(cache_enabled) = env::var("PALYRA_HTTP_FETCH_CACHE_ENABLED") {
         tool_call.http_fetch.cache_enabled = cache_enabled
@@ -3016,6 +3034,22 @@ fn parse_vault_ref_allowlist(raw: &str, source_name: &str) -> Result<Vec<String>
     Ok(refs)
 }
 
+fn parse_exact_vault_ref_allowlist(raw: &str, source_name: &str) -> Result<Vec<String>> {
+    let mut refs = Vec::new();
+    let mut seen_refs = HashSet::new();
+    for candidate in raw.split(',').map(str::trim).filter(|value| !value.is_empty()) {
+        let parsed = VaultRef::parse(candidate).map_err(|error| {
+            anyhow::anyhow!("{source_name} contains invalid vault ref '{candidate}': {error}")
+        })?;
+        let normalized = format!("{}/{}", parsed.scope, parsed.key);
+        push_unique_string(&mut refs, &mut seen_refs, normalized);
+    }
+    if refs.is_empty() {
+        anyhow::bail!("{source_name} must include at least one <scope>/<key> entry");
+    }
+    Ok(refs)
+}
+
 fn parse_tool_allowlist(raw: &str, source_name: &str) -> Result<Vec<String>> {
     parse_identifier_allowlist(raw, source_name, "tool name")
 }
@@ -3610,23 +3644,23 @@ mod tests {
         apply_feature_rollout_env_override, load_config, parse_broadcast_strategy,
         parse_browser_service_endpoint, parse_canvas_host_public_base_url,
         parse_content_type_allowlist, parse_cron_timezone_mode, parse_default_memory_ttl_ms,
-        parse_direct_message_policy, parse_dns_suffix_allowlist, parse_host_allowlist,
-        parse_http_header_allowlist, parse_journal_db_path, parse_memory_retention_vacuum_schedule,
-        parse_model_provider_auth_provider_kind, parse_model_provider_registry_entry,
-        parse_model_provider_registry_model, parse_openai_base_url, parse_openai_embeddings_dims,
-        parse_optional_auth_profile_id, parse_optional_browser_state_dir,
-        parse_optional_openai_embeddings_model, parse_optional_sha256_digest_field,
-        parse_optional_vault_ref_field, parse_positive_u32, parse_positive_usize,
-        parse_process_executable_allowlist, parse_process_runner_egress_enforcement_mode,
-        parse_process_runner_tier, parse_root_file_config, parse_storage_prefix_allowlist,
-        parse_tool_allowlist, parse_vault_dir, parse_vault_ref_allowlist,
-        validate_runtime_preview_config, AdminConfig, AuxiliaryExecutorConfig,
-        BrowserServiceConfig, CanvasHostConfig, ChannelRouterConfig, CronConfig,
-        DeliveryArbitrationConfig, DeploymentConfig, DeploymentMode, FlowOrchestrationConfig,
-        GatewayBindProfile, GatewayConfig, GatewayTlsConfig, HttpFetchConfig, IdentityConfig,
-        MemoryConfig, ModelProviderConfig, NetworkedWorkersConfig, OrchestratorConfig,
-        PruningPolicyMatrixConfig, ReplayCaptureConfig, RetrievalDualPathConfig,
-        SessionQueuePolicyConfig, StorageConfig, ToolCallConfig,
+        parse_direct_message_policy, parse_dns_suffix_allowlist, parse_exact_vault_ref_allowlist,
+        parse_host_allowlist, parse_http_header_allowlist, parse_journal_db_path,
+        parse_memory_retention_vacuum_schedule, parse_model_provider_auth_provider_kind,
+        parse_model_provider_registry_entry, parse_model_provider_registry_model,
+        parse_openai_base_url, parse_openai_embeddings_dims, parse_optional_auth_profile_id,
+        parse_optional_browser_state_dir, parse_optional_openai_embeddings_model,
+        parse_optional_sha256_digest_field, parse_optional_vault_ref_field, parse_positive_u32,
+        parse_positive_usize, parse_process_executable_allowlist,
+        parse_process_runner_egress_enforcement_mode, parse_process_runner_tier,
+        parse_root_file_config, parse_storage_prefix_allowlist, parse_tool_allowlist,
+        parse_vault_dir, parse_vault_ref_allowlist, validate_runtime_preview_config, AdminConfig,
+        AuxiliaryExecutorConfig, BrowserServiceConfig, CanvasHostConfig, ChannelRouterConfig,
+        CronConfig, DeliveryArbitrationConfig, DeploymentConfig, DeploymentMode,
+        FlowOrchestrationConfig, GatewayBindProfile, GatewayConfig, GatewayTlsConfig,
+        HttpFetchConfig, IdentityConfig, MemoryConfig, ModelProviderConfig, NetworkedWorkersConfig,
+        OrchestratorConfig, PruningPolicyMatrixConfig, ReplayCaptureConfig,
+        RetrievalDualPathConfig, SessionQueuePolicyConfig, StorageConfig, ToolCallConfig,
     };
     use crate::channel_router::{BroadcastStrategy, DirectMessagePolicy};
     use crate::model_provider::{
@@ -4350,6 +4384,10 @@ mod tests {
             "http fetch default content-type allowlist should include JavaScript assets"
         );
         assert!(
+            config.http_fetch.allowed_credential_vault_refs.is_empty(),
+            "http fetch credential injection must default to no vault refs until explicitly configured"
+        );
+        assert!(
             !config.browser_service.enabled,
             "browser service broker must default to explicit opt-in"
         );
@@ -4368,6 +4406,7 @@ mod tests {
         assert!(config.cache_enabled);
         assert_eq!(config.cache_ttl_ms, 30_000);
         assert_eq!(config.max_cache_entries, 256);
+        assert!(config.allowed_credential_vault_refs.is_empty());
     }
 
     #[test]
@@ -4468,6 +4507,7 @@ mod tests {
             max_response_bytes = 12345
             allowed_content_types = ["application/json"]
             allowed_request_headers = ["accept"]
+            allowed_credential_vault_refs = ["global/github_token"]
             cache_enabled = false
 
             [tool_call.browser_service]
@@ -4488,6 +4528,10 @@ mod tests {
         assert_eq!(http_fetch.max_response_bytes, Some(12_345));
         assert_eq!(http_fetch.allowed_content_types, Some(vec!["application/json".to_owned()]));
         assert_eq!(http_fetch.allowed_request_headers, Some(vec!["accept".to_owned()]));
+        assert_eq!(
+            http_fetch.allowed_credential_vault_refs,
+            Some(vec!["global/github_token".to_owned()])
+        );
         assert_eq!(http_fetch.cache_enabled, Some(false));
 
         let browser_service =
@@ -4617,6 +4661,39 @@ state_key_vault_ref = "global/browser_state_key"
         assert!(
             loaded.tool_call.browser_service.state_key_secret_ref.is_none(),
             "legacy browser state-key vault ref should not be converted during config loading and then self-conflict"
+        );
+    }
+
+    #[test]
+    fn load_config_accepts_http_fetch_credential_vault_ref_allowlist() {
+        let _guard = env_lock().lock().expect("env lock poisoned");
+        let tempdir = tempfile::tempdir().expect("temporary directory should be created");
+        let config_path = tempdir.path().join("palyra.toml");
+        std::fs::write(
+            config_path.as_path(),
+            r#"
+version = 1
+
+[admin]
+require_auth = false
+
+[tool_call.http_fetch]
+allowed_credential_vault_refs = ["global/github_token", "principal:UserA/api_token"]
+"#,
+        )
+        .expect("http fetch credential allowlist config should be written");
+
+        let _config = ScopedEnvVar::set(
+            "PALYRA_CONFIG",
+            config_path.to_str().expect("test path should be UTF-8"),
+        );
+        let _allowlist_env = ScopedEnvVar::unset("PALYRA_HTTP_FETCH_ALLOWED_CREDENTIAL_VAULT_REFS");
+
+        let loaded = super::load_config().expect("http fetch credential allowlist should load");
+
+        assert_eq!(
+            loaded.tool_call.http_fetch.allowed_credential_vault_refs,
+            vec!["global/github_token".to_owned(), "principal:UserA/api_token".to_owned()]
         );
     }
 
@@ -5221,6 +5298,19 @@ state_dir = "browserd-state"
             "gateway.vault_get_approval_required_refs",
         );
         assert!(result.is_err(), "vault ref allowlist must reject invalid entries");
+    }
+
+    #[test]
+    fn parse_exact_vault_ref_allowlist_preserves_scope_case() {
+        let parsed = parse_exact_vault_ref_allowlist(
+            "principal:UserA/api_token,principal:UserA/api_token,global/github_token",
+            "tool_call.http_fetch.allowed_credential_vault_refs",
+        )
+        .expect("exact vault ref allowlist should parse");
+        assert_eq!(
+            parsed,
+            vec!["principal:UserA/api_token".to_owned(), "global/github_token".to_owned()]
+        );
     }
 
     #[test]

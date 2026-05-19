@@ -477,6 +477,7 @@ pub struct FileHttpFetchConfig {
     pub max_redirects: Option<u32>,
     pub allowed_content_types: Option<Vec<String>>,
     pub allowed_request_headers: Option<Vec<String>>,
+    pub allowed_credential_vault_refs: Option<Vec<String>>,
     pub cache_enabled: Option<bool>,
     pub cache_ttl_ms: Option<u64>,
     pub max_cache_entries: Option<u64>,
