@@ -8,8 +8,8 @@ use super::{
     store_dns_nxdomain_cache, update_profile_state_metadata,
     validate_restored_snapshot_against_profile, validate_target_url, validate_target_url_blocking,
     Args, BrowserActionLogEntryInternal, BrowserEngineMode, BrowserProfileRecord,
-    BrowserRuntimeState, BrowserServiceImpl, BrowserTabRecord, ChromiumSessionProxy,
-    DnsValidationCache, NetworkLogEntryInternal, NetworkLogHeaderInternal,
+    BrowserRuntimeState, BrowserServiceImpl, BrowserTabRecord, ChromiumPrivateTargetPolicy,
+    ChromiumSessionProxy, DnsValidationCache, NetworkLogEntryInternal, NetworkLogHeaderInternal,
     PersistedSessionSnapshot, PersistedStateStore, SessionPermissionsInternal,
     AUTHORIZATION_HEADER, CANONICAL_PROTOCOL_MAJOR, CHROMIUM_NEW_TAB_RETRY_DELAY_MS,
     CHROMIUM_PATH_ENV, DEFAULT_CHROMIUM_STARTUP_TIMEOUT_MS, DEFAULT_GRPC_PORT,
@@ -743,7 +743,7 @@ async fn chromium_session_proxy_blocks_private_targets_without_opt_in() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn chromium_session_proxy_allows_private_targets_after_runtime_opt_in() {
+async fn chromium_session_proxy_allows_private_targets_after_session_opt_in() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("fixture listener should bind on loopback");
@@ -760,13 +760,9 @@ async fn chromium_session_proxy_allows_private_targets_after_runtime_opt_in() {
         inbound.write_all(b"pong").await.expect("fixture server should write tunneled response");
     });
 
-    let proxy = ChromiumSessionProxy::spawn(false)
+    let proxy = ChromiumSessionProxy::spawn(true)
         .await
         .expect("proxy should start for private-target opt-in policy");
-    assert!(
-        !proxy.set_allow_private_targets(true),
-        "runtime opt-in should report the previous deny policy"
-    );
     let proxy_addr = proxy
         .proxy_uri
         .strip_prefix("socks5://")
@@ -813,6 +809,106 @@ async fn chromium_session_proxy_allows_private_targets_after_runtime_opt_in() {
     assert_eq!(&response, b"pong");
 
     fixture_server.await.expect("fixture server task should complete successfully");
+}
+
+#[test]
+fn chromium_private_target_policy_scopes_request_override_to_exact_target() {
+    let policy = Arc::new(ChromiumPrivateTargetPolicy::new(false));
+    assert!(
+        !policy.allows_host_port("127.0.0.1", 7143),
+        "private target should start denied without a scoped override"
+    );
+
+    let scoped = policy
+        .scoped_url_allowance("http://127.0.0.1:7143/status")
+        .expect("scoped private-target allowance should parse")
+        .expect("network URL should create scoped allowance");
+    assert!(
+        policy.allows_url("http://127.0.0.1:7143/next"),
+        "same host and port should be allowed during the scoped override"
+    );
+    assert!(
+        policy.allows_host_port("127.0.0.1", 7143),
+        "SOCKS5 proxy should allow the scoped target"
+    );
+    assert!(
+        !policy.allows_host_port("127.0.0.1", 7144),
+        "SOCKS5 proxy should not inherit the override for another port"
+    );
+
+    drop(scoped);
+    assert!(
+        !policy.allows_host_port("127.0.0.1", 7143),
+        "dropping the scoped guard should revoke the allowance"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn chromium_session_proxy_scoped_private_override_rejects_unrelated_target() {
+    let allowed_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("allowed fixture listener should bind on loopback");
+    let allowed_port =
+        allowed_listener.local_addr().expect("allowed listener addr should resolve").port();
+    let blocked_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("blocked fixture listener should bind on loopback");
+    let blocked_port =
+        blocked_listener.local_addr().expect("blocked listener addr should resolve").port();
+    assert_ne!(allowed_port, blocked_port, "fixture ports should differ");
+
+    let proxy = ChromiumSessionProxy::spawn(false)
+        .await
+        .expect("proxy should start for scoped private-target policy");
+    let scoped_url = format!("http://127.0.0.1:{allowed_port}/");
+    let _scoped = proxy
+        .private_target_policy()
+        .scoped_url_allowance(scoped_url.as_str())
+        .expect("scoped private-target allowance should parse")
+        .expect("network URL should create scoped allowance");
+
+    let proxy_addr = proxy
+        .proxy_uri
+        .strip_prefix("socks5://")
+        .expect("proxy uri should use socks5 scheme")
+        .to_owned();
+    let mut stream = tokio::net::TcpStream::connect(proxy_addr.as_str())
+        .await
+        .expect("test client should connect to SOCKS5 proxy");
+
+    stream.write_all(&[0x05, 0x01, 0x00]).await.expect("proxy handshake should write greeting");
+    let mut method_reply = [0_u8; 2];
+    stream
+        .read_exact(&mut method_reply)
+        .await
+        .expect("proxy handshake should read selected method");
+    assert_eq!(method_reply, [0x05, 0x00], "proxy should accept SOCKS5 no-auth handshake");
+
+    let blocked_port_bytes = blocked_port.to_be_bytes();
+    stream
+        .write_all(&[
+            0x05,
+            0x01,
+            0x00,
+            0x01,
+            127,
+            0,
+            0,
+            1,
+            blocked_port_bytes[0],
+            blocked_port_bytes[1],
+        ])
+        .await
+        .expect("proxy request should send CONNECT target");
+    let mut connect_reply = [0_u8; 10];
+    stream
+        .read_exact(&mut connect_reply)
+        .await
+        .expect("proxy should return CONNECT policy decision");
+    assert_eq!(
+        connect_reply[1], 0x02,
+        "scoped override for one private target must not allow another target"
+    );
 }
 
 #[test]
