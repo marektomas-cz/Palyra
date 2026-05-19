@@ -1308,12 +1308,49 @@ fn console_mobile_voice_note_and_approval_endpoints_enforce_csrf_and_queue_into_
         "mobile voice-note should fail closed until transcript review is confirmed"
     );
 
+    let cross_device_voice_note = client
+        .post(format!("http://127.0.0.1:{admin_port}/console/v1/mobile/voice-notes"))
+        .header("Cookie", mobile_cookie.clone())
+        .header("x-palyra-csrf-token", mobile_csrf.clone())
+        .json(&serde_json::json!({
+            "session_id": desktop_session_id,
+            "transcript_text": "Ship it after CI is green.",
+            "transcript_reviewed": true,
+            "duration_ms": 4200
+        }))
+        .send()
+        .context("failed to call cross-device mobile voice-note")?;
+    assert_eq!(
+        cross_device_voice_note.status().as_u16(),
+        412,
+        "mobile voice-note must not queue execution into another device session"
+    );
+
+    let created_mobile_session = client
+        .post(format!("http://127.0.0.1:{admin_port}/console/v1/chat/sessions"))
+        .header("Cookie", mobile_cookie.clone())
+        .header("x-palyra-csrf-token", mobile_csrf.clone())
+        .json(&serde_json::json!({
+            "session_label": "mobile-voice-target",
+        }))
+        .send()
+        .context("failed to create mobile voice target session")?
+        .error_for_status()
+        .context("mobile voice target session create returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse mobile voice target session json")?;
+    let mobile_session_id = created_mobile_session
+        .get("session")
+        .and_then(|value| value.get("session_id"))
+        .and_then(Value::as_str)
+        .context("mobile voice target session id should be present")?;
+
     let queued_voice_note = client
         .post(format!("http://127.0.0.1:{admin_port}/console/v1/mobile/voice-notes"))
         .header("Cookie", mobile_cookie)
         .header("x-palyra-csrf-token", mobile_csrf)
         .json(&serde_json::json!({
-            "session_id": desktop_session_id,
+            "session_id": mobile_session_id,
             "transcript_text": "Ship it after CI is green.",
             "transcript_reviewed": true,
             "duration_ms": 4200
@@ -1334,16 +1371,24 @@ fn console_mobile_voice_note_and_approval_endpoints_enforce_csrf_and_queue_into_
             .get("session")
             .and_then(|value| value.get("session_id"))
             .and_then(Value::as_str),
-        Some(desktop_session_id),
-        "mobile voice-note should target the selected cross-device session"
+        Some(mobile_session_id),
+        "mobile voice-note should target the selected same-device session"
     );
     assert_eq!(
         queued_voice_note
             .get("task")
             .and_then(|value| value.get("device_id"))
             .and_then(Value::as_str),
-        Some("01ARZ3NDEKTSV4RRFFQ69G5FB2"),
-        "mobile voice-note queueing should reuse the target session device scope"
+        Some("01ARZ3NDEKTSV4RRFFQ69G5FB3"),
+        "mobile voice-note queueing should preserve the authenticated mobile device scope"
+    );
+    assert_eq!(
+        queued_voice_note
+            .get("task")
+            .and_then(|value| value.get("channel"))
+            .and_then(Value::as_str),
+        Some("mobile"),
+        "mobile voice-note queueing should preserve the authenticated mobile channel scope"
     );
 
     Ok(())

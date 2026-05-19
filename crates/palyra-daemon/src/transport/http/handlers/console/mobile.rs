@@ -461,7 +461,7 @@ pub(crate) async fn console_mobile_voice_note_create_handler(
         payload.session_id.as_deref().map(str::trim).filter(|value| !value.is_empty())
     {
         queued_for_existing_session = true;
-        load_mobile_session(&state, session.context.principal.as_str(), session_id).await?
+        load_mobile_execution_session(&state, &session.context, session_id).await?
     } else {
         state
             .runtime
@@ -494,8 +494,8 @@ pub(crate) async fn console_mobile_voice_note_create_handler(
             target_run_id: None,
             queued_input_id: None,
             owner_principal: session.context.principal.clone(),
-            device_id: target_session.device_id.clone(),
-            channel: target_session.channel.clone(),
+            device_id: session.context.device_id.clone(),
+            channel: session.context.channel.clone(),
             state: AuxiliaryTaskState::Queued.as_str().to_owned(),
             priority: 1,
             max_attempts: 3,
@@ -677,6 +677,33 @@ async fn load_mobile_session(
         )));
     }
     Ok(session)
+}
+
+async fn load_mobile_execution_session(
+    state: &AppState,
+    context: &gateway::RequestContext,
+    session_id: &str,
+) -> Result<journal::OrchestratorSessionRecord, Response> {
+    validate_canonical_id(session_id).map_err(|_| {
+        runtime_status_response(tonic::Status::invalid_argument(
+            "session_id must be a canonical ULID",
+        ))
+    })?;
+    Ok(state
+        .runtime
+        .resolve_orchestrator_session(journal::OrchestratorSessionResolveRequest {
+            session_id: Some(session_id.to_owned()),
+            session_key: None,
+            session_label: None,
+            principal: context.principal.clone(),
+            device_id: context.device_id.clone(),
+            channel: context.channel.clone(),
+            require_existing: true,
+            reset_session: false,
+        })
+        .await
+        .map_err(runtime_status_response)?
+        .session)
 }
 
 fn build_mobile_session_view(
