@@ -2239,6 +2239,7 @@ impl RegistryBackedModelProvider {
             "instruction_hash": request.instruction_hash.as_deref(),
             "context_trace_id": request.context_trace_id.as_deref(),
             "budget_profile": request.budget_profile.as_deref(),
+            "max_output_tokens": request.max_output_tokens,
             "vision_inputs": &request.vision_inputs,
         });
         crate::sha256_hex(
@@ -5389,6 +5390,7 @@ mod tests {
             instruction_hash: Some("instruction-sha256".to_owned()),
             context_trace_id: Some("ctx-01".to_owned()),
             budget_profile: Some("interactive-default".to_owned()),
+            max_output_tokens: Some(6_144),
         };
 
         let openai_payload =
@@ -5401,6 +5403,7 @@ mod tests {
         let anthropic_payload =
             AnthropicCompatibleChatAdapter.request_payload(&request, "claude-contract-test");
         assert_eq!(anthropic_payload["model"], "claude-contract-test");
+        assert_eq!(anthropic_payload["max_tokens"], 6_144);
         assert_eq!(anthropic_payload["messages"][0]["role"], "user");
         assert!(
             anthropic_payload["system"].as_str().unwrap_or_default().contains("You are concise."),
@@ -5435,6 +5438,7 @@ mod tests {
             instruction_hash: None,
             context_trace_id: None,
             budget_profile: None,
+            max_output_tokens: None,
         };
 
         let openai_payload =

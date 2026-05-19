@@ -42,7 +42,7 @@ use crate::{
 
 const DEFAULT_CONTEXT_WINDOW_TOKENS: u64 = 8_192;
 const MIN_CONTEXT_WINDOW_TOKENS: u64 = 2_048;
-const MAX_RESERVED_COMPLETION_TOKENS: u64 = 2_048;
+const MAX_RESERVED_COMPLETION_TOKENS: u64 = 8_192;
 const MIN_RESERVED_COMPLETION_TOKENS: u64 = 512;
 const RESERVED_TOOL_RESULT_TOKENS: u64 = 512;
 const PROVIDER_OVERHEAD_TOKENS: u64 = 192;
@@ -685,6 +685,7 @@ pub(crate) async fn prepare_model_provider_input_with_context_engine(
         instruction_hash: Some(compiled_instructions.hash),
         context_trace_id: Some(assembled.explain.trace_id),
         budget_profile: Some(assembled.explain.budget.profile_id),
+        max_output_tokens: Some(assembled.explain.budget.reserved_completion_tokens),
     })
 }
 

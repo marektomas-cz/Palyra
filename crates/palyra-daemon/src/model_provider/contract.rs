@@ -163,6 +163,8 @@ pub struct ProviderRequest {
     pub context_trace_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub budget_profile: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u64>,
 }
 
 impl ProviderRequest {
@@ -184,6 +186,7 @@ impl ProviderRequest {
             instruction_hash: None,
             context_trace_id: None,
             budget_profile: None,
+            max_output_tokens: None,
         }
     }
 

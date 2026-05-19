@@ -746,6 +746,7 @@ pub(crate) async fn process_run_stream_message(
     base_provider_request.instruction_hash = prepared_provider_input.instruction_hash.clone();
     base_provider_request.context_trace_id = prepared_provider_input.context_trace_id.clone();
     base_provider_request.budget_profile = prepared_provider_input.budget_profile.clone();
+    base_provider_request.max_output_tokens = prepared_provider_input.max_output_tokens;
     if !prepared_provider_input.provider_messages.is_empty() {
         let mut messages = prepared_provider_input.provider_messages.clone();
         messages.push(ProviderMessage::user_text(base_provider_request.input_text.clone()));
@@ -848,6 +849,7 @@ pub(crate) async fn process_run_stream_message(
         provider_request.instruction_hash = base_provider_request.instruction_hash.clone();
         provider_request.context_trace_id = base_provider_request.context_trace_id.clone();
         provider_request.budget_profile = base_provider_request.budget_profile.clone();
+        provider_request.max_output_tokens = base_provider_request.max_output_tokens;
         let provider_response = match execute_run_stream_provider_request(
             sender,
             runtime_state,

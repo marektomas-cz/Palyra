@@ -66,6 +66,7 @@ pub(crate) struct PreparedModelProviderInput {
     pub(crate) instruction_hash: Option<String>,
     pub(crate) context_trace_id: Option<String>,
     pub(crate) budget_profile: Option<String>,
+    pub(crate) max_output_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -930,6 +931,7 @@ async fn prepare_model_provider_input_legacy(
             instruction_hash: None,
             context_trace_id: None,
             budget_profile: None,
+            max_output_tokens: None,
         });
     }
     let provider_input_text = match build_context_reference_prompt(
@@ -1006,6 +1008,7 @@ async fn prepare_model_provider_input_legacy(
         instruction_hash: None,
         context_trace_id: None,
         budget_profile: None,
+        max_output_tokens: None,
     })
 }
 

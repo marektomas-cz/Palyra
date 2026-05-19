@@ -7,6 +7,8 @@ use super::{
     ProviderRequest,
 };
 
+const DEFAULT_ANTHROPIC_MAX_OUTPUT_TOKENS: u64 = 4_096;
+
 fn build_openai_message_content(
     message: &ProviderMessage,
     extra_vision_inputs: &[ProviderImageInput],
@@ -211,9 +213,11 @@ pub(super) struct AnthropicCompatibleChatAdapter;
 impl ProviderChatAdapter for AnthropicCompatibleChatAdapter {
     fn request_payload(&self, request: &ProviderRequest, model_name: &str) -> Value {
         let (messages, system) = build_anthropic_messages_and_system(request);
+        let max_tokens =
+            request.max_output_tokens.unwrap_or(DEFAULT_ANTHROPIC_MAX_OUTPUT_TOKENS).max(1);
         let mut body = json!({
             "model": model_name,
-            "max_tokens": 2048,
+            "max_tokens": max_tokens,
             "messages": messages,
         });
         if let Some(snapshot) = request.tool_catalog_snapshot.as_ref() {

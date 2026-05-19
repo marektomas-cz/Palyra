@@ -478,6 +478,7 @@ pub(crate) async fn handle_routed_route_message(
     provider_request.instruction_hash = prepared_provider_input.instruction_hash.clone();
     provider_request.context_trace_id = prepared_provider_input.context_trace_id.clone();
     provider_request.budget_profile = prepared_provider_input.budget_profile.clone();
+    provider_request.max_output_tokens = prepared_provider_input.max_output_tokens;
     if !prepared_provider_input.provider_messages.is_empty() {
         let mut messages = prepared_provider_input.provider_messages.clone();
         messages.push(ProviderMessage::user_text(provider_request.input_text.clone()));
