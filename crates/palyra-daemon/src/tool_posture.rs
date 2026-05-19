@@ -696,7 +696,7 @@ pub const TOOL_CATALOG: &[ToolCatalogEntry] = &[
         title: "Memory recall",
         description: "Plans bounded recall across memory, workspace, and session evidence.",
         category: "memory",
-        risk_level: ApprovalRiskLevel::Low,
+        risk_level: ApprovalRiskLevel::High,
         recommend_always_allow: false,
     },
     ToolCatalogEntry {
@@ -956,7 +956,7 @@ const PRESET_CONSERVATIVE_CODING: &[ToolPosturePresetAssignment] = &[
     },
     ToolPosturePresetAssignment {
         tool_name: "palyra.memory.recall",
-        state: ToolPostureState::AlwaysAllow,
+        state: ToolPostureState::AskEachTime,
     },
     ToolPosturePresetAssignment {
         tool_name: "palyra.process.run",
@@ -991,7 +991,7 @@ const PRESET_BROWSER_ASSIST: &[ToolPosturePresetAssignment] = &[
     },
     ToolPosturePresetAssignment {
         tool_name: "palyra.memory.recall",
-        state: ToolPostureState::AlwaysAllow,
+        state: ToolPostureState::AskEachTime,
     },
     ToolPosturePresetAssignment {
         tool_name: "palyra.browser.title",
@@ -1030,7 +1030,7 @@ const PRESET_READ_MOSTLY_RESEARCH: &[ToolPosturePresetAssignment] = &[
     },
     ToolPosturePresetAssignment {
         tool_name: "palyra.memory.recall",
-        state: ToolPostureState::AlwaysAllow,
+        state: ToolPostureState::AskEachTime,
     },
     ToolPosturePresetAssignment {
         tool_name: "palyra.http.fetch",
@@ -1069,7 +1069,7 @@ const PRESET_AUTOMATION_REVIEW: &[ToolPosturePresetAssignment] = &[
     },
     ToolPosturePresetAssignment {
         tool_name: "palyra.memory.recall",
-        state: ToolPostureState::AlwaysAllow,
+        state: ToolPostureState::AskEachTime,
     },
     ToolPosturePresetAssignment {
         tool_name: "palyra.http.fetch",
@@ -1105,7 +1105,8 @@ pub const TOOL_POSTURE_PRESETS: &[ToolPosturePresetDefinition] = &[
     ToolPosturePresetDefinition {
         preset_id: "conservative_coding",
         label: "Conservative coding",
-        description: "Keeps code execution guarded while leaving low-risk recall open.",
+        description:
+            "Keeps code execution and broad recall guarded while leaving memory search open.",
         assignments: PRESET_CONSERVATIVE_CODING,
     },
     ToolPosturePresetDefinition {
@@ -1118,7 +1119,8 @@ pub const TOOL_POSTURE_PRESETS: &[ToolPosturePresetDefinition] = &[
     ToolPosturePresetDefinition {
         preset_id: "read_mostly_research",
         label: "Read-mostly research",
-        description: "Optimizes for recall and browser observation while leaving edits disabled.",
+        description:
+            "Optimizes for memory search and browser observation while leaving edits disabled.",
         assignments: PRESET_READ_MOSTLY_RESEARCH,
     },
     ToolPosturePresetDefinition {
@@ -1602,5 +1604,25 @@ mod tests {
                 .all(|record| record.scope_id != "session-1"),
             "session scope overrides should be removed"
         );
+    }
+
+    #[test]
+    fn memory_recall_catalog_and_presets_require_review() {
+        let catalog = tool_catalog_entry("palyra.memory.recall").expect("catalog entry exists");
+        assert_eq!(catalog.risk_level, ApprovalRiskLevel::High);
+
+        for preset in TOOL_POSTURE_PRESETS {
+            let recall_assignment = preset
+                .assignments
+                .iter()
+                .find(|assignment| assignment.tool_name == "palyra.memory.recall")
+                .expect("preset should define recall posture");
+            assert_eq!(
+                recall_assignment.state,
+                ToolPostureState::AskEachTime,
+                "{} should keep broad memory recall under review",
+                preset.preset_id
+            );
+        }
     }
 }

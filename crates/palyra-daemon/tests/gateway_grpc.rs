@@ -5355,6 +5355,8 @@ async fn grpc_run_stream_executes_memory_recall_tool_and_emits_memory_attestatio
         "palyra.memory.recall",
         &serde_json::json!({
             "query": "rollback checklist",
+            "channel": "cli",
+            "session_id": SESSION_ID,
             "memory_top_k": 5,
             "workspace_top_k": 0,
             "min_score": 0.0,
@@ -5407,10 +5409,9 @@ async fn grpc_run_stream_executes_memory_recall_tool_and_emits_memory_attestatio
         gateway_v1::gateway_service_client::GatewayServiceClient::connect(endpoint)
             .await
             .context("failed to connect gateway gRPC client")?;
-    let mut stream_request =
-        tonic::Request::new(tokio_stream::iter(vec![sample_run_stream_request_with_text(
-            "trigger memory recall tool".to_owned(),
-        )]));
+    let mut request = sample_run_stream_request_with_text("trigger memory recall tool".to_owned());
+    request.allow_sensitive_tools = true;
+    let mut stream_request = tonic::Request::new(tokio_stream::iter(vec![request]));
     authorize_metadata(stream_request.metadata_mut())?;
     let mut response_stream = gateway_client
         .run_stream(stream_request)
@@ -5444,7 +5445,7 @@ async fn grpc_run_stream_executes_memory_recall_tool_and_emits_memory_attestatio
                         });
                         assert!(
                             contains_ingested,
-                            "memory recall tool should surface the ingested memory item in top candidates"
+                            "memory recall tool should surface the ingested memory item in top candidates: {output}"
                         );
                         let facts = output
                             .pointer("/structured_output/facts")

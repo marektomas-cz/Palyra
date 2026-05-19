@@ -15,6 +15,7 @@ use crate::{
         },
         recall::{preview_recall, RecallPreviewEnvelope, RecallRequest},
         service_authorization::authorize_memory_action,
+        session_compaction::truncate_console_text,
     },
     gateway::{
         current_unix_ms, GatewayRuntimeState, ToolRuntimeExecutionContext, MAX_MEMORY_SEARCH_TOP_K,
@@ -22,7 +23,7 @@ use crate::{
     },
     journal::{
         MemorySearchHit, MemorySearchRequest, MemorySource, SessionSearchOutcome,
-        SessionSearchRequest,
+        SessionSearchRequest, WorkspaceSearchHit,
     },
     tool_protocol::{ToolAttestation, ToolExecutionOutcome},
     transport::grpc::auth::RequestContext,
@@ -41,6 +42,7 @@ const MEMORY_HITS_ABSENT_CLAIM_BOUNDARY: &str =
 const SESSION_SEARCH_HITS_PRESENT_CLAIM_BOUNDARY: &str = "session transcript hits are retrieved evidence from prior conversations; cite them as session recall, not durable memory";
 const SESSION_SEARCH_HITS_ABSENT_CLAIM_BOUNDARY: &str =
     "no session transcript hits were returned; do not substitute unrelated durable memory or workspace artifacts for prior-session evidence";
+const MAX_WORKSPACE_RECALL_TOOL_SNIPPET_CHARS: usize = 512;
 
 pub(crate) fn memory_search_tool_output_payload(search_hits: &[MemorySearchHit]) -> Value {
     json!({
@@ -70,8 +72,67 @@ pub(crate) fn memory_search_tool_output_payload(search_hits: &[MemorySearchHit])
     })
 }
 
+pub(crate) fn workspace_search_tool_output_payload(search_hits: &[WorkspaceSearchHit]) -> Value {
+    json!({
+        "hit_count": search_hits.len(),
+        "hits": workspace_search_tool_output_hits(search_hits),
+    })
+}
+
+fn workspace_search_tool_output_hits(search_hits: &[WorkspaceSearchHit]) -> Vec<Value> {
+    search_hits.iter().map(workspace_search_hit_tool_output_payload).collect()
+}
+
+fn workspace_search_hit_tool_output_payload(hit: &WorkspaceSearchHit) -> Value {
+    let redacted_snippet = redact_memory_text_for_output(hit.snippet.as_str());
+    let bounded_snippet =
+        truncate_console_text(redacted_snippet.as_str(), MAX_WORKSPACE_RECALL_TOOL_SNIPPET_CHARS);
+
+    json!({
+        "document": {
+            "document_id": hit.document.document_id.as_str(),
+            "path": hit.document.path.as_str(),
+            "parent_path": hit.document.parent_path.as_deref(),
+            "title": hit.document.title.as_str(),
+            "kind": hit.document.kind.as_str(),
+            "document_class": hit.document.document_class.as_str(),
+            "state": hit.document.state.as_str(),
+            "prompt_binding": hit.document.prompt_binding.as_str(),
+            "risk_state": hit.document.risk_state.as_str(),
+            "risk_reasons": hit.document.risk_reasons.as_slice(),
+            "pinned": hit.document.pinned,
+            "manual_override": hit.document.manual_override,
+            "template_id": hit.document.template_id.as_deref(),
+            "template_version": hit.document.template_version,
+            "source_memory_id": hit.document.source_memory_id.as_deref(),
+            "latest_version": hit.document.latest_version,
+            "created_at_unix_ms": hit.document.created_at_unix_ms,
+            "updated_at_unix_ms": hit.document.updated_at_unix_ms,
+            "deleted_at_unix_ms": hit.document.deleted_at_unix_ms,
+            "last_recalled_at_unix_ms": hit.document.last_recalled_at_unix_ms,
+        },
+        "version": hit.version,
+        "chunk_index": hit.chunk_index,
+        "chunk_count": hit.chunk_count,
+        "snippet": bounded_snippet,
+        "score": hit.score,
+        "reason": hit.reason.as_str(),
+        "breakdown": {
+            "lexical_score": hit.breakdown.lexical_score,
+            "vector_score": hit.breakdown.vector_score,
+            "recency_score": hit.breakdown.recency_score,
+            "source_quality_score": hit.breakdown.source_quality_score,
+            "final_score": hit.breakdown.final_score,
+        },
+    })
+}
+
 pub(crate) fn memory_recall_tool_output_payload(preview: &RecallPreviewEnvelope) -> Value {
     let memory_hits = memory_search_tool_output_payload(preview.memory_hits.as_slice())
+        .get("hits")
+        .cloned()
+        .unwrap_or_else(|| Value::Array(Vec::new()));
+    let workspace_hits = workspace_search_tool_output_payload(preview.workspace_hits.as_slice())
         .get("hits")
         .cloned()
         .unwrap_or_else(|| Value::Array(Vec::new()));
@@ -80,7 +141,7 @@ pub(crate) fn memory_recall_tool_output_payload(preview: &RecallPreviewEnvelope)
         "memory_hit_count": preview.memory_hits.len(),
         "claim_boundary": memory_search_claim_boundary(preview.memory_hits.len()),
         "memory_hits": memory_hits,
-        "workspace_hits": preview.workspace_hits,
+        "workspace_hits": workspace_hits,
         "transcript_hits": preview.transcript_hits,
         "checkpoint_hits": preview.checkpoint_hits,
         "compaction_hits": preview.compaction_hits,
@@ -1509,6 +1570,10 @@ fn optional_trimmed_string(value: Option<&Value>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        application::recall::{RecallBudgetExplain, RecallPlan, StructuredRecallOutput},
+        journal::{WorkspaceDocumentRecord, WorkspaceScoreBreakdown, WorkspaceSearchHit},
+    };
 
     #[test]
     fn parse_session_search_limits_match_schema_bounds() {
@@ -1554,6 +1619,87 @@ mod tests {
     }
 
     #[test]
+    fn memory_recall_payload_sanitizes_workspace_hits() {
+        let preview = RecallPreviewEnvelope {
+            query: "deployment notes".to_owned(),
+            memory_hits: Vec::new(),
+            workspace_hits: vec![WorkspaceSearchHit {
+                document: workspace_document_record(
+                    "P0C_FULL_WORKSPACE_SECRET_DO_NOT_EXPOSE__line1\nline2 private",
+                ),
+                version: 3,
+                chunk_index: 1,
+                chunk_count: 4,
+                snippet: "visible deployment excerpt api_key=secret123".to_owned(),
+                score: 0.82,
+                reason: "lexical match".to_owned(),
+                breakdown: WorkspaceScoreBreakdown {
+                    lexical_score: 0.8,
+                    vector_score: 0.6,
+                    recency_score: 0.2,
+                    source_quality_score: 0.9,
+                    final_score: 0.82,
+                },
+            }],
+            transcript_hits: Vec::new(),
+            checkpoint_hits: Vec::new(),
+            compaction_hits: Vec::new(),
+            top_candidates: Vec::new(),
+            structured_output: structured_recall_output(),
+            plan: RecallPlan {
+                original_query: "deployment notes".to_owned(),
+                expanded_queries: Vec::new(),
+                session_scoped: false,
+                budget: RecallBudgetExplain { prompt_budget_tokens: 1_800, candidate_limit: 8 },
+                sources: Vec::new(),
+            },
+            diagnostics: Vec::new(),
+            parameter_delta: json!({}),
+            prompt_preview: "preview".to_owned(),
+        };
+
+        let payload = memory_recall_tool_output_payload(&preview);
+        let encoded = serde_json::to_string(&payload).expect("payload should serialize");
+        let workspace_hit =
+            payload["workspace_hits"][0].as_object().expect("workspace hit should be an object");
+        let document = workspace_hit
+            .get("document")
+            .and_then(Value::as_object)
+            .expect("workspace hit should include document metadata");
+
+        assert_eq!(document.get("document_id"), Some(&json!("workspace-doc-1")));
+        assert!(
+            !document.contains_key("content_text"),
+            "tool output must not serialize full workspace document content"
+        );
+        assert!(
+            !document.contains_key("content_hash"),
+            "tool output should avoid stable content fingerprints"
+        );
+        assert!(
+            !encoded.contains("P0C_FULL_WORKSPACE_SECRET_DO_NOT_EXPOSE"),
+            "full workspace body must not leak through recall output"
+        );
+        assert!(
+            !encoded.contains("line2 private"),
+            "workspace content outside the snippet must stay out of tool output"
+        );
+        assert!(
+            !encoded.contains("secret123"),
+            "workspace snippets should be redacted before returning to the model"
+        );
+        let snippet = workspace_hit
+            .get("snippet")
+            .and_then(Value::as_str)
+            .expect("workspace hit should include a snippet");
+        assert!(!snippet.is_empty(), "workspace snippets should remain present after sanitization");
+        assert_ne!(
+            snippet, "visible deployment excerpt api_key=secret123",
+            "workspace snippets should pass through the redaction layer"
+        );
+    }
+
+    #[test]
     fn retain_visibility_distinguishes_session_from_principal_scope() {
         let mut outcome = MemoryLifecycleRetainOutcome {
             status: MemoryLifecycleStatus::Retained,
@@ -1581,5 +1727,52 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .contains("future sessions"));
+    }
+
+    fn workspace_document_record(content_text: &str) -> WorkspaceDocumentRecord {
+        WorkspaceDocumentRecord {
+            document_id: "workspace-doc-1".to_owned(),
+            principal: "user:ops".to_owned(),
+            channel: Some("console".to_owned()),
+            agent_id: Some("agent-1".to_owned()),
+            latest_session_id: Some("session-1".to_owned()),
+            path: "docs/deploy.md".to_owned(),
+            parent_path: Some("docs".to_owned()),
+            title: "Deploy".to_owned(),
+            kind: "markdown".to_owned(),
+            document_class: "workspace".to_owned(),
+            state: "active".to_owned(),
+            prompt_binding: "context".to_owned(),
+            risk_state: "clean".to_owned(),
+            risk_reasons: Vec::new(),
+            pinned: true,
+            manual_override: false,
+            template_id: None,
+            template_version: None,
+            source_memory_id: None,
+            latest_version: 3,
+            content_text: content_text.to_owned(),
+            content_hash: "full-content-hash".to_owned(),
+            created_at_unix_ms: 1_000,
+            updated_at_unix_ms: 2_000,
+            deleted_at_unix_ms: None,
+            last_recalled_at_unix_ms: Some(2_500),
+        }
+    }
+
+    fn structured_recall_output() -> StructuredRecallOutput {
+        StructuredRecallOutput {
+            summary: String::new(),
+            facts: Vec::new(),
+            evidence: Vec::new(),
+            unresolved: Vec::new(),
+            contradictions: Vec::new(),
+            source_refs: Vec::new(),
+            provider_usage: Vec::new(),
+            synthesis_hash: "empty".to_owned(),
+            why_relevant_now: String::new(),
+            suggested_next_step: String::new(),
+            confidence: None,
+        }
     }
 }

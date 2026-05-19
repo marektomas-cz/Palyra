@@ -308,7 +308,7 @@ pub fn tool_metadata(tool_name: &str) -> Option<ToolMetadata> {
             Some(ToolMetadata { capabilities: EMPTY_TOOL_CAPABILITIES, default_sensitive: false })
         }
         "palyra.memory.recall" => {
-            Some(ToolMetadata { capabilities: EMPTY_TOOL_CAPABILITIES, default_sensitive: false })
+            Some(ToolMetadata { capabilities: EMPTY_TOOL_CAPABILITIES, default_sensitive: true })
         }
         "palyra.memory.session_search" | "palyra.session_search" => {
             Some(ToolMetadata { capabilities: EMPTY_TOOL_CAPABILITIES, default_sensitive: true })
@@ -1329,7 +1329,7 @@ mod tests {
     }
 
     #[test]
-    fn decide_tool_call_allows_memory_recall_when_allowlisted() {
+    fn decide_tool_call_requires_approval_for_memory_recall_when_allowlisted() {
         let config = ToolCallConfig {
             allowed_tools: vec!["palyra.memory.recall".to_owned()],
             max_calls_per_run: 1,
@@ -1341,10 +1341,16 @@ mod tests {
         let request_context = tool_request_context("user:ops");
         let decision =
             decide_tool_call(&config, &mut budget, &request_context, "palyra.memory.recall", false);
-        assert!(decision.allowed, "allowlisted memory recall should be executable");
+        assert!(!decision.allowed, "memory recall should require explicit approval");
+        assert!(decision.approval_required, "memory recall approval metadata should be visible");
+        assert_eq!(budget, 1, "denied tool should not consume budget");
+
+        let decision =
+            decide_tool_call(&config, &mut budget, &request_context, "palyra.memory.recall", true);
+        assert!(decision.allowed, "approved memory recall should be executable");
         assert!(
-            !decision.approval_required,
-            "memory recall should not require interactive approval"
+            decision.approval_required,
+            "approved execution should preserve sensitive-tool metadata"
         );
         assert_eq!(budget, 0, "allowed tool should consume budget");
     }
@@ -1549,7 +1555,7 @@ mod tests {
         assert!(!tool_requires_approval("palyra.echo"));
         assert!(!tool_requires_approval("palyra.sleep"));
         assert!(!tool_requires_approval("palyra.memory.search"));
-        assert!(!tool_requires_approval("palyra.memory.recall"));
+        assert!(tool_requires_approval("palyra.memory.recall"));
         assert!(tool_requires_approval("palyra.memory.session_search"));
         assert!(tool_requires_approval("palyra.session_search"));
         assert!(!tool_requires_approval("palyra.memory.retain"));
