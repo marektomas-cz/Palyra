@@ -2132,7 +2132,7 @@ fn run_post_apply_health_check(
 
 fn running_gateway_restart_check(
     context: &ApplyContext,
-    document: &toml::Value,
+    _document: &toml::Value,
     admin_auth_required: bool,
 ) -> Result<Option<HealthCheckSummary>> {
     let target = resolve_dashboard_access_target(Some(context.config_path.display().to_string()))?;
@@ -2145,45 +2145,15 @@ fn running_gateway_restart_check(
         return Ok(None);
     }
 
-    let admin_token = get_string_value_at_path(document, "admin.auth_token")?;
-    let Some(admin_token) = admin_token.filter(|value| !value.trim().is_empty()) else {
-        return Ok(Some(HealthCheckSummary {
-            check: "runtime_config_reload".to_owned(),
-            status: if admin_auth_required { "restart_required" } else { "restart_recommended" }
-                .to_owned(),
-            detail: "gateway is already reachable; restart it after onboarding so the running daemon reloads the updated config"
-                .to_owned(),
-        }));
-    };
-
-    let principal = get_string_value_at_path(document, "admin.bound_principal")?
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_ADMIN_BOUND_PRINCIPAL.to_owned());
-    match fetch_admin_status_payload(
-        &http_client,
-        target.url.as_str(),
-        Some(admin_token),
-        principal,
-        DEFAULT_DEVICE_ID.to_owned(),
-        Some(DEFAULT_CHANNEL.to_owned()),
-        None,
-    ) {
-        Ok(_) => Ok(Some(HealthCheckSummary {
-            check: "runtime_config_reload".to_owned(),
-            status: "restart_recommended".to_owned(),
-            detail: "gateway is already reachable; restart it after onboarding if model-provider, gateway, or runtime settings changed"
-                .to_owned(),
-        })),
-        Err(error) => Ok(Some(HealthCheckSummary {
-            check: "runtime_config_reload".to_owned(),
-            status: "restart_required".to_owned(),
-            detail: format!(
-                "gateway is already reachable but did not accept the newly written admin config: {}. Restart the running gateway so it reloads {}",
-                redact_auth_error(error.to_string().as_str()),
-                context.config_path.display()
-            ),
-        })),
-    }
+    Ok(Some(HealthCheckSummary {
+        check: "runtime_config_reload".to_owned(),
+        status: if admin_auth_required { "restart_required" } else { "restart_recommended" }
+            .to_owned(),
+        detail: format!(
+            "gateway is already reachable; restart the running gateway so it reloads {}",
+            context.config_path.display()
+        ),
+    }))
 }
 
 fn onboarding_summary_next_step(
@@ -3798,7 +3768,13 @@ impl ConfigureSectionLabel for ConfigureSectionArg {
 mod tests {
     use super::*;
     use crate::commands::wizard::{ScriptedWizardBackend, WizardValue};
-    use std::collections::VecDeque;
+    use std::{
+        collections::VecDeque,
+        io::{Read, Write},
+        net::TcpListener,
+        thread,
+        time::{Duration, Instant},
+    };
 
     #[test]
     fn build_onboarding_answers_prefills_skip_flags() {
@@ -3936,6 +3912,91 @@ mod tests {
         assert!(
             next_step.contains("Restart the already running gateway"),
             "next step should explain restart path: {next_step}"
+        );
+    }
+
+    #[test]
+    fn running_gateway_restart_check_does_not_send_admin_token_to_health_responder() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("test listener should bind");
+        let port = listener.local_addr().expect("listener address should resolve").port();
+        listener.set_nonblocking(true).expect("listener should support nonblocking mode");
+        let server = thread::spawn(move || {
+            let mut requests = Vec::new();
+            let mut deadline = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < deadline && requests.len() < 2 {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut buffer = [0_u8; 4096];
+                        let read = stream.read(&mut buffer).unwrap_or(0);
+                        let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+                        let body = if request.starts_with("GET /healthz ") {
+                            r#"{"service":"palyrad","status":"ok","version":"test","git_hash":"test","build_profile":"test","uptime_seconds":1}"#
+                        } else {
+                            r#"{"ok":true}"#
+                        };
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        stream.write_all(response.as_bytes()).expect("test response should write");
+                        requests.push(request);
+                        deadline = Instant::now() + Duration::from_millis(300);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("test listener failed: {error}"),
+                }
+            }
+            requests
+        });
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_path = temp.path().join("palyra.toml");
+        fs::write(
+            config_path.as_path(),
+            format!(
+                r#"
+version = 1
+[daemon]
+bind_addr = "127.0.0.1"
+port = {port}
+"#
+            ),
+        )
+        .expect("config should be written");
+        let document = toml::from_str::<toml::Value>(
+            r#"
+version = 1
+[admin]
+require_auth = true
+auth_token = "poc-admin-token-should-not-leave-config"
+bound_principal = "operator"
+"#,
+        )
+        .expect("test document should parse");
+        let context = ApplyContext {
+            config_path,
+            state_root: temp.path().join("state"),
+            identity_store_dir: temp.path().join("identity"),
+            vault_dir: temp.path().join("vault"),
+            tls_paths: None,
+        };
+
+        let summary = running_gateway_restart_check(&context, &document, true)
+            .expect("restart check should complete")
+            .expect("health responder should produce restart check");
+
+        assert_eq!(summary.check, "runtime_config_reload");
+        assert_eq!(summary.status, "restart_required");
+        let requests = server.join().expect("test server should finish");
+        assert_eq!(requests.len(), 1, "restart check must only call unauthenticated health");
+        assert!(requests[0].starts_with("GET /healthz "), "unexpected request: {}", requests[0]);
+        assert!(
+            !requests[0].contains("Authorization: Bearer"),
+            "admin token must not be sent to health responder: {}",
+            requests[0]
         );
     }
 
