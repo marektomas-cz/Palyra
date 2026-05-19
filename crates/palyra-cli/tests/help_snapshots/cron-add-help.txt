@@ -31,6 +31,8 @@ Options:
 
       --session-label <SESSION_LABEL>
 
+      --workdir <PATH>
+          Project working directory for scheduled runs; relative paths resolve from the current directory and are stored as absolute paths
       --json
 
   -h, --help

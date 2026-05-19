@@ -33,6 +33,8 @@ Options:
 
       --session-label <SESSION_LABEL>
 
+      --workdir <PATH>
+          Update the project working directory for scheduled runs; relative paths resolve from the current directory
       --json
 
   -h, --help
