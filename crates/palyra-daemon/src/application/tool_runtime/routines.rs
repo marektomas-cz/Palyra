@@ -1785,6 +1785,9 @@ fn normalize_optional_workdir(value: Option<String>) -> Result<Option<String>, S
     if workdir.contains('\0') {
         return Err("workdir must not contain NUL bytes".to_owned());
     }
+    if workdir.chars().any(char::is_control) {
+        return Err("workdir must not contain control characters".to_owned());
+    }
     Ok(Some(workdir))
 }
 
@@ -2041,5 +2044,25 @@ mod tests {
         .expect("execution config should parse");
 
         assert_eq!(execution.execution_posture, RoutineExecutionPosture::Standard);
+    }
+
+    #[test]
+    fn normalize_optional_workdir_rejects_newline_control_characters() {
+        let error =
+            super::normalize_optional_workdir(Some("/workspace/project\ninject".to_owned()))
+                .expect_err("workdir with control characters should be rejected");
+
+        assert!(
+            error.contains("control characters"),
+            "error should explain control-character rejection: {error}"
+        );
+    }
+
+    #[test]
+    fn normalize_optional_workdir_accepts_plain_path() {
+        let normalized = super::normalize_optional_workdir(Some(" /workspace/project ".to_owned()))
+            .expect("valid workdir should normalize");
+
+        assert_eq!(normalized, Some("/workspace/project".to_owned()));
     }
 }
