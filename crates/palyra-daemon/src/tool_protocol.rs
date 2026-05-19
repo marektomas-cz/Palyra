@@ -309,7 +309,7 @@ pub fn tool_metadata(tool_name: &str) -> Option<ToolMetadata> {
             Some(ToolMetadata { capabilities: EMPTY_TOOL_CAPABILITIES, default_sensitive: false })
         }
         "palyra.memory.session_search" | "palyra.session_search" => {
-            Some(ToolMetadata { capabilities: EMPTY_TOOL_CAPABILITIES, default_sensitive: false })
+            Some(ToolMetadata { capabilities: EMPTY_TOOL_CAPABILITIES, default_sensitive: true })
         }
         "palyra.memory.retain" => {
             Some(ToolMetadata { capabilities: EMPTY_TOOL_CAPABILITIES, default_sensitive: false })
@@ -1326,9 +1326,28 @@ mod tests {
 
     #[test]
     fn decide_tool_call_allows_memory_recall_when_allowlisted() {
-        for tool_name in
-            ["palyra.memory.recall", "palyra.memory.session_search", "palyra.session_search"]
-        {
+        let config = ToolCallConfig {
+            allowed_tools: vec!["palyra.memory.recall".to_owned()],
+            max_calls_per_run: 1,
+            execution_timeout_ms: 250,
+            process_runner: default_process_runner_policy(),
+            wasm_runtime: default_wasm_runtime_policy(),
+        };
+        let mut budget = 1;
+        let request_context = tool_request_context("user:ops");
+        let decision =
+            decide_tool_call(&config, &mut budget, &request_context, "palyra.memory.recall", false);
+        assert!(decision.allowed, "allowlisted memory recall should be executable");
+        assert!(
+            !decision.approval_required,
+            "memory recall should not require interactive approval"
+        );
+        assert_eq!(budget, 0, "allowed tool should consume budget");
+    }
+
+    #[test]
+    fn decide_tool_call_session_search_requires_approval_when_allowlisted() {
+        for tool_name in ["palyra.memory.session_search", "palyra.session_search"] {
             let config = ToolCallConfig {
                 allowed_tools: vec![tool_name.to_owned()],
                 max_calls_per_run: 1,
@@ -1336,16 +1355,21 @@ mod tests {
                 process_runner: default_process_runner_policy(),
                 wasm_runtime: default_wasm_runtime_policy(),
             };
-            let mut budget = 1;
             let request_context = tool_request_context("user:ops");
-            let decision =
-                decide_tool_call(&config, &mut budget, &request_context, tool_name, false);
-            assert!(decision.allowed, "allowlisted {tool_name} should be executable");
-            assert!(
-                !decision.approval_required,
-                "{tool_name} should not require interactive approval"
-            );
-            assert_eq!(budget, 0, "allowed tool should consume budget");
+            let mut budget = 1;
+
+            let denied = decide_tool_call(&config, &mut budget, &request_context, tool_name, false);
+
+            assert!(!denied.allowed, "allowlisted {tool_name} should still need approval");
+            assert!(denied.approval_required, "{tool_name} should require interactive approval");
+            assert_eq!(budget, 1, "denied approval must not consume budget");
+
+            let approved =
+                decide_tool_call(&config, &mut budget, &request_context, tool_name, true);
+
+            assert!(approved.allowed, "approved {tool_name} should be executable");
+            assert!(approved.approval_required, "sensitive metadata should remain visible");
+            assert_eq!(budget, 0, "approved tool should consume budget");
         }
     }
 
@@ -1517,8 +1541,8 @@ mod tests {
         assert!(!tool_requires_approval("palyra.sleep"));
         assert!(!tool_requires_approval("palyra.memory.search"));
         assert!(!tool_requires_approval("palyra.memory.recall"));
-        assert!(!tool_requires_approval("palyra.memory.session_search"));
-        assert!(!tool_requires_approval("palyra.session_search"));
+        assert!(tool_requires_approval("palyra.memory.session_search"));
+        assert!(tool_requires_approval("palyra.session_search"));
         assert!(!tool_requires_approval("palyra.memory.retain"));
         assert!(!tool_requires_approval("palyra.memory.reflect"));
         assert!(!tool_requires_approval("palyra.routines.query"));
