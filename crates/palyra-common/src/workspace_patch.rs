@@ -934,8 +934,8 @@ fn reject_structural_marker_in_full_file_body(
     let trimmed = line.trim_start();
     if trimmed.starts_with("diff --git ")
         || trimmed.starts_with("index ")
-        || trimmed.starts_with("--- ")
-        || trimmed.starts_with("+++ ")
+        || is_unified_diff_file_header(trimmed, "---")
+        || is_unified_diff_file_header(trimmed, "+++")
         || trimmed.starts_with("@@")
         || trimmed.starts_with("<<<<<<<")
         || trimmed.starts_with("=======")
@@ -947,6 +947,14 @@ fn reject_structural_marker_in_full_file_body(
         return Err(parse_error(line_number, 1, message.as_str()));
     }
     Ok(())
+}
+
+fn is_unified_diff_file_header(trimmed_line: &str, prefix: &str) -> bool {
+    let Some(rest) = trimmed_line.strip_prefix(prefix) else {
+        return false;
+    };
+
+    rest.starts_with([' ', '\t']) && !rest.trim().is_empty()
 }
 
 fn is_patch_header_or_end(line: &str) -> bool {
@@ -1910,6 +1918,27 @@ mod tests {
         assert_eq!(
             fs::read_to_string(workspace.join("public.txt")).expect("seed file should remain"),
             "alpha beta\n"
+        );
+    }
+
+    #[test]
+    fn apply_workspace_patch_allows_markdown_frontmatter_fences() {
+        let temp = tempdir().expect("tempdir should be created");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace should exist");
+
+        let patch = "*** Begin Patch\n*** Add File: reports/ready.md\n---   \nstatus: ready\n---\n# Ready\n*** End Patch\n";
+        apply_workspace_patch(
+            std::slice::from_ref(&workspace),
+            &default_request(patch, false),
+            &default_limits(),
+        )
+        .expect("frontmatter fences are ordinary full-file content");
+
+        assert_eq!(
+            fs::read_to_string(workspace.join("reports/ready.md"))
+                .expect("frontmatter report should be written"),
+            "---   \nstatus: ready\n---\n# Ready\n"
         );
     }
 
