@@ -531,9 +531,12 @@ fn execute_builtin_process_command(
             format!("{}\n", cwd.to_string_lossy())
         }
         "echo" => format!("{}\n", input.args.join(" ")),
-        "ls" | "dir" => {
-            builtin_list_directory_stdout(input.command.trim(), input.args.as_slice(), cwd)?
-        }
+        "ls" | "dir" => builtin_list_directory_stdout(
+            input.command.trim(),
+            input.args.as_slice(),
+            workspace_root,
+            cwd,
+        )?,
         "cat" | "type" => builtin_read_files_stdout(
             input.command.trim(),
             input.args.as_slice(),
@@ -664,9 +667,10 @@ fn builtin_read_files_stdout(
 fn builtin_list_directory_stdout(
     command: &str,
     args: &[String],
+    workspace_root: &Path,
     cwd: &Path,
 ) -> Result<String, SandboxProcessRunError> {
-    let target = resolve_builtin_list_directory_target(command, args, cwd)?;
+    let target = resolve_builtin_list_directory_target(command, args, workspace_root, cwd)?;
     let mut names = Vec::new();
     let mut truncated = false;
     let entries = fs::read_dir(target.as_path()).map_err(|error| SandboxProcessRunError {
@@ -707,6 +711,7 @@ fn builtin_list_directory_stdout(
 fn resolve_builtin_list_directory_target(
     command: &str,
     args: &[String],
+    workspace_root: &Path,
     cwd: &Path,
 ) -> Result<PathBuf, SandboxProcessRunError> {
     let mut target = None;
@@ -726,15 +731,7 @@ fn resolve_builtin_list_directory_target(
     }
 
     let raw = target.unwrap_or(".");
-    let candidate = if Path::new(raw).is_absolute() { PathBuf::from(raw) } else { cwd.join(raw) };
-    let canonical =
-        fs::canonicalize(candidate.as_path()).map_err(|error| SandboxProcessRunError {
-            kind: SandboxProcessRunErrorKind::WorkspaceScopeDenied,
-            message: format!(
-                "sandbox denied: directory '{}' is not readable within workspace scope: {error}",
-                candidate.display()
-            ),
-        })?;
+    let canonical = resolve_scoped_path(workspace_root, cwd, raw, true)?;
     if !canonical.is_dir() {
         return Err(SandboxProcessRunError {
             kind: SandboxProcessRunErrorKind::InvalidInput,
@@ -1233,63 +1230,145 @@ fn validate_argument_workspace_scope(
     command: &str,
     args: &[String],
 ) -> Result<(), SandboxProcessRunError> {
+    let _ = rewrite_arguments_to_scoped_paths(workspace_root, cwd, command, args)?;
+    Ok(())
+}
+
+fn rewrite_arguments_to_scoped_paths(
+    workspace_root: &Path,
+    cwd: &Path,
+    command: &str,
+    args: &[String],
+) -> Result<Vec<String>, SandboxProcessRunError> {
+    let mut rewritten = Vec::with_capacity(args.len());
     let mut index = 0usize;
     while index < args.len() {
         let arg = &args[index];
         if argument_is_non_path_option_assignment(arg.as_str()) {
+            rewritten.push(arg.clone());
             index = index.saturating_add(1);
             continue;
         }
         if option_consumes_non_path_value(arg.as_str()) {
+            rewritten.push(arg.clone());
+            if let Some(value) = args.get(index.saturating_add(1)) {
+                rewritten.push(value.clone());
+            }
             index = index.saturating_add(2);
             continue;
         }
         if is_windows_taskkill_switch(command, arg.as_str()) {
+            rewritten.push(arg.clone());
             index = index.saturating_add(1);
             continue;
         }
         if let Some(file_url_path) = parse_file_url_path(arg.as_str())? {
-            let _ = resolve_scoped_path(workspace_root, cwd, file_url_path.as_str(), false)?;
+            let scoped = resolve_scoped_path(workspace_root, cwd, file_url_path.as_str(), false)?;
+            rewritten.push(scoped_file_url_argument(scoped.as_path())?);
             index = index.saturating_add(1);
             continue;
         }
         if let Some(value) = option_assignment_value(arg.as_str()) {
             let value = value.trim();
             if let Some(file_url_path) = parse_file_url_path(value)? {
-                let _ = resolve_scoped_path(workspace_root, cwd, file_url_path.as_str(), false)?;
+                let scoped =
+                    resolve_scoped_path(workspace_root, cwd, file_url_path.as_str(), false)?;
+                let scoped = scoped_file_url_argument(scoped.as_path())?;
+                rewritten.push(replace_option_assignment_value(arg.as_str(), scoped.as_str()));
                 index = index.saturating_add(1);
                 continue;
             }
             if !argument_requires_path_validation(value) {
+                rewritten.push(arg.clone());
                 index = index.saturating_add(1);
                 continue;
             }
-            let _ = resolve_scoped_path(workspace_root, cwd, value, false)?;
+            let scoped = resolve_scoped_path(workspace_root, cwd, value, false)?;
+            rewritten.push(replace_option_assignment_value(
+                arg.as_str(),
+                scoped.to_string_lossy().as_ref(),
+            ));
             index = index.saturating_add(1);
             continue;
         }
         if let Some(value) = option_compact_value(arg.as_str()) {
             if let Some(file_url_path) = parse_file_url_path(value)? {
-                let _ = resolve_scoped_path(workspace_root, cwd, file_url_path.as_str(), false)?;
+                let scoped =
+                    resolve_scoped_path(workspace_root, cwd, file_url_path.as_str(), false)?;
+                let scoped = scoped_file_url_argument(scoped.as_path())?;
+                rewritten.push(replace_option_compact_value(arg.as_str(), scoped.as_str()));
                 index = index.saturating_add(1);
                 continue;
             }
             if !argument_requires_path_validation(value) {
+                rewritten.push(arg.clone());
                 index = index.saturating_add(1);
                 continue;
             }
-            let _ = resolve_scoped_path(workspace_root, cwd, value, false)?;
+            let scoped = resolve_scoped_path(workspace_root, cwd, value, false)?;
+            rewritten.push(replace_option_compact_value(
+                arg.as_str(),
+                scoped.to_string_lossy().as_ref(),
+            ));
             index = index.saturating_add(1);
             continue;
         }
         if !argument_requires_path_validation(arg.as_str()) {
+            rewritten.push(arg.clone());
             index = index.saturating_add(1);
             continue;
         }
-        let _ = resolve_scoped_path(workspace_root, cwd, arg.as_str(), false)?;
+        let scoped = resolve_scoped_path(workspace_root, cwd, arg.as_str(), false)?;
+        rewritten.push(scoped.to_string_lossy().to_string());
         index = index.saturating_add(1);
     }
-    Ok(())
+    Ok(rewritten)
+}
+
+fn scoped_file_url_argument(path: &Path) -> Result<String, SandboxProcessRunError> {
+    reqwest::Url::from_file_path(path).map(|url| url.to_string()).map_err(|_| {
+        SandboxProcessRunError {
+            kind: SandboxProcessRunErrorKind::WorkspaceScopeDenied,
+            message: format!(
+                "sandbox denied: scoped file URL path '{}' cannot be represented safely",
+                path.display()
+            ),
+        }
+    })
+}
+
+fn replace_option_assignment_value(arg: &str, replacement: &str) -> String {
+    match arg.trim().split_once('=') {
+        Some((name, _)) => format!("{name}={replacement}"),
+        None => arg.to_owned(),
+    }
+}
+
+fn replace_option_compact_value(arg: &str, replacement: &str) -> String {
+    let trimmed = arg.trim();
+    if !trimmed.starts_with('-') || trimmed.starts_with("--") {
+        return arg.to_owned();
+    }
+
+    let mut char_indices = trimmed.char_indices();
+    let Some((_, _)) = char_indices.next() else {
+        return arg.to_owned();
+    };
+    let Some((_, second)) = char_indices.next() else {
+        return arg.to_owned();
+    };
+    if !second.is_ascii_alphabetic() {
+        return arg.to_owned();
+    }
+
+    let Some((value_index, value_char)) = char_indices.next() else {
+        return arg.to_owned();
+    };
+    if value_char == '=' || value_char.is_whitespace() {
+        return arg.to_owned();
+    }
+
+    format!("{}{}", &trimmed[..value_index], replacement)
 }
 
 fn argument_is_non_path_option_assignment(arg: &str) -> bool {
@@ -2182,6 +2261,13 @@ fn build_process_command(
         return Ok(command);
     }
 
+    let scoped_args = rewrite_arguments_to_scoped_paths(
+        workspace_root,
+        cwd,
+        input.command.as_str(),
+        &input.args,
+    )?;
+
     if matches!(policy.tier, SandboxProcessRunnerTier::C) {
         let tier_c_policy = TierCPolicy {
             workspace_root: workspace_root.to_path_buf(),
@@ -2194,7 +2280,7 @@ fn build_process_command(
             allowed_dns_suffixes: policy.allowed_dns_suffixes.clone(),
         };
         let tier_c_request =
-            TierCCommandRequest { command: input.command.clone(), args: input.args.clone() };
+            TierCCommandRequest { command: input.command.clone(), args: scoped_args.clone() };
         let plan = build_tier_c_command_plan(&tier_c_policy, &tier_c_request)
             .map_err(map_tier_c_backend_error)?;
         let mut command = Command::new(plan.program);
@@ -2210,7 +2296,7 @@ fn build_process_command(
 
     let program = resolve_tier_b_process_program(input.command.as_str());
     let mut command = Command::new(program.as_path());
-    command.args(input.args.as_slice()).current_dir(cwd);
+    command.args(scoped_args.as_slice()).current_dir(cwd);
     configure_tier_b_process_environment(&mut command, program.as_path(), policy);
     Ok(command)
 }
@@ -2619,12 +2705,12 @@ mod tests {
     };
 
     use super::{
-        canonical_workspace_root, collect_requested_egress_hosts,
-        cpu_rlimit_seconds_from_usage_micros, is_host_allowlisted, process_failure_message,
-        redacted_process_output_preview, redacted_process_output_text,
+        build_process_command, builtin_list_directory_stdout, canonical_workspace_root,
+        collect_requested_egress_hosts, cpu_rlimit_seconds_from_usage_micros, is_host_allowlisted,
+        process_failure_message, redacted_process_output_preview, redacted_process_output_text,
         resolve_host_working_directory, resolve_working_directory,
-        rewrite_host_virtual_workspace_args, run_constrained_process,
-        validate_argument_workspace_scope, validate_cmd_invocation_shape,
+        rewrite_arguments_to_scoped_paths, rewrite_host_virtual_workspace_args,
+        run_constrained_process, validate_argument_workspace_scope, validate_cmd_invocation_shape,
         validate_interpreter_argument_guardrails, validate_no_embedded_command_line_arg,
         validate_process_termination_scope, validate_runtime_egress_enforcement,
         EgressEnforcementMode, ProcessRunnerInput, SandboxProcessRunErrorKind,
@@ -2757,6 +2843,113 @@ mod tests {
             args.as_slice(),
         )
         .expect("virtual workspace path aliases should stay within scope");
+
+        let _ = fs::remove_dir_all(workspace.as_path());
+    }
+
+    #[test]
+    fn builtin_list_directory_resolves_virtual_root_alias_to_workspace() {
+        let workspace = unique_temp_dir("workspace-builtin-list-virtual-root");
+        fs::create_dir_all(workspace.as_path()).expect("workspace directory should be created");
+        fs::write(workspace.join("WORKSPACE_SENTINEL_ONLY"), b"ok")
+            .expect("workspace sentinel should be written");
+        let canonical_workspace = canonical_workspace_root(workspace.as_path())
+            .expect("workspace root should canonicalize");
+        let args = vec!["/".to_owned()];
+
+        let output = builtin_list_directory_stdout(
+            "ls",
+            args.as_slice(),
+            canonical_workspace.as_path(),
+            canonical_workspace.as_path(),
+        )
+        .expect("virtual root alias should list the workspace root");
+
+        assert!(output.contains("WORKSPACE_SENTINEL_ONLY"), "{output}");
+
+        let _ = fs::remove_dir_all(workspace.as_path());
+    }
+
+    #[test]
+    fn rewrite_arguments_to_scoped_paths_replaces_virtual_workspace_aliases() {
+        let workspace = unique_temp_dir("workspace-virtual-arg-rewrite");
+        let nested = workspace.join("e2e-file-workflow");
+        fs::create_dir_all(nested.as_path()).expect("workspace subdirectory should be created");
+        fs::write(nested.join("test.js"), b"console.log('ok');\n")
+            .expect("workspace fixture should be written");
+        let canonical_workspace = canonical_workspace_root(workspace.as_path())
+            .expect("workspace root should canonicalize");
+        let expected_script = canonical_workspace
+            .join("e2e-file-workflow")
+            .join("test.js")
+            .to_string_lossy()
+            .to_string();
+        let expected_directory =
+            canonical_workspace.join("e2e-file-workflow").to_string_lossy().to_string();
+        let args = vec![
+            "/workspace/e2e-file-workflow/test.js".to_owned(),
+            "--config=\\workspace\\e2e-file-workflow\\test.js".to_owned(),
+            "-C/workspace/e2e-file-workflow".to_owned(),
+            "--grep".to_owned(),
+            "/not/a/path/pattern".to_owned(),
+        ];
+
+        let rewritten = rewrite_arguments_to_scoped_paths(
+            canonical_workspace.as_path(),
+            canonical_workspace.as_path(),
+            "node",
+            args.as_slice(),
+        )
+        .expect("virtual workspace path aliases should rewrite to scoped paths");
+
+        assert_eq!(rewritten[0], expected_script);
+        assert_eq!(rewritten[1], format!("--config={expected_script}"));
+        assert_eq!(rewritten[2], format!("-C{expected_directory}"));
+        assert_eq!(rewritten[3], "--grep");
+        assert_eq!(rewritten[4], "/not/a/path/pattern");
+
+        let _ = fs::remove_dir_all(workspace.as_path());
+    }
+
+    #[test]
+    fn build_process_command_uses_rewritten_sandbox_args() {
+        let workspace = unique_temp_dir("workspace-build-command-virtual-arg");
+        let nested = workspace.join("e2e-file-workflow");
+        fs::create_dir_all(nested.as_path()).expect("workspace subdirectory should be created");
+        fs::write(nested.join("test.js"), b"console.log('ok');\n")
+            .expect("workspace fixture should be written");
+        let canonical_workspace = canonical_workspace_root(workspace.as_path())
+            .expect("workspace root should canonicalize");
+        let expected_script = canonical_workspace
+            .join("e2e-file-workflow")
+            .join("test.js")
+            .to_string_lossy()
+            .to_string();
+        let policy = sandbox_policy_with_allowed_executables(
+            canonical_workspace.clone(),
+            vec!["node".into()],
+        );
+        let input = ProcessRunnerInput {
+            command: "node".to_owned(),
+            args: vec!["/".to_owned(), "--config=/workspace/e2e-file-workflow/test.js".to_owned()],
+            cwd: None,
+            requested_egress_hosts: Vec::new(),
+            timeout_ms: None,
+            background: false,
+        };
+
+        let command = build_process_command(
+            &policy,
+            &input,
+            canonical_workspace.as_path(),
+            canonical_workspace.as_path(),
+        )
+        .expect("sandboxed process command should be built");
+        let args =
+            command.get_args().map(|arg| arg.to_string_lossy().to_string()).collect::<Vec<_>>();
+
+        assert_eq!(args[0], canonical_workspace.to_string_lossy());
+        assert_eq!(args[1], format!("--config={expected_script}"));
 
         let _ = fs::remove_dir_all(workspace.as_path());
     }
