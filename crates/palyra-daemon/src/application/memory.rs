@@ -1090,6 +1090,13 @@ fn contains_secret_value_like_memory_write(lowered: &str) -> bool {
     if !contains_any(lowered, MEMORY_WRITE_SENSITIVE_PATTERNS) {
         return false;
     }
+    if contains_any(lowered, &["equals", " is "])
+        || contains_unnegated_memory_write_word(lowered, "remember")
+        || contains_unnegated_memory_write_word(lowered, "save")
+        || contains_unnegated_memory_write_word(lowered, "store")
+    {
+        return true;
+    }
     if contains_any(
         lowered,
         &[
@@ -1111,7 +1118,37 @@ fn contains_secret_value_like_memory_write(lowered: &str) -> bool {
     ) {
         return false;
     }
-    contains_any(lowered, &["actual", "equals", " is ", "remember", "save ", "store ", "value"])
+    contains_any(lowered, &["actual", "value"])
+}
+
+fn contains_unnegated_memory_write_word(lowered: &str, word: &str) -> bool {
+    lowered.match_indices(word).any(|(index, _)| {
+        let clause_prefix = current_clause_prefix(lowered, index);
+        has_word_boundaries(lowered, index, word.len())
+            && !clause_prefix.contains("do not ")
+            && !clause_prefix.contains("don't ")
+            && !clause_prefix.contains("must not ")
+            && !clause_prefix.contains("never ")
+            && !clause_prefix.contains("no ")
+    })
+}
+
+fn current_clause_prefix(text: &str, index: usize) -> &str {
+    let prefix = &text[..index];
+    let clause_start =
+        prefix.rfind(['.', '!', '?', ';', '\n']).map(|offset| offset + 1).unwrap_or(0);
+    &text[clause_start..index]
+}
+
+fn has_word_boundaries(text: &str, index: usize, len: usize) -> bool {
+    let before = text[..index].chars().next_back();
+    let after = text[index + len..].chars().next();
+    before.is_none_or(|ch| !memory_classifier_word_char(ch))
+        && after.is_none_or(|ch| !memory_classifier_word_char(ch))
+}
+
+fn memory_classifier_word_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
 }
 
 fn contains_high_risk_memory_write_intent(lowered: &str) -> bool {
@@ -1537,6 +1574,28 @@ mod tests {
             !classification.reason_codes.iter().any(|reason| reason.starts_with("sensitivity:")),
             "safe defensive rules should not be treated as secret storage or policy bypass"
         );
+    }
+
+    #[test]
+    fn write_classifier_marks_safe_phrase_secret_values_for_review() {
+        let classification = classify_memory_write(classification_input(
+            "Never log secrets. The admin token is abc123.",
+        ));
+
+        assert_eq!(classification.sensitivity, MemoryWriteSensitivity::Sensitive);
+        assert_eq!(classification.approval_state, MemoryWriteApprovalState::Required);
+        assert!(classification.reason_codes.iter().any(|reason| reason == "sensitivity:sensitive"));
+    }
+
+    #[test]
+    fn write_classifier_marks_safe_phrase_positive_store_intent_for_review() {
+        let classification = classify_memory_write(classification_input(
+            "Never log secrets. Store the admin token abc123 for future deployments.",
+        ));
+
+        assert_eq!(classification.sensitivity, MemoryWriteSensitivity::Sensitive);
+        assert_eq!(classification.approval_state, MemoryWriteApprovalState::Required);
+        assert!(classification.reason_codes.iter().any(|reason| reason == "sensitivity:sensitive"));
     }
 
     #[test]
