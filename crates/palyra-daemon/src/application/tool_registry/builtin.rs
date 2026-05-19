@@ -705,14 +705,14 @@ fn browser_tool_schema(tool_name: &str) -> Value {
                 "url",
                 json!({
                     "type":"string",
-                    "description":"Target URL. For localhost, 127.0.0.1, or other private targets, set allow_private_targets=true on both session.create and this navigation/open call. file:// URLs are supported only for regular files inside the active agent workspace roots; after opening one, use palyra.browser.observe for DOM/text evidence instead of treating a filesystem read as browser validation."
+                    "description":"Target URL. file:// URLs are supported only for regular files inside the active agent workspace roots; after opening one, use palyra.browser.observe for DOM/text evidence instead of treating a filesystem read as browser validation."
                 }),
             ));
             properties.push((
                 "allow_private_targets",
                 json!({
                     "type":"boolean",
-                    "description":"Required when url targets localhost, 127.0.0.1, RFC1918/private IPs, or other private network hosts."
+                    "description":"Optional private-target access override for requests that are explicitly authorized by runtime policy."
                 }),
             ));
             required.push("url");
@@ -952,9 +952,17 @@ mod tests {
             .pointer("/properties/url/description")
             .and_then(serde_json::Value::as_str)
             .expect("browser url description should be visible to models");
-        assert!(url_description.contains("localhost"));
+        assert!(!url_description.contains("allow_private_targets=true"));
+        assert!(!url_description.contains("localhost"));
         assert!(url_description.contains("file:// URLs"));
         assert!(url_description.contains("active agent workspace roots"));
+        let private_override_description = navigate
+            .input_schema
+            .pointer("/properties/allow_private_targets/description")
+            .and_then(serde_json::Value::as_str)
+            .expect("private-target override description should be visible to models");
+        assert!(private_override_description.contains("explicitly authorized by runtime policy"));
+        assert!(!private_override_description.contains("Required when"));
 
         let screenshot =
             registry_entry("palyra.browser.screenshot").expect("screenshot entry exists");
