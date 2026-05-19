@@ -13356,7 +13356,6 @@ impl JournalStore {
                         memory_items_fts MATCH ?1 AND
                         memory.principal = ?2 AND
                         (
-                            (?4 IS NULL AND ?3 IS NULL) OR
                             (?4 IS NOT NULL AND memory.session_ulid = ?4) OR
                             (
                                 memory.session_ulid IS NULL AND
@@ -13467,7 +13466,6 @@ impl JournalStore {
                     memory.principal = ?2 AND
                     (memory.ttl_unix_ms IS NULL OR memory.ttl_unix_ms > ?5) AND
                     (
-                        (?4 IS NULL AND ?3 IS NULL) OR
                         (?4 IS NOT NULL AND memory.session_ulid = ?4) OR
                         (
                             memory.session_ulid IS NULL AND
@@ -22024,7 +22022,7 @@ mod tests {
     }
 
     #[test]
-    fn memory_search_includes_broader_scope_memory_for_channel_and_session_queries() {
+    fn memory_search_respects_scope_for_principal_channel_and_session_queries() {
         let db_path = temp_db_path();
         let store = JournalStore::open(test_journal_config(db_path, false))
             .expect("journal store should open");
@@ -22090,8 +22088,8 @@ mod tests {
             })
             .expect("principal memory search should succeed");
         assert!(
-            principal_hits.iter().any(|hit| hit.item.memory_id == "01ARZ3NDEKTSV4RRFFQ69G5FE2"),
-            "principal-wide searches should include same-principal channel memory"
+            !principal_hits.iter().any(|hit| hit.item.memory_id == "01ARZ3NDEKTSV4RRFFQ69G5FE2"),
+            "principal-wide searches must not include channel-scoped memory"
         );
 
         let principal_session_hits = store
@@ -22105,12 +22103,12 @@ mod tests {
                 tags: Vec::new(),
                 sources: Vec::new(),
             })
-            .expect("principal memory search should include session hits");
+            .expect("principal memory search should succeed");
         assert!(
-            principal_session_hits
+            !principal_session_hits
                 .iter()
                 .any(|hit| hit.item.memory_id == "01ARZ3NDEKTSV4RRFFQ69G5FE3"),
-            "principal-wide searches should include same-principal session memory"
+            "principal-wide searches must not include session-scoped memory"
         );
     }
 
