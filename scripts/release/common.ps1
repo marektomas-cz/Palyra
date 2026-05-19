@@ -542,6 +542,22 @@ function Add-WindowsUserPathEntry {
     return $true
 }
 
+function Move-WindowsUserPathEntryToFront {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Entry
+    )
+
+    $existingPath = Get-WindowsUserPathValue
+    $updatedPath = Move-PathEntryToFront -Entry $Entry -PathValue $existingPath
+    if ([string]::Equals($updatedPath, $existingPath, [StringComparison]::Ordinal)) {
+        return $false
+    }
+
+    Set-WindowsUserPathValue -PathValue $updatedPath
+    return $true
+}
+
 function Remove-WindowsUserPathEntry {
     param(
         [Parameter(Mandatory = $true)]

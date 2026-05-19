@@ -165,13 +165,38 @@ if ([string]::IsNullOrWhiteSpace($cliUserPathUpdated)) {
     $cliUserPathUpdated = "unknown"
 }
 
+$cliPathPreflightSource = $null
+$cliPathPreflightMatchesHarness = "not_checked"
 if ($IsWindows) {
+    if (Add-CurrentSessionPathEntry -Entry $resolvedCliCommandRoot) {
+        $cliSessionPathUpdated = "true"
+    }
+    if (Move-WindowsUserPathEntryToFront -Entry $resolvedCliCommandRoot) {
+        $cliUserPathUpdated = "true"
+    }
+
     $windowsPathValue = @(
         [Environment]::GetEnvironmentVariable("Path", "User"),
         [Environment]::GetEnvironmentVariable("Path", "Machine")
     ) -join [IO.Path]::PathSeparator
     if (-not (Test-PathEntryPresent -Entry $resolvedCliCommandRoot -PathValue $windowsPathValue)) {
         throw "Clean desktop install did not persist or select a globally visible Windows CLI command root: $resolvedCliCommandRoot"
+    }
+
+    $resolvedPalyraCommand = Get-Command palyra -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -eq $resolvedPalyraCommand -or [string]::IsNullOrWhiteSpace($resolvedPalyraCommand.Source)) {
+        throw "Clean desktop install could not resolve 'palyra' on PATH after selecting harness CLI command root: $resolvedCliCommandRoot"
+    }
+    $cliPathPreflightSource = [IO.Path]::GetFullPath($resolvedPalyraCommand.Source)
+    $cliPathPreflightRoot = Split-Path -Parent $cliPathPreflightSource
+    $cliPathPreflightMatchesHarness =
+        if (Test-PathEntryEquals -Left $cliPathPreflightRoot -Right $resolvedCliCommandRoot) {
+            "true"
+        } else {
+            "false"
+        }
+    if ($cliPathPreflightMatchesHarness -ne "true") {
+        throw "Clean desktop install resolved 'palyra' to '$cliPathPreflightSource' instead of the harness CLI command root '$resolvedCliCommandRoot'. Use cli_command_path='$resolvedCliCommandPath' in this shell, or open a new shell after PATH persistence."
     }
 }
 
@@ -233,6 +258,8 @@ $installSummary = [ordered]@{
     cli_current_shell_command = $resolvedCliCurrentShellCommand
     cli_new_shell_command = $resolvedCliNewShellCommand
     cli_parent_shell_note = $resolvedCliParentShellNote
+    cli_path_preflight_source = $cliPathPreflightSource
+    cli_path_preflight_matches_harness = $cliPathPreflightMatchesHarness
     launcher_path = $launcherPath
 }
 $installSummary |
@@ -256,4 +283,6 @@ Write-Output "cli_user_path_updated=$cliUserPathUpdated"
 Write-Output "cli_current_shell_command=$resolvedCliCurrentShellCommand"
 Write-Output "cli_new_shell_command=$resolvedCliNewShellCommand"
 Write-Output "cli_parent_shell_note=$resolvedCliParentShellNote"
+Write-Output "cli_path_preflight_source=$cliPathPreflightSource"
+Write-Output "cli_path_preflight_matches_harness=$cliPathPreflightMatchesHarness"
 Write-Output "launcher_path=$launcherPath"
