@@ -4395,8 +4395,15 @@ struct AgentTextEmitter {
 
 impl AgentTextEmitter {
     fn emit(&mut self, event: &common_v1::RunStreamEvent) -> Result<()> {
-        if let Some(common_v1::run_stream_event::Body::ModelToken(token)) = event.body.as_ref() {
-            self.write_token(token.token.as_str())?;
+        match event.body.as_ref() {
+            Some(common_v1::run_stream_event::Body::ModelToken(token)) => {
+                self.write_token(token.token.as_str())?;
+            }
+            _ => {
+                if let Some(line) = agent_text_event_line(event) {
+                    self.write_event_line(line)?;
+                }
+            }
         }
         Ok(())
     }
@@ -4420,12 +4427,43 @@ impl AgentTextEmitter {
         }
         Ok(())
     }
+
+    fn write_event_line(&mut self, line: String) -> Result<()> {
+        if line.is_empty() {
+            return Ok(());
+        }
+        let mut stdout = std::io::stdout().lock();
+        if self.wrote_text && self.needs_newline {
+            stdout.write_all(b"\n").context("stdout write failed")?;
+        }
+        stdout.write_all(line.as_bytes()).context("stdout write failed")?;
+        stdout.write_all(b"\n").context("stdout write failed")?;
+        self.wrote_text = true;
+        self.needs_newline = false;
+        Ok(())
+    }
+}
+
+fn agent_text_event_line(event: &common_v1::RunStreamEvent) -> Option<String> {
+    match event.body.as_ref()? {
+        common_v1::run_stream_event::Body::ToolProposal(proposal) => Some(format!(
+            "agent.tool.proposal tool_name={} approval_required={}",
+            safe_stream_label_for_output(proposal.tool_name.as_str()),
+            proposal.approval_required
+        )),
+        common_v1::run_stream_event::Body::ToolApprovalRequest(approval_request) => Some(format!(
+            "agent.tool.approval.request tool_name={} summary={}",
+            safe_stream_label_for_output(approval_request.tool_name.as_str()),
+            sanitized_optional_text_field(approval_request.request_summary.as_str())
+        )),
+        _ => None,
+    }
 }
 
 fn emit_agent_event_text(event: &common_v1::RunStreamEvent) -> Result<()> {
     let mut emitter = AgentTextEmitter::default();
+    emitter.emit(event)?;
     if let Some(common_v1::run_stream_event::Body::ModelToken(token)) = event.body.as_ref() {
-        emitter.write_token(token.token.as_str())?;
         if token.is_final {
             emitter.finish()?;
         }
@@ -4486,7 +4524,6 @@ fn safe_agent_progress_status_message(status: &common_v1::StreamStatus) -> Optio
     }
 }
 
-#[cfg(test)]
 fn safe_stream_label_for_output(value: &str) -> String {
     let sanitized = sanitize_diagnostic_error(value).trim().to_owned();
     if sanitized.is_empty() {
@@ -4508,7 +4545,6 @@ fn safe_stream_label_json_value(value: &str) -> Value {
     }
 }
 
-#[cfg(test)]
 fn sanitized_optional_text_field(value: &str) -> String {
     let sanitized = sanitize_diagnostic_error(value).trim().to_owned();
     if sanitized.is_empty() {
@@ -4673,7 +4709,6 @@ fn is_sensitive_cli_arg_marker(raw: &str) -> bool {
     !normalized.is_empty() && is_sensitive_key(normalized.as_str())
 }
 
-#[cfg(test)]
 fn is_safe_stream_label_char(candidate: char) -> bool {
     candidate.is_ascii_alphanumeric() || matches!(candidate, '.' | '_' | '-' | ':' | '/')
 }
@@ -4781,6 +4816,56 @@ mod agent_stream_output_tests {
 
         let json = sanitized_optional_json_text(error);
         assert_eq!(json, Value::String("failed with access_token=<redacted>".to_owned()));
+    }
+
+    #[test]
+    fn text_stream_renders_tool_proposal_without_raw_input() {
+        let event = common_v1::RunStreamEvent {
+            v: CANONICAL_PROTOCOL_MAJOR,
+            run_id: None,
+            body: Some(common_v1::run_stream_event::Body::ToolProposal(common_v1::ToolProposal {
+                proposal_id: None,
+                tool_name: "palyra.fs.apply_patch".to_owned(),
+                input_json: br#"{"api_key":"sk-test-secret"}"#.to_vec(),
+                approval_required: true,
+            })),
+        };
+
+        let line = agent_text_event_line(&event).expect("tool proposal should render");
+
+        assert_eq!(
+            line,
+            "agent.tool.proposal tool_name=palyra.fs.apply_patch approval_required=true"
+        );
+        assert!(!line.contains("sk-test-secret"), "{line}");
+        assert!(!line.contains("input_json"), "{line}");
+    }
+
+    #[test]
+    fn text_stream_renders_tool_approval_request_details() {
+        let event = common_v1::RunStreamEvent {
+            v: CANONICAL_PROTOCOL_MAJOR,
+            run_id: None,
+            body: Some(common_v1::run_stream_event::Body::ToolApprovalRequest(
+                common_v1::ToolApprovalRequest {
+                    proposal_id: None,
+                    approval_id: None,
+                    tool_name: "palyra.process.run".to_owned(),
+                    input_json: br#"{"cmd":"palyra doctor","token":"raw-token"}"#.to_vec(),
+                    approval_required: true,
+                    request_summary: "run a command with access_token=browser-secret".to_owned(),
+                    prompt: None,
+                },
+            )),
+        };
+
+        let line = agent_text_event_line(&event).expect("approval request should render");
+
+        assert!(line.contains("tool_name=palyra.process.run"), "{line}");
+        assert!(line.contains("summary=\"run a command with access_token=<redacted>\""), "{line}");
+        assert!(!line.contains("browser-secret"), "{line}");
+        assert!(!line.contains("raw-token"), "{line}");
+        assert!(!line.contains("input_json"), "{line}");
     }
 
     #[test]
