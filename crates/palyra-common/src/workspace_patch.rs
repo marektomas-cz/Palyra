@@ -373,6 +373,7 @@ fn replace_ascii_case_insensitive(haystack: &str, needle: &str, replacement: &st
 
 fn parse_patch_header_path(line: &str) -> Option<&str> {
     line.strip_prefix("*** Add File: ")
+        .or_else(|| line.strip_prefix("*** Replace File: "))
         .or_else(|| line.strip_prefix("*** Update File: "))
         .or_else(|| line.strip_prefix("*** Delete File: "))
         .or_else(|| line.strip_prefix("*** Move to: "))
@@ -2170,6 +2171,41 @@ mod tests {
         );
         assert!(preview.contains("+[REDACTED]"), "secret file content should be redacted");
         assert!(preview.contains("*** Add File: .env"));
+    }
+
+    #[test]
+    fn redact_patch_preview_masks_replace_file_secret_paths() {
+        let preview = redact_patch_preview(
+            "*** Begin Patch\n*** Replace File: .env\n+SESSIONID=leak-value-83d4c2e1\n*** Replace File: certs/service.pem\n+-----BEGIN PRIVATE KEY-----\n*** End Patch\n",
+            &WorkspacePatchRedactionPolicy::default(),
+            16 * 1024,
+        );
+
+        assert!(preview.contains("*** Replace File: .env"));
+        assert!(preview.contains("*** Replace File: certs/service.pem"));
+        assert!(preview.contains("+[REDACTED]"), "secret file content should be redacted");
+        assert!(!preview.contains("SESSIONID=leak-value-83d4c2e1"));
+        assert!(!preview.contains("-----BEGIN PRIVATE KEY-----"));
+    }
+
+    #[test]
+    fn apply_workspace_patch_dry_run_redacts_replace_file_secret_preview() {
+        let temp = tempdir().expect("tempdir should be created");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace should exist");
+        fs::write(workspace.join(".env"), "SESSIONID=old\n").expect("seed file should exist");
+
+        let patch = "*** Begin Patch\n*** Replace File: .env\n+SESSIONID=leak-value-83d4c2e1\n*** End Patch\n";
+        let outcome = apply_workspace_patch(
+            std::slice::from_ref(&workspace),
+            &default_request(patch, true),
+            &default_limits(),
+        )
+        .expect("dry-run replace should parse and attest");
+
+        assert!(outcome.redacted_preview.contains("*** Replace File: .env"));
+        assert!(outcome.redacted_preview.contains("+[REDACTED]"));
+        assert!(!outcome.redacted_preview.contains("SESSIONID=leak-value-83d4c2e1"));
     }
 
     #[test]
