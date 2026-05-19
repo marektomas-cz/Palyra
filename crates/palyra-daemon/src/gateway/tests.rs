@@ -5140,6 +5140,7 @@ async fn routines_tool_flow_supports_upsert_listing_pause_resume_and_schedule_pr
         "natural_language_schedule": "every 2h",
         "run_mode": "fresh_session",
         "execution_posture": "sensitive_tools",
+        "approval_mode": "before_first_run",
         "procedure_profile_id": "procedure.ops.heartbeat",
         "skill_profile_id": "skill.ops.triage",
         "provider_profile_id": "provider.fast",
@@ -5332,6 +5333,39 @@ async fn routines_tool_flow_supports_upsert_listing_pause_resume_and_schedule_pr
         list_runs_json.get("runs").and_then(Value::as_array).map(Vec::len),
         Some(0),
         "new routines should not report phantom runs"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn routines_tool_rejects_sensitive_posture_without_approval_gate() {
+    let state = build_test_runtime_state(false);
+    let _registry = configure_test_routines_runtime(&state, "http://127.0.0.1:9".to_owned());
+    let context = routines_tool_test_context();
+    let upsert_input = serde_json::to_vec(&json!({
+        "operation": "upsert",
+        "name": "Privileged heartbeat",
+        "prompt": "Check privileged diagnostics and summarize action items.",
+        "trigger_kind": "schedule",
+        "natural_language_schedule": "every 2h",
+        "run_mode": "fresh_session",
+        "execution_posture": "sensitive_tools",
+    }))
+    .expect("routine upsert payload should serialize");
+
+    let outcome = execute_routines_tool(
+        &state,
+        context,
+        super::ROUTINES_CONTROL_TOOL_NAME,
+        "01ARZ3NDEKTSV4RRFFQ69G5FBK",
+        upsert_input.as_slice(),
+    )
+    .await;
+
+    assert!(!outcome.success, "sensitive routine without approval gate should fail");
+    assert!(
+        outcome.error.contains("approval_mode=before_enable or before_first_run"),
+        "error should explain required routine approval gate: {}",
+        outcome.error
     );
 }
 

@@ -454,6 +454,7 @@ async fn upsert_routine(
     )?;
     let approval_policy =
         parse_approval_policy(optional_string_field(payload, "approval_mode").as_deref())?;
+    validate_sensitive_tool_approval_policy(&execution, &approval_policy)?;
     let concurrency_policy =
         parse_concurrency_policy(optional_string_field(payload, "concurrency_policy").as_deref())?;
     let retry_policy = parse_retry_policy(
@@ -1756,6 +1757,21 @@ fn parse_approval_policy(value: Option<&str>) -> Result<RoutineApprovalPolicy, S
     Ok(RoutineApprovalPolicy { mode })
 }
 
+fn validate_sensitive_tool_approval_policy(
+    execution: &RoutineExecutionConfig,
+    approval_policy: &RoutineApprovalPolicy,
+) -> Result<(), String> {
+    if execution.execution_posture == RoutineExecutionPosture::SensitiveTools
+        && approval_policy.mode == RoutineApprovalMode::None
+    {
+        return Err(
+            "approval_mode=before_enable or before_first_run is required when execution_posture=sensitive_tools"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
 fn normalize_owner_principal(requested: Option<&str>, principal: &str) -> Result<String, String> {
     match requested.map(str::trim) {
         Some("") | None => Ok(principal.to_owned()),
@@ -1957,7 +1973,10 @@ fn routines_tool_execution_outcome(
 
 #[cfg(test)]
 mod tests {
-    use crate::routines::{RoutineExecutionPosture, RoutineRunMode, RoutineTriggerKind};
+    use crate::routines::{
+        RoutineApprovalMode, RoutineApprovalPolicy, RoutineExecutionConfig,
+        RoutineExecutionPosture, RoutineRunMode, RoutineTriggerKind,
+    };
     use serde_json::json;
 
     #[test]
@@ -2061,6 +2080,37 @@ mod tests {
         .expect("execution config should parse");
 
         assert_eq!(execution.execution_posture, RoutineExecutionPosture::SensitiveTools);
+    }
+
+    #[test]
+    fn validate_sensitive_tool_approval_policy_requires_routine_gate() {
+        let execution = RoutineExecutionConfig {
+            run_mode: RoutineRunMode::FreshSession,
+            execution_posture: RoutineExecutionPosture::SensitiveTools,
+            ..RoutineExecutionConfig::default()
+        };
+        let approval_policy = RoutineApprovalPolicy { mode: RoutineApprovalMode::None };
+
+        let error = super::validate_sensitive_tool_approval_policy(&execution, &approval_policy)
+            .expect_err("sensitive tool routines require an approval gate");
+
+        assert!(
+            error.contains("approval_mode=before_enable or before_first_run"),
+            "error should name the required approval modes: {error}"
+        );
+    }
+
+    #[test]
+    fn validate_sensitive_tool_approval_policy_accepts_before_first_run_gate() {
+        let execution = RoutineExecutionConfig {
+            run_mode: RoutineRunMode::FreshSession,
+            execution_posture: RoutineExecutionPosture::SensitiveTools,
+            ..RoutineExecutionConfig::default()
+        };
+        let approval_policy = RoutineApprovalPolicy { mode: RoutineApprovalMode::BeforeFirstRun };
+
+        super::validate_sensitive_tool_approval_policy(&execution, &approval_policy)
+            .expect("before_first_run should satisfy the sensitive tool routine gate");
     }
 
     #[test]

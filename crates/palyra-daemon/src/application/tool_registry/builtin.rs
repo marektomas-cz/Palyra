@@ -201,7 +201,7 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
         ),
         entry(
             "palyra.routines.control",
-            "Create, update, pause, resume, or manually dispatch routines through the approval-aware runtime. For new reminders and monitors, omit routine_id and use operation=upsert with trigger_kind=schedule, name, prompt, and natural_language_schedule such as 'every 30 minutes' or 'every 40 seconds'. Use workdir for a scheduled project root that future runs should treat as their cwd and output base. Scheduled routines default to execution_posture=sensitive_tools because future runs cannot prompt for per-tool approval; set execution_posture=standard only when the routine must stay read-only or approval-gated.",
+            "Create, update, pause, resume, or manually dispatch routines through the approval-aware runtime. For new reminders and monitors, omit routine_id and use operation=upsert with trigger_kind=schedule, name, prompt, and natural_language_schedule such as 'every 30 minutes' or 'every 40 seconds'. Use workdir for a scheduled project root that future runs should treat as their cwd and output base. Scheduled routines default to execution_posture=standard. Set execution_posture=sensitive_tools only when future runs genuinely need sensitive tools, and include approval_mode=before_enable or approval_mode=before_first_run.",
             object_schema(
                 &["operation"],
                 vec![
@@ -237,7 +237,11 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
                     ),
                     (
                         "execution_posture",
-                        json!({"type":"string","enum":["standard","sensitive_tools"]}),
+                        json!({"type":"string","enum":["standard","sensitive_tools"],"description":"Use sensitive_tools only with approval_mode=before_enable or before_first_run."}),
+                    ),
+                    (
+                        "approval_mode",
+                        json!({"type":"string","enum":["none","before_enable","before_first_run"],"description":"Required as before_enable or before_first_run when execution_posture=sensitive_tools."}),
                     ),
                     ("enabled", json!({"type":"boolean"})),
                 ],
