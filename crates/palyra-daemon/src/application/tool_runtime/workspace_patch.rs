@@ -208,6 +208,7 @@ pub(crate) async fn execute_workspace_patch_tool(
         session_id,
         &parsed,
         patch.as_str(),
+        dry_run,
         agent_workspace_roots.as_slice(),
     )
     .await
@@ -275,6 +276,7 @@ async fn resolve_workspace_patch_roots(
     session_id: &str,
     parsed: &serde_json::Map<String, Value>,
     patch: &str,
+    dry_run: bool,
     agent_workspace_roots: &[PathBuf],
 ) -> Result<Vec<PathBuf>, String> {
     if let Some(value) = parsed.get("workspace_root") {
@@ -283,8 +285,12 @@ async fn resolve_workspace_patch_roots(
         };
         let workspace_root = raw_workspace_root.trim();
         if !workspace_root.is_empty() {
-            return resolve_workspace_root_override(agent_workspace_roots, workspace_root)
-                .map(|root| vec![root]);
+            return resolve_workspace_root_override(
+                agent_workspace_roots,
+                workspace_root,
+                !dry_run,
+            )
+            .map(|root| vec![root]);
         }
     }
     if let Some(active_root) =
@@ -324,6 +330,7 @@ fn patch_operation_paths(patch: &str) -> Vec<String> {
 fn resolve_workspace_root_override(
     agent_workspace_roots: &[PathBuf],
     workspace_root: &str,
+    create_missing_relative: bool,
 ) -> Result<PathBuf, String> {
     if workspace_root.chars().any(char::is_control) {
         return Err(
@@ -353,9 +360,55 @@ fn resolve_workspace_root_override(
             Err(error) => return Err(error),
         }
     }
+    if create_missing_relative {
+        let Some(canonical_root) = canonical_roots.first() else {
+            return Err("palyra.fs.apply_patch agent has no accessible workspace roots".to_owned());
+        };
+        let created = create_missing_relative_workspace_root(
+            canonical_root,
+            requested,
+            &canonical_roots,
+            workspace_root,
+        )?;
+        return Ok(created);
+    }
     Err(format!(
         "palyra.fs.apply_patch workspace_root does not exist inside agent workspace roots: {workspace_root}"
     ))
+}
+
+fn create_missing_relative_workspace_root(
+    canonical_root: &Path,
+    requested: &Path,
+    canonical_roots: &[PathBuf],
+    workspace_root: &str,
+) -> Result<PathBuf, String> {
+    let candidate = canonical_root.join(requested);
+    let mut nearest_existing = candidate.clone();
+    while !nearest_existing.exists() {
+        if nearest_existing == *canonical_root || !nearest_existing.pop() {
+            return Err(format!(
+                "palyra.fs.apply_patch workspace_root does not exist inside agent workspace roots: {workspace_root}"
+            ));
+        }
+    }
+    let canonical_existing = fs::canonicalize(nearest_existing.as_path()).map_err(|error| {
+        format!("palyra.fs.apply_patch failed to resolve workspace_root {workspace_root}: {error}")
+    })?;
+    if !canonical_existing.is_dir() {
+        return Err(format!(
+            "palyra.fs.apply_patch workspace_root parent is not a directory: {workspace_root}"
+        ));
+    }
+    if !canonical_roots.iter().any(|root| canonical_existing.starts_with(root)) {
+        return Err(format!(
+            "palyra.fs.apply_patch workspace_root escapes agent workspace roots: {workspace_root}"
+        ));
+    }
+    fs::create_dir_all(candidate.as_path()).map_err(|error| {
+        format!("palyra.fs.apply_patch failed to create workspace_root {workspace_root}: {error}")
+    })?;
+    canonicalize_workspace_root_override(candidate.as_path(), canonical_roots, workspace_root)
 }
 
 fn canonicalize_agent_workspace_roots(
@@ -621,6 +674,7 @@ mod tests {
         let roots = resolve_workspace_root_override(
             std::slice::from_ref(&workspace),
             "e2e-cli/file-tool-smoke",
+            false,
         )
         .expect("workspace root override should resolve");
         let roots = vec![roots];
@@ -642,6 +696,47 @@ mod tests {
     }
 
     #[test]
+    fn workspace_root_override_creates_missing_relative_directory_for_write() {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let workspace = tempdir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace directory should exist");
+
+        let root = resolve_workspace_root_override(
+            std::slice::from_ref(&workspace),
+            "agent-browser-smoke",
+            true,
+        )
+        .expect("missing relative workspace root should be created for apply_patch writes");
+
+        assert!(root.is_dir());
+        assert_eq!(
+            root,
+            std::fs::canonicalize(workspace.join("agent-browser-smoke"))
+                .expect("created root should canonicalize")
+        );
+    }
+
+    #[test]
+    fn workspace_root_override_does_not_create_missing_relative_directory_for_dry_run() {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let workspace = tempdir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace directory should exist");
+
+        let error = resolve_workspace_root_override(
+            std::slice::from_ref(&workspace),
+            "web-research-smoke",
+            false,
+        )
+        .expect_err("dry-run planning should not create missing workspace roots");
+
+        assert!(error.contains("does not exist inside agent workspace roots"));
+        assert!(
+            !workspace.join("web-research-smoke").exists(),
+            "dry-run resolution must not mutate the filesystem"
+        );
+    }
+
+    #[test]
     fn workspace_root_override_rejects_outside_directory() {
         let tempdir = tempfile::tempdir().expect("tempdir should be created");
         let workspace = tempdir.path().join("workspace");
@@ -650,7 +745,7 @@ mod tests {
         std::fs::create_dir_all(&outside).expect("outside directory should exist");
 
         let error =
-            resolve_workspace_root_override(&[workspace], outside.to_string_lossy().as_ref())
+            resolve_workspace_root_override(&[workspace], outside.to_string_lossy().as_ref(), true)
                 .expect_err("outside workspace_root should be rejected");
 
         assert!(error.contains("escapes agent workspace roots"), "unexpected error: {error}");
@@ -665,7 +760,7 @@ mod tests {
         std::fs::create_dir_all(&outside).expect("outside directory should exist");
 
         let error =
-            resolve_workspace_root_override(&[workspace], outside.to_string_lossy().as_ref())
+            resolve_workspace_root_override(&[workspace], outside.to_string_lossy().as_ref(), true)
                 .expect_err("host workspace_root should be rejected");
 
         assert!(error.contains("escapes agent workspace roots"), "unexpected error: {error}");
