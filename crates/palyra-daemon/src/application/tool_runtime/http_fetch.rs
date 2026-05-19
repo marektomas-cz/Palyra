@@ -305,10 +305,12 @@ pub(crate) async fn execute_http_fetch_tool(
         None => runtime_state.config.http_fetch.allowed_content_types.clone(),
     };
 
+    let requested_allow_private_targets =
+        payload.get("allow_private_targets").and_then(Value::as_bool);
     let allow_private_targets = http_fetch_allows_private_targets_for_url(
         runtime_state.config.http_fetch.allow_private_targets,
         &runtime_state.config.tool_call.process_runner,
-        payload.get("allow_private_targets").and_then(Value::as_bool),
+        requested_allow_private_targets,
         &url,
     );
 
@@ -386,11 +388,17 @@ pub(crate) async fn execute_http_fetch_tool(
         let (egress_verdict, resolved_addrs) = if let Some(resolved) = next_egress_verdict.take() {
             resolved
         } else {
+            let allow_private_targets_for_current_url = http_fetch_allows_private_targets_for_url(
+                runtime_state.config.http_fetch.allow_private_targets,
+                &runtime_state.config.tool_call.process_runner,
+                requested_allow_private_targets,
+                &current_url,
+            );
             match evaluate_http_fetch_egress(
                 runtime_state,
                 method.as_str(),
                 &current_url,
-                allow_private_targets,
+                allow_private_targets_for_current_url,
                 max_response_bytes,
                 credential_bindings.as_slice(),
             ) {

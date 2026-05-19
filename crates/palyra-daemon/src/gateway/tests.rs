@@ -836,6 +836,35 @@ fn http_fetch_payload_can_allow_loopback_only_for_local_host_process_runtime() {
     );
 }
 
+#[test]
+fn http_fetch_private_target_override_is_recomputed_per_url() {
+    let host_access_policy = process_runner_policy_with_host_access();
+    let requested_allow_private_targets = Some(true);
+    let initial_loopback_url =
+        Url::parse("http://127.0.0.1:8780/redirect").expect("loopback URL should parse");
+    let redirected_private_url =
+        Url::parse("http://169.254.169.254/latest/meta-data").expect("redirect URL should parse");
+
+    assert!(
+        http_fetch_allows_private_targets_for_url(
+            false,
+            &host_access_policy,
+            requested_allow_private_targets,
+            &initial_loopback_url,
+        ),
+        "loopback origin can use the local host-process override"
+    );
+    assert!(
+        !http_fetch_allows_private_targets_for_url(
+            false,
+            &host_access_policy,
+            requested_allow_private_targets,
+            &redirected_private_url,
+        ),
+        "redirected non-loopback private targets must not inherit loopback-only overrides"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn http_fetch_rejects_url_credentials() {
     let state = build_test_runtime_state(false);
