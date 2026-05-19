@@ -22,7 +22,7 @@ use palyra_sandbox::{
     build_tier_c_command_plan, current_backend_capabilities, current_backend_executor,
     current_backend_kind, TierCBackendError, TierCCommandRequest, TierCPolicy,
 };
-use serde_json::json;
+use serde_json::{json, Value};
 
 const MAX_COMMAND_LENGTH: usize = 256;
 const MAX_ARGS_COUNT: usize = 128;
@@ -312,7 +312,7 @@ pub fn run_constrained_process(
         return Err(SandboxProcessRunError {
             kind: SandboxProcessRunErrorKind::TimedOut,
             message: format!(
-                "sandbox process timed out after {}ms and was terminated; for dev servers or other long-running commands, rerun with background=true and an explicit timeout_ms lifetime",
+                "sandbox process timed out after {}ms and was terminated; for dev servers or intentional long-running services, rerun with background=true and an explicit timeout_ms lifetime, then poll or stop the returned process handle. Do not use background=true to verify tests or builds; rerun those foreground with a longer timeout after fixing the hang.",
                 per_call_timeout.as_millis()
             ),
         });
@@ -1859,16 +1859,20 @@ fn spawn_background_process(
     let RedactedProcessOutputText { text: stderr_text, redacted: stderr_redacted } =
         redacted_process_output(stderr.bytes.as_slice());
     let output_json = serde_json::to_vec(&json!({
-        "exit_code": 0,
+        "exit_code": Value::Null,
         "stdout": stdout_text,
         "stderr": stderr_text,
         "stdout_truncated": stdout.truncated,
         "stderr_truncated": stderr.truncated,
         "stdout_redacted": stdout_redacted,
         "stderr_redacted": stderr_redacted,
-        "background_output_note": "stdout/stderr are bounded startup snapshots captured during the startup check; use an explicit fixed port if a dynamic port is not printed here",
+        "background_output_note": "stdout/stderr are bounded startup snapshots captured during the startup check, not command completion output; use an explicit fixed port if a dynamic port is not printed here",
         "duration_ms": 0,
         "background": true,
+        "started": true,
+        "completed": false,
+        "startup_success": true,
+        "process_state": "running",
         "pid": pid,
         "lifetime_ms": lifetime_ms,
         "max_lifetime_ms": MAX_BACKGROUND_PROCESS_LIFETIME_MS,
@@ -3288,6 +3292,14 @@ mod tests {
             serde_json::from_slice(&result.output_json).expect("output should parse");
 
         assert_eq!(output.get("background").and_then(serde_json::Value::as_bool), Some(true));
+        assert_eq!(output.get("exit_code"), Some(&serde_json::Value::Null));
+        assert_eq!(output.get("started").and_then(serde_json::Value::as_bool), Some(true));
+        assert_eq!(output.get("completed").and_then(serde_json::Value::as_bool), Some(false));
+        assert_eq!(output.get("startup_success").and_then(serde_json::Value::as_bool), Some(true));
+        assert_eq!(
+            output.get("process_state").and_then(serde_json::Value::as_str),
+            Some("running")
+        );
         assert_eq!(
             output.get("lifetime_ms").and_then(serde_json::Value::as_u64),
             Some(super::DEFAULT_BACKGROUND_PROCESS_LIFETIME_MS)
@@ -3349,6 +3361,12 @@ mod tests {
             serde_json::from_slice(&result.output_json).expect("output should parse");
 
         assert_eq!(output.get("background").and_then(serde_json::Value::as_bool), Some(true));
+        assert_eq!(output.get("exit_code"), Some(&serde_json::Value::Null));
+        assert_eq!(output.get("completed").and_then(serde_json::Value::as_bool), Some(false));
+        assert_eq!(
+            output.get("process_state").and_then(serde_json::Value::as_str),
+            Some("running")
+        );
         let stdout = output
             .get("stdout")
             .and_then(serde_json::Value::as_str)
@@ -3364,6 +3382,11 @@ mod tests {
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default()
             .contains("startup snapshots"));
+        assert!(output
+            .get("background_output_note")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .contains("not command completion output"));
 
         let _ = fs::remove_dir_all(workspace.as_path());
     }
