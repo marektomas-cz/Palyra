@@ -179,6 +179,43 @@ fn anthropic_catalog_exposes_browser_observe_without_default_keywords() {
 }
 
 #[test]
+fn anthropic_catalog_exposes_browser_viewport_without_exclusive_bounds() {
+    let config = config(&["palyra.browser.viewport"]);
+    let snapshot = build_model_visible_tool_catalog_snapshot(ToolCatalogBuildRequest {
+        config: &config,
+        browser_service_enabled: true,
+        request_context: &request_context(),
+        provider_kind: "anthropic",
+        provider_model_id: Some("minimax-m2.7"),
+        surface: ToolExposureSurface::RunStream,
+        remaining_tool_budget: 1,
+        created_at_unix_ms: 42,
+    });
+
+    let viewport = snapshot
+        .tools
+        .iter()
+        .find(|tool| tool.name == "palyra.browser.viewport")
+        .expect("browser viewport should stay visible for Anthropic-compatible providers");
+    assert!(
+        !snapshot.filtered_tools.iter().any(|tool| {
+            tool.name == "palyra.browser.viewport"
+                && tool.reason_code.as_str() == "provider_schema_incompatible"
+        }),
+        "browser viewport must not be filtered for schema dialect incompatibility"
+    );
+    let device_scale_factor = &viewport.provider_schema["properties"]["device_scale_factor"];
+    assert!(device_scale_factor.get("exclusiveMinimum").is_none());
+    assert_eq!(device_scale_factor.get("minimum").and_then(serde_json::Value::as_i64), Some(0));
+    assert!(device_scale_factor.get("default").is_none());
+
+    let payload = snapshot_to_provider_request_value(&snapshot);
+    let tools = provider_tools_from_catalog_snapshot(&payload, ToolSchemaDialect::Anthropic);
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0]["name"], "palyra.browser.viewport");
+}
+
+#[test]
 fn browser_session_create_returns_model_visible_handle() {
     assert_eq!(
         projection_policy_for_tool("palyra.browser.session.create"),

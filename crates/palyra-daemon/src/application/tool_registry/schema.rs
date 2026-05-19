@@ -39,6 +39,7 @@ fn normalize_schema_for_provider(
     };
 
     object.remove("default");
+    downlevel_exclusive_numeric_bounds(object);
 
     if dialect == ToolSchemaDialect::Anthropic
         && object.get("additionalProperties").is_some_and(Value::is_object)
@@ -63,6 +64,15 @@ fn normalize_schema_for_provider(
     }
 
     Ok(())
+}
+
+fn downlevel_exclusive_numeric_bounds(object: &mut Map<String, Value>) {
+    if let Some(bound) = object.remove("exclusiveMinimum") {
+        object.entry("minimum".to_owned()).or_insert(bound);
+    }
+    if let Some(bound) = object.remove("exclusiveMaximum") {
+        object.entry("maximum".to_owned()).or_insert(bound);
+    }
 }
 
 fn validate_schema_subset(
