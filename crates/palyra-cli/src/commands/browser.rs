@@ -36,6 +36,7 @@ const BROWSER_SERVICE_METADATA_FILE_NAME: &str = "browser-service.json";
 const BROWSER_SERVICE_STDOUT_LOG_FILE_NAME: &str = "browserd.stdout.log";
 const BROWSER_SERVICE_STDERR_LOG_FILE_NAME: &str = "browserd.stderr.log";
 const BROWSERD_STATE_ENCRYPTION_KEY_ENV: &str = "PALYRA_BROWSERD_STATE_ENCRYPTION_KEY";
+const BROWSERD_AUTH_TOKEN_ENV: &str = "PALYRA_BROWSERD_AUTH_TOKEN";
 const BROWSERD_STATE_ENCRYPTION_KEY_LEN: usize = 32;
 const BROWSER_ARTIFACT_DIR: &str = "browser-artifacts";
 const BROWSER_CALLER_PRINCIPAL_HEADER: &str = "x-palyra-principal";
@@ -779,6 +780,10 @@ fn ensure_browser_gateway_tools_allowed(document: &mut toml::Value) -> Result<Ve
     Ok(added)
 }
 
+fn set_browserd_auth_token(command: &mut Command, auth_token: &str) {
+    command.env(BROWSERD_AUTH_TOKEN_ENV, auth_token);
+}
+
 fn generate_browser_auth_token() -> String {
     format!("palyra_browser_{}_{}", Ulid::new(), Ulid::new())
 }
@@ -869,7 +874,7 @@ async fn run_browser_start(
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));
     if let Some(auth_token) = resolved.connection.auth_token.as_ref() {
-        command.arg("--auth-token").arg(auth_token);
+        set_browserd_auth_token(&mut command, auth_token);
     }
     if let Some(state_key) = browserd_state_encryption_key.as_ref() {
         command.env(BROWSERD_STATE_ENCRYPTION_KEY_ENV, state_key);
@@ -4243,6 +4248,7 @@ mod tests {
     use crate::{args::BrowserCommand, browser_v1, common_v1};
     use palyra_control_plane as control_plane;
     use serde_json::{json, Value};
+    use std::process::Command;
 
     fn disabled_policy() -> BrowserPolicySnapshot {
         BrowserPolicySnapshot {
@@ -4307,6 +4313,31 @@ mod tests {
             auth_token_configured: true,
             state_encryption_key_configured: false,
         }
+    }
+
+    #[test]
+    fn browserd_auth_token_is_passed_via_environment_not_argv() {
+        let mut command = Command::new("palyra-browserd");
+
+        super::set_browserd_auth_token(&mut command, "browser-token-for-test");
+
+        let args =
+            command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect::<Vec<_>>();
+        assert!(
+            !args.iter().any(|arg| arg == "--auth-token" || arg == "browser-token-for-test"),
+            "browserd token must not be exposed through process arguments: {args:?}"
+        );
+        assert_eq!(
+            command
+                .get_envs()
+                .find_map(|(key, value)| {
+                    (key == super::BROWSERD_AUTH_TOKEN_ENV)
+                        .then(|| value.map(|entry| entry.to_string_lossy().into_owned()))
+                })
+                .flatten()
+                .as_deref(),
+            Some("browser-token-for-test")
+        );
     }
 
     #[test]
