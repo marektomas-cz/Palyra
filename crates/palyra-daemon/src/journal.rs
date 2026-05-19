@@ -19938,6 +19938,21 @@ mod tests {
                 .expect("provider payload should serialize"),
             })
             .expect("provider raw artifact should be stored");
+        let stdout_stderr = store
+            .create_tool_result_artifact(&ToolResultArtifactCreateRequest {
+                artifact_id: "01ARZ3NDEKTSV4RRFFQ69G5P20".to_owned(),
+                session_id: session_id.to_owned(),
+                run_id: run_id.to_owned(),
+                proposal_id: "01ARZ3NDEKTSV4RRFFQ69G5P21".to_owned(),
+                tool_name: "palyra.process.run".to_owned(),
+                mime_type: "application/json".to_owned(),
+                sensitivity: ToolResultSensitivity::StdoutStderr,
+                retention: ArtifactRetentionPolicy::keep(),
+                redacted_preview: "{\"stdout\":\"<preview>\"}".to_owned(),
+                content: br#"{"stdout":"INTERNAL_PROJECT_CODENAME=BLUEJAY\n","stderr":""}"#
+                    .to_vec(),
+            })
+            .expect("stdout/stderr artifact should be stored");
         let provider_preview = store
             .read_tool_result_artifact(&ToolResultArtifactReadRequest {
                 artifact_id: provider_raw.artifact_id.clone(),
@@ -19975,6 +19990,22 @@ mod tests {
             .expect_err("provider raw full read should stay gated");
         assert!(matches!(provider_full_read, JournalError::ToolResultArtifactReadDenied { .. }));
 
+        let stdout_read = store
+            .read_tool_result_artifact(&ToolResultArtifactReadRequest {
+                artifact_id: stdout_stderr.artifact_id,
+                session_id: session_id.to_owned(),
+                run_id: run_id.to_owned(),
+                principal: "user:ops".to_owned(),
+                device_id: "device:local".to_owned(),
+                channel: Some("cli".to_owned()),
+                expected_digest_sha256: None,
+                offset_bytes: 0,
+                max_bytes: 4096,
+                text_preview: true,
+            })
+            .expect_err("stdout/stderr artifacts should stay gated from artifact.read");
+        assert!(matches!(stdout_read, JournalError::ToolResultArtifactReadDenied { .. }));
+
         let secret_read = store
             .read_tool_result_artifact(&ToolResultArtifactReadRequest {
                 artifact_id: secret.artifact_id,
@@ -19994,7 +20025,7 @@ mod tests {
         let artifacts = store
             .list_tool_result_artifacts_for_run(run_id)
             .expect("artifact refs should be listable for replay");
-        assert_eq!(artifacts.len(), 3);
+        assert_eq!(artifacts.len(), 4);
     }
 
     #[test]
