@@ -255,7 +255,8 @@ impl ToolResultSensitivity {
     pub const fn requires_full_read_gate(self) -> bool {
         matches!(
             self,
-            Self::StdoutStderr
+            Self::InternalPath
+                | Self::StdoutStderr
                 | Self::PersonalData
                 | Self::Secret
                 | Self::ProviderRawPayload
@@ -1500,6 +1501,7 @@ mod tests {
     fn artifact_contracts_capture_sensitivity_retention_and_budget_defaults() {
         assert!(ToolResultSensitivity::Secret.requires_full_read_gate());
         assert!(ToolResultSensitivity::StdoutStderr.requires_full_read_gate());
+        assert!(ToolResultSensitivity::InternalPath.requires_full_read_gate());
 
         let keep = ArtifactRetentionPolicy::keep();
         assert_eq!(keep.disposition, ArtifactRetentionDisposition::Keep);

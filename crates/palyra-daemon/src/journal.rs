@@ -19953,6 +19953,20 @@ mod tests {
                     .to_vec(),
             })
             .expect("stdout/stderr artifact should be stored");
+        let internal_path = store
+            .create_tool_result_artifact(&ToolResultArtifactCreateRequest {
+                artifact_id: "01ARZ3NDEKTSV4RRFFQ69G5P22".to_owned(),
+                session_id: session_id.to_owned(),
+                run_id: run_id.to_owned(),
+                proposal_id: "01ARZ3NDEKTSV4RRFFQ69G5P23".to_owned(),
+                tool_name: "palyra.fs.apply_patch".to_owned(),
+                mime_type: "application/json".to_owned(),
+                sensitivity: ToolResultSensitivity::InternalPath,
+                retention: ArtifactRetentionPolicy::keep(),
+                redacted_preview: "{\"path\":\"workspace/file.rs\"}".to_owned(),
+                content: br#"{"path":"C:\\Users\\alice\\repo\\workspace\\secret.txt"}"#.to_vec(),
+            })
+            .expect("internal path artifact should be stored");
         let provider_preview = store
             .read_tool_result_artifact(&ToolResultArtifactReadRequest {
                 artifact_id: provider_raw.artifact_id.clone(),
@@ -20006,6 +20020,22 @@ mod tests {
             .expect_err("stdout/stderr artifacts should stay gated from artifact.read");
         assert!(matches!(stdout_read, JournalError::ToolResultArtifactReadDenied { .. }));
 
+        let internal_path_read = store
+            .read_tool_result_artifact(&ToolResultArtifactReadRequest {
+                artifact_id: internal_path.artifact_id,
+                session_id: session_id.to_owned(),
+                run_id: run_id.to_owned(),
+                principal: "user:ops".to_owned(),
+                device_id: "device:local".to_owned(),
+                channel: Some("cli".to_owned()),
+                expected_digest_sha256: None,
+                offset_bytes: 0,
+                max_bytes: 4096,
+                text_preview: true,
+            })
+            .expect_err("internal path artifacts should stay gated from artifact.read");
+        assert!(matches!(internal_path_read, JournalError::ToolResultArtifactReadDenied { .. }));
+
         let secret_read = store
             .read_tool_result_artifact(&ToolResultArtifactReadRequest {
                 artifact_id: secret.artifact_id,
@@ -20025,7 +20055,7 @@ mod tests {
         let artifacts = store
             .list_tool_result_artifacts_for_run(run_id)
             .expect("artifact refs should be listable for replay");
-        assert_eq!(artifacts.len(), 4);
+        assert_eq!(artifacts.len(), 5);
     }
 
     #[test]
