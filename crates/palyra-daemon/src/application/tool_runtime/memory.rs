@@ -1024,6 +1024,7 @@ pub(crate) async fn execute_memory_session_search_tool(
         principal: context.principal.to_owned(),
         device_id: context.device_id.to_owned(),
         channel,
+        session_id: None,
         exclude_session_id: if include_current_session {
             None
         } else {

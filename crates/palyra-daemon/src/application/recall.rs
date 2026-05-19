@@ -1044,14 +1044,16 @@ fn build_recall_plan(
     for (source_kind, selected, reason, top_k) in [
         (
             RecallSourceKind::Transcript,
-            session_scoped && (mentions_history || mentions_memory),
+            session_scoped,
             if !session_scoped {
                 "session-scoped transcript recall requires a scoped session".to_owned()
             } else if mentions_history {
                 "query asks about prior conversation or earlier decisions".to_owned()
-            } else {
+            } else if mentions_memory {
                 "planner adds transcript because remembered context may still live only in the tape"
                     .to_owned()
+            } else {
+                "planner adds transcript because an explicit session scope was provided".to_owned()
             },
             DEFAULT_TRANSCRIPT_TOP_K,
         ),
@@ -2374,6 +2376,39 @@ mod tests {
             .iter()
             .any(|source| source.source_kind == RecallSourceKind::Checkpoint
                 && source.decision == RecallSourceDecision::Selected));
+    }
+
+    #[test]
+    fn planner_selects_transcript_for_plain_session_scoped_queries() {
+        let query = "warehouse migration ticket and reviewer initials";
+        let plan = build_recall_plan(
+            query,
+            build_query_variants(query).as_slice(),
+            true,
+            &RecallRequest {
+                query: query.to_owned(),
+                channel: Some("cli".to_owned()),
+                session_id: Some("01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned()),
+                agent_id: None,
+                memory_top_k: 4,
+                workspace_top_k: 4,
+                min_score: 0.0,
+                workspace_prefix: None,
+                include_workspace_historical: false,
+                include_workspace_quarantined: false,
+                max_candidates: 8,
+                prompt_budget_tokens: 1_800,
+            },
+        );
+
+        let transcript_source = plan
+            .sources
+            .iter()
+            .find(|source| source.source_kind == RecallSourceKind::Transcript)
+            .expect("transcript source should be present");
+
+        assert_eq!(transcript_source.decision, RecallSourceDecision::Selected);
+        assert!(transcript_source.reason.contains("explicit session scope"));
     }
 
     #[test]

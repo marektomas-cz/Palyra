@@ -1133,7 +1133,7 @@ pub(crate) async fn console_search_all_handler(
         })?;
     }
     let top_k = query.top_k.unwrap_or(8).clamp(1, 24);
-    let channel = query.channel.and_then(trim_to_option);
+    let channel = query.channel.and_then(trim_to_option).or(session.context.channel.clone());
     let memory_hits = state
         .runtime
         .search_memory(journal::MemorySearchRequest {
@@ -1169,7 +1169,7 @@ pub(crate) async fn console_search_all_handler(
             after_session_key: None,
             principal: session.context.principal.clone(),
             device_id: session.context.device_id.clone(),
-            channel,
+            channel: channel.clone(),
             include_archived: false,
             requested_limit: Some(top_k),
             search_query: Some(search_query.to_owned()),
@@ -1192,17 +1192,53 @@ pub(crate) async fn console_search_all_handler(
             })
         })
         .collect::<Vec<_>>();
+    let session_transcript_outcome = if session_scope.is_some() {
+        Some(
+            state
+                .runtime
+                .search_orchestrator_session_windows(SessionSearchRequest {
+                    principal: session.context.principal.clone(),
+                    device_id: session.context.device_id.clone(),
+                    channel: channel.clone(),
+                    session_id: session_scope.clone(),
+                    exclude_session_id: None,
+                    query: search_query.to_owned(),
+                    top_k,
+                    min_score,
+                    window_before: 2,
+                    window_after: 2,
+                    max_windows_per_session: 3,
+                    include_archived: false,
+                })
+                .await
+                .map_err(runtime_status_response)?,
+        )
+    } else {
+        None
+    };
+    let (session_transcript_hits, session_transcript_diagnostics) =
+        if let Some(outcome) = session_transcript_outcome {
+            (outcome.groups, Some(outcome.diagnostics))
+        } else {
+            (Vec::new(), None)
+        };
+    let session_transcript_count = session_transcript_hits.len();
     Ok(Json(json!({
         "query": search_query,
         "groups": {
             "sessions": session_hits,
+            "session_transcripts": session_transcript_hits,
             "workspace": workspace_hits,
             "memory": memory_hits,
         },
         "counts": {
             "sessions": session_count,
+            "session_transcripts": session_transcript_count,
             "workspace": workspace_hits.len(),
             "memory": memory_hits.len(),
+        },
+        "diagnostics": {
+            "session_transcripts": session_transcript_diagnostics,
         },
         "contract": contract_descriptor(),
     })))
@@ -1231,6 +1267,7 @@ pub(crate) async fn console_session_search_handler(
             principal: session.context.principal.clone(),
             device_id: session.context.device_id.clone(),
             channel: channel.clone(),
+            session_id: None,
             exclude_session_id: None,
             query: search_query.to_owned(),
             top_k: query.top_k.unwrap_or(8).clamp(1, 24),

@@ -2765,6 +2765,7 @@ pub struct SessionSearchRequest {
     pub principal: String,
     pub device_id: String,
     pub channel: Option<String>,
+    pub session_id: Option<String>,
     pub exclude_session_id: Option<String>,
     pub query: String,
     pub top_k: usize,
@@ -15656,11 +15657,11 @@ fn load_session_search_candidates(
         "1 = 1".to_owned()
     } else {
         (0..like_needles.len())
-            .map(|index| format!("LOWER(tape.payload_json) LIKE ?{} ESCAPE '\\'", index + 6))
+            .map(|index| format!("LOWER(tape.payload_json) LIKE ?{} ESCAPE '\\'", index + 7))
             .collect::<Vec<_>>()
             .join(" OR ")
     };
-    let limit_parameter_index = like_needles.len() + 6;
+    let limit_parameter_index = like_needles.len() + 7;
     let sql = format!(
         r#"
             SELECT
@@ -15705,7 +15706,8 @@ fn load_session_search_candidates(
               AND sessions.device_id = ?2
               AND ((sessions.channel = ?3) OR (sessions.channel IS NULL AND ?3 IS NULL))
               AND (?4 = 1 OR sessions.archived_at_unix_ms IS NULL)
-              AND (?5 IS NULL OR sessions.session_ulid != ?5)
+              AND (?5 IS NULL OR sessions.session_ulid = ?5)
+              AND (?6 IS NULL OR sessions.session_ulid != ?6)
               AND tape.event_type IN ('message.received', 'queued.input', 'message.replied', 'rollback.marker')
               AND ({like_clause})
             ORDER BY tape.created_at_unix_ms DESC, tape.run_ulid DESC, tape.seq DESC
@@ -15716,17 +15718,19 @@ fn load_session_search_candidates(
     let now_unix_ms = current_unix_ms()?;
     let channel = request.channel.as_deref();
     let include_archived = if request.include_archived { 1_i64 } else { 0_i64 };
+    let session_id = request.session_id.as_deref();
     let exclude_session_id = request.exclude_session_id.as_deref();
     let scan_limit = scan_limit as i64;
     let like_patterns = like_needles
         .iter()
         .map(|needle| format!("%{}%", escape_sql_like(needle.as_str())))
         .collect::<Vec<_>>();
-    let mut parameters: Vec<&dyn ToSql> = Vec::with_capacity(6 + like_patterns.len());
+    let mut parameters: Vec<&dyn ToSql> = Vec::with_capacity(7 + like_patterns.len());
     parameters.push(&request.principal);
     parameters.push(&request.device_id);
     parameters.push(&channel);
     parameters.push(&include_archived);
+    parameters.push(&session_id);
     parameters.push(&exclude_session_id);
     for pattern in &like_patterns {
         parameters.push(pattern);
@@ -20761,6 +20765,7 @@ mod tests {
                 principal: "user:ops".to_owned(),
                 device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
                 channel: Some("cli".to_owned()),
+                session_id: None,
                 exclude_session_id: None,
                 query: "cross session recall".to_owned(),
                 top_k: 4,
@@ -20795,6 +20800,53 @@ mod tests {
     }
 
     #[test]
+    fn session_search_can_target_exact_session_transcripts() {
+        let db_path = temp_db_path();
+        let store = JournalStore::open(test_journal_config(db_path, false))
+            .expect("journal store should open");
+
+        for (session_id, run_id, ticket) in [
+            ("01ARZ3NDEKTSV4RRFFQ69G5SF1", "01ARZ3NDEKTSV4RRFFQ69G5RF1", "ORCHID-5821"),
+            ("01ARZ3NDEKTSV4RRFFQ69G5SF2", "01ARZ3NDEKTSV4RRFFQ69G5RF2", "ORCHID-9999"),
+        ] {
+            upsert_orchestrator_session(&store, session_id);
+            start_orchestrator_run(&store, session_id, run_id);
+            store
+                .append_orchestrator_tape_event(&OrchestratorTapeAppendRequest {
+                    run_id: run_id.to_owned(),
+                    seq: 0,
+                    event_type: "message.received".to_owned(),
+                    payload_json: format!(
+                        r#"{{"text":"warehouse migration ticket {ticket}; reviewer initials PT"}}"#
+                    ),
+                })
+                .expect("tape event should persist");
+        }
+
+        let outcome = store
+            .search_orchestrator_session_windows(&SessionSearchRequest {
+                principal: "user:ops".to_owned(),
+                device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+                channel: Some("cli".to_owned()),
+                session_id: Some("01ARZ3NDEKTSV4RRFFQ69G5SF1".to_owned()),
+                exclude_session_id: None,
+                query: "warehouse migration ticket reviewer initials".to_owned(),
+                top_k: 4,
+                min_score: 0.0,
+                window_before: 0,
+                window_after: 0,
+                max_windows_per_session: 2,
+                include_archived: false,
+            })
+            .expect("session search should succeed");
+
+        assert_eq!(outcome.groups.len(), 1);
+        assert_eq!(outcome.groups[0].session.session_id, "01ARZ3NDEKTSV4RRFFQ69G5SF1");
+        assert!(outcome.groups[0].windows[0].matched.text.contains("ORCHID-5821"));
+        assert!(!outcome.groups[0].windows[0].matched.text.contains("ORCHID-9999"));
+    }
+
+    #[test]
     fn session_search_matches_natural_language_prior_session_recall() {
         let db_path = temp_db_path();
         let store = JournalStore::open(test_journal_config(db_path, false))
@@ -20826,6 +20878,7 @@ mod tests {
                 principal: "user:ops".to_owned(),
                 device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
                 channel: Some("cli".to_owned()),
+                session_id: None,
                 exclude_session_id: Some("01ARZ3NDEKTSV4RRFFQ69G5SE2".to_owned()),
                 query: "název dočasného feature flagu".to_owned(),
                 top_k: 1,
