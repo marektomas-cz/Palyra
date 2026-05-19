@@ -486,6 +486,9 @@ fn normalize_patch_control_variant(
     if let Some(canonical) = canonical_patch_fence_variant(line) {
         return Some(canonical.to_owned());
     }
+    if let Some(canonical) = operation_header_variant(line) {
+        return Some(canonical);
+    }
     if let Some(path) = begin_file_variant_path(line) {
         if let Some((header_index, pending_path)) = pending_empty_file_header.as_ref() {
             if path == *pending_path && output_lines.get(*header_index).is_some() {
@@ -506,6 +509,27 @@ fn canonical_patch_fence_variant(line: &str) -> Option<&'static str> {
         "*** End Patch" | "*** End Patch ***" => Some("*** End Patch"),
         _ => None,
     }
+}
+
+fn operation_header_variant(line: &str) -> Option<String> {
+    let control = patch_control_line(line);
+    for prefix in [
+        "*** Add File:",
+        "*** Replace File:",
+        "*** Update File:",
+        "*** Delete File:",
+        "*** Move to:",
+    ] {
+        let Some(raw_path) = control.strip_prefix(prefix) else {
+            continue;
+        };
+        let path = strip_trailing_patch_stars(raw_path);
+        if path.is_empty() {
+            return None;
+        }
+        return Some(format!("{prefix} {path}"));
+    }
+    None
 }
 
 fn begin_file_variant_path(line: &str) -> Option<String> {
@@ -2187,6 +2211,37 @@ mod tests {
             fs::read_to_string(workspace.join("reports").join("ready.md"))
                 .expect("report should be created"),
             "READY detected\n"
+        );
+    }
+
+    #[test]
+    fn apply_workspace_patch_strips_trailing_stars_from_operation_headers() {
+        let temp = tempdir().expect("tempdir should be created");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace should exist");
+        let patch =
+            "*** Begin Patch\n*** Add File: index.html ***\n+<h1>Ready</h1>\n*** End Patch\n";
+
+        let outcome = apply_workspace_patch(
+            std::slice::from_ref(&workspace),
+            &default_request(patch, false),
+            &default_limits(),
+        )
+        .expect("trailing operation-header stars should be normalized");
+
+        assert_eq!(outcome.files_touched.len(), 1);
+        assert_eq!(
+            attestation_by_path(&outcome, "index.html").operation,
+            "create",
+            "path should not retain trailing patch fence stars"
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.join("index.html")).expect("index should be created"),
+            "<h1>Ready</h1>\n"
+        );
+        assert!(
+            !workspace.join("index.html ***").exists(),
+            "malformed header suffix must not become part of the filename"
         );
     }
 
