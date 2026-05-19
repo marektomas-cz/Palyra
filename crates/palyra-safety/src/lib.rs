@@ -195,6 +195,7 @@ const SENSITIVE_ASSIGNMENT_KEYS: &[&str] = &[
     "refresh_token",
     "client_secret",
     "password",
+    "private_key",
     "secret",
     "token",
 ];
@@ -747,7 +748,21 @@ fn detect_sensitive_assignment(line: &str, _lowered: &str) -> Option<&'static st
 }
 
 fn sensitive_assignment_separator_index(line: &str) -> Option<usize> {
-    line.find('=').or_else(|| line.find(':'))
+    match (line.find('='), line.find(':')) {
+        (Some(equals), Some(colon))
+            if colon < equals && is_colon_style_assignment_key(&line[..colon]) =>
+        {
+            Some(colon)
+        }
+        (Some(equals), _) => Some(equals),
+        (None, Some(colon)) => Some(colon),
+        (None, None) => None,
+    }
+}
+
+fn is_colon_style_assignment_key(raw_key: &str) -> bool {
+    let raw_key = raw_key.trim().trim_start_matches(|ch| matches!(ch, '{' | '[' | ',')).trim();
+    !raw_key.is_empty() && !raw_key.chars().any(char::is_whitespace)
 }
 
 fn assignment_key_identifier(raw_key: &str) -> Option<String> {
@@ -774,14 +789,16 @@ fn classify_sensitive_assignment_key(key: &str) -> Option<&'static str> {
     if compact.contains("clientsecret") {
         return Some("client_secret");
     }
-    if key == "password" || key.ends_with("_password") || key.ends_with("-password") {
-        return Some("password");
+    if compact.contains("privatekey") {
+        return Some("private_key");
     }
-    if key == "token" || key.ends_with("_token") || key.ends_with("-token") {
-        return Some("token");
-    }
-    if key == "secret" || key.ends_with("_secret") || key.ends_with("-secret") {
-        return Some("secret");
+    for component in key.split(['_', '-']) {
+        match component {
+            "password" => return Some("password"),
+            "token" => return Some("token"),
+            "secret" => return Some("secret"),
+            _ => {}
+        }
     }
     SENSITIVE_ASSIGNMENT_KEYS.iter().copied().find(|candidate| key == *candidate)
 }
@@ -1384,6 +1401,61 @@ mod tests {
         assert!(!outcome.redacted_text.contains("= [REDACTED_SECRET];"));
         assert!(!outcome.redacted_text.contains("super-secret-value"));
         assert!(!outcome.redacted_text.contains("local-dev-secret"));
+    }
+
+    #[test]
+    fn common_composite_secret_assignment_names_are_redacted() {
+        let source = "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI_K7MDENG_bPxRfiCYEXAMPLEKEY\n\
+                      JWT_SECRET_KEY=jwt-signing-secret\n\
+                      SESSION_SECRET_KEY=session-signing-secret\n\
+                      STRIPE_SECRET_KEY=stripe-signing-secret\n\
+                      PRIVATE_KEY=private-key-value";
+        let outcome = redact_text_for_export(
+            source,
+            SafetySourceKind::Workspace,
+            SafetyContentKind::WorkspaceDocument,
+            TrustLabel::TrustedLocal,
+        );
+
+        assert!(outcome.redacted);
+        assert!(outcome.redacted_text.contains("AWS_SECRET_ACCESS_KEY=[REDACTED_SECRET]"));
+        assert!(outcome.redacted_text.contains("JWT_SECRET_KEY=[REDACTED_SECRET]"));
+        assert!(outcome.redacted_text.contains("SESSION_SECRET_KEY=[REDACTED_SECRET]"));
+        assert!(outcome.redacted_text.contains("STRIPE_SECRET_KEY=[REDACTED_SECRET]"));
+        assert!(outcome.redacted_text.contains("PRIVATE_KEY=[REDACTED_SECRET]"));
+        assert!(!outcome.redacted_text.contains("wJalrXUtnFEMI_K7MDENG_bPxRfiCYEXAMPLEKEY"));
+        assert!(!outcome.redacted_text.contains("jwt-signing-secret"));
+        assert!(!outcome.redacted_text.contains("private-key-value"));
+        assert!(outcome
+            .scan
+            .finding_codes()
+            .iter()
+            .any(|code| code == "secret_leak.assignment.secret"));
+        assert!(outcome
+            .scan
+            .finding_codes()
+            .iter()
+            .any(|code| code == "secret_leak.assignment.private_key"));
+    }
+
+    #[test]
+    fn colon_style_assignments_with_equals_in_values_redact_entire_value() {
+        let source = r#"{"api_key": "YWJjZGVm=="}"#;
+        let outcome = redact_text_for_export(
+            source,
+            SafetySourceKind::Workspace,
+            SafetyContentKind::WorkspaceDocument,
+            TrustLabel::TrustedLocal,
+        );
+
+        assert!(outcome.redacted);
+        assert_eq!(outcome.redacted_text, r#"{"api_key": "[REDACTED_SECRET]"}"#);
+        assert!(!outcome.redacted_text.contains("YWJjZGVm"));
+        assert!(outcome
+            .scan
+            .finding_codes()
+            .iter()
+            .any(|code| code == "secret_leak.assignment.api_key"));
     }
 
     #[test]
