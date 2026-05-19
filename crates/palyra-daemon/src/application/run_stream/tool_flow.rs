@@ -1339,24 +1339,15 @@ async fn project_tool_result_for_model(
     tool_name: &str,
     outcome: ToolExecutionOutcome,
 ) -> Result<ToolExecutionOutcome, Status> {
-    if !outcome.success {
-        return Ok(outcome);
-    }
-
     let budget = ToolTurnBudget::default();
-    let projection_policy = projection_policy_for_tool(tool_name);
-    let default_sensitive =
-        matches!(projection_policy, ToolResultProjectionPolicy::RedactedPreviewAndArtifact);
-    let should_spill = match projection_policy {
-        ToolResultProjectionPolicy::InlineUnlessLarge => {
-            outcome.output_json.len() > budget.max_model_inline_bytes
-        }
-        ToolResultProjectionPolicy::SummarizeAndArtifact => true,
-        ToolResultProjectionPolicy::RedactedPreviewAndArtifact => true,
-    };
+    let should_spill = should_project_tool_result_for_model(tool_name, &outcome, &budget);
     if !should_spill {
         return Ok(outcome);
     }
+
+    let projection_policy = projection_policy_for_tool(tool_name);
+    let default_sensitive =
+        matches!(projection_policy, ToolResultProjectionPolicy::RedactedPreviewAndArtifact);
 
     let sensitivity = tool_result_sensitivity(tool_name, default_sensitive);
     let preview = redacted_tool_result_preview(
@@ -1421,6 +1412,20 @@ async fn project_tool_result_for_model(
         Status::internal(format!("failed to serialize projected tool result: {error}"))
     })?;
     Ok(projected_outcome)
+}
+
+fn should_project_tool_result_for_model(
+    tool_name: &str,
+    outcome: &ToolExecutionOutcome,
+    budget: &ToolTurnBudget,
+) -> bool {
+    match projection_policy_for_tool(tool_name) {
+        ToolResultProjectionPolicy::InlineUnlessLarge => {
+            outcome.output_json.len() > budget.max_model_inline_bytes
+        }
+        ToolResultProjectionPolicy::SummarizeAndArtifact
+        | ToolResultProjectionPolicy::RedactedPreviewAndArtifact => true,
+    }
 }
 
 fn tool_result_sensitivity(tool_name: &str, default_sensitive: bool) -> ToolResultSensitivity {
@@ -1529,6 +1534,8 @@ mod tests {
         allow_sensitive_tools_approval_outcome, classify_tool_parallelism, ToolParallelism,
     };
     use crate::journal::{ApprovalDecision, ApprovalDecisionScope};
+    use crate::tool_protocol::{ToolAttestation, ToolExecutionOutcome};
+    use palyra_common::runtime_contracts::ToolTurnBudget;
     use palyra_common::validate_canonical_id;
     use serde_json::json;
 
@@ -1605,5 +1612,42 @@ mod tests {
         assert!(preview.contains("\"size_bytes\":3072"), "{preview}");
         assert!(preview.contains("\"image_base64\":\"<redacted:base64 chars=4096>\""), "{preview}");
         assert!(!preview.contains("AAAA"), "{preview}");
+    }
+
+    #[test]
+    fn failed_browser_tool_results_require_redacted_projection() {
+        let raw = "B".repeat(4096);
+        let output_json = serde_json::to_vec(&json!({
+            "success": false,
+            "error": "selector not found",
+            "failure_screenshot_mime_type": "image/png",
+            "failure_screenshot_base64": raw,
+        }))
+        .expect("test payload should serialize");
+        let outcome = ToolExecutionOutcome {
+            success: false,
+            output_json,
+            error: "selector not found".to_owned(),
+            attestation: ToolAttestation {
+                attestation_id: "01ARZ3NDEKTSV4RRFFQ69G5FAA".to_owned(),
+                execution_sha256: "0".repeat(64),
+                executed_at_unix_ms: 0,
+                timed_out: false,
+                executor: "test".to_owned(),
+                sandbox_enforcement: "n/a".to_owned(),
+            },
+        };
+
+        assert!(super::should_project_tool_result_for_model(
+            "palyra.browser.click",
+            &outcome,
+            &ToolTurnBudget::default()
+        ));
+        let preview = super::redacted_tool_result_preview(outcome.output_json.as_slice(), 1024);
+        assert!(
+            preview.contains("\"failure_screenshot_base64\":\"<redacted:base64 chars=4096>\""),
+            "{preview}"
+        );
+        assert!(!preview.contains("BBBB"), "{preview}");
     }
 }
