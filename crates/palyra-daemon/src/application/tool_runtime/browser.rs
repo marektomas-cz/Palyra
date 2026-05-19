@@ -109,7 +109,7 @@ fn browser_session_profile_id_from_payload(
         return Ok((Some(common_v1::CanonicalId { ulid: trimmed.to_owned() }), None));
     }
 
-    Ok((None, Some(trimmed.to_owned())))
+    Err("palyra.browser.session.create field 'profile_id' must be a canonical id".to_owned())
 }
 
 async fn validate_browser_file_url_workspace_scope(
@@ -2848,16 +2848,15 @@ mod tests {
     }
 
     #[test]
-    fn browser_session_profile_id_ignores_friendly_labels() {
+    fn browser_session_profile_id_rejects_friendly_labels() {
         let payload = json!({"profile_id": "scenario-s005-chat-demo"});
 
-        let (profile_id, ignored) = browser_session_profile_id_from_payload(
+        let error = browser_session_profile_id_from_payload(
             payload.as_object().expect("payload must be an object"),
         )
-        .expect("friendly profile labels should not fail session creation");
+        .expect_err("friendly profile labels should fail session creation");
 
-        assert!(profile_id.is_none());
-        assert_eq!(ignored.as_deref(), Some("scenario-s005-chat-demo"));
+        assert!(error.contains("field 'profile_id' must be a canonical id"));
     }
 
     #[test]
