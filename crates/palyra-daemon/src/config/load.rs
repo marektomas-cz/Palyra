@@ -4338,6 +4338,18 @@ mod tests {
             "http fetch default content-type allowlist should include markdown docs"
         );
         assert!(
+            config.http_fetch.allowed_content_types.iter().any(|value| value == "text/css"),
+            "http fetch default content-type allowlist should include CSS assets"
+        );
+        assert!(
+            config
+                .http_fetch
+                .allowed_content_types
+                .iter()
+                .any(|value| value == "application/javascript"),
+            "http fetch default content-type allowlist should include JavaScript assets"
+        );
+        assert!(
             !config.browser_service.enabled,
             "browser service broker must default to explicit opt-in"
         );

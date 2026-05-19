@@ -87,8 +87,18 @@ const DEFAULT_HTTP_FETCH_REQUEST_TIMEOUT_MS: u64 = 10_000;
 const DEFAULT_HTTP_FETCH_MAX_RESPONSE_BYTES: u64 = 512 * 1024;
 const DEFAULT_HTTP_FETCH_ALLOW_REDIRECTS: bool = true;
 const DEFAULT_HTTP_FETCH_MAX_REDIRECTS: u32 = 3;
-const DEFAULT_HTTP_FETCH_ALLOWED_CONTENT_TYPES: &[&str] =
-    &["text/html", "text/plain", "text/markdown", "application/json"];
+const DEFAULT_HTTP_FETCH_ALLOWED_CONTENT_TYPES: &[&str] = &[
+    "text/html",
+    "text/plain",
+    "text/markdown",
+    "application/json",
+    "text/css",
+    "text/javascript",
+    "text/ecmascript",
+    "application/javascript",
+    "application/x-javascript",
+    "application/ecmascript",
+];
 const DEFAULT_HTTP_FETCH_ALLOWED_REQUEST_HEADERS: &[&str] =
     &["accept", "accept-language", "if-none-match", "if-modified-since", "user-agent"];
 const DEFAULT_HTTP_FETCH_CACHE_ENABLED: bool = true;
