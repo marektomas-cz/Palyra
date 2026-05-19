@@ -235,6 +235,8 @@ pub fn run_constrained_process(
     let input = parse_process_runner_input(input_json)?;
     validate_input_shape(&input)?;
     validate_allowed_executable(policy, input.command.as_str())?;
+    validate_no_embedded_command_line_arg(&input)?;
+    validate_cmd_invocation_shape(input.command.as_str(), input.args.as_slice())?;
     validate_process_termination_scope(input.command.as_str(), input.args.as_slice())?;
 
     let host_access = process_runner_allows_host_access(policy);
@@ -911,6 +913,70 @@ fn process_runner_command_with_args_message(command: &str) -> String {
     }
 }
 
+fn validate_no_embedded_command_line_arg(
+    input: &ProcessRunnerInput,
+) -> Result<(), SandboxProcessRunError> {
+    if input.args.len() != 1 {
+        return Ok(());
+    }
+    let arg = input.args[0].trim_start();
+    let Some((first_token, _)) = arg.split_once(char::is_whitespace) else {
+        return Ok(());
+    };
+    if !process_executable_tokens_match(input.command.as_str(), first_token) {
+        return Ok(());
+    }
+
+    Err(SandboxProcessRunError {
+        kind: SandboxProcessRunErrorKind::InvalidInput,
+        message: format!(
+            "palyra.process.run args must be an array of executable arguments, not a single command-line string; got args=[{arg:?}]. Use command={:?} and split each argument into its own args entry, for example args=[\"-e\", \"console.log('ok')\"] for node eval.",
+            input.command
+        ),
+    })
+}
+
+fn process_executable_tokens_match(command: &str, candidate: &str) -> bool {
+    let command = normalize_process_executable_token(command);
+    let candidate = normalize_process_executable_token(candidate);
+    !command.is_empty() && command == candidate
+}
+
+fn normalize_process_executable_token(value: &str) -> String {
+    let trimmed = value.trim().trim_matches('"').trim_matches('\'');
+    let file_name = trimmed
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(trimmed)
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'');
+    file_name
+        .strip_suffix(".exe")
+        .or_else(|| file_name.strip_suffix(".cmd"))
+        .or_else(|| file_name.strip_suffix(".bat"))
+        .unwrap_or(file_name)
+        .to_ascii_lowercase()
+}
+
+fn validate_cmd_invocation_shape(
+    command: &str,
+    args: &[String],
+) -> Result<(), SandboxProcessRunError> {
+    if normalized_process_command_name(command) != "cmd" {
+        return Ok(());
+    }
+    let first_arg = args.first().map(|arg| arg.trim().to_ascii_lowercase());
+    if matches!(first_arg.as_deref(), Some("/c" | "/k")) {
+        return Ok(());
+    }
+
+    Err(SandboxProcessRunError {
+        kind: SandboxProcessRunErrorKind::InvalidInput,
+        message: "palyra.process.run command='cmd' requires an explicit /c or /k mode; for ordinary commands, call the executable directly with split args instead of routing through cmd".to_owned(),
+    })
+}
+
 fn validate_allowed_executable(
     policy: &SandboxProcessRunnerPolicy,
     command: &str,
@@ -1017,7 +1083,15 @@ fn validate_interpreter_argument_guardrails(
         });
     }
 
-    for argument in args {
+    for (index, argument) in args.iter().enumerate() {
+        if argument_is_non_path_option_assignment(argument.as_str())
+            || index
+                .checked_sub(1)
+                .and_then(|previous| args.get(previous))
+                .is_some_and(|previous| option_consumes_non_path_value(previous.as_str()))
+        {
+            continue;
+        }
         if !contains_embedded_absolute_path(argument.as_str()) {
             continue;
         }
@@ -1168,43 +1242,76 @@ fn validate_argument_workspace_scope(
     command: &str,
     args: &[String],
 ) -> Result<(), SandboxProcessRunError> {
-    for arg in args {
+    let mut index = 0usize;
+    while index < args.len() {
+        let arg = &args[index];
+        if argument_is_non_path_option_assignment(arg.as_str()) {
+            index = index.saturating_add(1);
+            continue;
+        }
+        if option_consumes_non_path_value(arg.as_str()) {
+            index = index.saturating_add(2);
+            continue;
+        }
         if is_windows_taskkill_switch(command, arg.as_str()) {
+            index = index.saturating_add(1);
             continue;
         }
         if let Some(file_url_path) = parse_file_url_path(arg.as_str())? {
             let _ = resolve_scoped_path(workspace_root, cwd, file_url_path.as_str(), false)?;
+            index = index.saturating_add(1);
             continue;
         }
         if let Some(value) = option_assignment_value(arg.as_str()) {
             let value = value.trim();
             if let Some(file_url_path) = parse_file_url_path(value)? {
                 let _ = resolve_scoped_path(workspace_root, cwd, file_url_path.as_str(), false)?;
+                index = index.saturating_add(1);
                 continue;
             }
             if !argument_requires_path_validation(value) {
+                index = index.saturating_add(1);
                 continue;
             }
             let _ = resolve_scoped_path(workspace_root, cwd, value, false)?;
+            index = index.saturating_add(1);
             continue;
         }
         if let Some(value) = option_compact_value(arg.as_str()) {
             if let Some(file_url_path) = parse_file_url_path(value)? {
                 let _ = resolve_scoped_path(workspace_root, cwd, file_url_path.as_str(), false)?;
+                index = index.saturating_add(1);
                 continue;
             }
             if !argument_requires_path_validation(value) {
+                index = index.saturating_add(1);
                 continue;
             }
             let _ = resolve_scoped_path(workspace_root, cwd, value, false)?;
+            index = index.saturating_add(1);
             continue;
         }
         if !argument_requires_path_validation(arg.as_str()) {
+            index = index.saturating_add(1);
             continue;
         }
         let _ = resolve_scoped_path(workspace_root, cwd, arg.as_str(), false)?;
+        index = index.saturating_add(1);
     }
     Ok(())
+}
+
+fn argument_is_non_path_option_assignment(arg: &str) -> bool {
+    option_assignment_value(arg)
+        .and_then(|_| arg.trim().split_once('=').map(|(name, _)| name))
+        .is_some_and(option_consumes_non_path_value)
+}
+
+fn option_consumes_non_path_value(arg: &str) -> bool {
+    matches!(
+        arg.trim().to_ascii_lowercase().as_str(),
+        "--test-name-pattern" | "--testnamepattern" | "--grep" | "--grep-invert" | "-t"
+    )
 }
 
 fn is_windows_taskkill_switch(command: &str, arg: &str) -> bool {
@@ -2479,7 +2586,8 @@ mod tests {
         redacted_process_output_preview, redacted_process_output_text,
         resolve_host_working_directory, resolve_working_directory,
         rewrite_host_virtual_workspace_args, run_constrained_process,
-        validate_argument_workspace_scope, validate_interpreter_argument_guardrails,
+        validate_argument_workspace_scope, validate_cmd_invocation_shape,
+        validate_interpreter_argument_guardrails, validate_no_embedded_command_line_arg,
         validate_process_termination_scope, validate_runtime_egress_enforcement,
         EgressEnforcementMode, ProcessRunnerInput, SandboxProcessRunErrorKind,
         SandboxProcessRunnerPolicy, SandboxProcessRunnerTier, StreamCapture,
@@ -2717,6 +2825,60 @@ mod tests {
         .expect("taskkill cleanup switches should not be treated as absolute paths");
 
         let _ = fs::remove_dir_all(workspace.as_path());
+    }
+
+    #[test]
+    fn validate_argument_workspace_scope_allows_test_name_pattern_route_text() {
+        let workspace = unique_temp_dir("workspace-test-name-pattern");
+        fs::create_dir_all(workspace.as_path()).expect("workspace directory should be created");
+        let canonical_workspace = canonical_workspace_root(workspace.as_path())
+            .expect("workspace root should canonicalize");
+        let args = vec!["--test-name-pattern".to_owned(), "^GET /notes returns empty".to_owned()];
+
+        validate_argument_workspace_scope(
+            canonical_workspace.as_path(),
+            canonical_workspace.as_path(),
+            "node",
+            args.as_slice(),
+        )
+        .expect("test-name route patterns are matcher text, not filesystem paths");
+        validate_interpreter_argument_guardrails(
+            canonical_workspace.as_path(),
+            canonical_workspace.as_path(),
+            "node",
+            args.as_slice(),
+        )
+        .expect("interpreter guardrails should not treat route matcher text as host paths");
+
+        let _ = fs::remove_dir_all(workspace.as_path());
+    }
+
+    #[test]
+    fn validate_process_runner_rejects_embedded_command_line_arg() {
+        let input = ProcessRunnerInput {
+            command: "node".to_owned(),
+            args: vec!["node -e \"(() => console.log('ok'))()\"".to_owned()],
+            cwd: None,
+            requested_egress_hosts: Vec::new(),
+            timeout_ms: None,
+            background: false,
+        };
+
+        let error = validate_no_embedded_command_line_arg(&input)
+            .expect_err("single command-line args should be rejected before execution");
+
+        assert_eq!(error.kind, SandboxProcessRunErrorKind::InvalidInput);
+        assert!(error.message.contains("split each argument"), "{}", error.message);
+    }
+
+    #[test]
+    fn validate_cmd_invocation_rejects_missing_mode() {
+        let args = vec!["echo".to_owned(), "hello".to_owned()];
+        let error = validate_cmd_invocation_shape("cmd", args.as_slice())
+            .expect_err("cmd without /c or /k should not look successful");
+
+        assert_eq!(error.kind, SandboxProcessRunErrorKind::InvalidInput);
+        assert!(error.message.contains("requires an explicit /c or /k"), "{}", error.message);
     }
 
     #[test]

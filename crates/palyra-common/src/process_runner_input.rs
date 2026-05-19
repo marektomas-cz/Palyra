@@ -84,8 +84,20 @@ fn normalize_repeated_command_argument(input: &mut ProcessRunnerToolInput) {
     if !executable_tokens_match(command, first_token) {
         return;
     }
+    if command_line_fragment_requires_explicit_args(rest) {
+        return;
+    }
     input.args =
         rest.split_whitespace().filter(|arg| !arg.is_empty()).map(ToOwned::to_owned).collect();
+}
+
+fn command_line_fragment_requires_explicit_args(value: &str) -> bool {
+    value.chars().any(|character| {
+        matches!(
+            character,
+            '"' | '\'' | '`' | '<' | '>' | '|' | '&' | ';' | '(' | ')' | '[' | ']' | '{' | '}'
+        )
+    })
 }
 
 fn executable_tokens_match(command: &str, candidate: &str) -> bool {
@@ -162,6 +174,16 @@ mod tests {
 
         assert_eq!(parsed.command, "node");
         assert_eq!(parsed.args, vec!["e2e-smoke-file-patch/math.test.js"]);
+    }
+
+    #[test]
+    fn parse_process_runner_tool_input_preserves_complex_single_arg_command_line() {
+        let input = br#"{"command":"node","args":["node -e \"(() => console.log('ok'))()\""]}"#;
+        let parsed = parse_process_runner_tool_input(input)
+            .expect("valid process-runner payload should parse");
+
+        assert_eq!(parsed.command, "node");
+        assert_eq!(parsed.args, vec!["node -e \"(() => console.log('ok'))()\""]);
     }
 
     #[test]
