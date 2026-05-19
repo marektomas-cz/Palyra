@@ -183,6 +183,50 @@ fn secrets_get_honors_global_json_output_format() -> Result<()> {
 }
 
 #[test]
+fn secrets_mutations_honor_global_json_output_format() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+    let secret_value = b"json-mutation-secret-token";
+
+    let set_output = run_cli_with_stdin(
+        &workdir,
+        &["--output-format", "json", "secrets", "set", "global", "e2e_dummy", "--value-stdin"],
+        secret_value,
+    )?;
+    assert!(
+        set_output.status.success(),
+        "secrets set should succeed: {}",
+        String::from_utf8_lossy(&set_output.stderr)
+    );
+    let set_value: serde_json::Value =
+        serde_json::from_slice(&set_output.stdout).context("secrets set stdout was not JSON")?;
+    assert_eq!(set_value.get("scope").and_then(serde_json::Value::as_str), Some("global"));
+    assert_eq!(set_value.get("key").and_then(serde_json::Value::as_str), Some("e2e_dummy"));
+    assert_eq!(set_value.get("operation").and_then(serde_json::Value::as_str), Some("set"));
+    assert!(set_value.get("backend").and_then(serde_json::Value::as_str).is_some());
+    assert!(
+        !set_value.to_string().contains("json-mutation-secret-token"),
+        "JSON set output must not reveal secret bytes: {set_value}"
+    );
+
+    let delete_output = run_cli(
+        &workdir,
+        &["--output-format", "json", "secrets", "delete", "global", "e2e_dummy"],
+    )?;
+    assert!(
+        delete_output.status.success(),
+        "secrets delete should succeed: {}",
+        String::from_utf8_lossy(&delete_output.stderr)
+    );
+    let delete_value: serde_json::Value = serde_json::from_slice(&delete_output.stdout)
+        .context("secrets delete stdout was not JSON")?;
+    assert_eq!(delete_value.get("scope").and_then(serde_json::Value::as_str), Some("global"));
+    assert_eq!(delete_value.get("key").and_then(serde_json::Value::as_str), Some("e2e_dummy"));
+    assert_eq!(delete_value.get("operation").and_then(serde_json::Value::as_str), Some("delete"));
+    assert_eq!(delete_value.get("deleted").and_then(serde_json::Value::as_bool), Some(true));
+    Ok(())
+}
+
+#[test]
 fn secrets_get_missing_key_fails_with_not_found_error() -> Result<()> {
     let workdir = TempDir::new().context("failed to create temporary workdir")?;
     let output = run_cli(&workdir, &["secrets", "get", "global", "missing_key"])?;

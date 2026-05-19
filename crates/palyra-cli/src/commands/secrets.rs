@@ -103,6 +103,20 @@ pub(crate) fn run_secrets(command: SecretsCommand) -> Result<()> {
             let metadata = vault
                 .put_secret(&scope, key.as_str(), value.as_slice())
                 .with_context(|| format!("failed to store secret key={} scope={scope}", key))?;
+            let payload = json!({
+                "scope": scope.to_string(),
+                "key": metadata.key.as_str(),
+                "backend": vault.backend_kind().as_str(),
+                "operation": "set",
+            });
+            if output::preferred_json(false) {
+                output::print_json_pretty(&payload, "failed to encode secrets set output as JSON")?;
+                return std::io::stdout().flush().context("stdout flush failed");
+            }
+            if output::preferred_ndjson(false, false) {
+                output::print_json_line(&payload, "failed to encode secrets set output as NDJSON")?;
+                return std::io::stdout().flush().context("stdout flush failed");
+            }
             println!(
                 "secrets.set scope={} key={} backend={}",
                 scope,
@@ -216,6 +230,26 @@ pub(crate) fn run_secrets(command: SecretsCommand) -> Result<()> {
             let deleted = vault
                 .delete_secret(&scope, key.as_str())
                 .with_context(|| format!("failed to delete secret key={} scope={scope}", key))?;
+            let payload = json!({
+                "scope": scope.to_string(),
+                "key": key.as_str(),
+                "deleted": deleted,
+                "operation": "delete",
+            });
+            if output::preferred_json(false) {
+                output::print_json_pretty(
+                    &payload,
+                    "failed to encode secrets delete output as JSON",
+                )?;
+                return std::io::stdout().flush().context("stdout flush failed");
+            }
+            if output::preferred_ndjson(false, false) {
+                output::print_json_line(
+                    &payload,
+                    "failed to encode secrets delete output as NDJSON",
+                )?;
+                return std::io::stdout().flush().context("stdout flush failed");
+            }
             println!("secrets.delete scope={} key={} deleted={}", scope, key, deleted);
             std::io::stdout().flush().context("stdout flush failed")
         }
