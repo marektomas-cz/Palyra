@@ -438,6 +438,7 @@ pub(crate) async fn navigate_with_guards(
     };
     let redirect_limit = max_redirects.clamp(1, 10);
     let mut redirects = 0_u32;
+    let initial_scheme = current_url.scheme().to_owned();
     loop {
         if current_url.scheme() == "file" {
             return navigate_local_file_with_guards(
@@ -616,6 +617,20 @@ pub(crate) async fn navigate_with_guards(
                     }
                 }
             };
+            if initial_scheme != "file" && current_url.scheme() == "file" {
+                return NavigateOutcome {
+                    success: false,
+                    final_url: current_url.to_string(),
+                    status_code: response.status().as_u16(),
+                    title: String::new(),
+                    page_body: String::new(),
+                    body_bytes: 0,
+                    latency_ms: started_at.elapsed().as_millis() as u64,
+                    error: "redirect to file:// URL is blocked by policy".to_owned(),
+                    network_log,
+                    cookie_updates,
+                };
+            }
             redirects = redirects.saturating_add(1);
             continue;
         }

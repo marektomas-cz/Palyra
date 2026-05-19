@@ -447,6 +447,27 @@ async fn navigate_with_guards_allows_local_file_with_private_target_opt_in() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn navigate_with_guards_blocks_http_redirect_to_local_file() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let fixture = temp.path().join("secret.txt");
+    std::fs::write(fixture.as_path(), "sensitive").expect("fixture should be written");
+    let file_url = Url::from_file_path(fixture.as_path()).expect("file URL should be built");
+    let (url, handle) = spawn_redirect_http_server(file_url.as_str());
+
+    let outcome = navigate_with_guards(url.as_str(), 2_000, true, 3, true, 4_096, None).await;
+    handle.join().expect("test server thread should exit");
+
+    assert!(!outcome.success, "http redirect to file:// must be blocked");
+    assert_eq!(outcome.status_code, 302);
+    assert!(
+        outcome.error.contains("redirect to file:// URL is blocked"),
+        "navigation should fail closed for http-to-file redirects: final_url={} error={}",
+        outcome.final_url,
+        outcome.error
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn navigate_with_guards_enforces_response_size_limit() {
     let (url, handle) = spawn_chunked_http_server(
         200,
@@ -4774,6 +4795,22 @@ fn spawn_chunked_http_server(
             "server should write chunked terminator",
         );
         let _ = flush_chunked_test_stream(&mut stream, "server should flush chunked terminator");
+    });
+    (format!("http://{address}/"), handle)
+}
+
+fn spawn_redirect_http_server(location: &str) -> (String, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let address = listener.local_addr().expect("listener local address should resolve");
+    let location = location.to_owned();
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("listener should accept request");
+        let _ = read_http_request(&mut stream);
+        let response = format!(
+            "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        );
+        stream.write_all(response.as_bytes()).expect("server should write response");
+        stream.flush().expect("server should flush response");
     });
     (format!("http://{address}/"), handle)
 }
