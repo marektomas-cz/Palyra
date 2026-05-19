@@ -2311,15 +2311,15 @@ fn configure_windows_tier_b_process_environment(
     }
     command
         .env("PATH", windows_tier_b_process_path(program, policy))
+        .env("TEMP", policy.workspace_root.as_path())
+        .env("TMP", policy.workspace_root.as_path())
         .env("LANG", "C")
         .env("LC_ALL", "C");
 }
 
 #[cfg(windows)]
 const WINDOWS_TIER_B_SAFE_ENV_KEYS: &[&str] = &[
-    "APPDATA",
     "COMSPEC",
-    "LOCALAPPDATA",
     "PATHEXT",
     "PROGRAMDATA",
     "ProgramFiles",
@@ -2327,10 +2327,6 @@ const WINDOWS_TIER_B_SAFE_ENV_KEYS: &[&str] = &[
     "ProgramW6432",
     "SystemDrive",
     "SystemRoot",
-    "TEMP",
-    "TMP",
-    "USERPROFILE",
-    "VOLTA_HOME",
     "WINDIR",
 ];
 
@@ -3072,6 +3068,27 @@ mod tests {
 
         super::validate_platform_resource_quota_support(&policy)
             .expect("windows tier-b explicit local commands rely on timeout and output guards");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_tier_b_safe_env_keys_exclude_host_profile_locations() {
+        for key in ["APPDATA", "LOCALAPPDATA", "TEMP", "TMP", "USERPROFILE", "VOLTA_HOME"] {
+            assert!(
+                !super::WINDOWS_TIER_B_SAFE_ENV_KEYS
+                    .iter()
+                    .any(|candidate| candidate.eq_ignore_ascii_case(key)),
+                "{key} must not be copied from the daemon host environment"
+            );
+        }
+        for key in ["COMSPEC", "PATHEXT", "SystemRoot", "WINDIR"] {
+            assert!(
+                super::WINDOWS_TIER_B_SAFE_ENV_KEYS
+                    .iter()
+                    .any(|candidate| candidate.eq_ignore_ascii_case(key)),
+                "{key} should remain available for Windows process startup"
+            );
+        }
     }
 
     #[test]
