@@ -5,7 +5,7 @@ use std::{
     fs,
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -30,6 +30,7 @@ use tracing::warn;
 use ulid::Ulid;
 
 use crate::{
+    access_control::{AccessRegistry, FEATURE_ROUTINES_AUTOMATION},
     config::MemoryRetentionConfig,
     gateway::{
         proto::palyra::{common::v1 as common_v1, cron::v1 as cron_v1, gateway::v1 as gateway_v1},
@@ -1174,6 +1175,7 @@ pub fn spawn_scheduler_loop(
     grpc_url: String,
     wake_signal: Arc<Notify>,
     memory_retention: MemoryRetentionConfig,
+    access_registry: Arc<Mutex<AccessRegistry>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let periodic_skill_reaudit = match resolve_periodic_skill_reaudit_config() {
@@ -1195,6 +1197,7 @@ pub fn spawn_scheduler_loop(
                 auth.clone(),
                 grpc_url.clone(),
                 Arc::clone(&wake_signal),
+                Arc::clone(&access_registry),
             )
             .await
             {
@@ -1206,6 +1209,7 @@ pub fn spawn_scheduler_loop(
                 auth.clone(),
                 grpc_url.clone(),
                 Arc::clone(&wake_signal),
+                Arc::clone(&access_registry),
             )
             .await
             {
@@ -1347,7 +1351,11 @@ async fn process_due_jobs(
     auth: GatewayAuthConfig,
     grpc_url: String,
     wake_signal: Arc<Notify>,
+    access_registry: Arc<Mutex<AccessRegistry>>,
 ) -> Result<(), Status> {
+    if !routines_automation_enabled(&access_registry) {
+        return Ok(());
+    }
     let now_unix_ms = now_unix_ms()?;
     let jobs = state.list_due_cron_jobs(now_unix_ms, SCHEDULER_MAX_DUE_BATCH).await?;
     for job in jobs {
@@ -1437,7 +1445,11 @@ async fn process_queued_jobs(
     auth: GatewayAuthConfig,
     grpc_url: String,
     wake_signal: Arc<Notify>,
+    access_registry: Arc<Mutex<AccessRegistry>>,
 ) -> Result<(), Status> {
+    if !routines_automation_enabled(&access_registry) {
+        return Ok(());
+    }
     let mut after_job_id = None::<String>;
     loop {
         let (jobs, next_after_job_id) =
@@ -1486,6 +1498,17 @@ async fn process_queued_jobs(
         after_job_id = Some(next_after_job_id);
     }
     Ok(())
+}
+
+fn routines_automation_enabled(access_registry: &Arc<Mutex<AccessRegistry>>) -> bool {
+    let registry = match access_registry.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            warn!("access registry lock poisoned while checking routines automation gate");
+            poisoned.into_inner()
+        }
+    };
+    registry.is_feature_enabled(FEATURE_ROUTINES_AUTOMATION)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2568,7 +2591,10 @@ fn now_unix_ms_or_fallback(
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{
+        fs,
+        sync::{Arc, Mutex},
+    };
 
     use tempfile::tempdir;
 
@@ -2578,13 +2604,14 @@ mod tests {
         cron_successful_completion_tool, cron_terminal_status_from_stream,
         decide_concurrency_policy, load_periodic_reaudit_skills_index, normalize_schedule,
         now_unix_ms_or_fallback, parse_skill_reaudit_interval, periodic_reaudit_targets,
-        scheduled_routine_run_metadata_upsert, scheduler_attempt_failure,
-        should_pause_recurring_cron_after_policy_denied, should_repair_stale_cron_run,
-        ConcurrencyDecision, CronMatcher, CronMisfireRecoveryAction, CronTimezoneMode,
-        InstalledSkillRecord, InstalledSkillsIndex, SchedulerHealthInput, TriggerJobOptions,
-        OBJECTIVE_BUDGET_EXHAUSTED_ERROR_KIND, SCHEDULER_STALE_RUN_AFTER_MS,
+        routines_automation_enabled, scheduled_routine_run_metadata_upsert,
+        scheduler_attempt_failure, should_pause_recurring_cron_after_policy_denied,
+        should_repair_stale_cron_run, ConcurrencyDecision, CronMatcher, CronMisfireRecoveryAction,
+        CronTimezoneMode, InstalledSkillRecord, InstalledSkillsIndex, SchedulerHealthInput,
+        TriggerJobOptions, OBJECTIVE_BUDGET_EXHAUSTED_ERROR_KIND, SCHEDULER_STALE_RUN_AFTER_MS,
         SKILLS_INDEX_FILE_NAME, SKILLS_LAYOUT_VERSION,
     };
+    use crate::access_control::{AccessRegistry, FEATURE_ROUTINES_AUTOMATION};
     use crate::gateway::proto::palyra::cron::v1 as cron_v1;
     use crate::journal::{
         CronConcurrencyPolicy, CronJobRecord, CronMisfirePolicy, CronRetryPolicy, CronRunRecord,
@@ -2663,6 +2690,31 @@ mod tests {
         let runs = vec![succeeded, failed, active, skipped_without_orchestrator, budget_skip];
 
         assert_eq!(budgeted_objective_run_count(&runs), 2);
+    }
+
+    #[test]
+    fn routines_automation_gate_fails_closed_until_feature_enabled() {
+        let temp = tempdir().expect("tempdir should be created");
+        let registry = Arc::new(Mutex::new(
+            AccessRegistry::open(temp.path()).expect("access registry should open"),
+        ));
+
+        assert!(
+            !routines_automation_enabled(&registry),
+            "routine scheduler automation should be disabled by default"
+        );
+
+        {
+            let mut guard = registry.lock().expect("access registry lock should be available");
+            guard
+                .set_feature_flag(FEATURE_ROUTINES_AUTOMATION, true, None, "admin:test", 1)
+                .expect("routine automation flag should update");
+        }
+
+        assert!(
+            routines_automation_enabled(&registry),
+            "routine scheduler automation should run only after the rollout flag is enabled"
+        );
     }
 
     #[test]

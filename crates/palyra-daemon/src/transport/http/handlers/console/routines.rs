@@ -5,9 +5,13 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
-use super::diagnostics::{authorize_console_session, build_page_info};
+use super::{
+    access::lock_access_registry,
+    diagnostics::{authorize_console_session, build_page_info},
+};
 
 use crate::{
+    access_control::FEATURE_ROUTINES_AUTOMATION,
     cron::{self, CronTimezoneMode},
     gateway::{proto::palyra::cron::v1 as cron_v1, validate_cron_job_channel_context},
     journal::{
@@ -347,6 +351,8 @@ pub(crate) async fn console_routine_import_handler(
             routine_approval_subject_id(routine_id.as_str(), RoutineApprovalMode::BeforeEnable),
         )
         .await?;
+    let effective_enabled = requested_enabled && !approval_required;
+    require_routines_automation_enabled_for_write(&state, effective_enabled)?;
     let job_record = persist_routine_job(
         &state,
         existing_job,
@@ -361,7 +367,7 @@ pub(crate) async fn console_routine_import_handler(
             workdir: bundle.job.workdir.clone(),
             schedule_type: bundle.job.schedule_type,
             schedule_payload_json: bundle.job.schedule_payload_json.clone(),
-            enabled: requested_enabled && !approval_required,
+            enabled: effective_enabled,
             concurrency_policy: bundle.job.concurrency_policy,
             retry_policy: bundle.job.retry_policy.clone(),
             misfire_policy: bundle.job.misfire_policy,
@@ -482,6 +488,8 @@ pub(crate) async fn console_routine_upsert_handler(
             routine_approval_subject_id(routine_id.as_str(), RoutineApprovalMode::BeforeEnable),
         )
         .await?;
+    let effective_enabled = enabled && !approval_required;
+    require_routines_automation_enabled_for_write(&state, effective_enabled)?;
     let job_record = persist_routine_job(
         &state,
         existing_job,
@@ -496,7 +504,7 @@ pub(crate) async fn console_routine_upsert_handler(
             workdir,
             schedule_type: schedule.schedule_type,
             schedule_payload_json: schedule.schedule_payload_json.clone(),
-            enabled: enabled && !approval_required,
+            enabled: effective_enabled,
             concurrency_policy,
             retry_policy: retry_policy.clone(),
             misfire_policy,
@@ -610,6 +618,7 @@ pub(crate) async fn console_routine_set_enabled_handler(
         )
         .await?;
     let effective_enabled = payload.enabled && !approval_required;
+    require_routines_automation_enabled_for_write(&state, effective_enabled)?;
     let next_run_at_unix_ms = cron::next_run_at_for_enabled_state(
         &routine.job,
         effective_enabled,
@@ -647,6 +656,34 @@ pub(crate) async fn console_routine_set_enabled_handler(
             None
         },
     })))
+}
+
+#[allow(clippy::result_large_err)]
+fn require_routines_automation_enabled_for_write(
+    state: &AppState,
+    effective_enabled: bool,
+) -> Result<(), Response> {
+    if routine_automation_flag_permits_enabled_write(
+        routines_automation_feature_enabled(state),
+        effective_enabled,
+    ) {
+        return Ok(());
+    }
+    Err(runtime_status_response(tonic::Status::permission_denied(format!(
+        "feature flag '{FEATURE_ROUTINES_AUTOMATION}' is disabled"
+    ))))
+}
+
+fn routines_automation_feature_enabled(state: &AppState) -> bool {
+    let registry = lock_access_registry(&state.access_registry);
+    registry.is_feature_enabled(FEATURE_ROUTINES_AUTOMATION)
+}
+
+const fn routine_automation_flag_permits_enabled_write(
+    feature_enabled: bool,
+    effective_enabled: bool,
+) -> bool {
+    !effective_enabled || feature_enabled
 }
 
 pub(crate) async fn console_routine_run_now_handler(
@@ -2525,8 +2562,9 @@ fn internal_console_error(error: anyhow::Error) -> Response {
 mod tests {
     use super::{
         compare_optional_matchers, is_in_quiet_hours, normalize_channel, parse_delivery,
-        parse_execution_config, parse_quiet_hours, routine_matches_trigger,
-        routine_output_fields_from_session, routine_output_text_from_tape_events,
+        parse_execution_config, parse_quiet_hours, routine_automation_flag_permits_enabled_write,
+        routine_matches_trigger, routine_output_fields_from_session,
+        routine_output_text_from_tape_events,
     };
     use crate::journal::{OrchestratorSessionRecord, OrchestratorTapeRecord};
     use crate::routines::{
@@ -2566,6 +2604,22 @@ mod tests {
             &metadata,
             &json!({ "integration_id": "repo-a", "provider": "github", "event": "pull_request" }),
         ));
+    }
+
+    #[test]
+    fn routine_automation_flag_blocks_enabled_writes_only() {
+        assert!(
+            !routine_automation_flag_permits_enabled_write(false, true),
+            "disabled rollout flag should block writing an effectively enabled routine"
+        );
+        assert!(
+            routine_automation_flag_permits_enabled_write(false, false),
+            "disabled routines should remain editable while the rollout flag is disabled"
+        );
+        assert!(
+            routine_automation_flag_permits_enabled_write(true, true),
+            "enabled rollout flag should permit enabled routine writes"
+        );
     }
 
     #[test]

@@ -2566,6 +2566,7 @@ pub async fn run() -> Result<()> {
         grpc_url.clone(),
         Arc::clone(&scheduler_wake),
         loaded.memory.retention.clone(),
+        Arc::clone(&access_registry),
     );
 
     let state = build_app_state(
