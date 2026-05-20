@@ -467,6 +467,25 @@ fn admin_routines_tool_test_context() -> super::ToolRuntimeExecutionContext<'sta
     super::ToolRuntimeExecutionContext { principal: "admin:ops", ..routines_tool_test_context() }
 }
 
+fn ensure_tool_context_session(
+    state: &std::sync::Arc<GatewayRuntimeState>,
+    context: &super::ToolRuntimeExecutionContext<'_>,
+) {
+    state
+        .journal_store
+        .resolve_orchestrator_session(&OrchestratorSessionResolveRequest {
+            session_id: Some(context.session_id.to_owned()),
+            session_key: None,
+            session_label: None,
+            principal: context.principal.to_owned(),
+            device_id: context.device_id.to_owned(),
+            channel: context.channel.map(str::to_owned),
+            require_existing: false,
+            reset_session: false,
+        })
+        .expect("tool runtime session should resolve");
+}
+
 fn parse_tool_output_json(outcome: &super::ToolExecutionOutcome) -> Value {
     serde_json::from_slice(&outcome.output_json).expect("tool output should parse as JSON")
 }
@@ -4354,6 +4373,7 @@ async fn memory_recall_tool_channel_override_requires_authenticated_channel_cont
 async fn memory_recall_tool_finds_principal_memory_without_session_override() {
     let state = build_test_runtime_state(false);
     let context = routines_tool_test_context();
+    ensure_tool_context_session(&state, &context);
     let marker = "e2e_memory_marker_20260502";
     state
         .ingest_memory_item(MemoryItemCreateRequest {
@@ -4409,6 +4429,74 @@ async fn memory_recall_tool_finds_principal_memory_without_session_override() {
                 .is_none_or(|content| !content.contains("private slack channel"))
         }),
         "recall tool must not surface same-principal memory from another channel: {payload}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn memory_recall_tool_defaults_to_current_session_scope() {
+    let state = build_test_runtime_state(false);
+    let context = routines_tool_test_context();
+    ensure_tool_context_session(&state, &context);
+    let marker = "PALYRA_RECALL_CURRENT_SESSION_MARKER";
+    state
+        .ingest_memory_item(MemoryItemCreateRequest {
+            memory_id: "01ARZ3NDEKTSV4RRFFQ69G5FE1".to_owned(),
+            principal: context.principal.to_owned(),
+            channel: context.channel.map(str::to_owned),
+            session_id: Some(context.session_id.to_owned()),
+            source: MemorySource::Manual,
+            content_text: format!("Current session recall marker was {marker}"),
+            tags: vec!["e2e".to_owned()],
+            confidence: Some(0.95),
+            ttl_unix_ms: None,
+        })
+        .await
+        .expect("current-session memory should ingest");
+    state
+        .ingest_memory_item(MemoryItemCreateRequest {
+            memory_id: "01ARZ3NDEKTSV4RRFFQ69G5FE2".to_owned(),
+            principal: context.principal.to_owned(),
+            channel: context.channel.map(str::to_owned),
+            session_id: Some("01ARZ3NDEKTSV4RRFFQ69G5FE3".to_owned()),
+            source: MemorySource::Manual,
+            content_text: format!("Other session recall marker was {marker}"),
+            tags: vec!["e2e".to_owned()],
+            confidence: Some(0.95),
+            ttl_unix_ms: None,
+        })
+        .await
+        .expect("cross-session memory should ingest as noise");
+
+    let input_json = br#"{"query":"PALYRA_RECALL_CURRENT_SESSION_MARKER","memory_top_k":4,"workspace_top_k":0,"min_score":0.0}"#;
+    let outcome =
+        execute_memory_recall_tool(&state, context, "01ARZ3NDEKTSV4RRFFQ69G5FE4", input_json).await;
+
+    assert!(outcome.success, "recall tool should succeed: {}", outcome.error);
+    let payload = parse_tool_output_json(&outcome);
+    assert_eq!(
+        payload.pointer("/parameter_delta/explicit_recall/session_id").and_then(Value::as_str),
+        Some(context.session_id),
+        "omitted session_id should bind recall to the active runtime session: {payload}"
+    );
+    let memory_hits = payload
+        .get("memory_hits")
+        .and_then(Value::as_array)
+        .expect("recall output should include memory_hits");
+    assert!(
+        memory_hits.iter().any(|hit| {
+            hit.get("content_text")
+                .and_then(Value::as_str)
+                .is_some_and(|content| content.contains("Current session recall marker"))
+        }),
+        "default recall should surface current-session memory: {payload}"
+    );
+    assert!(
+        memory_hits.iter().all(|hit| {
+            hit.get("content_text")
+                .and_then(Value::as_str)
+                .is_none_or(|content| !content.contains("Other session recall marker"))
+        }),
+        "default recall must not surface same-principal memory from another session: {payload}"
     );
 }
 
