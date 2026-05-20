@@ -14,7 +14,13 @@ use sha2::{Digest, Sha256};
 const BINDING_SCHEMA_VERSION: u32 = 1;
 const DEFAULT_IDLE_TIMEOUT_MS: i64 = 8 * 60 * 60 * 1_000;
 const DEFAULT_MAX_AGE_MS: i64 = 30 * 24 * 60 * 60 * 1_000;
+const MAX_BINDING_COMPONENT_BYTES: usize = 512;
 const MAX_BINDING_LIST_LIMIT: usize = 1_000;
+#[cfg(not(test))]
+const MAX_BINDING_RECORDS: usize = 10_000;
+#[cfg(test)]
+const MAX_BINDING_RECORDS: usize = 8;
+const HASH_SUFFIX_PREFIX: &str = "#sha256:";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -212,6 +218,19 @@ impl ConversationBindingRecord {
         ensure_non_empty(self.principal.as_str(), "principal")?;
         ensure_non_empty(self.session_id.as_str(), "session_id")?;
         ensure_non_empty(self.policy_scope.as_str(), "policy_scope")?;
+        ensure_component_within_limit(self.binding_id.as_str(), "binding_id")?;
+        ensure_component_within_limit(self.channel.as_str(), "channel")?;
+        ensure_optional_component_within_limit(self.conversation_id.as_deref(), "conversation_id")?;
+        ensure_optional_component_within_limit(self.thread_id.as_deref(), "thread_id")?;
+        ensure_optional_component_within_limit(self.sender_identity.as_deref(), "sender_identity")?;
+        ensure_component_within_limit(self.principal.as_str(), "principal")?;
+        ensure_component_within_limit(self.session_id.as_str(), "session_id")?;
+        ensure_optional_component_within_limit(self.workspace_id.as_deref(), "workspace_id")?;
+        ensure_component_within_limit(self.policy_scope.as_str(), "policy_scope")?;
+        ensure_optional_component_within_limit(
+            self.parent_binding_id.as_deref(),
+            "parent_binding_id",
+        )?;
         Ok(())
     }
 }
@@ -432,10 +451,14 @@ impl ConversationBindingStore {
                 envelope.schema_version
             )));
         }
-        for record in envelope.records.values() {
+        let mut records = BTreeMap::new();
+        for mut record in envelope.records.into_values() {
+            normalize_record_components(&mut record)?;
             record.validate()?;
+            insert_preferred_record(&mut records, record);
         }
-        let store = Self { path, records: Arc::new(Mutex::new(envelope.records)) };
+        prune_records_to_limit(&mut records, None);
+        let store = Self { path, records: Arc::new(Mutex::new(records)) };
         store.persist()?;
         Ok(store)
     }
@@ -454,6 +477,7 @@ impl ConversationBindingStore {
         let mut record = build_record(request)?;
         record.validate()?;
         let mut guard = self.lock_records()?;
+        remove_due_records(&mut guard, record.updated_at_unix_ms);
         let created = !guard.contains_key(record.binding_id.as_str());
         let reason = if let Some(existing) = guard.get_mut(record.binding_id.as_str()) {
             existing.session_id = record.session_id.clone();
@@ -468,6 +492,7 @@ impl ConversationBindingStore {
         } else {
             let reason = "binding_created".to_owned();
             guard.insert(record.binding_id.clone(), record.clone());
+            prune_records_to_limit(&mut guard, Some(record.binding_id.as_str()));
             reason
         };
         drop(guard);
@@ -596,15 +621,7 @@ impl ConversationBindingStore {
         now_unix_ms: i64,
     ) -> Result<Vec<ConversationBindingRecord>, ConversationBindingError> {
         let mut guard = self.lock_records()?;
-        let mut expired = Vec::new();
-        for record in guard.values_mut() {
-            if record.state.is_active()
-                && record.expires_at_unix_ms.is_some_and(|expires_at| expires_at <= now_unix_ms)
-            {
-                record.expire(now_unix_ms);
-                expired.push(record.clone());
-            }
-        }
+        let expired = remove_due_records(&mut guard, now_unix_ms);
         drop(guard);
         if !expired.is_empty() {
             self.persist()?;
@@ -788,18 +805,10 @@ impl From<serde_json::Error> for ConversationBindingError {
 fn build_record(
     request: ConversationBindingCreateRequest,
 ) -> Result<ConversationBindingRecord, ConversationBindingError> {
-    let channel = normalize_component(request.channel.as_str()).ok_or_else(|| {
-        ConversationBindingError::InvalidRecord("channel must not be empty".to_owned())
-    })?;
-    let principal = normalize_component(request.principal.as_str()).ok_or_else(|| {
-        ConversationBindingError::InvalidRecord("principal must not be empty".to_owned())
-    })?;
-    let session_id = normalize_component(request.session_id.as_str()).ok_or_else(|| {
-        ConversationBindingError::InvalidRecord("session_id must not be empty".to_owned())
-    })?;
-    let policy_scope = normalize_component(request.policy_scope.as_str()).ok_or_else(|| {
-        ConversationBindingError::InvalidRecord("policy_scope must not be empty".to_owned())
-    })?;
+    let channel = normalize_required_component(request.channel.as_str(), "channel")?;
+    let principal = normalize_required_component(request.principal.as_str(), "principal")?;
+    let session_id = normalize_required_component(request.session_id.as_str(), "session_id")?;
+    let policy_scope = normalize_required_component(request.policy_scope.as_str(), "policy_scope")?;
     let conversation_id = normalize_optional_component(request.conversation_id.as_deref());
     let thread_id = normalize_optional_component(request.thread_id.as_deref());
     let sender_identity = normalize_optional_component(request.sender_identity.as_deref());
@@ -842,15 +851,15 @@ fn detect_conflicts<'a>(
     records: impl Iterator<Item = &'a ConversationBindingRecord>,
     now_unix_ms: i64,
 ) -> Vec<ConversationBindingConflict> {
-    let records = records.cloned().collect::<Vec<_>>();
+    let records = records.collect::<Vec<_>>();
     let mut conflicts = Vec::new();
     let mut active_by_scope: BTreeMap<ConversationBindingScopeKey, Vec<String>> = BTreeMap::new();
     let mut active_by_conflict_scope: BTreeMap<
         ConversationBindingConflictScopeKey,
-        Vec<ConversationBindingRecord>,
+        Vec<&ConversationBindingRecord>,
     > = BTreeMap::new();
     let ids = records.iter().map(|record| record.binding_id.clone()).collect::<BTreeSet<_>>();
-    for record in &records {
+    for record in records {
         if record.state.is_active()
             && record.expires_at_unix_ms.is_some_and(|expires_at| expires_at <= now_unix_ms)
         {
@@ -878,10 +887,7 @@ fn detect_conflicts<'a>(
         }
         if record.active(now_unix_ms) {
             active_by_scope.entry(record.scope_key()).or_default().push(record.binding_id.clone());
-            active_by_conflict_scope
-                .entry(record.conflict_scope_key())
-                .or_default()
-                .push(record.clone());
+            active_by_conflict_scope.entry(record.conflict_scope_key()).or_default().push(record);
         }
     }
     for binding_ids in active_by_scope.values() {
@@ -1005,17 +1011,155 @@ fn ensure_non_empty(value: &str, field: &str) -> Result<(), ConversationBindingE
     }
 }
 
+fn ensure_component_within_limit(value: &str, field: &str) -> Result<(), ConversationBindingError> {
+    if value.len() > MAX_BINDING_COMPONENT_BYTES {
+        Err(ConversationBindingError::InvalidRecord(format!(
+            "{field} exceeds {MAX_BINDING_COMPONENT_BYTES} bytes"
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+fn ensure_optional_component_within_limit(
+    value: Option<&str>,
+    field: &str,
+) -> Result<(), ConversationBindingError> {
+    if let Some(value) = value {
+        ensure_component_within_limit(value, field)?;
+    }
+    Ok(())
+}
+
+fn normalize_record_components(
+    record: &mut ConversationBindingRecord,
+) -> Result<(), ConversationBindingError> {
+    record.binding_id = normalize_required_component(record.binding_id.as_str(), "binding_id")?;
+    record.channel = normalize_required_component(record.channel.as_str(), "channel")?;
+    record.conversation_id = normalize_optional_component(record.conversation_id.as_deref());
+    record.thread_id = normalize_optional_component(record.thread_id.as_deref());
+    record.sender_identity = normalize_optional_component(record.sender_identity.as_deref());
+    record.principal = normalize_required_component(record.principal.as_str(), "principal")?;
+    record.session_id = normalize_required_component(record.session_id.as_str(), "session_id")?;
+    record.workspace_id = normalize_optional_component(record.workspace_id.as_deref());
+    record.policy_scope =
+        normalize_required_component(record.policy_scope.as_str(), "policy_scope")?;
+    record.parent_binding_id = normalize_optional_component(record.parent_binding_id.as_deref());
+    Ok(())
+}
+
+fn insert_preferred_record(
+    records: &mut BTreeMap<String, ConversationBindingRecord>,
+    record: ConversationBindingRecord,
+) {
+    let should_replace = records.get(record.binding_id.as_str()).is_none_or(|existing| {
+        record
+            .last_activity_at_unix_ms
+            .cmp(&existing.last_activity_at_unix_ms)
+            .then_with(|| record.updated_at_unix_ms.cmp(&existing.updated_at_unix_ms))
+            .is_gt()
+    });
+    if should_replace {
+        records.insert(record.binding_id.clone(), record);
+    }
+}
+
+fn remove_due_records(
+    records: &mut BTreeMap<String, ConversationBindingRecord>,
+    now_unix_ms: i64,
+) -> Vec<ConversationBindingRecord> {
+    let expired_ids = records
+        .iter()
+        .filter(|(_, record)| {
+            record.state.is_active()
+                && record.expires_at_unix_ms.is_some_and(|expires_at| expires_at <= now_unix_ms)
+        })
+        .map(|(binding_id, _)| binding_id.clone())
+        .collect::<Vec<_>>();
+    let mut expired = Vec::with_capacity(expired_ids.len());
+    for binding_id in expired_ids {
+        if let Some(mut record) = records.remove(binding_id.as_str()) {
+            record.expire(now_unix_ms);
+            expired.push(record);
+        }
+    }
+    expired
+}
+
+fn prune_records_to_limit(
+    records: &mut BTreeMap<String, ConversationBindingRecord>,
+    preserve_binding_id: Option<&str>,
+) -> usize {
+    let mut removed = 0usize;
+    while records.len() > MAX_BINDING_RECORDS {
+        let remove_id = records
+            .iter()
+            .filter(|(binding_id, _)| preserve_binding_id != Some(binding_id.as_str()))
+            .min_by(|(left_id, left), (right_id, right)| {
+                record_retention_rank(left)
+                    .cmp(&record_retention_rank(right))
+                    .then_with(|| left_id.cmp(right_id))
+            })
+            .map(|(binding_id, _)| binding_id.clone());
+        let Some(remove_id) = remove_id else {
+            break;
+        };
+        records.remove(remove_id.as_str());
+        removed = removed.saturating_add(1);
+    }
+    removed
+}
+
+fn record_retention_rank(record: &ConversationBindingRecord) -> (u8, i64, i64) {
+    let state_rank = match record.state {
+        ConversationBindingLifecycleState::Expired => 0,
+        ConversationBindingLifecycleState::Detached | ConversationBindingLifecycleState::Stale => 1,
+        ConversationBindingLifecycleState::Active => 2,
+    };
+    (state_rank, record.last_activity_at_unix_ms, record.updated_at_unix_ms)
+}
+
+fn normalize_required_component(
+    value: &str,
+    field: &str,
+) -> Result<String, ConversationBindingError> {
+    normalize_component(value).ok_or_else(|| {
+        ConversationBindingError::InvalidRecord(format!("{field} must not be empty"))
+    })
+}
+
 fn normalize_component(value: &str) -> Option<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         None
     } else {
-        Some(trimmed.to_owned())
+        Some(bound_component_bytes(trimmed))
     }
 }
 
 fn normalize_optional_component(value: Option<&str>) -> Option<String> {
     value.and_then(normalize_component)
+}
+
+fn bound_component_bytes(value: &str) -> String {
+    if value.len() <= MAX_BINDING_COMPONENT_BYTES {
+        return value.to_owned();
+    }
+    let suffix = format!("{HASH_SUFFIX_PREFIX}{}", sha256_hex(value.as_bytes()));
+    let prefix_budget = MAX_BINDING_COMPONENT_BYTES.saturating_sub(suffix.len());
+    let prefix = truncate_utf8_to_bytes(value, prefix_budget);
+    format!("{prefix}{suffix}")
+}
+
+fn truncate_utf8_to_bytes(value: &str, max_bytes: usize) -> &str {
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let mut end = max_bytes.min(value.len());
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
 }
 
 fn safe_text(value: &str) -> String {
@@ -1031,8 +1175,8 @@ fn sha256_hex(payload: &[u8]) -> String {
 mod tests {
     use super::{
         ConversationBindingCreateRequest, ConversationBindingKind, ConversationBindingLifecycle,
-        ConversationBindingLifecycleState, ConversationBindingListFilter,
-        ConversationBindingResolveRequest, ConversationBindingStore,
+        ConversationBindingListFilter, ConversationBindingResolveRequest, ConversationBindingStore,
+        MAX_BINDING_COMPONENT_BYTES, MAX_BINDING_RECORDS,
     };
 
     fn create_request(session_id: &str, now_unix_ms: i64) -> ConversationBindingCreateRequest {
@@ -1117,7 +1261,7 @@ mod tests {
                 1_101,
             )
             .expect("list succeeds");
-        assert_eq!(records[0].state, ConversationBindingLifecycleState::Expired);
+        assert!(records.is_empty());
     }
 
     #[test]
@@ -1181,5 +1325,78 @@ mod tests {
             .iter()
             .any(|conflict| conflict.kind.as_str() == "principal_mismatch"));
         assert!(!report.repair_plan.safe_to_auto_apply);
+    }
+
+    #[test]
+    fn oversized_route_identifiers_are_bounded_and_resolve_stably() {
+        let store = ConversationBindingStore::open_temp();
+        let oversized = "x".repeat(MAX_BINDING_COMPONENT_BYTES + 128);
+        let mut request = create_request("01ARZ3NDEKTSV4RRFFQ69G5FAZ", 1_000);
+        request.conversation_id = Some(oversized.clone());
+        request.thread_id = Some(format!("thread-{oversized}"));
+        request.sender_identity = Some(format!("sender-{oversized}"));
+
+        let created = store.create_or_touch(request).expect("oversized create succeeds");
+        assert!(created
+            .record
+            .conversation_id
+            .as_ref()
+            .is_some_and(|value| { value.len() <= MAX_BINDING_COMPONENT_BYTES }));
+        assert!(created
+            .record
+            .thread_id
+            .as_ref()
+            .is_some_and(|value| { value.len() <= MAX_BINDING_COMPONENT_BYTES }));
+        assert!(created
+            .record
+            .sender_identity
+            .as_ref()
+            .is_some_and(|value| { value.len() <= MAX_BINDING_COMPONENT_BYTES }));
+
+        let resolved = store
+            .resolve(ConversationBindingResolveRequest {
+                channel: "discord:default".to_owned(),
+                conversation_id: Some(oversized.clone()),
+                thread_id: Some(format!("thread-{oversized}")),
+                sender_identity: Some(format!("sender-{oversized}")),
+                principal: "user:ops".to_owned(),
+                now_unix_ms: 1_001,
+            })
+            .expect("oversized resolve succeeds");
+        assert_eq!(
+            resolved.record.as_ref().map(|record| record.binding_id.as_str()),
+            Some(created.record.binding_id.as_str())
+        );
+    }
+
+    #[test]
+    fn create_prunes_oldest_binding_when_record_limit_is_reached() {
+        let store = ConversationBindingStore::open_temp();
+        for index in 0..MAX_BINDING_RECORDS {
+            let mut request =
+                create_request(format!("session-{index}").as_str(), 1_000 + index as i64);
+            request.conversation_id = Some(format!("conv-{index}"));
+            request.thread_id = Some(format!("thread-{index}"));
+            store.create_or_touch(request).expect("binding create succeeds");
+        }
+
+        let mut newest = create_request("session-new", 2_000);
+        newest.conversation_id = Some("conv-new".to_owned());
+        newest.thread_id = Some("thread-new".to_owned());
+        let created = store.create_or_touch(newest).expect("new binding create succeeds");
+
+        let records = store
+            .list(
+                ConversationBindingListFilter {
+                    include_inactive: true,
+                    limit: Some(MAX_BINDING_RECORDS + 1),
+                    ..Default::default()
+                },
+                2_000,
+            )
+            .expect("list succeeds");
+        assert_eq!(records.len(), MAX_BINDING_RECORDS);
+        assert!(records.iter().any(|record| record.binding_id == created.record.binding_id));
+        assert!(!records.iter().any(|record| record.thread_id.as_deref() == Some("thread-0")));
     }
 }
