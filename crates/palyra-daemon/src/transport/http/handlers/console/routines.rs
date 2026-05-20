@@ -1531,77 +1531,77 @@ async fn dispatch_single_routine(
     let delivery =
         request.delivery_override.clone().unwrap_or_else(|| routine.metadata.delivery.clone());
 
-    if !request.bypass_operator_gates {
-        if !routine.job.enabled {
-            return register_terminal_routine_run(
-                state,
-                TerminalRoutineRunRequest {
-                    routine_id: routine.job.job_id.as_str(),
-                    trigger_kind: request.trigger_kind,
-                    trigger_reason: request.trigger_reason,
-                    trigger_payload: &request.trigger_payload,
-                    trigger_dedupe_key: request.trigger_dedupe_key,
-                    execution,
-                    delivery,
-                    dispatch_mode: request.dispatch_mode,
-                    source_run_id: request.source_run_id,
-                    status: CronRunStatus::Skipped,
-                    outcome_override: RoutineRunOutcomeKind::Skipped,
-                    message: "routine is disabled",
-                    skip_reason: Some("routine_disabled".to_owned()),
-                    delivery_reason: None,
-                    approval_note: request.approval_note,
-                    safety_note: request.safety_note,
-                },
-            )
-            .await;
-        }
-        if routine.metadata.approval_policy.mode == RoutineApprovalMode::BeforeFirstRun
-            && !routine_approval_granted(
-                state,
-                routine_approval_subject_id(
-                    routine.metadata.routine_id.as_str(),
-                    RoutineApprovalMode::BeforeFirstRun,
-                ),
-            )
-            .await?
-        {
-            let approval = ensure_routine_approval_requested(
-                state,
-                principal,
-                Some(routine.job.channel.as_str()),
-                &routine.job,
-                &routine.metadata,
+    if !routine.job.enabled {
+        return register_terminal_routine_run(
+            state,
+            TerminalRoutineRunRequest {
+                routine_id: routine.job.job_id.as_str(),
+                trigger_kind: request.trigger_kind,
+                trigger_reason: request.trigger_reason,
+                trigger_payload: &request.trigger_payload,
+                trigger_dedupe_key: request.trigger_dedupe_key,
+                execution,
+                delivery,
+                dispatch_mode: request.dispatch_mode,
+                source_run_id: request.source_run_id,
+                status: CronRunStatus::Skipped,
+                outcome_override: RoutineRunOutcomeKind::Skipped,
+                message: "routine is disabled",
+                skip_reason: Some("routine_disabled".to_owned()),
+                delivery_reason: None,
+                approval_note: request.approval_note,
+                safety_note: request.safety_note,
+            },
+        )
+        .await;
+    }
+    if routine.metadata.approval_policy.mode == RoutineApprovalMode::BeforeFirstRun
+        && !routine_approval_granted(
+            state,
+            routine_approval_subject_id(
+                routine.metadata.routine_id.as_str(),
                 RoutineApprovalMode::BeforeFirstRun,
-            )
-            .await?;
-            let mut response = register_terminal_routine_run(
-                state,
-                TerminalRoutineRunRequest {
-                    routine_id: routine.job.job_id.as_str(),
-                    trigger_kind: request.trigger_kind,
-                    trigger_reason: request.trigger_reason,
-                    trigger_payload: &request.trigger_payload,
-                    trigger_dedupe_key: request.trigger_dedupe_key,
-                    execution,
-                    delivery,
-                    dispatch_mode: request.dispatch_mode,
-                    source_run_id: request.source_run_id,
-                    status: CronRunStatus::Denied,
-                    outcome_override: RoutineRunOutcomeKind::Denied,
-                    message: "routine approval is required before the first run",
-                    skip_reason: Some("approval_required".to_owned()),
-                    delivery_reason: None,
-                    approval_note: Some("before_first_run approval is still pending".to_owned()),
-                    safety_note: request.safety_note,
-                },
-            )
-            .await?;
-            if let Some(object) = response.as_object_mut() {
-                object.insert("approval".to_owned(), approval);
-            }
-            return Ok(response);
+            ),
+        )
+        .await?
+    {
+        let approval = ensure_routine_approval_requested(
+            state,
+            principal,
+            Some(routine.job.channel.as_str()),
+            &routine.job,
+            &routine.metadata,
+            RoutineApprovalMode::BeforeFirstRun,
+        )
+        .await?;
+        let mut response = register_terminal_routine_run(
+            state,
+            TerminalRoutineRunRequest {
+                routine_id: routine.job.job_id.as_str(),
+                trigger_kind: request.trigger_kind,
+                trigger_reason: request.trigger_reason,
+                trigger_payload: &request.trigger_payload,
+                trigger_dedupe_key: request.trigger_dedupe_key,
+                execution,
+                delivery,
+                dispatch_mode: request.dispatch_mode,
+                source_run_id: request.source_run_id,
+                status: CronRunStatus::Denied,
+                outcome_override: RoutineRunOutcomeKind::Denied,
+                message: "routine approval is required before the first run",
+                skip_reason: Some("approval_required".to_owned()),
+                delivery_reason: None,
+                approval_note: Some("before_first_run approval is still pending".to_owned()),
+                safety_note: request.safety_note,
+            },
+        )
+        .await?;
+        if let Some(object) = response.as_object_mut() {
+            object.insert("approval".to_owned(), approval);
         }
+        return Ok(response);
+    }
+    if !request.bypass_operator_gates {
         if routine.metadata.trigger_kind != request.trigger_kind
             && request.trigger_kind != RoutineTriggerKind::Manual
         {

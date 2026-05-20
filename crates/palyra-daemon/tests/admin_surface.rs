@@ -1892,6 +1892,139 @@ fn console_routine_import_rejects_existing_job_owned_by_another_principal() -> R
 }
 
 #[test]
+fn console_routine_test_run_preserves_disabled_and_before_first_run_gates() -> Result<()> {
+    let (child, admin_port) =
+        spawn_palyrad_with_dynamic_ports_with_env(&[("PALYRA_ADMIN_REQUIRE_AUTH", "false")])?;
+    let mut daemon = ChildGuard::new(child);
+    wait_for_health(admin_port, daemon.child_mut())?;
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(4))
+        .build()
+        .context("failed to build HTTP client")?;
+    let (cookie, csrf_token) = login_console_session(&client, admin_port, CONSOLE_ADMIN_PRINCIPAL)?;
+    client
+        .post(format!(
+            "http://127.0.0.1:{admin_port}/console/v1/access/features/routines_automation"
+        ))
+        .header("Cookie", cookie.clone())
+        .header("x-palyra-csrf-token", csrf_token.clone())
+        .json(&serde_json::json!({
+            "enabled": true,
+            "stage": "test",
+        }))
+        .send()
+        .context("failed to enable routines automation for test")?
+        .error_for_status()
+        .context("routines automation feature enable returned non-success status")?;
+
+    let disabled_routine = client
+        .post(format!("http://127.0.0.1:{admin_port}/console/v1/routines"))
+        .header("Cookie", cookie.clone())
+        .header("x-palyra-csrf-token", csrf_token.clone())
+        .json(&serde_json::json!({
+            "name": "disabled-test-run-gate",
+            "prompt": "disabled routine test-run gate validation",
+            "trigger_kind": "schedule",
+            "schedule_type": "every",
+            "every_interval_ms": 60000,
+            "enabled": false,
+            "channel": "web",
+        }))
+        .send()
+        .context("failed to create disabled routine")?
+        .error_for_status()
+        .context("disabled routine create returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse disabled routine create response json")?;
+    let disabled_routine_id = disabled_routine
+        .get("routine")
+        .and_then(|routine| routine.get("routine_id"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("disabled routine create missing routine.routine_id"))?;
+
+    let disabled_test_run = client
+        .post(format!(
+            "http://127.0.0.1:{admin_port}/console/v1/routines/{disabled_routine_id}/test-run"
+        ))
+        .header("Cookie", cookie.clone())
+        .header("x-palyra-csrf-token", csrf_token.clone())
+        .json(&serde_json::json!({}))
+        .send()
+        .context("failed to test-run disabled routine")?
+        .error_for_status()
+        .context("disabled routine test-run returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse disabled routine test-run response json")?;
+    assert_eq!(
+        disabled_test_run.get("status").and_then(Value::as_str),
+        Some("skipped"),
+        "safe test-run must not dispatch disabled routines"
+    );
+    assert_eq!(
+        disabled_test_run.get("message").and_then(Value::as_str),
+        Some("routine is disabled")
+    );
+
+    let approval_routine = client
+        .post(format!("http://127.0.0.1:{admin_port}/console/v1/routines"))
+        .header("Cookie", cookie.clone())
+        .header("x-palyra-csrf-token", csrf_token.clone())
+        .json(&serde_json::json!({
+            "name": "before-first-run-test-run-gate",
+            "prompt": "before first run routine test-run gate validation",
+            "trigger_kind": "schedule",
+            "schedule_type": "every",
+            "every_interval_ms": 300000,
+            "enabled": true,
+            "channel": "web",
+            "approval_mode": "before_first_run",
+        }))
+        .send()
+        .context("failed to create before_first_run routine")?
+        .error_for_status()
+        .context("before_first_run routine create returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse before_first_run routine create response json")?;
+    let approval_routine_id = approval_routine
+        .get("routine")
+        .and_then(|routine| routine.get("routine_id"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            anyhow::anyhow!("before_first_run routine create missing routine.routine_id")
+        })?;
+
+    let approval_test_run = client
+        .post(format!(
+            "http://127.0.0.1:{admin_port}/console/v1/routines/{approval_routine_id}/test-run"
+        ))
+        .header("Cookie", cookie)
+        .header("x-palyra-csrf-token", csrf_token)
+        .json(&serde_json::json!({}))
+        .send()
+        .context("failed to test-run before_first_run routine")?
+        .error_for_status()
+        .context("before_first_run routine test-run returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse before_first_run routine test-run response json")?;
+    assert_eq!(
+        approval_test_run.get("status").and_then(Value::as_str),
+        Some("denied"),
+        "safe test-run must preserve before_first_run approval"
+    );
+    assert_eq!(
+        approval_test_run.get("message").and_then(Value::as_str),
+        Some("routine approval is required before the first run")
+    );
+    assert!(
+        approval_test_run.get("approval").is_some(),
+        "safe test-run denial should include the pending approval payload"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn console_browser_relay_action_rejects_body_token_without_authorization_header() -> Result<()> {
     let (child, admin_port) = spawn_palyrad_with_bound_console_principal(CONSOLE_ADMIN_PRINCIPAL)?;
     let mut daemon = ChildGuard::new(child);
