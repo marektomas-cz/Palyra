@@ -111,31 +111,13 @@ fn emit_unavailable_health_json(
     http: &Result<HealthResponse>,
     grpc: &Result<gateway_v1::HealthResponse>,
 ) -> Result<()> {
-    let primary_error = http.as_ref().err().or_else(|| grpc.as_ref().err());
-    let exit_code =
-        primary_error.map(output::classify_error).unwrap_or(output::CliExitCode::Connectivity);
-    let message = [http.as_ref().err(), grpc.as_ref().err()]
-        .into_iter()
-        .flatten()
-        .map(|error| format!("{error:#}"))
-        .collect::<Vec<_>>()
-        .join("; ");
-    let message =
-        if message.trim().is_empty() { "health check failed".to_owned() } else { message };
-    let context = app::current_root_context();
-    let payload = json!({
-        "status": "error",
-        "overall": "unavailable",
-        "daemon_url": daemon_url,
-        "grpc_url": grpc_url,
-        "http": health_probe_result_to_json(http),
-        "grpc": grpc_health_probe_result_to_json(grpc),
-        "error": {
-            "kind": exit_code.kind(),
-            "message": message,
-            "trace_id": context.as_ref().map(|value| value.trace_id()),
-        },
-    });
+    let (exit_code, payload) = unavailable_health_json_payload(
+        daemon_url,
+        grpc_url,
+        http,
+        grpc,
+        app::current_root_context().as_ref().map(|value| value.trace_id()),
+    );
 
     eprintln!(
         "{}",
@@ -143,6 +125,45 @@ fn emit_unavailable_health_json(
             .context("failed to encode unavailable health output as JSON")?
     );
     Err(output::already_emitted_error(exit_code))
+}
+
+fn unavailable_health_json_payload(
+    daemon_url: &str,
+    grpc_url: &str,
+    http: &Result<HealthResponse>,
+    grpc: &Result<gateway_v1::HealthResponse>,
+    trace_id: Option<&str>,
+) -> (output::CliExitCode, Value) {
+    let primary_error = http.as_ref().err().or_else(|| grpc.as_ref().err());
+    let exit_code =
+        primary_error.map(output::classify_error).unwrap_or(output::CliExitCode::Connectivity);
+    let message = [http.as_ref().err(), grpc.as_ref().err()]
+        .into_iter()
+        .flatten()
+        .map(format_health_error_for_json)
+        .collect::<Vec<_>>()
+        .join("; ");
+    let message =
+        if message.trim().is_empty() { "health check failed".to_owned() } else { message };
+    let payload = json!({
+        "status": "error",
+        "overall": "unavailable",
+        "daemon_url": output::sanitize_diagnostic_text(daemon_url),
+        "grpc_url": output::sanitize_diagnostic_text(grpc_url),
+        "http": health_probe_result_to_json(http),
+        "grpc": grpc_health_probe_result_to_json(grpc),
+        "error": {
+            "kind": exit_code.kind(),
+            "message": message,
+            "trace_id": trace_id,
+        },
+    });
+
+    (exit_code, payload)
+}
+
+fn format_health_error_for_json(error: &anyhow::Error) -> String {
+    output::sanitize_diagnostic_text(format!("{error:#}").as_str())
 }
 
 fn health_probe_result_to_json(result: &Result<HealthResponse>) -> Value {
@@ -158,7 +179,7 @@ fn health_probe_result_to_json(result: &Result<HealthResponse>) -> Value {
             "status": "error",
             "error": {
                 "kind": output::classify_error(error).kind(),
-                "message": format!("{error:#}"),
+                "message": format_health_error_for_json(error),
             },
         }),
     }
@@ -177,8 +198,38 @@ fn grpc_health_probe_result_to_json(result: &Result<gateway_v1::HealthResponse>)
             "status": "error",
             "error": {
                 "kind": output::classify_error(error).kind(),
-                "message": format!("{error:#}"),
+                "message": format_health_error_for_json(error),
             },
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unavailable_health_json_redacts_urls_and_probe_errors() {
+        let http: Result<HealthResponse> = Err(anyhow!(
+            "failed to call http://user:HTTP_PASS_123@example.test/healthz?api_key=HTTP_TOKEN_456"
+        ));
+        let grpc: Result<gateway_v1::HealthResponse> = Err(anyhow!(
+            "failed to connect gateway gRPC endpoint http://user:GRPC_PASS_ABC@example.test:7443?token=GRPC_TOKEN_XYZ"
+        ));
+
+        let (_exit_code, payload) = unavailable_health_json_payload(
+            "http://user:HTTP_PASS_123@example.test?api_key=HTTP_TOKEN_456",
+            "http://user:GRPC_PASS_ABC@example.test:7443?token=GRPC_TOKEN_XYZ",
+            &http,
+            &grpc,
+            Some("trace-123"),
+        );
+        let rendered = serde_json::to_string(&payload).expect("health JSON payload encodes");
+
+        for secret in ["HTTP_PASS_123", "HTTP_TOKEN_456", "GRPC_PASS_ABC", "GRPC_TOKEN_XYZ"] {
+            assert!(!rendered.contains(secret), "payload leaked {secret}: {rendered}");
+        }
+        assert!(rendered.contains("<redacted>"));
+        assert_eq!(payload.pointer("/error/trace_id").and_then(Value::as_str), Some("trace-123"));
     }
 }

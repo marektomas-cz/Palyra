@@ -64,11 +64,23 @@ fn command_level_health_json_reports_unavailable_runtime_as_json() -> Result<()>
     let workdir = TempDir::new().context("failed to create temporary workdir")?;
     let output = run_cli(
         &workdir,
-        &["health", "--url", "http://127.0.0.1:1", "--grpc-url", "http://127.0.0.1:1", "--json"],
+        &[
+            "health",
+            "--url",
+            "http://user:HTTP_PASS_123@127.0.0.1:1?api_key=HTTP_KEY_456",
+            "--grpc-url",
+            "http://user:GRPC_PASS_ABC@127.0.0.1:1?password=GRPC_SECRET_XYZ",
+            "--json",
+        ],
     )?;
 
     assert!(!output.status.success(), "health should fail when runtime is unavailable");
     let payload = parse_stderr_json(&output, "health --json failure")?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for secret in ["HTTP_PASS_123", "HTTP_KEY_456", "GRPC_PASS_ABC", "GRPC_SECRET_XYZ"] {
+        assert!(!stderr.contains(secret), "health JSON leaked {secret}: {stderr}");
+    }
+    assert!(stderr.contains("<redacted>"), "health JSON should redact URL credentials: {stderr}");
     assert_eq!(payload.get("status").and_then(Value::as_str), Some("error"));
     assert_eq!(payload.get("overall").and_then(Value::as_str), Some("unavailable"));
     assert_eq!(

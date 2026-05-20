@@ -111,6 +111,10 @@ pub(crate) fn print_text_line(line: &str) -> Result<()> {
 }
 
 fn sanitize_text_output_line(line: &str) -> String {
+    sanitize_diagnostic_text(line)
+}
+
+pub(crate) fn sanitize_diagnostic_text(line: &str) -> String {
     redact_auth_error(redact_url_segments_in_text(line).as_str())
 }
 
