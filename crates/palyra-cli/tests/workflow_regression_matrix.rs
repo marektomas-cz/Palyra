@@ -2126,13 +2126,12 @@ fn spawn_browserd_with_dynamic_ports(state_dir: &Path) -> Result<(Child, u16, u1
                 "127.0.0.1",
                 "--grpc-port",
                 "0",
-                "--auth-token",
-                BROWSER_AUTH_TOKEN,
                 "--engine-mode",
                 "simulated",
             ])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .env("PALYRA_BROWSERD_AUTH_TOKEN", BROWSER_AUTH_TOKEN)
             .env("PALYRA_BROWSERD_STATE_DIR", state_dir.display().to_string())
             .env("PALYRA_BROWSERD_STATE_ENCRYPTION_KEY", BROWSER_STATE_KEY_B64)
             .env("PALYRA_BROWSERD_ENGINE_MODE", "simulated")

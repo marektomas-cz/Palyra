@@ -847,9 +847,7 @@ impl ControlCenter {
                     .arg("--grpc-bind")
                     .arg(LOOPBACK_HOST)
                     .arg("--grpc-port")
-                    .arg(self.runtime.browser_grpc_port.to_string())
-                    .arg("--auth-token")
-                    .arg(self.browser_auth_token.as_str());
+                    .arg(self.runtime.browser_grpc_port.to_string());
                 for (key, value) in self.browserd_env() {
                     command.env(key, value);
                 }
