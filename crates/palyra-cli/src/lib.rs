@@ -2795,28 +2795,130 @@ fn read_recent_support_bundle_recall_artifacts(
     let rows = statement.query_map([limit], |row| {
         let diagnostics_raw: String = row.get(6)?;
         let provenance_raw: String = row.get(7)?;
+        let mut diagnostics = parse_support_bundle_recall_artifact_json(
+            diagnostics_raw.as_str(),
+            "recall artifact diagnostics JSON could not be parsed",
+        );
+        let mut provenance = parse_support_bundle_recall_artifact_json(
+            provenance_raw.as_str(),
+            "recall artifact provenance JSON could not be parsed",
+        );
+        redact_support_bundle_recall_artifact_json(&mut diagnostics, None);
+        redact_support_bundle_recall_artifact_json(&mut provenance, None);
+        let artifact_id: String = row.get(0)?;
+        let principal: String = row.get(2)?;
+        let channel: Option<String> = row.get(3)?;
+        let session_id: Option<String> = row.get(4)?;
+        let summary: String = row.get(5)?;
         Ok(SupportBundleRecallArtifactRecord {
-            artifact_id: row.get(0)?,
+            artifact_id: redacted_support_bundle_identifier(artifact_id.as_str()),
             artifact_kind: row.get(1)?,
-            principal: row.get(2)?,
-            channel: row.get(3)?,
-            session_id: row.get(4)?,
-            summary: row.get(5)?,
-            diagnostics: serde_json::from_str(diagnostics_raw.as_str()).unwrap_or_else(|_| {
-                json!({
-                    "decode_error": "recall artifact diagnostics JSON could not be parsed",
-                })
-            }),
-            provenance: serde_json::from_str(provenance_raw.as_str()).unwrap_or_else(|_| {
-                json!({
-                    "decode_error": "recall artifact provenance JSON could not be parsed",
-                })
-            }),
+            principal: redacted_support_bundle_identifier(principal.as_str()),
+            channel: channel
+                .as_deref()
+                .map(redacted_support_bundle_identifier)
+                .filter(|value| !value.is_empty()),
+            session_id: session_id
+                .as_deref()
+                .map(redacted_support_bundle_identifier)
+                .filter(|value| !value.is_empty()),
+            summary: support_bundle_recall_artifact_summary(summary.as_str()),
+            diagnostics,
+            provenance,
             created_at_unix_ms: row.get(8)?,
         })
     })?;
     rows.collect::<std::result::Result<Vec<_>, rusqlite::Error>>()
         .context("failed to read support-bundle recall artifacts")
+}
+
+fn parse_support_bundle_recall_artifact_json(raw: &str, decode_error: &str) -> Value {
+    serde_json::from_str(raw).unwrap_or_else(|_| {
+        json!({
+            "decode_error": decode_error,
+        })
+    })
+}
+
+fn redacted_support_bundle_identifier(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    format!("redacted:sha256:{}", &sha256_hex(trimmed.as_bytes())[..16])
+}
+
+fn support_bundle_recall_artifact_summary(raw: &str) -> String {
+    if raw.trim().is_empty() {
+        String::new()
+    } else {
+        REDACTED.to_owned()
+    }
+}
+
+fn redact_support_bundle_recall_artifact_json(value: &mut Value, key_context: Option<&str>) {
+    match value {
+        Value::Object(map) => {
+            for (key, entry) in map {
+                if is_sensitive_key(key.as_str())
+                    || support_bundle_recall_artifact_key_requires_redaction(key.as_str())
+                {
+                    *entry = Value::String(REDACTED.to_owned());
+                    continue;
+                }
+                redact_support_bundle_recall_artifact_json(entry, Some(key.as_str()));
+            }
+        }
+        Value::Array(items) => {
+            for entry in items {
+                redact_support_bundle_recall_artifact_json(entry, key_context);
+            }
+        }
+        Value::String(raw) => {
+            if key_context.is_some_and(|key| {
+                is_sensitive_key(key) || support_bundle_recall_artifact_key_requires_redaction(key)
+            }) {
+                *raw = REDACTED.to_owned();
+                return;
+            }
+            if key_context
+                .map(|key| key_contains_any(key, &["url", "uri", "endpoint", "location"]))
+                .unwrap_or(false)
+            {
+                *raw = redact_cli_json_url(raw.as_str(), key_context);
+                return;
+            }
+            if key_context
+                .map(|key| key_contains_any(key, &["error", "reason", "message", "detail"]))
+                .unwrap_or(false)
+            {
+                *raw = sanitize_diagnostic_error(raw.as_str());
+            } else {
+                *raw = truncate_utf8_chars(sanitize_diagnostic_error(raw.as_str()).as_str(), 512);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn support_bundle_recall_artifact_key_requires_redaction(key: &str) -> bool {
+    let normalized = key.to_ascii_lowercase().replace(['-', '.'], "_");
+    key_contains_any(
+        normalized.as_str(),
+        &[
+            "principal",
+            "device",
+            "channel",
+            "session",
+            "run_id",
+            "memory_id",
+            "document_id",
+            "checkpoint_id",
+            "artifact_id",
+            "source_ref",
+            "path",
+        ],
+    )
 }
 
 fn read_support_bundle_flow_timeline(connection: &Connection) -> SupportBundleFlowTimelineSnapshot {
@@ -11186,12 +11288,12 @@ mod diagnostics_bundle_tests {
     use super::{
         build_support_bundle_incident_checklists, build_support_bundle_operator_runbooks,
         encode_support_bundle_with_cap, extract_support_bundle_error_message,
-        read_support_bundle_flow_timeline, unavailable_support_bundle_queue_state,
-        unavailable_support_bundle_recall_artifacts, DoctorAccessSnapshot, DoctorBrowserSnapshot,
-        DoctorConfigSnapshot, DoctorConnectivityProbe, DoctorConnectivitySnapshot,
-        DoctorDeploymentBindSnapshot, DoctorDeploymentSnapshot, DoctorIdentitySnapshot,
-        DoctorProviderAuthSnapshot, DoctorReport, DoctorSandboxSnapshot, DoctorSummary,
-        SkillsInventorySnapshot, SupportBundle, SupportBundleBuildSnapshot,
+        read_recent_support_bundle_recall_artifacts, read_support_bundle_flow_timeline,
+        unavailable_support_bundle_queue_state, unavailable_support_bundle_recall_artifacts,
+        DoctorAccessSnapshot, DoctorBrowserSnapshot, DoctorConfigSnapshot, DoctorConnectivityProbe,
+        DoctorConnectivitySnapshot, DoctorDeploymentBindSnapshot, DoctorDeploymentSnapshot,
+        DoctorIdentitySnapshot, DoctorProviderAuthSnapshot, DoctorReport, DoctorSandboxSnapshot,
+        DoctorSummary, SkillsInventorySnapshot, SupportBundle, SupportBundleBuildSnapshot,
         SupportBundleConfigSnapshot, SupportBundleDiagnosticsSnapshot,
         SupportBundleFlowTimelineSnapshot, SupportBundleJournalErrorRecord,
         SupportBundleJournalSnapshot, SupportBundleObservabilitySnapshot,
@@ -11563,6 +11665,90 @@ mod diagnostics_bundle_tests {
                 && !extracted.contains("qwerty"),
             "extracted error message must not leak raw secret values: {extracted}"
         );
+    }
+
+    #[test]
+    fn support_bundle_recall_artifacts_redact_scope_and_provenance() {
+        let connection = Connection::open_in_memory().expect("in-memory db should open");
+        connection
+            .execute_batch(
+                r#"
+                CREATE TABLE recall_artifacts (
+                    artifact_ulid TEXT PRIMARY KEY,
+                    artifact_kind TEXT NOT NULL,
+                    principal TEXT NOT NULL,
+                    device_id TEXT NOT NULL,
+                    channel TEXT,
+                    session_ulid TEXT,
+                    query TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    diagnostics_json TEXT NOT NULL,
+                    provenance_json TEXT NOT NULL,
+                    created_by_principal TEXT NOT NULL,
+                    created_at_unix_ms INTEGER NOT NULL
+                );
+                "#,
+            )
+            .expect("recall_artifacts table should be created");
+        connection
+            .execute(
+                "INSERT INTO recall_artifacts (
+                    artifact_ulid, artifact_kind, principal, device_id, channel, session_ulid,
+                    query, summary, payload_json, diagnostics_json, provenance_json,
+                    created_by_principal, created_at_unix_ms
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                params![
+                    "01LEAKBOB00000000000002",
+                    "recall_preview",
+                    "user:bob",
+                    "device:bob-laptop",
+                    "discord:channel:secret",
+                    "01SESSIONBOBSECRET0000001",
+                    "where is the acquisition plan?",
+                    "Bob confidential acquisition summary",
+                    "{}",
+                    r#"{"reason":"Authorization: Bearer bob-secret","path":"/home/bob/confidential/acquisition.txt"}"#,
+                    r#"{"workspace":[{"document_id":"doc-bob","path":"/home/bob/confidential/acquisition.txt"}],"checkpoints":[{"checkpoint_id":"cp-bob","workspace_paths":["/mnt/other-device/secrets.txt"]}],"transcript":[{"run_id":"run-bob","seq":7,"event_type":"message.replied"}]}"#,
+                    "user:bob",
+                    1_730_000_000_200_i64,
+                ],
+            )
+            .expect("recall artifact should insert");
+
+        let records = read_recent_support_bundle_recall_artifacts(&connection, 16)
+            .expect("support-bundle recall artifacts should read");
+        let encoded = serde_json::to_string(&records)
+            .expect("support-bundle recall artifacts should serialize");
+
+        assert_eq!(records.len(), 1);
+        assert!(
+            encoded.contains("redacted:sha256:"),
+            "support-bundle recall artifacts should keep stable redacted refs: {encoded}"
+        );
+        assert!(
+            encoded.contains("<redacted>"),
+            "support-bundle recall artifacts should mark redacted payload fields: {encoded}"
+        );
+        for leaked in [
+            "01LEAKBOB00000000000002",
+            "user:bob",
+            "device:bob-laptop",
+            "discord:channel:secret",
+            "01SESSIONBOBSECRET0000001",
+            "Bob confidential acquisition summary",
+            "bob-secret",
+            "/home/bob/confidential/acquisition.txt",
+            "/mnt/other-device/secrets.txt",
+            "doc-bob",
+            "cp-bob",
+            "run-bob",
+        ] {
+            assert!(
+                !encoded.contains(leaked),
+                "support-bundle recall artifact output leaked {leaked}: {encoded}"
+            );
+        }
     }
 
     #[test]
