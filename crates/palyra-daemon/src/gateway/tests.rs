@@ -2518,30 +2518,39 @@ fn vault_scope_enforcement_rejects_bare_channel_name_for_account_scope() {
 
 #[test]
 fn vault_get_approval_matcher_checks_selected_scope_key_refs() {
-    let refs = vec!["global/openai_api_key".to_owned()];
-    let matched = vault_get_requires_approval(&super::VaultScope::Global, "openai_api_key", &refs);
+    let refs = vec!["global/openai_api_key".to_owned(), "global/anthropic_api_key".to_owned()];
+    let matched_openai =
+        vault_get_requires_approval(&super::VaultScope::Global, "openai_api_key", &refs);
+    let matched_anthropic =
+        vault_get_requires_approval(&super::VaultScope::Global, "anthropic_api_key", &refs);
     let not_matched =
         vault_get_requires_approval(&super::VaultScope::Global, "non_sensitive", &refs);
-    assert!(matched, "configured scope/key ref should require explicit approval");
+    assert!(matched_openai, "configured OpenAI provider key should require explicit approval");
+    assert!(
+        matched_anthropic,
+        "configured Anthropic provider key should require explicit approval"
+    );
     assert!(!not_matched, "unconfigured scope/key ref should not require explicit approval");
 }
 
 #[test]
 fn vault_get_approval_policy_denies_without_explicit_approval() {
-    let refs = vec!["global/openai_api_key".to_owned()];
-    let error = enforce_vault_get_approval_policy(
-        "user:ops",
-        &super::VaultScope::Global,
-        "openai_api_key",
-        refs.as_slice(),
-        false,
-    )
-    .expect_err("selected sensitive vault ref must be denied without explicit approval");
-    assert_eq!(error.code(), tonic::Code::PermissionDenied);
-    assert!(
-        error.message().contains("explicit approval"),
-        "deny reason should explain explicit approval requirement"
-    );
+    let refs = vec!["global/openai_api_key".to_owned(), "global/anthropic_api_key".to_owned()];
+    for key in ["openai_api_key", "anthropic_api_key"] {
+        let error = enforce_vault_get_approval_policy(
+            "user:ops",
+            &super::VaultScope::Global,
+            key,
+            refs.as_slice(),
+            false,
+        )
+        .expect_err("selected sensitive vault ref must be denied without explicit approval");
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
+        assert!(
+            error.message().contains("explicit approval"),
+            "deny reason should explain explicit approval requirement"
+        );
+    }
 }
 
 #[test]

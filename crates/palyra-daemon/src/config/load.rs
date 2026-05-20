@@ -3768,7 +3768,7 @@ mod tests {
         );
         assert_eq!(
             config.vault_get_approval_required_refs,
-            vec!["global/openai_api_key".to_owned()],
+            vec!["global/openai_api_key".to_owned(), "global/anthropic_api_key".to_owned()],
             "sensitive vault reads should require explicit approval by default"
         );
         assert_eq!(config.max_tape_entries_per_response, 1_000);

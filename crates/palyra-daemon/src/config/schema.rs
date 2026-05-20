@@ -24,7 +24,8 @@ const DEFAULT_GATEWAY_ALLOW_INSECURE_REMOTE: bool = false;
 const DEFAULT_GATEWAY_MAX_TAPE_ENTRIES_PER_RESPONSE: usize = 1_000;
 const DEFAULT_GATEWAY_MAX_TAPE_BYTES_PER_RESPONSE: usize = 2 * 1024 * 1024;
 const DEFAULT_GATEWAY_TLS_ENABLED: bool = false;
-const DEFAULT_GATEWAY_VAULT_GET_APPROVAL_REQUIRED_REFS: &[&str] = &["global/openai_api_key"];
+const DEFAULT_GATEWAY_VAULT_GET_APPROVAL_REQUIRED_REFS: &[&str] =
+    &["global/openai_api_key", "global/anthropic_api_key"];
 const DEFAULT_CRON_TIMEZONE_MODE: CronTimezoneMode = CronTimezoneMode::Utc;
 const DEFAULT_ORCHESTRATOR_RUNLOOP_V1_ENABLED: bool = false;
 const DEFAULT_SESSION_QUEUE_MODE: RuntimePreviewMode = RuntimePreviewMode::PreviewOnly;
