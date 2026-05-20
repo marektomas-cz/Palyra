@@ -782,6 +782,7 @@ export function ChatConsolePanel({
           canvasesBusy={sessionCanvases.canvasesBusy}
           canvasDetailBusy={sessionCanvases.canvasDetailBusy}
           pinnedCanvasId={sessionCanvases.pinnedCanvasId}
+          revealSensitiveValues={revealSensitiveValues}
           restoringStateVersion={sessionCanvases.restoringStateVersion}
           runtimeFrameUrl={sessionCanvases.runtimeFrameUrl}
           selectedCanvas={sessionCanvases.selectedCanvas}

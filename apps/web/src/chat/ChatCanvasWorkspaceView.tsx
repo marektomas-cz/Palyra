@@ -19,6 +19,7 @@ type ChatCanvasWorkspaceViewProps = {
   readonly canvasesBusy: boolean;
   readonly canvasDetailBusy: boolean;
   readonly pinnedCanvasId: string | null;
+  readonly revealSensitiveValues: boolean;
   readonly restoringStateVersion: number | null;
   readonly runtimeFrameUrl: string | null;
   readonly selectedCanvas: SessionCanvasDetailEnvelope | null;
@@ -44,6 +45,7 @@ export function ChatCanvasWorkspaceView({
   canvasesBusy,
   canvasDetailBusy,
   pinnedCanvasId,
+  revealSensitiveValues,
   restoringStateVersion,
   runtimeFrameUrl,
   selectedCanvas,
@@ -274,7 +276,7 @@ export function ChatCanvasWorkspaceView({
                 >
                   <PrettyJsonBlock
                     className="chat-detail-panel__payload"
-                    revealSensitiveValues
+                    revealSensitiveValues={revealSensitiveValues}
                     value={selectedCanvas.state}
                   />
                 </SectionCard>
