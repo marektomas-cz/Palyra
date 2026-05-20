@@ -2268,7 +2268,6 @@ fn background_process_lifetime(timeout_ms: Option<u64>, execution_timeout: Durat
     timeout_ms
         .map(Duration::from_millis)
         .unwrap_or(default_lifetime)
-        .max(default_lifetime)
         .min(Duration::from_millis(MAX_BACKGROUND_PROCESS_LIFETIME_MS))
 }
 
@@ -3658,10 +3657,7 @@ mod tests {
             output.get("process_state").and_then(serde_json::Value::as_str),
             Some("running")
         );
-        assert_eq!(
-            output.get("lifetime_ms").and_then(serde_json::Value::as_u64),
-            Some(super::DEFAULT_BACKGROUND_PROCESS_LIFETIME_MS)
-        );
+        assert_eq!(output.get("lifetime_ms").and_then(serde_json::Value::as_u64), Some(1_000));
         assert_eq!(
             output.get("max_lifetime_ms").and_then(serde_json::Value::as_u64),
             Some(super::MAX_BACKGROUND_PROCESS_LIFETIME_MS)
@@ -3890,12 +3886,12 @@ mod tests {
     }
 
     #[test]
-    fn background_process_lifetime_floors_short_explicit_timeout() {
+    fn background_process_lifetime_honors_short_explicit_timeout() {
         let short = super::background_process_lifetime(Some(100), Duration::from_millis(750));
         let capped =
             super::background_process_lifetime(Some(60 * 60_000), Duration::from_millis(750));
 
-        assert_eq!(short, Duration::from_millis(10 * 60_000));
+        assert_eq!(short, Duration::from_millis(100));
         assert_eq!(capped, Duration::from_millis(30 * 60_000));
     }
 
