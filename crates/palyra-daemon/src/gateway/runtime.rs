@@ -6298,6 +6298,28 @@ impl GatewayRuntimeState {
         after_run_id: Option<String>,
         requested_limit: Option<usize>,
     ) -> Result<(Vec<CronRunRecord>, Option<String>), Status> {
+        self.list_cron_runs_filtered(job_id, None, after_run_id, requested_limit).await
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn list_cron_runs_for_owner(
+        self: &Arc<Self>,
+        owner_principal: String,
+        after_run_id: Option<String>,
+        requested_limit: Option<usize>,
+    ) -> Result<(Vec<CronRunRecord>, Option<String>), Status> {
+        self.list_cron_runs_filtered(None, Some(owner_principal), after_run_id, requested_limit)
+            .await
+    }
+
+    #[allow(clippy::result_large_err)]
+    async fn list_cron_runs_filtered(
+        self: &Arc<Self>,
+        job_id: Option<String>,
+        owner_principal: Option<String>,
+        after_run_id: Option<String>,
+        requested_limit: Option<usize>,
+    ) -> Result<(Vec<CronRunRecord>, Option<String>), Status> {
         let state = Arc::clone(self);
         tokio::task::spawn_blocking(move || {
             let limit = requested_limit.unwrap_or(100).clamp(1, MAX_CRON_PAGE_LIMIT);
@@ -6305,6 +6327,7 @@ impl GatewayRuntimeState {
                 .journal_store
                 .list_cron_runs(CronRunsListFilter {
                     job_id: job_id.as_deref(),
+                    owner_principal: owner_principal.as_deref(),
                     after_run_id: after_run_id.as_deref(),
                     limit: limit.saturating_add(1),
                 })

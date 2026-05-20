@@ -1483,7 +1483,11 @@ async fn build_operator_insights_snapshot(
 
     let (cron_runs, cron_next_after) = state
         .runtime
-        .list_cron_runs(None, None, Some(OPERATOR_INSIGHTS_CRON_RUN_LIMIT))
+        .list_cron_runs_for_owner(
+            resolved.query.principal.clone(),
+            None,
+            Some(OPERATOR_INSIGHTS_CRON_RUN_LIMIT),
+        )
         .await
         .map_err(runtime_status_response)?;
 

@@ -358,6 +358,7 @@ pub struct CronJobRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CronRunsListFilter<'a> {
     pub job_id: Option<&'a str>,
+    pub owner_principal: Option<&'a str>,
     pub after_run_id: Option<&'a str>,
     pub limit: usize,
 }
@@ -12122,32 +12123,39 @@ impl JournalStore {
         let mut statement = guard.prepare(
             r#"
                 SELECT
-                    run_ulid,
-                    job_ulid,
-                    attempt,
-                    session_ulid,
-                    orchestrator_run_ulid,
-                    started_at_unix_ms,
-                    finished_at_unix_ms,
-                    status,
-                    error_kind,
-                    error_message_redacted,
-                    model_tokens_in,
-                    model_tokens_out,
-                    tool_calls,
-                    tool_denies,
-                    created_at_unix_ms,
-                    updated_at_unix_ms
+                    cron_runs.run_ulid,
+                    cron_runs.job_ulid,
+                    cron_runs.attempt,
+                    cron_runs.session_ulid,
+                    cron_runs.orchestrator_run_ulid,
+                    cron_runs.started_at_unix_ms,
+                    cron_runs.finished_at_unix_ms,
+                    cron_runs.status,
+                    cron_runs.error_kind,
+                    cron_runs.error_message_redacted,
+                    cron_runs.model_tokens_in,
+                    cron_runs.model_tokens_out,
+                    cron_runs.tool_calls,
+                    cron_runs.tool_denies,
+                    cron_runs.created_at_unix_ms,
+                    cron_runs.updated_at_unix_ms
                 FROM cron_runs
+                INNER JOIN cron_jobs
+                    ON cron_jobs.job_ulid = cron_runs.job_ulid
                 WHERE
-                    (?1 IS NULL OR job_ulid = ?1) AND
-                    (?2 IS NULL OR run_ulid > ?2)
-                ORDER BY run_ulid ASC
-                LIMIT ?3
+                    (?1 IS NULL OR cron_runs.job_ulid = ?1) AND
+                    (?2 IS NULL OR cron_jobs.owner_principal = ?2) AND
+                    (?3 IS NULL OR cron_runs.run_ulid > ?3)
+                ORDER BY cron_runs.run_ulid ASC
+                LIMIT ?4
             "#,
         )?;
-        let mut rows =
-            statement.query(params![filter.job_id, filter.after_run_id, limit as i64])?;
+        let mut rows = statement.query(params![
+            filter.job_id,
+            filter.owner_principal,
+            filter.after_run_id,
+            limit as i64
+        ])?;
         let mut runs = Vec::new();
         while let Some(row) = rows.next()? {
             runs.push(map_cron_run_row(row)?);
@@ -22301,12 +22309,76 @@ mod tests {
         let listed = store
             .list_cron_runs(CronRunsListFilter {
                 job_id: Some(job.job_id.as_str()),
+                owner_principal: None,
                 after_run_id: None,
                 limit: 5,
             })
             .expect("cron runs listing should succeed");
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].run_id, "01ARZ3NDEKTSV4RRFFQ69G5FBD");
+    }
+
+    #[test]
+    fn cron_run_listing_filters_by_job_owner_principal() {
+        let db_path = temp_db_path();
+        let store = JournalStore::open(test_journal_config(db_path, false))
+            .expect("journal store should open");
+        let ops_job = store
+            .create_cron_job(&sample_cron_job_request("01ARZ3NDEKTSV4RRFFQ69G5FBO"))
+            .expect("ops cron job should be inserted");
+        let mut finance_request = sample_cron_job_request("01ARZ3NDEKTSV4RRFFQ69G5FBP");
+        finance_request.owner_principal = "user:finance".to_owned();
+        let finance_job =
+            store.create_cron_job(&finance_request).expect("finance cron job should be inserted");
+
+        store
+            .start_cron_run(&CronRunStartRequest {
+                run_id: "01ARZ3NDEKTSV4RRFFQ69G5FBQ".to_owned(),
+                job_id: ops_job.job_id.clone(),
+                attempt: 1,
+                session_id: None,
+                orchestrator_run_id: None,
+                status: CronRunStatus::Succeeded,
+                error_kind: None,
+                error_message_redacted: None,
+            })
+            .expect("ops cron run should persist");
+        store
+            .start_cron_run(&CronRunStartRequest {
+                run_id: "01ARZ3NDEKTSV4RRFFQ69G5FBR".to_owned(),
+                job_id: finance_job.job_id.clone(),
+                attempt: 1,
+                session_id: None,
+                orchestrator_run_id: None,
+                status: CronRunStatus::Failed,
+                error_kind: Some("tool_denied".to_owned()),
+                error_message_redacted: Some("tool denied".to_owned()),
+            })
+            .expect("finance cron run should persist");
+
+        let ops_runs = store
+            .list_cron_runs(CronRunsListFilter {
+                job_id: None,
+                owner_principal: Some("user:ops"),
+                after_run_id: None,
+                limit: 10,
+            })
+            .expect("owner-scoped cron run listing should succeed");
+        assert_eq!(ops_runs.len(), 1);
+        assert_eq!(ops_runs[0].run_id, "01ARZ3NDEKTSV4RRFFQ69G5FBQ");
+        assert_eq!(ops_runs[0].job_id, ops_job.job_id);
+
+        let finance_runs = store
+            .list_cron_runs(CronRunsListFilter {
+                job_id: None,
+                owner_principal: Some("user:finance"),
+                after_run_id: None,
+                limit: 10,
+            })
+            .expect("finance-scoped cron run listing should succeed");
+        assert_eq!(finance_runs.len(), 1);
+        assert_eq!(finance_runs[0].run_id, "01ARZ3NDEKTSV4RRFFQ69G5FBR");
+        assert_eq!(finance_runs[0].job_id, finance_job.job_id);
     }
 
     #[test]
@@ -22357,6 +22429,7 @@ mod tests {
         let remaining_runs = store
             .list_cron_runs(CronRunsListFilter {
                 job_id: Some(job.job_id.as_str()),
+                owner_principal: None,
                 after_run_id: None,
                 limit: 10,
             })
