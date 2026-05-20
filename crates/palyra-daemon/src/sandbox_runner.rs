@@ -2873,8 +2873,8 @@ fn reserve_output_budget(remaining_budget: &AtomicUsize, requested_bytes: usize)
 #[cfg(test)]
 mod tests {
     use std::{
-        fs,
-        path::PathBuf,
+        fs, io,
+        path::{Path, PathBuf},
         process::Command,
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
@@ -2943,6 +2943,16 @@ mod tests {
             .as_nanos();
         std::env::temp_dir()
             .join(format!("palyra-sandbox-runner-{suffix}-{nanos}-{}", std::process::id()))
+    }
+
+    #[cfg(unix)]
+    fn create_directory_symlink(target: &Path, link: &Path) -> io::Result<()> {
+        std::os::unix::fs::symlink(target, link)
+    }
+
+    #[cfg(windows)]
+    fn create_directory_symlink(target: &Path, link: &Path) -> io::Result<()> {
+        std::os::windows::fs::symlink_dir(target, link)
     }
 
     #[test]
@@ -3043,6 +3053,42 @@ mod tests {
         assert!(output.contains("WORKSPACE_SENTINEL_ONLY"), "{output}");
 
         let _ = fs::remove_dir_all(workspace.as_path());
+    }
+
+    #[test]
+    fn builtin_list_directory_rejects_dash_prefixed_symlink_escape() {
+        let workspace = unique_temp_dir("workspace-builtin-list-dash-symlink");
+        let outside = unique_temp_dir("outside-builtin-list-dash-symlink");
+        fs::create_dir_all(workspace.as_path()).expect("workspace directory should be created");
+        fs::create_dir_all(outside.as_path()).expect("outside directory should be created");
+        fs::write(outside.join("OUTSIDE_LIST_MARKER"), b"outside")
+            .expect("outside marker should be written");
+        let link_path = workspace.join("-x");
+        if let Err(error) = create_directory_symlink(outside.as_path(), link_path.as_path()) {
+            eprintln!(
+                "skipping dash-prefixed symlink escape regression because symlink creation failed: {error}"
+            );
+            let _ = fs::remove_dir_all(workspace.as_path());
+            let _ = fs::remove_dir_all(outside.as_path());
+            return;
+        }
+        let canonical_workspace = canonical_workspace_root(workspace.as_path())
+            .expect("workspace root should canonicalize");
+        let args = vec!["-x".to_owned()];
+
+        let error = builtin_list_directory_stdout(
+            "ls",
+            args.as_slice(),
+            canonical_workspace.as_path(),
+            canonical_workspace.as_path(),
+        )
+        .expect_err("dash-prefixed symlink target must not list outside workspace");
+
+        assert_eq!(error.kind, SandboxProcessRunErrorKind::WorkspaceScopeDenied);
+        assert!(error.message.contains("escapes workspace scope"), "unexpected error: {error:?}");
+
+        let _ = fs::remove_dir_all(workspace.as_path());
+        let _ = fs::remove_dir_all(outside.as_path());
     }
 
     #[test]
