@@ -7,9 +7,9 @@ use std::{
 };
 
 use palyra_common::workspace_patch::{
-    apply_workspace_patch, compute_patch_sha256, redact_patch_preview, WorkspacePatchError,
-    WorkspacePatchLimits, WorkspacePatchOutcome, WorkspacePatchRedactionPolicy,
-    WorkspacePatchRequest,
+    apply_workspace_patch, apply_workspace_patch_with_canonical_root_constraints,
+    compute_patch_sha256, redact_patch_preview, WorkspacePatchError, WorkspacePatchLimits,
+    WorkspacePatchOutcome, WorkspacePatchRedactionPolicy, WorkspacePatchRequest,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -46,6 +46,7 @@ pub(crate) struct WorkspacePatchToolRequest<'a> {
 #[derive(Debug, Clone)]
 struct ResolvedWorkspacePatchRoots {
     roots: Vec<PathBuf>,
+    canonical_constraint_roots: Vec<PathBuf>,
     risk_path_prefixes: Vec<String>,
 }
 
@@ -237,23 +238,28 @@ pub(crate) async fn execute_workspace_patch_tool(
         redaction_policy: redaction_policy.clone(),
     };
     let workspace_roots = resolved_workspace_roots.roots;
+    let canonical_constraint_roots = resolved_workspace_roots.canonical_constraint_roots;
     let risk_path_prefixes = resolved_workspace_roots.risk_path_prefixes;
 
-    let planned_outcome =
-        match apply_workspace_patch(workspace_roots.as_slice(), &planning_request, &limits) {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                return workspace_patch_error_outcome(
-                    proposal_id,
-                    input_json,
-                    dry_run,
-                    patch.as_str(),
-                    &redaction_policy,
-                    &limits,
-                    &error,
-                );
-            }
-        };
+    let planned_outcome = match apply_workspace_patch_with_resolved_roots(
+        workspace_roots.as_slice(),
+        canonical_constraint_roots.as_slice(),
+        &planning_request,
+        &limits,
+    ) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            return workspace_patch_error_outcome(
+                proposal_id,
+                input_json,
+                dry_run,
+                patch.as_str(),
+                &redaction_policy,
+                &limits,
+                &error,
+            );
+        }
+    };
 
     if dry_run {
         return serialize_workspace_patch_success(proposal_id, input_json, &planned_outcome);
@@ -273,11 +279,30 @@ pub(crate) async fn execute_workspace_patch_tool(
             redaction_policy: &redaction_policy,
             limits: &limits,
             workspace_roots: workspace_roots.as_slice(),
+            canonical_constraint_roots: canonical_constraint_roots.as_slice(),
             risk_path_prefixes: risk_path_prefixes.as_slice(),
             planned_outcome,
         },
     )
     .await
+}
+
+fn apply_workspace_patch_with_resolved_roots(
+    workspace_roots: &[PathBuf],
+    canonical_constraint_roots: &[PathBuf],
+    request: &WorkspacePatchRequest,
+    limits: &WorkspacePatchLimits,
+) -> Result<WorkspacePatchOutcome, WorkspacePatchError> {
+    if canonical_constraint_roots.is_empty() {
+        apply_workspace_patch(workspace_roots, request, limits)
+    } else {
+        apply_workspace_patch_with_canonical_root_constraints(
+            workspace_roots,
+            canonical_constraint_roots,
+            request,
+            limits,
+        )
+    }
 }
 
 async fn resolve_workspace_patch_roots(
@@ -305,18 +330,26 @@ async fn resolve_workspace_patch_roots(
         session_active_workspace_root(runtime_state, session_id, agent_workspace_roots).await?
     {
         if !patch_already_targets_active_root(patch, &active_root) {
-            let risk_path_prefixes = workspace_root_risk_path_prefixes(
-                active_root.root.as_path(),
-                agent_workspace_roots,
+            let canonical_constraint_roots =
+                canonicalize_agent_workspace_roots(agent_workspace_roots)?;
+            let risk_path_prefixes = workspace_root_risk_path_prefixes_from_canonical(
+                fs::canonicalize(active_root.root.as_path())
+                    .map_err(|error| {
+                        format!("palyra.fs.apply_patch failed to resolve active workspace root: {error}")
+                    })?
+                    .as_path(),
+                canonical_constraint_roots.as_slice(),
             );
             return Ok(ResolvedWorkspacePatchRoots {
                 roots: vec![active_root.root],
+                canonical_constraint_roots,
                 risk_path_prefixes,
             });
         }
     }
     Ok(ResolvedWorkspacePatchRoots {
         roots: agent_workspace_roots.to_vec(),
+        canonical_constraint_roots: Vec::new(),
         risk_path_prefixes: Vec::new(),
     })
 }
@@ -367,7 +400,11 @@ fn resolve_workspace_root_override(
             canonicalize_workspace_root_override(requested, &canonical_roots, workspace_root)?;
         let risk_path_prefixes =
             workspace_root_risk_path_prefixes_from_canonical(root.as_path(), &canonical_roots);
-        return Ok(ResolvedWorkspacePatchRoots { roots: vec![root], risk_path_prefixes });
+        return Ok(ResolvedWorkspacePatchRoots {
+            roots: vec![root],
+            canonical_constraint_roots: canonical_roots,
+            risk_path_prefixes,
+        });
     }
     validate_relative_workspace_root_override(requested, workspace_root)?;
     for canonical_root in &canonical_roots {
@@ -382,7 +419,11 @@ fn resolve_workspace_root_override(
                     root.as_path(),
                     &canonical_roots,
                 );
-                return Ok(ResolvedWorkspacePatchRoots { roots: vec![root], risk_path_prefixes });
+                return Ok(ResolvedWorkspacePatchRoots {
+                    roots: vec![root],
+                    canonical_constraint_roots: canonical_roots.clone(),
+                    risk_path_prefixes,
+                });
             }
             Err(error) if error.contains("does not exist") => {}
             Err(error) => return Err(error),
@@ -400,24 +441,15 @@ fn resolve_workspace_root_override(
         )?;
         let risk_path_prefixes =
             workspace_root_risk_path_prefixes_from_canonical(created.as_path(), &canonical_roots);
-        return Ok(ResolvedWorkspacePatchRoots { roots: vec![created], risk_path_prefixes });
+        return Ok(ResolvedWorkspacePatchRoots {
+            roots: vec![created],
+            canonical_constraint_roots: canonical_roots,
+            risk_path_prefixes,
+        });
     }
     Err(format!(
         "palyra.fs.apply_patch workspace_root does not exist inside agent workspace roots: {workspace_root}"
     ))
-}
-
-fn workspace_root_risk_path_prefixes(
-    root: &Path,
-    agent_workspace_roots: &[PathBuf],
-) -> Vec<String> {
-    let Ok(canonical_root) = fs::canonicalize(root) else {
-        return Vec::new();
-    };
-    let Ok(canonical_roots) = canonicalize_agent_workspace_roots(agent_workspace_roots) else {
-        return Vec::new();
-    };
-    workspace_root_risk_path_prefixes_from_canonical(canonical_root.as_path(), &canonical_roots)
 }
 
 fn workspace_root_risk_path_prefixes_from_canonical(
@@ -743,7 +775,8 @@ mod tests {
         workspace_patch_recovery_hint, WORKSPACE_PATCH_GRAMMAR_HINT,
     };
     use palyra_common::workspace_patch::{
-        apply_workspace_patch, WorkspacePatchError, WorkspacePatchLimits, WorkspacePatchRequest,
+        apply_workspace_patch, apply_workspace_patch_with_canonical_root_constraints,
+        WorkspacePatchError, WorkspacePatchLimits, WorkspacePatchRequest,
     };
     use serde_json::Value;
 
@@ -761,11 +794,15 @@ mod tests {
         )
         .expect("workspace root override should resolve");
         assert_eq!(roots.risk_path_prefixes, vec!["e2e-cli/file-tool-smoke"]);
-        let roots = roots.roots;
+        assert_eq!(
+            roots.canonical_constraint_roots,
+            vec![std::fs::canonicalize(&workspace).expect("workspace should canonicalize")]
+        );
         let patch = "*** Begin Patch\n*** Add File: calc.js\n+export const add = (a, b) => a + b;\n*** End Patch\n";
 
-        apply_workspace_patch(
-            roots.as_slice(),
+        apply_workspace_patch_with_canonical_root_constraints(
+            roots.roots.as_slice(),
+            roots.canonical_constraint_roots.as_slice(),
             &WorkspacePatchRequest {
                 patch: patch.to_owned(),
                 dry_run: false,
@@ -794,6 +831,10 @@ mod tests {
         let root = roots.roots.first().expect("created root should be returned");
 
         assert!(root.is_dir());
+        assert_eq!(
+            roots.canonical_constraint_roots,
+            vec![std::fs::canonicalize(&workspace).expect("workspace should canonicalize")]
+        );
         assert_eq!(
             root,
             &std::fs::canonicalize(workspace.join("agent-browser-smoke"))

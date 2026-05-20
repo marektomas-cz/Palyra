@@ -228,15 +228,44 @@ pub fn apply_workspace_patch(
     request: &WorkspacePatchRequest,
     limits: &WorkspacePatchLimits,
 ) -> Result<WorkspacePatchOutcome, WorkspacePatchError> {
-    let patch_bytes = request.patch.as_bytes();
-    if patch_bytes.len() > limits.max_patch_bytes {
-        return Err(WorkspacePatchError::PatchTooLarge {
-            limit: limits.max_patch_bytes,
-            actual: patch_bytes.len(),
-        });
-    }
-
+    validate_workspace_patch_request_size(request, limits)?;
     let canonical_roots = canonicalize_workspace_roots(workspace_roots)?;
+    apply_workspace_patch_with_canonical_roots(canonical_roots, request, limits)
+}
+
+/// Applies a workspace patch after confirming the current canonical roots still
+/// resolve below a trusted set of already-canonicalized parent roots.
+///
+/// This is used by callers that accept a narrower workspace-root override. It
+/// preserves the original workspace-root confinement after any later
+/// re-canonicalization of the selected root.
+pub fn apply_workspace_patch_with_canonical_root_constraints(
+    workspace_roots: &[PathBuf],
+    canonical_constraint_roots: &[PathBuf],
+    request: &WorkspacePatchRequest,
+    limits: &WorkspacePatchLimits,
+) -> Result<WorkspacePatchOutcome, WorkspacePatchError> {
+    validate_workspace_patch_request_size(request, limits)?;
+    let canonical_roots = canonicalize_workspace_roots(workspace_roots)?;
+    validate_canonical_root_constraints(canonical_roots.as_slice(), canonical_constraint_roots)?;
+    apply_workspace_patch_with_canonical_roots(canonical_roots, request, limits)
+}
+
+/// Revalidates that the current canonical roots still resolve below the
+/// supplied already-canonicalized parent roots.
+pub fn validate_workspace_patch_roots_with_canonical_constraints(
+    workspace_roots: &[PathBuf],
+    canonical_constraint_roots: &[PathBuf],
+) -> Result<(), WorkspacePatchError> {
+    let canonical_roots = canonicalize_workspace_roots(workspace_roots)?;
+    validate_canonical_root_constraints(canonical_roots.as_slice(), canonical_constraint_roots)
+}
+
+fn apply_workspace_patch_with_canonical_roots(
+    canonical_roots: Vec<PathBuf>,
+    request: &WorkspacePatchRequest,
+    limits: &WorkspacePatchLimits,
+) -> Result<WorkspacePatchOutcome, WorkspacePatchError> {
     let normalized_patch = normalize_supported_patch_document(request.patch.as_str());
     let patch_text = normalized_patch.as_ref();
     let operations = parse_patch_document(patch_text)?;
@@ -276,6 +305,20 @@ pub fn apply_workspace_patch(
             rollback_performed: execution.rollback_performed,
         }),
     }
+}
+
+fn validate_workspace_patch_request_size(
+    request: &WorkspacePatchRequest,
+    limits: &WorkspacePatchLimits,
+) -> Result<(), WorkspacePatchError> {
+    let patch_bytes = request.patch.as_bytes();
+    if patch_bytes.len() > limits.max_patch_bytes {
+        return Err(WorkspacePatchError::PatchTooLarge {
+            limit: limits.max_patch_bytes,
+            actual: patch_bytes.len(),
+        });
+    }
+    Ok(())
 }
 
 /// Computes a deterministic SHA256 digest of the raw patch payload.
@@ -410,6 +453,25 @@ fn canonicalize_workspace_roots(
         roots.push(canonical);
     }
     Ok(roots)
+}
+
+fn validate_canonical_root_constraints(
+    canonical_roots: &[PathBuf],
+    canonical_constraint_roots: &[PathBuf],
+) -> Result<(), WorkspacePatchError> {
+    if canonical_constraint_roots.is_empty() {
+        return Ok(());
+    }
+    for root in canonical_roots {
+        if canonical_constraint_roots.iter().any(|constraint| root.starts_with(constraint)) {
+            continue;
+        }
+        return Err(WorkspacePatchError::InvalidWorkspaceRoot {
+            path: root.display().to_string(),
+            message: "path escapes canonical workspace constraints".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 fn normalize_supported_patch_document(patch: &str) -> Cow<'_, str> {
@@ -1716,9 +1778,10 @@ fn truncate_utf8(mut value: String, max_bytes: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_workspace_patch, compute_patch_sha256, redact_patch_preview, sha256_hex,
-        WorkspacePatchError, WorkspacePatchLimits, WorkspacePatchOutcome,
-        WorkspacePatchRedactionPolicy, WorkspacePatchRequest,
+        apply_workspace_patch, apply_workspace_patch_with_canonical_root_constraints,
+        compute_patch_sha256, redact_patch_preview, sha256_hex, WorkspacePatchError,
+        WorkspacePatchLimits, WorkspacePatchOutcome, WorkspacePatchRedactionPolicy,
+        WorkspacePatchRequest,
     };
     use std::{fs, path::PathBuf};
     use tempfile::tempdir;
@@ -2126,6 +2189,59 @@ mod tests {
             apply_workspace_patch(&[workspace], &default_request(patch, false), &default_limits())
                 .expect_err("path traversal must be denied");
         assert!(matches!(error, WorkspacePatchError::InvalidPatchPath { .. }));
+    }
+
+    #[test]
+    fn apply_workspace_patch_with_canonical_root_constraints_rejects_outside_root() {
+        let temp = tempdir().expect("tempdir should be created");
+        let workspace = temp.path().join("workspace");
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(&workspace).expect("workspace should exist");
+        fs::create_dir_all(&outside).expect("outside directory should exist");
+        let canonical_workspace =
+            fs::canonicalize(&workspace).expect("workspace should canonicalize");
+
+        let patch = "*** Begin Patch\n*** Add File: escaped.txt\n+outside\n*** End Patch\n";
+        let error = apply_workspace_patch_with_canonical_root_constraints(
+            std::slice::from_ref(&outside),
+            std::slice::from_ref(&canonical_workspace),
+            &default_request(patch, false),
+            &default_limits(),
+        )
+        .expect_err("workspace roots outside canonical constraints must be rejected");
+
+        assert!(matches!(error, WorkspacePatchError::InvalidWorkspaceRoot { .. }));
+        assert!(!outside.join("escaped.txt").exists(), "outside target must remain untouched");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_workspace_patch_with_canonical_root_constraints_rejects_swapped_override_root() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempdir().expect("tempdir should be created");
+        let workspace = temp.path().join("workspace");
+        let override_root = workspace.join("project");
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(&override_root).expect("override root should exist");
+        fs::create_dir_all(&outside).expect("outside directory should exist");
+        let canonical_workspace =
+            fs::canonicalize(&workspace).expect("workspace should canonicalize");
+
+        fs::remove_dir(&override_root).expect("override root should be removable");
+        symlink(&outside, &override_root).expect("override root should be swappable");
+
+        let patch = "*** Begin Patch\n*** Add File: escaped.txt\n+outside\n*** End Patch\n";
+        let error = apply_workspace_patch_with_canonical_root_constraints(
+            std::slice::from_ref(&override_root),
+            std::slice::from_ref(&canonical_workspace),
+            &default_request(patch, false),
+            &default_limits(),
+        )
+        .expect_err("swapped override root must be rejected");
+
+        assert!(matches!(error, WorkspacePatchError::InvalidWorkspaceRoot { .. }));
+        assert!(!outside.join("escaped.txt").exists(), "outside target must remain untouched");
     }
 
     #[cfg(unix)]

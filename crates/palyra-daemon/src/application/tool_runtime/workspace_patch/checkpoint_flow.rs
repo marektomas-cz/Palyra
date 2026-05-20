@@ -1,8 +1,10 @@
 use std::{path::PathBuf, sync::Arc, time::Instant};
 
 use palyra_common::workspace_patch::{
-    apply_workspace_patch, WorkspacePatchFileAttestation, WorkspacePatchLimits,
-    WorkspacePatchOutcome, WorkspacePatchRedactionPolicy, WorkspacePatchRequest,
+    apply_workspace_patch, apply_workspace_patch_with_canonical_root_constraints,
+    validate_workspace_patch_roots_with_canonical_constraints, WorkspacePatchError,
+    WorkspacePatchFileAttestation, WorkspacePatchLimits, WorkspacePatchOutcome,
+    WorkspacePatchRedactionPolicy, WorkspacePatchRequest,
 };
 use serde_json::{json, Value};
 use tracing::error;
@@ -33,6 +35,7 @@ pub(super) struct WorkspacePatchMutationRequest<'a> {
     pub(super) redaction_policy: &'a WorkspacePatchRedactionPolicy,
     pub(super) limits: &'a WorkspacePatchLimits,
     pub(super) workspace_roots: &'a [PathBuf],
+    pub(super) canonical_constraint_roots: &'a [PathBuf],
     pub(super) risk_path_prefixes: &'a [String],
     pub(super) planned_outcome: WorkspacePatchOutcome,
 }
@@ -53,6 +56,7 @@ pub(super) async fn execute_workspace_patch_mutation(
         redaction_policy,
         limits,
         workspace_roots,
+        canonical_constraint_roots,
         risk_path_prefixes,
         planned_outcome,
     } = request;
@@ -63,6 +67,20 @@ pub(super) async fn execute_workspace_patch_mutation(
     );
     let mut preflight_checkpoint = None;
     let mut preflight_error = None;
+
+    if let Err(error) =
+        validate_patch_roots_against_constraints(workspace_roots, canonical_constraint_roots)
+    {
+        return workspace_patch_error_outcome(
+            proposal_id,
+            input_json,
+            false,
+            patch,
+            redaction_policy,
+            limits,
+            &error,
+        );
+    }
 
     match capture_workspace_patch_checkpoint(
         runtime_state,
@@ -120,7 +138,12 @@ pub(super) async fn execute_workspace_patch_mutation(
         dry_run: false,
         redaction_policy: redaction_policy.clone(),
     };
-    let outcome = match apply_workspace_patch(workspace_roots, &request, limits) {
+    let outcome = match apply_patch_with_constraints(
+        workspace_roots,
+        canonical_constraint_roots,
+        &request,
+        limits,
+    ) {
         Ok(outcome) => outcome,
         Err(error) => {
             return workspace_patch_error_outcome(
@@ -246,6 +269,38 @@ pub(super) async fn execute_workspace_patch_mutation(
     };
     append_workspace_checkpoint_output(&mut output_value, checkpoint_output_context);
     serialize_workspace_patch_success_value(proposal_id, input_json, output_value)
+}
+
+fn apply_patch_with_constraints(
+    workspace_roots: &[PathBuf],
+    canonical_constraint_roots: &[PathBuf],
+    request: &WorkspacePatchRequest,
+    limits: &WorkspacePatchLimits,
+) -> Result<WorkspacePatchOutcome, WorkspacePatchError> {
+    if canonical_constraint_roots.is_empty() {
+        apply_workspace_patch(workspace_roots, request, limits)
+    } else {
+        apply_workspace_patch_with_canonical_root_constraints(
+            workspace_roots,
+            canonical_constraint_roots,
+            request,
+            limits,
+        )
+    }
+}
+
+fn validate_patch_roots_against_constraints(
+    workspace_roots: &[PathBuf],
+    canonical_constraint_roots: &[PathBuf],
+) -> Result<(), WorkspacePatchError> {
+    if canonical_constraint_roots.is_empty() {
+        Ok(())
+    } else {
+        validate_workspace_patch_roots_with_canonical_constraints(
+            workspace_roots,
+            canonical_constraint_roots,
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
