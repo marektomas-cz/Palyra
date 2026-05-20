@@ -6,7 +6,9 @@ use tonic::Status;
 use ulid::Ulid;
 
 use crate::{
-    application::service_authorization::authorize_memory_action,
+    application::service_authorization::{
+        authorize_memory_action, principal_has_sensitive_service_role, SensitiveServiceRole,
+    },
     gateway::{
         current_unix_ms_status, non_empty, GatewayRuntimeState, MAX_MEMORY_SEARCH_TOP_K,
         MAX_MEMORY_TOOL_TAGS,
@@ -989,8 +991,14 @@ pub(crate) fn classify_memory_write(
         MemoryWriteSensitivity::Sensitive => reason_codes.push("sensitivity:sensitive".to_owned()),
         MemoryWriteSensitivity::HighRisk => reason_codes.push("sensitivity:high_risk".to_owned()),
     }
+    let requires_operator_review =
+        persistent_runtime_rule_requires_operator_review(&input, category);
+    if requires_operator_review {
+        reason_codes.push("policy:operator_review_for_runtime_rule".to_owned());
+    }
     let approval_state = if input.confidence < MEMORY_RETAIN_LOW_CONFIDENCE_THRESHOLD
         || sensitivity != MemoryWriteSensitivity::Normal
+        || requires_operator_review
     {
         MemoryWriteApprovalState::Required
     } else {
@@ -1057,6 +1065,18 @@ fn classify_memory_write_category(lowered: &str) -> MemoryWriteCategory {
     } else {
         MemoryWriteCategory::Fact
     }
+}
+
+fn persistent_runtime_rule_requires_operator_review(
+    input: &MemoryWriteClassificationInput,
+    category: MemoryWriteCategory,
+) -> bool {
+    matches!(input.scope, MemoryLifecycleScope::Channel | MemoryLifecycleScope::Principal)
+        && matches!(category, MemoryWriteCategory::Procedure | MemoryWriteCategory::Constraint)
+        && !principal_has_sensitive_service_role(
+            input.principal.as_str(),
+            SensitiveServiceRole::AdminOrSystem,
+        )
 }
 
 fn classify_memory_write_sensitivity(
@@ -1573,7 +1593,7 @@ mod tests {
     }
 
     #[test]
-    fn write_classifier_allows_safe_secret_handling_rules() {
+    fn write_classifier_requires_review_for_persistent_runtime_rules() {
         let mut input = classification_input(
             "Workflow rules: never log secrets, redact tokens, follow approval policy, and do not bypass sandbox guardrails.",
         );
@@ -1582,11 +1602,49 @@ mod tests {
         let classification = classify_memory_write(input);
 
         assert_eq!(classification.sensitivity, MemoryWriteSensitivity::Normal);
-        assert_eq!(classification.approval_state, MemoryWriteApprovalState::NotRequired);
+        assert_eq!(classification.category, MemoryWriteCategory::Procedure);
+        assert_eq!(classification.approval_state, MemoryWriteApprovalState::Required);
+        assert!(classification
+            .reason_codes
+            .iter()
+            .any(|reason| reason == "policy:operator_review_for_runtime_rule"));
         assert!(
             !classification.reason_codes.iter().any(|reason| reason.starts_with("sensitivity:")),
             "safe defensive rules should not be treated as secret storage or policy bypass"
         );
+    }
+
+    #[test]
+    fn write_classifier_allows_session_scoped_safe_runtime_rules() {
+        let classification = classify_memory_write(classification_input(
+            "Workflow rules for this session: inspect files, run available tests, and summarize results.",
+        ));
+
+        assert_eq!(classification.sensitivity, MemoryWriteSensitivity::Normal);
+        assert_eq!(classification.category, MemoryWriteCategory::Procedure);
+        assert_eq!(classification.approval_state, MemoryWriteApprovalState::NotRequired);
+        assert!(!classification
+            .reason_codes
+            .iter()
+            .any(|reason| reason == "policy:operator_review_for_runtime_rule"));
+    }
+
+    #[test]
+    fn write_classifier_allows_admin_persistent_runtime_rules() {
+        let mut input = classification_input(
+            "Workflow rules: always inspect release artifacts and write concise rollout reports.",
+        );
+        input.principal = "admin:ops".to_owned();
+        input.scope = MemoryLifecycleScope::Principal;
+
+        let classification = classify_memory_write(input);
+
+        assert_eq!(classification.category, MemoryWriteCategory::Procedure);
+        assert_eq!(classification.approval_state, MemoryWriteApprovalState::NotRequired);
+        assert!(!classification
+            .reason_codes
+            .iter()
+            .any(|reason| reason == "policy:operator_review_for_runtime_rule"));
     }
 
     #[test]
