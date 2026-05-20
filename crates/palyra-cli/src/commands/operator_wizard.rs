@@ -1857,17 +1857,8 @@ fn apply_onboarding_plan(
     validate_daemon_compatible_document(&document).with_context(|| {
         format!("generated config {} does not match daemon schema", context.config_path.display())
     })?;
-    if context.config_path.exists() {
-        write_document_with_backups(context.config_path.as_path(), &document, CONFIGURE_BACKUPS)
-            .with_context(|| {
-                format!("failed to persist config {}", context.config_path.display())
-            })?;
-    } else {
-        let rendered = serialize_document_pretty(&document)
-            .context("failed to serialize wizard-generated config document")?;
-        fs::write(context.config_path.as_path(), rendered)
-            .with_context(|| format!("failed to write {}", context.config_path.display()))?;
-    }
+    write_document_with_backups(context.config_path.as_path(), &document, CONFIGURE_BACKUPS)
+        .with_context(|| format!("failed to persist config {}", context.config_path.display()))?;
 
     if plan.deployment_profile == palyra_common::deployment_profiles::DeploymentProfileId::Local {
         app::update_active_profile_paths(
@@ -3869,6 +3860,49 @@ mod tests {
             resolve_existing_config_action(&mut wizard, false, path.as_path()).expect("action");
 
         assert_eq!(action, None);
+    }
+
+    #[test]
+    fn apply_onboarding_plan_creates_new_secret_config_securely() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_path = temp.path().join("nested").join("palyra.toml");
+        let context = ApplyContext {
+            config_path: config_path.clone(),
+            state_root: temp.path().join("state"),
+            identity_store_dir: temp.path().join("identity"),
+            vault_dir: temp.path().join("vault"),
+            tls_paths: None,
+        };
+        let deployment_profile = palyra_common::deployment_profiles::DeploymentProfileId::SingleVm;
+        let mut plan = OnboardingMutationPlan {
+            flow: "remote".to_owned(),
+            deployment_profile,
+            deployment_mode: deployment_profile.deployment_mode().to_owned(),
+            bind_profile: deployment_profile.bind_profile().to_owned(),
+            auth_method: "remote_admin_token".to_owned(),
+            admin_token: Some("admin-secret-test-token".to_owned()),
+            remote_base_url: Some("https://dashboard.example.test/".to_owned()),
+            remote_verification: Some("server_cert".to_owned()),
+            pinned_server_cert_sha256: Some("a".repeat(64)),
+            ..Default::default()
+        };
+
+        apply_onboarding_plan(&context, &mut plan)
+            .expect("new remote onboarding config should be persisted securely");
+
+        let written = fs::read_to_string(config_path.as_path()).expect("config should be readable");
+        assert!(written.contains("auth_token = \"admin-secret-test-token\""));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mode = fs::metadata(config_path.as_path())
+                .expect("config metadata should be readable")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "new token-bearing config should be owner-only");
+        }
     }
 
     #[test]
