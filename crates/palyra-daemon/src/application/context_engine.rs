@@ -1111,6 +1111,10 @@ fn stable_sha256_json(value: &Value) -> String {
     crate::sha256_hex(payload.as_slice())
 }
 
+fn cache_scope_hash(value: &str) -> String {
+    crate::sha256_hex(value.as_bytes())
+}
+
 fn context_assembly_reason_codes(
     strategy: ContextEngineStrategy,
     selected: &[ContextEngineSegmentExplain],
@@ -1550,7 +1554,8 @@ fn context_assembly_diagnostics_payload(explain: &ContextAssemblyTrace) -> Value
             "provider_cache_supported": explain.cache.provider_cache_supported,
             "stable_prefix_hash": explain.cache.stable_prefix_hash.as_deref(),
             "stable_prefix_tokens": explain.cache.stable_prefix_tokens,
-            "cache_scope_key": explain.cache.cache_scope_key.as_deref(),
+            "cache_scope_hash": explain.cache.cache_scope_key.as_deref().map(cache_scope_hash),
+            "cache_scope_key_redacted": explain.cache.cache_scope_key.is_some(),
             "trust_scope": explain.cache.trust_scope.as_str(),
         },
         "selected_segments": explain.selected_segments.iter().map(|segment| json!({
@@ -1562,8 +1567,9 @@ fn context_assembly_diagnostics_payload(explain: &ContextAssemblyTrace) -> Value
             "trust_label": segment.trust_label.as_str(),
             "safety_action": segment.safety_action.as_str(),
             "safety_findings": segment.safety_findings.as_slice(),
-            "source_refs": segment.source_refs.as_slice(),
-            "preview": segment.preview.as_str(),
+            "source_ref_count": segment.source_refs.len(),
+            "source_refs_redacted": !segment.source_refs.is_empty(),
+            "preview_redacted": !segment.preview.is_empty(),
         })).collect::<Vec<_>>(),
         "dropped_segments": explain.dropped_segments.iter().map(|segment| json!({
             "kind": segment.kind,
@@ -1758,9 +1764,9 @@ fn estimate_tokens(text: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        assemble_segments, resolve_provider_context_budget, select_strategy, ContextEngineStrategy,
-        ContextSegment, ContextSegmentKind, ProviderBudgetProfile, ProviderContextBudget,
-        SummaryQualityGateExplain,
+        assemble_segments, context_assembly_diagnostics_payload, resolve_provider_context_budget,
+        select_strategy, ContextEngineStrategy, ContextSegment, ContextSegmentKind,
+        ProviderBudgetProfile, ProviderContextBudget, SummaryQualityGateExplain,
     };
     use crate::model_provider::{
         ProviderCapabilitiesSnapshot, ProviderCircuitBreakerSnapshot, ProviderDiscoverySnapshot,
@@ -1771,7 +1777,7 @@ mod tests {
     };
     use crate::transport::grpc::auth::RequestContext;
     use palyra_safety::{SafetyAction, TrustLabel};
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     fn segment(
         kind: ContextSegmentKind,
@@ -2272,6 +2278,59 @@ mod tests {
                 ],
                 "dropped_segments": []
             })
+        );
+    }
+
+    #[test]
+    fn diagnostics_payload_redacts_context_previews_and_scope_identifiers() {
+        let assembled = assemble_segments(
+            &[
+                segment(
+                    ContextSegmentKind::PreferenceContext,
+                    "stable policy",
+                    64,
+                    90,
+                    true,
+                    true,
+                    None,
+                ),
+                segment(ContextSegmentKind::UserInput, "ship it", 24, 100, false, true, None),
+            ],
+            ContextEngineStrategy::ProviderAware,
+            budget(4_096, 768, 256, 128, true),
+            &RequestContext {
+                principal: "user:alice".to_owned(),
+                device_id: "device".to_owned(),
+                channel: Some("cli".to_owned()),
+            },
+            "session-alice",
+            None,
+        );
+
+        let payload = context_assembly_diagnostics_payload(&assembled.explain);
+        assert!(
+            payload.pointer("/cache/cache_scope_key").is_none(),
+            "diagnostics payload must not expose principal/session/channel cache scope"
+        );
+        assert!(
+            payload.pointer("/cache/cache_scope_hash").and_then(Value::as_str).is_some(),
+            "diagnostics payload should retain a non-reversible cache scope correlation hash"
+        );
+        let segments =
+            payload.pointer("/selected_segments").and_then(Value::as_array).expect("segments");
+        assert!(
+            segments.iter().all(|segment| segment.get("preview").is_none()),
+            "diagnostics payload must not expose prompt previews"
+        );
+        assert!(
+            segments.iter().all(|segment| segment.get("source_refs").is_none()),
+            "diagnostics payload must not expose source references"
+        );
+        assert!(
+            segments
+                .iter()
+                .all(|segment| segment.get("preview_redacted").and_then(Value::as_bool).is_some()),
+            "diagnostics payload should disclose only preview redaction state"
         );
     }
 

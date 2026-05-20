@@ -932,6 +932,7 @@ fn collect_console_context_engine_diagnostics(state: &AppState) -> Value {
     let feature_rollout = &state.runtime.config.feature_rollouts.context_engine;
     let mut recent_traces = state.runtime.context_assembly_traces_snapshot();
     for trace in &mut recent_traces {
+        sanitize_context_engine_trace_for_console(trace);
         redact_console_diagnostics_value(trace, None);
     }
     let latest_trace_id = recent_traces
@@ -950,6 +951,39 @@ fn collect_console_context_engine_diagnostics(state: &AppState) -> Value {
         "latest_trace_id": latest_trace_id,
         "recent_traces": recent_traces,
     })
+}
+
+fn sanitize_context_engine_trace_for_console(trace: &mut Value) {
+    if let Some(cache) = trace.get_mut("cache").and_then(Value::as_object_mut) {
+        if let Some(cache_scope_key) = cache.remove("cache_scope_key") {
+            if let Some(cache_scope_key) = cache_scope_key.as_str() {
+                cache.insert(
+                    "cache_scope_hash".to_owned(),
+                    Value::String(crate::sha256_hex(cache_scope_key.as_bytes())),
+                );
+            }
+            cache.insert("cache_scope_key_redacted".to_owned(), Value::Bool(true));
+        }
+    }
+    if let Some(segments) = trace.get_mut("selected_segments").and_then(Value::as_array_mut) {
+        for segment in segments {
+            let Some(segment) = segment.as_object_mut() else {
+                continue;
+            };
+            let preview_redacted = segment
+                .remove("preview")
+                .and_then(|preview| preview.as_str().map(|value| !value.is_empty()))
+                .unwrap_or(false);
+            segment.insert("preview_redacted".to_owned(), Value::Bool(preview_redacted));
+
+            let source_ref_count = segment
+                .remove("source_refs")
+                .and_then(|source_refs| source_refs.as_array().map(Vec::len))
+                .unwrap_or(0);
+            segment.insert("source_ref_count".to_owned(), json!(source_ref_count));
+            segment.insert("source_refs_redacted".to_owned(), Value::Bool(source_ref_count > 0));
+        }
+    }
 }
 
 #[allow(clippy::result_large_err)]
@@ -4844,6 +4878,48 @@ pub(crate) fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod context_engine_trace_diagnostics_tests {
+    use super::sanitize_context_engine_trace_for_console;
+    use serde_json::{json, Value};
+
+    #[test]
+    fn sanitizer_removes_legacy_trace_preview_source_refs_and_scope_key() {
+        let mut trace = json!({
+            "cache": {
+                "cache_scope_key": "session=session-a;principal=user:alice;channel=cli;prefix=abc",
+                "stable_prefix_tokens": 64
+            },
+            "selected_segments": [
+                {
+                    "kind": "memory_recall",
+                    "preview": "private project snippet",
+                    "source_refs": ["memory:alice:1"]
+                }
+            ]
+        });
+
+        sanitize_context_engine_trace_for_console(&mut trace);
+
+        assert!(trace.pointer("/cache/cache_scope_key").is_none());
+        assert!(trace.pointer("/cache/cache_scope_hash").and_then(Value::as_str).is_some());
+        assert_eq!(
+            trace.pointer("/cache/cache_scope_key_redacted").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert!(trace.pointer("/selected_segments/0/preview").is_none());
+        assert!(trace.pointer("/selected_segments/0/source_refs").is_none());
+        assert_eq!(
+            trace.pointer("/selected_segments/0/preview_redacted").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            trace.pointer("/selected_segments/0/source_ref_count").and_then(Value::as_u64),
+            Some(1)
+        );
+    }
 }
 
 #[cfg(test)]
