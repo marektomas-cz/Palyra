@@ -62,6 +62,7 @@ struct ConsoleProbeTarget {
     kind: String,
     enabled: bool,
     endpoint_base_url: Option<String>,
+    allow_private_base_url: bool,
     auth_profile_id: Option<String>,
     auth_profile_provider_kind: Option<String>,
     inline_api_key: Option<String>,
@@ -159,9 +160,19 @@ async fn run_console_provider_probe(
 }
 
 fn build_console_probe_targets(config: &FileModelProviderConfig) -> Vec<ConsoleProbeTarget> {
+    let allow_private_env = std::env::var("PALYRA_MODEL_PROVIDER_ALLOW_PRIVATE_BASE_URL").ok();
+    build_console_probe_targets_with_env(config, allow_private_env.as_deref())
+}
+
+fn build_console_probe_targets_with_env(
+    config: &FileModelProviderConfig,
+    allow_private_env: Option<&str>,
+) -> Vec<ConsoleProbeTarget> {
     let provider_kind =
         config.kind.clone().unwrap_or_else(|| DETERMINISTIC_PROVIDER_KIND.to_owned());
     let models_by_provider = registry_model_ids_by_provider(config);
+    let global_allow_private_base_url =
+        effective_global_allow_private_base_url(config, allow_private_env);
 
     if let Some(entries) = config.providers.as_ref() {
         let default_provider_id =
@@ -186,6 +197,9 @@ fn build_console_probe_targets(config: &FileModelProviderConfig) -> Vec<ConsoleP
                             None
                         }
                     }),
+                    allow_private_base_url: entry
+                        .allow_private_base_url
+                        .unwrap_or(global_allow_private_base_url),
                     auth_profile_id: entry.auth_profile_id.clone().or_else(|| {
                         inherit_globals.then(|| config.auth_profile_id.clone()).flatten()
                     }),
@@ -216,6 +230,7 @@ fn build_console_probe_targets(config: &FileModelProviderConfig) -> Vec<ConsoleP
         kind: provider_kind.clone(),
         enabled: true,
         endpoint_base_url: default_base_url_for_kind(provider_kind.as_str(), config),
+        allow_private_base_url: global_allow_private_base_url,
         auth_profile_id: config.auth_profile_id.clone(),
         auth_profile_provider_kind: config.auth_provider_kind.clone(),
         inline_api_key: inline_api_key_for_kind(provider_kind.as_str(), config),
@@ -226,6 +241,16 @@ fn build_console_probe_targets(config: &FileModelProviderConfig) -> Vec<ConsoleP
             .map(|(_, models)| models.clone())
             .unwrap_or_default(),
     }]
+}
+
+fn effective_global_allow_private_base_url(
+    config: &FileModelProviderConfig,
+    env_override: Option<&str>,
+) -> bool {
+    if let Some(value) = env_override {
+        return value.trim().parse::<bool>().unwrap_or(false);
+    }
+    config.allow_private_base_url.unwrap_or(false)
 }
 
 fn overlay_probe_targets_with_runtime_snapshot(
@@ -405,6 +430,11 @@ async fn probe_console_provider(
         payload.message = "provider base_url is not configured".to_owned();
         return payload;
     };
+    if let Err(error) = validate_console_probe_endpoint_policy(target, base_url) {
+        payload.state = "endpoint_failed".to_owned();
+        payload.message = sanitize_probe_error(error.to_string().as_str());
+        return payload;
+    }
 
     let credential = match resolve_provider_credential(state, target) {
         Ok(Some(credential)) => credential,
@@ -536,6 +566,16 @@ async fn probe_console_provider(
     }
 
     payload
+}
+
+fn validate_console_probe_endpoint_policy(
+    target: &ConsoleProbeTarget,
+    base_url: &str,
+) -> Result<(), anyhow::Error> {
+    crate::model_provider::validate_openai_base_url_network_policy(
+        base_url,
+        target.allow_private_base_url,
+    )
 }
 
 fn resolve_provider_credential(
@@ -691,5 +731,97 @@ fn normalize_optional_text(value: &str) -> Option<&str> {
         None
     } else {
         Some(trimmed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use palyra_common::daemon_config_schema::FileModelProviderRegistryEntry;
+
+    fn sample_probe_target(allow_private_base_url: bool) -> ConsoleProbeTarget {
+        ConsoleProbeTarget {
+            provider_id: "openai-primary".to_owned(),
+            kind: OPENAI_COMPATIBLE_PROVIDER_KIND.to_owned(),
+            enabled: true,
+            endpoint_base_url: Some("http://127.0.0.1:11434/v1".to_owned()),
+            allow_private_base_url,
+            auth_profile_id: None,
+            auth_profile_provider_kind: None,
+            inline_api_key: None,
+            vault_ref: None,
+            configured_model_ids: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn console_probe_targets_inherit_global_private_base_url_policy() {
+        let config = FileModelProviderConfig {
+            kind: Some(OPENAI_COMPATIBLE_PROVIDER_KIND.to_owned()),
+            allow_private_base_url: Some(true),
+            providers: Some(vec![FileModelProviderRegistryEntry {
+                provider_id: Some("local-provider".to_owned()),
+                kind: Some(OPENAI_COMPATIBLE_PROVIDER_KIND.to_owned()),
+                base_url: Some("http://127.0.0.1:11434/v1".to_owned()),
+                ..FileModelProviderRegistryEntry::default()
+            }]),
+            ..FileModelProviderConfig::default()
+        };
+
+        let targets = build_console_probe_targets_with_env(&config, None);
+
+        assert_eq!(targets.len(), 1);
+        assert!(
+            targets[0].allow_private_base_url,
+            "provider probes should carry the same private-network opt-in as model runtime"
+        );
+    }
+
+    #[test]
+    fn console_probe_targets_allow_provider_private_base_url_override() {
+        let config = FileModelProviderConfig {
+            kind: Some(OPENAI_COMPATIBLE_PROVIDER_KIND.to_owned()),
+            allow_private_base_url: Some(true),
+            providers: Some(vec![FileModelProviderRegistryEntry {
+                provider_id: Some("public-provider".to_owned()),
+                kind: Some(OPENAI_COMPATIBLE_PROVIDER_KIND.to_owned()),
+                base_url: Some("https://api.openai.com/v1".to_owned()),
+                allow_private_base_url: Some(false),
+                ..FileModelProviderRegistryEntry::default()
+            }]),
+            ..FileModelProviderConfig::default()
+        };
+
+        let targets = build_console_probe_targets_with_env(&config, None);
+
+        assert_eq!(targets.len(), 1);
+        assert!(
+            !targets[0].allow_private_base_url,
+            "provider-level allow_private_base_url=false should override the global opt-in"
+        );
+    }
+
+    #[test]
+    fn console_probe_endpoint_policy_blocks_private_base_url_without_opt_in() {
+        let target = sample_probe_target(false);
+
+        let error = validate_console_probe_endpoint_policy(
+            &target,
+            target.endpoint_base_url.as_deref().expect("test target should include base URL"),
+        )
+        .expect_err("private probe target should be rejected without explicit opt-in");
+
+        assert!(error.to_string().contains("allow_private_base_url"));
+    }
+
+    #[test]
+    fn console_probe_endpoint_policy_allows_private_base_url_with_opt_in() {
+        let target = sample_probe_target(true);
+
+        validate_console_probe_endpoint_policy(
+            &target,
+            target.endpoint_base_url.as_deref().expect("test target should include base URL"),
+        )
+        .expect("private probe target should be allowed with explicit opt-in");
     }
 }
