@@ -1897,8 +1897,13 @@ async fn run_job_with_retries(
                     disable_objective_if_budget_exhausted(Arc::clone(&state), &job)
                         .await?
                         .is_some();
-                if should_pause_recurring_cron_after_policy_denied(&job, &options, terminal_status)
-                {
+                if should_pause_recurring_cron_after_policy_denied(
+                    &job,
+                    &options,
+                    terminal_status,
+                    // Run-stream tool denials are execution outcomes, not trusted scheduler policy.
+                    false,
+                ) {
                     pause_recurring_cron_after_policy_denied(Arc::clone(&state), &job).await?;
                     wake_signal.notify_one();
                     return Ok(());
@@ -1991,8 +1996,10 @@ fn should_pause_recurring_cron_after_policy_denied(
     job: &CronJobRecord,
     options: &TriggerJobOptions,
     terminal_status: CronRunStatus,
+    trusted_scheduler_policy_denial: bool,
 ) -> bool {
-    terminal_status == CronRunStatus::Denied
+    trusted_scheduler_policy_denial
+        && terminal_status == CronRunStatus::Denied
         && matches!(job.schedule_type, CronScheduleType::Cron | CronScheduleType::Every)
         && options.origin_kind.as_deref().unwrap_or("cron") == "cron"
 }
@@ -2849,11 +2856,19 @@ mod tests {
             &every_job,
             &TriggerJobOptions { origin_kind: Some("cron".to_owned()), ..Default::default() },
             CronRunStatus::Denied,
+            true,
         ));
         assert!(!should_pause_recurring_cron_after_policy_denied(
             &every_job,
             &TriggerJobOptions { origin_kind: Some("manual".to_owned()), ..Default::default() },
             CronRunStatus::Denied,
+            true,
+        ));
+        assert!(!should_pause_recurring_cron_after_policy_denied(
+            &every_job,
+            &TriggerJobOptions { origin_kind: Some("cron".to_owned()), ..Default::default() },
+            CronRunStatus::Denied,
+            false,
         ));
 
         let at_job = CronJobRecord {
@@ -2865,6 +2880,23 @@ mod tests {
             &at_job,
             &TriggerJobOptions { origin_kind: Some("cron".to_owned()), ..Default::default() },
             CronRunStatus::Denied,
+            true,
+        ));
+    }
+
+    #[test]
+    fn model_induced_tool_denials_do_not_pause_recurring_jobs() {
+        let every_job =
+            sample_every_job("01ARZ3NDEKTSV4RRFFQ69G5FAV", Some(1_000), CronMisfirePolicy::Skip);
+        let terminal_status =
+            cron_terminal_status_from_stream(true, false, 1, 0, "I need approval to write file.md");
+
+        assert_eq!(terminal_status, CronRunStatus::Denied);
+        assert!(!should_pause_recurring_cron_after_policy_denied(
+            &every_job,
+            &TriggerJobOptions { origin_kind: Some("cron".to_owned()), ..Default::default() },
+            terminal_status,
+            false,
         ));
     }
 
