@@ -100,9 +100,10 @@ pub(crate) async fn console_diagnostics_handler(
     let mut flows_payload =
         collect_console_flows_diagnostics(&state, session.context.principal.as_str()).await?;
     redact_console_diagnostics_value(&mut flows_payload, None);
-    let delegation_payload = collect_console_delegation_diagnostics(&state, &session.context)
+    let mut delegation_payload = collect_console_delegation_diagnostics(&state, &session.context)
         .await
         .map_err(runtime_status_response)?;
+    redact_console_diagnostics_value(&mut delegation_payload, None);
     let deployment_payload = collect_console_deployment_diagnostics(&state);
     let execution_backends_payload =
         collect_console_execution_backend_diagnostics(&state).map_err(runtime_status_response)?;
@@ -399,14 +400,7 @@ async fn collect_console_delegation_diagnostics(
 ) -> Result<Value, tonic::Status> {
     let tasks = state
         .runtime
-        .list_orchestrator_background_tasks(crate::journal::OrchestratorBackgroundTaskListFilter {
-            owner_principal: Some(context.principal.clone()),
-            device_id: None,
-            channel: None,
-            session_id: None,
-            include_completed: false,
-            limit: 256,
-        })
+        .list_orchestrator_background_tasks(delegation_diagnostics_task_filter(context))
         .await?;
     let delegated_tasks = tasks.iter().filter(|task| task.delegation.is_some()).collect::<Vec<_>>();
     let mut parent_groups =
@@ -544,6 +538,19 @@ async fn collect_console_delegation_diagnostics(
         "recent_children": recent_children,
         "catalog": crate::delegation::built_in_delegation_catalog(),
     }))
+}
+
+fn delegation_diagnostics_task_filter(
+    context: &crate::gateway::RequestContext,
+) -> crate::journal::OrchestratorBackgroundTaskListFilter {
+    crate::journal::OrchestratorBackgroundTaskListFilter {
+        owner_principal: Some(context.principal.clone()),
+        device_id: Some(context.device_id.clone()),
+        channel: context.channel.clone(),
+        session_id: None,
+        include_completed: false,
+        limit: 256,
+    }
 }
 
 struct DelegationParentDiagnostics {
@@ -5091,6 +5098,29 @@ mod support_bundle_root_tests {
         let support_root =
             resolve_support_bundle_root().expect("support bundle root should resolve");
         assert_eq!(support_root, portable_state_root.join("support-bundles"));
+    }
+}
+
+#[cfg(test)]
+mod delegation_diagnostics_tests {
+    use super::delegation_diagnostics_task_filter;
+    use crate::gateway;
+
+    #[test]
+    fn delegation_diagnostics_filter_preserves_console_device_and_channel_scope() {
+        let context = gateway::RequestContext {
+            principal: "admin:alice".to_owned(),
+            device_id: "device-a".to_owned(),
+            channel: Some("web".to_owned()),
+        };
+
+        let filter = delegation_diagnostics_task_filter(&context);
+
+        assert_eq!(filter.owner_principal.as_deref(), Some("admin:alice"));
+        assert_eq!(filter.device_id.as_deref(), Some("device-a"));
+        assert_eq!(filter.channel.as_deref(), Some("web"));
+        assert_eq!(filter.session_id, None);
+        assert!(!filter.include_completed);
     }
 }
 
