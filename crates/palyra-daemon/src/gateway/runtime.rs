@@ -1131,6 +1131,81 @@ fn auth_profile_id_from_credential_id(credential_id: &str) -> Option<&str> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProviderCredentialAttribution {
+    provider_id: String,
+    credential_id: String,
+    auth_profile_id: Option<String>,
+}
+
+fn provider_credential_attribution_from_parts(
+    provider_id: &str,
+    credential_id: &str,
+) -> ProviderCredentialAttribution {
+    ProviderCredentialAttribution {
+        provider_id: provider_id.to_owned(),
+        credential_id: credential_id.to_owned(),
+        auth_profile_id: auth_profile_id_from_credential_id(credential_id).map(str::to_owned),
+    }
+}
+
+fn provider_credential_attribution_for_provider(
+    snapshot: &ProviderStatusSnapshot,
+    lease_context: &ProviderLeaseExecutionContext,
+    provider_id: &str,
+) -> Option<ProviderCredentialAttribution> {
+    if snapshot.provider_id == provider_id {
+        return Some(provider_credential_attribution_from_parts(
+            snapshot.provider_id.as_str(),
+            snapshot.credential_id.as_str(),
+        ));
+    }
+    if let Some(provider) =
+        snapshot.registry.providers.iter().find(|provider| provider.provider_id == provider_id)
+    {
+        return Some(provider_credential_attribution_from_parts(
+            provider.provider_id.as_str(),
+            provider.credential_id.as_str(),
+        ));
+    }
+    if let Some(credential) = snapshot
+        .registry
+        .credentials
+        .iter()
+        .find(|credential| credential.provider_id == provider_id)
+    {
+        return Some(provider_credential_attribution_from_parts(
+            credential.provider_id.as_str(),
+            credential.credential_id.as_str(),
+        ));
+    }
+    (lease_context.provider_id == provider_id).then(|| {
+        provider_credential_attribution_from_parts(
+            lease_context.provider_id.as_str(),
+            lease_context.credential_id.as_str(),
+        )
+    })
+}
+
+fn request_may_failover_to_other_provider(
+    snapshot: &ProviderStatusSnapshot,
+    model_override_requested: bool,
+    lease_context: &ProviderLeaseExecutionContext,
+) -> bool {
+    !model_override_requested
+        && snapshot.registry.failover_enabled
+        && snapshot.registry.models.iter().any(|model| {
+            model.enabled
+                && model.role == "chat"
+                && model.provider_id != lease_context.provider_id
+                && snapshot
+                    .registry
+                    .providers
+                    .iter()
+                    .any(|provider| provider.enabled && provider.provider_id == model.provider_id)
+        })
+}
+
 fn auth_profile_failure_kind_for_provider_error(
     error: &ProviderError,
 ) -> Option<AuthProfileFailureKind> {
@@ -2999,6 +3074,7 @@ impl GatewayRuntimeState {
         request: ProviderRequest,
         lease_context: ProviderLeaseExecutionContext,
     ) -> Result<crate::model_provider::ProviderResponse, Status> {
+        let model_override_requested = request.model_override.is_some();
         let _lease = self
             .provider_leases
             .acquire(ProviderLeaseAcquireRequest {
@@ -3022,15 +3098,22 @@ impl GatewayRuntimeState {
         self.counters.model_provider_requests.fetch_add(1, Ordering::Relaxed);
         match self.model_provider.complete(request).await {
             Ok(response) => {
-                self.record_provider_credential_feedback(ProviderCredentialFeedbackRequest {
-                    provider_id: lease_context.provider_id.clone(),
-                    credential_id: lease_context.credential_id.clone(),
-                    kind: ProviderCredentialFeedbackKind::Success,
-                    retry_after_ms: None,
-                    reason: "provider call succeeded".to_owned(),
-                    observed_at_unix_ms: current_unix_ms(),
-                });
-                self.record_auth_profile_success_for_lease(&lease_context);
+                let provider_status = self.model_provider.status_snapshot();
+                if let Some(attribution) = provider_credential_attribution_for_provider(
+                    &provider_status,
+                    &lease_context,
+                    response.provider_id.as_str(),
+                ) {
+                    self.record_provider_credential_feedback(ProviderCredentialFeedbackRequest {
+                        provider_id: attribution.provider_id.clone(),
+                        credential_id: attribution.credential_id.clone(),
+                        kind: ProviderCredentialFeedbackKind::Success,
+                        retry_after_ms: None,
+                        reason: "provider call succeeded".to_owned(),
+                        observed_at_unix_ms: current_unix_ms(),
+                    });
+                    self.record_auth_profile_success_for_attribution(&attribution);
+                }
                 if response.retry_count > 0 {
                     self.counters
                         .model_provider_retry_attempts
@@ -3050,17 +3133,25 @@ impl GatewayRuntimeState {
                         .model_provider_circuit_open_rejections
                         .fetch_add(1, Ordering::Relaxed);
                 }
-                self.record_auth_profile_failure_for_lease(&lease_context, &error);
-                self.record_provider_lease_feedback_for_error(&lease_context, &error);
+                let provider_status = self.model_provider.status_snapshot();
+                if !request_may_failover_to_other_provider(
+                    &provider_status,
+                    model_override_requested,
+                    &lease_context,
+                ) {
+                    self.record_auth_profile_failure_for_lease(&lease_context, &error);
+                    self.record_provider_lease_feedback_for_error(&lease_context, &error);
+                }
                 Err(map_provider_error(error))
             }
         }
     }
 
-    fn record_auth_profile_success_for_lease(&self, lease_context: &ProviderLeaseExecutionContext) {
-        let Some(profile_id) =
-            auth_profile_id_from_credential_id(lease_context.credential_id.as_str())
-        else {
+    fn record_auth_profile_success_for_attribution(
+        &self,
+        attribution: &ProviderCredentialAttribution,
+    ) {
+        let Some(profile_id) = attribution.auth_profile_id.as_deref() else {
             return;
         };
         let Some(registry) = self.auth_profile_registry.as_ref() else {
@@ -3069,7 +3160,7 @@ impl GatewayRuntimeState {
         if let Err(error) = registry.record_profile_success(profile_id) {
             warn!(
                 profile_id,
-                provider_id = lease_context.provider_id.as_str(),
+                provider_id = attribution.provider_id.as_str(),
                 error = %error,
                 "failed to record auth profile provider success"
             );
@@ -8005,8 +8096,16 @@ fn normalize_optional_agent_model_profile(value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        provider_lease_timeout_status, select_default_agent_model_profile,
+        provider_credential_attribution_for_provider, provider_lease_timeout_status,
+        request_may_failover_to_other_provider, select_default_agent_model_profile,
         validate_memory_item_content_limits, MemoryRuntimeConfig,
+    };
+    use crate::model_provider::{
+        ProviderCapabilitiesSnapshot, ProviderCircuitBreakerSnapshot, ProviderDiscoverySnapshot,
+        ProviderHealthProbeSnapshot, ProviderRegistryModelSnapshot,
+        ProviderRegistryProviderSnapshot, ProviderRegistrySnapshot, ProviderResponseCacheSnapshot,
+        ProviderRetryPolicySnapshot, ProviderRouteSelectionTrace, ProviderRuntimeMetricsSnapshot,
+        ProviderStatusSnapshot,
     };
     use crate::provider_leases::{
         LeasePreviewState, LeasePriority, ProviderLeaseExecutionContext,
@@ -8074,6 +8173,46 @@ mod tests {
     }
 
     #[test]
+    fn provider_credential_attribution_uses_actual_failover_provider() {
+        let lease_context =
+            provider_lease_context("openai-primary", "auth-profile:openai-primary:primary-profile");
+        let snapshot = provider_status_snapshot(true);
+
+        let attribution = provider_credential_attribution_for_provider(
+            &snapshot,
+            &lease_context,
+            "anthropic-primary",
+        )
+        .expect("fallback provider should resolve to a credential attribution");
+
+        assert_eq!(attribution.provider_id, "anthropic-primary");
+        assert_eq!(attribution.credential_id, "auth-profile:anthropic-primary:fallback-profile");
+        assert_eq!(attribution.auth_profile_id.as_deref(), Some("fallback-profile"));
+    }
+
+    #[test]
+    fn failover_failure_feedback_is_suppressed_for_cross_provider_candidates() {
+        let lease_context =
+            provider_lease_context("openai-primary", "auth-profile:openai-primary:primary-profile");
+        let snapshot = provider_status_snapshot(true);
+
+        assert!(
+            request_may_failover_to_other_provider(&snapshot, false, &lease_context),
+            "no model override plus enabled fallback provider can make the final error ambiguous"
+        );
+        assert!(
+            !request_may_failover_to_other_provider(&snapshot, true, &lease_context),
+            "explicit model override disables registry failover attribution ambiguity"
+        );
+
+        let failover_disabled = provider_status_snapshot(false);
+        assert!(
+            !request_may_failover_to_other_provider(&failover_disabled, false, &lease_context),
+            "disabled failover keeps failure attribution bound to the lease provider"
+        );
+    }
+
+    #[test]
     fn memory_content_limit_validation_rejects_oversized_updates() {
         let byte_config =
             MemoryRuntimeConfig { max_item_bytes: 12, max_item_tokens: 32, ..Default::default() };
@@ -8107,5 +8246,185 @@ mod tests {
         );
 
         assert_eq!(selected.as_deref(), Some("MiniMax-M2.7"));
+    }
+
+    fn provider_lease_context(
+        provider_id: &str,
+        credential_id: &str,
+    ) -> ProviderLeaseExecutionContext {
+        ProviderLeaseExecutionContext {
+            provider_id: provider_id.to_owned(),
+            credential_id: credential_id.to_owned(),
+            priority: LeasePriority::Foreground,
+            task_label: "primary_interactive".to_owned(),
+            max_wait_ms: 30_000,
+            session_id: Some("session-1".to_owned()),
+            run_id: Some("run-1".to_owned()),
+        }
+    }
+
+    fn provider_status_snapshot(failover_enabled: bool) -> ProviderStatusSnapshot {
+        ProviderStatusSnapshot {
+            kind: "registry".to_owned(),
+            provider_id: "openai-primary".to_owned(),
+            credential_id: "auth-profile:openai-primary:primary-profile".to_owned(),
+            model_id: Some("gpt-4o-mini".to_owned()),
+            capabilities: provider_capabilities(),
+            openai_base_url: None,
+            anthropic_base_url: None,
+            openai_model: Some("gpt-4o-mini".to_owned()),
+            anthropic_model: None,
+            openai_embeddings_model: None,
+            openai_embeddings_dims: None,
+            auth_profile_id: Some("primary-profile".to_owned()),
+            auth_profile_provider_kind: Some("openai".to_owned()),
+            credential_source: Some("auth_profile_api_key".to_owned()),
+            api_key_configured: true,
+            retry_policy: retry_policy(),
+            circuit_breaker: circuit_breaker(),
+            runtime_metrics: runtime_metrics(),
+            response_cache: ProviderResponseCacheSnapshot {
+                enabled: false,
+                entry_count: 0,
+                hit_count: 0,
+                miss_count: 0,
+            },
+            health: health("ok"),
+            discovery: discovery(),
+            registry: ProviderRegistrySnapshot {
+                default_chat_model_id: Some("gpt-4o-mini".to_owned()),
+                default_embeddings_model_id: None,
+                default_audio_transcription_model_id: None,
+                failover_enabled,
+                response_cache_enabled: false,
+                providers: vec![
+                    provider_snapshot(
+                        "openai-primary",
+                        "auth-profile:openai-primary:primary-profile",
+                        "primary-profile",
+                        "openai",
+                    ),
+                    provider_snapshot(
+                        "anthropic-primary",
+                        "auth-profile:anthropic-primary:fallback-profile",
+                        "fallback-profile",
+                        "anthropic",
+                    ),
+                ],
+                credentials: Vec::new(),
+                models: vec![
+                    model_snapshot("gpt-4o-mini", "openai-primary"),
+                    model_snapshot("claude-3-5-sonnet-latest", "anthropic-primary"),
+                ],
+            },
+            route_selection: ProviderRouteSelectionTrace::empty(),
+        }
+    }
+
+    fn provider_snapshot(
+        provider_id: &str,
+        credential_id: &str,
+        auth_profile_id: &str,
+        kind: &str,
+    ) -> ProviderRegistryProviderSnapshot {
+        ProviderRegistryProviderSnapshot {
+            provider_id: provider_id.to_owned(),
+            credential_id: credential_id.to_owned(),
+            display_name: provider_id.to_owned(),
+            kind: kind.to_owned(),
+            enabled: true,
+            endpoint_base_url: None,
+            auth_profile_id: Some(auth_profile_id.to_owned()),
+            auth_profile_provider_kind: Some(kind.to_owned()),
+            credential_source: Some("auth_profile_api_key".to_owned()),
+            api_key_configured: true,
+            retry_policy: retry_policy(),
+            circuit_breaker: circuit_breaker(),
+            runtime_metrics: runtime_metrics(),
+            health: health("ok"),
+            discovery: discovery(),
+        }
+    }
+
+    fn model_snapshot(model_id: &str, provider_id: &str) -> ProviderRegistryModelSnapshot {
+        ProviderRegistryModelSnapshot {
+            model_id: model_id.to_owned(),
+            provider_id: provider_id.to_owned(),
+            role: "chat".to_owned(),
+            enabled: true,
+            capabilities: provider_capabilities(),
+        }
+    }
+
+    fn provider_capabilities() -> ProviderCapabilitiesSnapshot {
+        ProviderCapabilitiesSnapshot {
+            streaming_tokens: true,
+            tool_calls: true,
+            json_mode: true,
+            vision: false,
+            audio_transcribe: false,
+            embeddings: false,
+            max_context_tokens: Some(128_000),
+            cost_tier: "standard".to_owned(),
+            latency_tier: "standard".to_owned(),
+            recommended_use_cases: Vec::new(),
+            known_limitations: Vec::new(),
+            operator_override: false,
+            metadata_source: "static".to_owned(),
+        }
+    }
+
+    fn retry_policy() -> ProviderRetryPolicySnapshot {
+        ProviderRetryPolicySnapshot { max_retries: 0, retry_backoff_ms: 0 }
+    }
+
+    fn circuit_breaker() -> ProviderCircuitBreakerSnapshot {
+        ProviderCircuitBreakerSnapshot {
+            failure_threshold: 1,
+            cooldown_ms: 60_000,
+            consecutive_failures: 0,
+            open: false,
+        }
+    }
+
+    fn runtime_metrics() -> ProviderRuntimeMetricsSnapshot {
+        ProviderRuntimeMetricsSnapshot {
+            request_count: 0,
+            error_count: 0,
+            error_rate_bps: 0,
+            total_retry_attempts: 0,
+            total_prompt_tokens: 0,
+            total_completion_tokens: 0,
+            avg_prompt_tokens_per_run: 0,
+            avg_completion_tokens_per_run: 0,
+            last_latency_ms: 0,
+            avg_latency_ms: 0,
+            max_latency_ms: 0,
+            last_used_at_unix_ms: None,
+            last_success_at_unix_ms: None,
+            last_error_at_unix_ms: None,
+            last_error: None,
+        }
+    }
+
+    fn health(state: &str) -> ProviderHealthProbeSnapshot {
+        ProviderHealthProbeSnapshot {
+            state: state.to_owned(),
+            message: "test".to_owned(),
+            checked_at_unix_ms: None,
+            latency_ms: None,
+            source: "test".to_owned(),
+        }
+    }
+
+    fn discovery() -> ProviderDiscoverySnapshot {
+        ProviderDiscoverySnapshot {
+            status: "unknown".to_owned(),
+            checked_at_unix_ms: None,
+            expires_at_unix_ms: None,
+            discovered_model_ids: Vec::new(),
+            source: "test".to_owned(),
+            message: None,
+        }
     }
 }
