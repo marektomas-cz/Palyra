@@ -79,7 +79,7 @@ async fn run_plugins_async(command: PluginsCommand) -> Result<()> {
                     module_path,
                     entrypoint,
                     enabled: Some(!disabled),
-                    allow_tofu: allow_tofu.then_some(true),
+                    allow_tofu: Some(allow_tofu),
                     allow_untrusted: allow_untrusted.then_some(true),
                     capability_profile: Some(control_plane::PluginCapabilityProfile {
                         http_hosts: capability_http_hosts,
@@ -134,7 +134,7 @@ async fn run_plugins_async(command: PluginsCommand) -> Result<()> {
                     module_path,
                     entrypoint,
                     enabled: Some(!disabled),
-                    allow_tofu: allow_tofu.then_some(true),
+                    allow_tofu: Some(allow_tofu),
                     allow_untrusted: allow_untrusted.then_some(true),
                     capability_profile: Some(control_plane::PluginCapabilityProfile {
                         http_hosts: capability_http_hosts,
