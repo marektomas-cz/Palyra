@@ -4001,12 +4001,12 @@ mod tests {
     }
 
     #[test]
-    fn memory_config_defaults_to_constrained_ingestion_with_auto_inject_enabled() {
+    fn memory_config_defaults_to_constrained_ingestion_with_auto_inject_disabled() {
         let config = MemoryConfig::default();
         assert_eq!(config.max_item_bytes, 16 * 1024);
         assert_eq!(config.max_item_tokens, 2_048);
         assert_eq!(config.default_ttl_ms, Some(30 * 24 * 60 * 60 * 1_000));
-        assert!(config.auto_inject.enabled, "memory auto-inject should default to enabled");
+        assert!(!config.auto_inject.enabled, "memory auto-inject must default to explicit opt-in");
         assert_eq!(config.auto_inject.max_items, 3);
         assert!(
             config.retention.max_entries.is_none(),

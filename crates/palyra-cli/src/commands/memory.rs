@@ -417,7 +417,7 @@ pub(crate) async fn run_memory_async(
                 println!("{}", serde_json::to_string_pretty(&payload)?);
             } else {
                 println!(
-                    "memory.ingest id={} source={} created_at_ms={} agent_visibility=auto_inject_eligible recall_hint=\"palyra memory recall <query> --json\"",
+                    "memory.ingest id={} source={} created_at_ms={} agent_visibility=searchable_recall_opt_in_auto_inject recall_hint=\"palyra memory recall <query> --json\"",
                     item.memory_id.map(|value| value.ulid).unwrap_or_default(),
                     memory_source_to_text(item.source),
                     item.created_at_unix_ms
@@ -1334,8 +1334,8 @@ fn attach_manual_ingest_visibility(payload: &mut Value) {
         "agent_visibility".to_owned(),
         json!({
             "manual_ingest_auto_attached_by_command": false,
-            "auto_inject_default_enabled": true,
-            "normal_agent_run_context": "manual memory ingest stores searchable memory that is eligible for automatic prompt context when memory.auto_inject.enabled is true; use explicit recall for deterministic preview",
+            "auto_inject_default_enabled": false,
+            "normal_agent_run_context": "manual memory ingest stores searchable memory but is not attached to future prompts unless memory.auto_inject.enabled is explicitly true; use explicit recall for deterministic preview",
             "recall_for_prompt_preview": "palyra memory recall <query> --json",
         }),
     );
@@ -1419,7 +1419,7 @@ mod tests {
         );
         assert_eq!(
             payload.pointer("/agent_visibility/auto_inject_default_enabled"),
-            Some(&json!(true))
+            Some(&json!(false))
         );
         assert_eq!(
             payload.pointer("/agent_visibility/recall_for_prompt_preview"),

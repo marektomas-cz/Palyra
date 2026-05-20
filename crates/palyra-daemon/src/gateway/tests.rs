@@ -1996,11 +1996,11 @@ async fn memory_auto_inject_searches_current_scope_without_cross_session_leakage
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn default_memory_auto_inject_adds_manual_preference_to_fresh_session_prompt() {
+async fn default_memory_auto_inject_does_not_add_manual_preference_to_fresh_session_prompt() {
     let state = build_test_runtime_state(false);
     assert!(
-        state.memory_config_snapshot().auto_inject_enabled,
-        "manual/import memory should be eligible for prompt auto-inject by default"
+        !state.memory_config_snapshot().auto_inject_enabled,
+        "manual/import memory auto-inject must require explicit opt-in"
     );
 
     let context = RequestContext {
@@ -2061,23 +2061,34 @@ async fn default_memory_auto_inject_adds_manual_preference_to_fresh_session_prom
         },
     )
     .await
-    .expect("provider input preparation should auto-inject matching manual memory by default");
+    .expect("provider input preparation should succeed with auto-inject disabled by default");
 
     assert!(
-        prepared.provider_input_text.contains("<memory_context"),
-        "fresh-session provider input should include automatic memory context: {}",
+        !prepared.provider_input_text.contains("<memory_context"),
+        "fresh-session provider input should not include automatic memory context by default: {}",
         prepared.provider_input_text
     );
     assert!(
-        prepared.provider_input_text.contains("TypeScript, Playwright, and concise Czech reports"),
-        "stored preference should be available to the model without explicit recall: {}",
+        !prepared.provider_input_text.contains("TypeScript, Playwright, and concise Czech reports"),
+        "stored preference should require explicit recall or opt-in auto-inject: {}",
         prepared.provider_input_text
+    );
+    let tape =
+        state.journal_store.orchestrator_tape(current_run_id).expect("test tape should load");
+    assert!(
+        tape.iter().all(|event| event.event_type != "memory_auto_inject"),
+        "default-disabled auto-inject must not append a memory_auto_inject tape event"
     );
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn memory_auto_inject_excludes_transient_tape_memory_sources() {
     let state = build_test_runtime_state(false);
+    let mut memory_config = state.memory_config_snapshot();
+    memory_config.auto_inject_enabled = true;
+    memory_config.auto_inject_max_items = 2;
+    state.configure_memory(memory_config);
+
     let context = RequestContext {
         principal: "user:ops".to_owned(),
         device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
