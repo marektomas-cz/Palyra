@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::Arc,
 };
 
@@ -1038,7 +1038,11 @@ async fn restore_workspace_entry(
     let workspace_root = workspace_roots
         .get(key.workspace_root_index as usize)
         .ok_or_else(|| Status::internal("workspace restore root index is out of range"))?;
-    let absolute_path = workspace_root.join(Path::new(key.path.as_str()));
+    let canonical_workspace_root = canonicalize_workspace_restore_root(workspace_root)?;
+    let absolute_path = resolve_workspace_restore_target(
+        canonical_workspace_root.as_path(),
+        Path::new(key.path.as_str()),
+    )?;
     if entry.file.deleted() {
         match fs::remove_file(absolute_path.as_path()) {
             Ok(()) => return Ok(()),
@@ -1075,12 +1079,177 @@ async fn restore_workspace_entry(
             ))
         })?;
     }
+    ensure_workspace_restore_target_confined(
+        canonical_workspace_root.as_path(),
+        absolute_path.as_path(),
+    )?;
     fs::write(absolute_path.as_path(), content_bytes).map_err(|error| {
         Status::internal(format!(
             "failed to write restored workspace file {}: {error}",
             absolute_path.display()
         ))
     })
+}
+
+fn resolve_workspace_restore_target(
+    workspace_root: &Path,
+    relative_path: &Path,
+) -> Result<PathBuf, Status> {
+    validate_workspace_restore_relative_path(relative_path)?;
+    let absolute_path = workspace_root.join(relative_path);
+    ensure_workspace_restore_target_confined(workspace_root, absolute_path.as_path())?;
+    Ok(absolute_path)
+}
+
+fn canonicalize_workspace_restore_root(workspace_root: &Path) -> Result<PathBuf, Status> {
+    let canonical = fs::canonicalize(workspace_root).map_err(|error| {
+        Status::internal(format!(
+            "failed to canonicalize workspace restore root {}: {error}",
+            workspace_root.display()
+        ))
+    })?;
+    if !canonical.is_dir() {
+        return Err(Status::invalid_argument(format!(
+            "workspace restore root is not a directory: {}",
+            workspace_root.display()
+        )));
+    }
+    Ok(canonical)
+}
+
+fn validate_workspace_restore_relative_path(relative_path: &Path) -> Result<(), Status> {
+    if relative_path.as_os_str().is_empty() || relative_path.is_absolute() {
+        return Err(Status::invalid_argument(format!(
+            "workspace restore path must be relative: {}",
+            relative_path.display()
+        )));
+    }
+    let mut has_normal_component = false;
+    for component in relative_path.components() {
+        match component {
+            Component::Normal(_) => has_normal_component = true,
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(Status::invalid_argument(format!(
+                    "workspace restore path escapes workspace root: {}",
+                    relative_path.display()
+                )));
+            }
+        }
+    }
+    if !has_normal_component {
+        return Err(Status::invalid_argument(format!(
+            "workspace restore path must name a file: {}",
+            relative_path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_workspace_restore_target_confined(
+    workspace_root: &Path,
+    absolute_path: &Path,
+) -> Result<(), Status> {
+    match fs::symlink_metadata(absolute_path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() {
+                return Err(Status::invalid_argument(format!(
+                    "workspace restore path cannot target a symlink: {}",
+                    absolute_path.display()
+                )));
+            }
+            let canonical = fs::canonicalize(absolute_path).map_err(|error| {
+                Status::internal(format!(
+                    "failed to canonicalize workspace restore path {}: {error}",
+                    absolute_path.display()
+                ))
+            })?;
+            ensure_canonical_restore_path_within_root(
+                workspace_root,
+                canonical.as_path(),
+                absolute_path,
+            )
+        }
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            let ancestor = nearest_existing_restore_ancestor(absolute_path)?;
+            let metadata = fs::symlink_metadata(ancestor.as_path()).map_err(|error| {
+                Status::internal(format!(
+                    "failed to inspect workspace restore ancestor {}: {error}",
+                    ancestor.display()
+                ))
+            })?;
+            if metadata.file_type().is_symlink() {
+                return Err(Status::invalid_argument(format!(
+                    "workspace restore path resolves through a symlinked ancestor: {}",
+                    ancestor.display()
+                )));
+            }
+            let canonical_ancestor = fs::canonicalize(ancestor.as_path()).map_err(|error| {
+                Status::internal(format!(
+                    "failed to canonicalize workspace restore ancestor {}: {error}",
+                    ancestor.display()
+                ))
+            })?;
+            ensure_canonical_restore_path_within_root(
+                workspace_root,
+                canonical_ancestor.as_path(),
+                absolute_path,
+            )
+        }
+        Err(error) => Err(Status::internal(format!(
+            "failed to inspect workspace restore path {}: {error}",
+            absolute_path.display()
+        ))),
+    }
+}
+
+fn nearest_existing_restore_ancestor(path: &Path) -> Result<PathBuf, Status> {
+    let mut cursor = path.to_path_buf();
+    loop {
+        match fs::symlink_metadata(cursor.as_path()) {
+            Ok(_) => return Ok(cursor),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                let Some(parent) = cursor.parent() else {
+                    return Err(Status::invalid_argument(format!(
+                        "workspace restore path escapes workspace root: {}",
+                        path.display()
+                    )));
+                };
+                cursor = parent.to_path_buf();
+            }
+            Err(error) => {
+                return Err(Status::internal(format!(
+                    "failed to inspect workspace restore ancestor {}: {error}",
+                    cursor.display()
+                )));
+            }
+        }
+    }
+}
+
+fn ensure_canonical_restore_path_within_root(
+    workspace_root: &Path,
+    canonical_path: &Path,
+    display_path: &Path,
+) -> Result<(), Status> {
+    if canonical_path.starts_with(workspace_root) {
+        Ok(())
+    } else {
+        Err(Status::invalid_argument(format!(
+            "workspace restore path escapes workspace root: {}",
+            display_path.display()
+        )))
+    }
 }
 
 fn workspace_checkpoint_summary(
@@ -1641,11 +1810,12 @@ struct LoadedCompareAnchor {
 mod tests {
     use super::{
         artifact_matches_query, build_line_diff_preview, build_preflight_checkpoint_files,
-        infer_content_type, summarize_workspace_content, WorkspaceArtifactRecord,
-        WorkspaceArtifactVersion,
+        infer_content_type, resolve_workspace_restore_target, summarize_workspace_content,
+        WorkspaceArtifactRecord, WorkspaceArtifactVersion,
     };
     use palyra_common::workspace_patch::WorkspacePatchFileAttestation;
     use sha2::{Digest, Sha256};
+    use std::path::Path;
 
     fn sample_artifact() -> WorkspaceArtifactRecord {
         WorkspaceArtifactRecord {
@@ -1740,6 +1910,78 @@ mod tests {
             .expect("destination absence entry should exist");
         assert!(destination.after_content_sha256.is_none());
         assert!(destination.content_bytes.is_none());
+    }
+
+    #[test]
+    fn workspace_restore_target_allows_new_relative_path_under_root() {
+        let tempdir = tempfile::tempdir().expect("workspace tempdir should be created");
+        let workspace_root =
+            std::fs::canonicalize(tempdir.path()).expect("workspace root should canonicalize");
+
+        let target = resolve_workspace_restore_target(
+            workspace_root.as_path(),
+            Path::new("nested/notes.txt"),
+        )
+        .expect("relative restore target should be accepted");
+
+        assert_eq!(target, workspace_root.join("nested").join("notes.txt"));
+    }
+
+    #[test]
+    fn workspace_restore_target_rejects_parent_component_escape() {
+        let tempdir = tempfile::tempdir().expect("workspace tempdir should be created");
+        let workspace_root =
+            std::fs::canonicalize(tempdir.path()).expect("workspace root should canonicalize");
+
+        let error =
+            resolve_workspace_restore_target(workspace_root.as_path(), Path::new("../outside.txt"))
+                .expect_err("parent traversal should be rejected");
+
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_restore_target_rejects_symlink_leaf_escape() {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::tempdir().expect("workspace tempdir should be created");
+        let workspace = tempdir.path().join("workspace");
+        std::fs::create_dir_all(workspace.as_path()).expect("workspace should be created");
+        let outside_file = tempdir.path().join("outside.txt");
+        std::fs::write(outside_file.as_path(), b"outside").expect("outside file should be written");
+        symlink(outside_file.as_path(), workspace.join("notes.txt").as_path())
+            .expect("symlink leaf should be created");
+        let workspace_root =
+            std::fs::canonicalize(workspace.as_path()).expect("workspace root should canonicalize");
+
+        let error =
+            resolve_workspace_restore_target(workspace_root.as_path(), Path::new("notes.txt"))
+                .expect_err("symlink leaf should be rejected");
+
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_restore_target_rejects_symlink_parent_escape() {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::tempdir().expect("workspace tempdir should be created");
+        let workspace = tempdir.path().join("workspace");
+        let outside = tempdir.path().join("outside");
+        std::fs::create_dir_all(workspace.as_path()).expect("workspace should be created");
+        std::fs::create_dir_all(outside.as_path()).expect("outside dir should be created");
+        symlink(outside.as_path(), workspace.join("link").as_path())
+            .expect("symlink parent should be created");
+        let workspace_root =
+            std::fs::canonicalize(workspace.as_path()).expect("workspace root should canonicalize");
+
+        let error =
+            resolve_workspace_restore_target(workspace_root.as_path(), Path::new("link/notes.txt"))
+                .expect_err("symlink parent should be rejected");
+
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
     }
 
     #[test]
