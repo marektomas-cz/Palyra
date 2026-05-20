@@ -1,5 +1,5 @@
 use super::{
-    browser_v1, build_accessibility_tree_snapshot, build_dom_snapshot,
+    action_log_entry_to_proto, browser_v1, build_accessibility_tree_snapshot, build_dom_snapshot,
     chromium_active_tab_for_session, chromium_new_tab_error_is_retryable,
     default_browserd_state_dir_from_env, derive_state_encryption_key, encrypt_state_blob,
     enforce_non_loopback_bind_auth, navigate_with_guards, parse_daemon_bind_socket,
@@ -196,6 +196,81 @@ async fn browser_service_records_failed_navigation_in_action_log() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn browser_service_redacts_navigation_url_selector_in_action_log() {
+    let runtime = simulated_runtime_for_tests();
+    let service = BrowserServiceImpl { runtime: Arc::clone(&runtime) };
+    let created = create_test_session(&service, "user:ops").await;
+    let session_id = created.session_id.expect("session id should be present");
+    let (base_url, handle) = spawn_static_http_server(
+        200,
+        "<html><head><title>Callback</title></head><body>ok</body></html>",
+    );
+    let sensitive_url = format!(
+        "{base_url}callback?code=oauthCODE123&state=csrfSTATE456&access_token=tok789&signature=sig000&safe=1#fragment"
+    );
+
+    let navigate = service
+        .navigate(Request::new(browser_v1::NavigateRequest {
+            v: 1,
+            session_id: Some(session_id.clone()),
+            url: sensitive_url,
+            timeout_ms: 2_000,
+            allow_redirects: true,
+            max_redirects: 3,
+            allow_private_targets: true,
+        }))
+        .await
+        .expect("navigate should succeed")
+        .into_inner();
+    assert!(navigate.success, "navigation should succeed: {}", navigate.error);
+
+    let stored_selector = {
+        let sessions = runtime.sessions.lock().await;
+        sessions
+            .get(session_id.ulid.as_str())
+            .and_then(|session| session.action_log.back())
+            .map(|entry| entry.selector.clone())
+            .expect("navigate action should be recorded")
+    };
+    assert_navigation_selector_redacted(stored_selector.as_str());
+
+    let mut inspect = Request::new(browser_v1::InspectSessionRequest {
+        v: 1,
+        session_id: Some(session_id),
+        include_cookies: false,
+        include_storage: false,
+        include_action_log: true,
+        include_network_log: false,
+        include_page_snapshot: false,
+        include_console_log: false,
+        include_page_diagnostics: false,
+        max_cookie_bytes: 0,
+        max_storage_bytes: 0,
+        max_action_log_entries: 10,
+        max_network_log_entries: 0,
+        max_network_log_bytes: 0,
+        max_dom_snapshot_bytes: 0,
+        max_visible_text_bytes: 0,
+        max_console_log_entries: 0,
+        max_console_log_bytes: 0,
+    });
+    insert_principal(&mut inspect, "user:ops");
+    let inspected = service
+        .inspect_session(inspect)
+        .await
+        .expect("inspect_session should include action log")
+        .into_inner();
+    let entry = inspected
+        .action_log
+        .iter()
+        .find(|entry| entry.action_name == "navigate")
+        .expect("navigate action should be serialized");
+    assert_navigation_selector_redacted(entry.selector.as_str());
+
+    handle.join().expect("test server thread should exit");
+}
+
 #[test]
 fn query_redaction_treats_oauth_code_and_state_as_sensitive() {
     let redacted = super::redact_query_pairs("code=oauth123&state=abc123&safe=1");
@@ -208,6 +283,48 @@ fn query_redaction_treats_oauth_code_and_state_as_sensitive() {
     assert!(
         !redacted.contains("oauth123") && !redacted.contains("abc123"),
         "sensitive values must not leak: {redacted}"
+    );
+}
+
+#[test]
+fn action_log_entry_to_proto_redacts_url_selector_query_secrets() {
+    let entry = BrowserActionLogEntryInternal {
+        action_id: ulid::Ulid::new().to_string(),
+        action_name: "navigate".to_owned(),
+        selector: "https://idp.example/callback?code=oauthCODE123&state=csrfSTATE456&access_token=tok789&signature=sig000&safe=1#fragment".to_owned(),
+        success: true,
+        outcome: "loaded".to_owned(),
+        error: String::new(),
+        started_at_unix_ms: 1,
+        completed_at_unix_ms: 2,
+        attempts: 1,
+        page_url: String::new(),
+    };
+
+    let proto = action_log_entry_to_proto(&entry);
+
+    assert_navigation_selector_redacted(proto.selector.as_str());
+}
+
+fn assert_navigation_selector_redacted(selector: &str) {
+    assert!(selector.contains("code=<redacted>"), "oauth code must be redacted: {selector}");
+    assert!(selector.contains("state=<redacted>"), "oauth state must be redacted: {selector}");
+    assert!(
+        selector.contains("access_token=<redacted>"),
+        "access token must be redacted: {selector}"
+    );
+    assert!(selector.contains("signature=<redacted>"), "signature must be redacted: {selector}");
+    assert!(
+        selector.contains("safe=1"),
+        "non-sensitive query parameters should be preserved: {selector}"
+    );
+    assert!(
+        !selector.contains("oauthCODE123")
+            && !selector.contains("csrfSTATE456")
+            && !selector.contains("tok789")
+            && !selector.contains("sig000")
+            && !selector.contains("fragment"),
+        "selector must not expose raw URL secrets or fragments: {selector}"
     );
 }
 

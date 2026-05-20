@@ -7,7 +7,7 @@ pub(crate) fn action_log_entry_to_proto(
         v: CANONICAL_PROTOCOL_MAJOR,
         action_id: entry.action_id.clone(),
         action_name: truncate_utf8_bytes(entry.action_name.as_str(), MAX_INSPECT_ACTION_NAME_BYTES),
-        selector: truncate_utf8_bytes(entry.selector.as_str(), MAX_INSPECT_ACTION_SELECTOR_BYTES),
+        selector: action_log_selector_to_proto(entry.selector.as_str()),
         success: entry.success,
         outcome: sanitize_debug_text(entry.outcome.as_str(), MAX_INSPECT_ACTION_OUTCOME_BYTES),
         error: sanitize_debug_text(entry.error.as_str(), MAX_INSPECT_ACTION_ERROR_BYTES),
@@ -16,6 +16,18 @@ pub(crate) fn action_log_entry_to_proto(
         attempts: entry.attempts,
         page_url: normalize_url_with_redaction(entry.page_url.as_str()),
     }
+}
+
+fn action_log_selector_to_proto(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if Url::parse(trimmed).is_ok_and(|url| matches!(url.scheme(), "http" | "https" | "file")) {
+        let redacted = normalize_url_with_redaction(trimmed);
+        return truncate_utf8_bytes(redacted.as_str(), MAX_INSPECT_ACTION_SELECTOR_BYTES);
+    }
+    sanitize_debug_text(trimmed, MAX_INSPECT_ACTION_SELECTOR_BYTES)
 }
 
 pub(crate) fn page_diagnostics_to_proto(

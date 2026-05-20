@@ -1132,12 +1132,13 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
                 Status::internal(format!("failed to persist state after navigate: {error}"))
             })?;
         }
+        let action_selector = normalize_url_with_redaction(url.as_str());
         let _ = finalize_session_action(
             self.runtime.as_ref(),
             session_id.as_str(),
             FinalizeActionRequest {
                 action_name: "navigate",
-                selector: url.as_str(),
+                selector: action_selector.as_str(),
                 success: outcome.success,
                 outcome: navigate_action_outcome(&outcome),
                 error: outcome.error.as_str(),
