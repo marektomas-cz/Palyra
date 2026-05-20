@@ -7,8 +7,6 @@
   "parent": null,
   "metadata": {
     "provider_kind": "openai_compatible",
-    "provider_id": "openai-primary",
-    "credential_id": "config:openai-primary:inline_config",
     "role": "chat",
     "default": true,
     "enabled": true,

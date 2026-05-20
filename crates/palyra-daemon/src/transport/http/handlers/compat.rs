@@ -130,8 +130,6 @@ struct CompatModelDescriptor {
     id: String,
     role: &'static str,
     provider_kind: String,
-    provider_id: String,
-    credential_id: String,
     health_status: String,
     discovery_status: String,
     default_model: bool,
@@ -1034,10 +1032,6 @@ fn build_chat_model_descriptor(
         id: model_id.to_owned(),
         role: "chat",
         provider_kind: provider.kind.clone(),
-        provider_id: registry_model
-            .map(|entry| entry.provider_id.clone())
-            .unwrap_or_else(|| provider.provider_id.clone()),
-        credential_id: provider.credential_id.clone(),
         health_status: provider.health.state.clone(),
         discovery_status: provider.discovery.status.clone(),
         default_model: true,
@@ -1064,10 +1058,6 @@ fn build_embeddings_model_descriptor(
         id: model_id.to_owned(),
         role: "embeddings",
         provider_kind: provider.kind.clone(),
-        provider_id: registry_model
-            .map(|entry| entry.provider_id.clone())
-            .unwrap_or_else(|| provider.provider_id.clone()),
-        credential_id: provider.credential_id.clone(),
         health_status: provider.health.state.clone(),
         discovery_status: provider.discovery.status.clone(),
         default_model: provider
@@ -1091,8 +1081,6 @@ fn compat_model_json(model: &CompatModelDescriptor) -> Value {
         "parent": Value::Null,
         "metadata": {
             "provider_kind": model.provider_kind,
-            "provider_id": model.provider_id,
-            "credential_id": model.credential_id,
             "role": model.role,
             "default": model.default_model,
             "enabled": model.enabled,

@@ -401,6 +401,14 @@ fn compat_model_detail_and_embeddings_surface_publish_registry_backed_payloads()
     assert_eq!(model_status, 200);
     assert_eq!(model_detail.get("id").and_then(Value::as_str), Some("gpt-4.1-mini"));
     assert_eq!(model_detail.pointer("/metadata/role").and_then(Value::as_str), Some("chat"),);
+    assert!(
+        model_detail.pointer("/metadata/provider_id").is_none(),
+        "compat model detail must not expose internal provider identifiers"
+    );
+    assert!(
+        model_detail.pointer("/metadata/credential_id").is_none(),
+        "compat model detail must not expose internal credential identifiers"
+    );
     assert_json_golden("compat_model_detail.json", &model_detail)?;
 
     let (embeddings_status, embeddings_response) = compat_post_json(
