@@ -463,6 +463,10 @@ fn routines_tool_test_context() -> super::ToolRuntimeExecutionContext<'static> {
     }
 }
 
+fn admin_routines_tool_test_context() -> super::ToolRuntimeExecutionContext<'static> {
+    super::ToolRuntimeExecutionContext { principal: "admin:ops", ..routines_tool_test_context() }
+}
+
 fn parse_tool_output_json(outcome: &super::ToolExecutionOutcome) -> Value {
     serde_json::from_slice(&outcome.output_json).expect("tool output should parse as JSON")
 }
@@ -4606,7 +4610,7 @@ async fn memory_retain_tool_updates_exact_duplicate_instead_of_writing_twice() {
 #[tokio::test(flavor = "multi_thread")]
 async fn memory_retain_tool_replaces_near_duplicate_preference_content() {
     let state = build_test_runtime_state(false);
-    let context = routines_tool_test_context();
+    let context = admin_routines_tool_test_context();
     let first = br#"{"content_text":"Project UI smoke tests prefer Vitest, not Playwright","scope":"principal","confidence":0.9}"#;
     let initial =
         execute_memory_retain_tool(&state, context, "01ARZ3NDEKTSV4RRFFQ69G5FC6", first).await;
@@ -4653,7 +4657,7 @@ async fn memory_retain_tool_replaces_near_duplicate_preference_content() {
 #[tokio::test(flavor = "multi_thread")]
 async fn memory_retain_tool_principal_scope_does_not_replace_channel_scoped_duplicate() {
     let state = build_test_runtime_state(false);
-    let context = routines_tool_test_context();
+    let context = admin_routines_tool_test_context();
     state
         .ingest_memory_item(MemoryItemCreateRequest {
             memory_id: "01ARZ3NDEKTSV4RRFFQ69G5FC8".to_owned(),
@@ -4717,7 +4721,7 @@ async fn memory_retain_tool_principal_scope_does_not_replace_channel_scoped_dupl
 #[tokio::test(flavor = "multi_thread")]
 async fn memory_retain_tool_replaces_conflicting_preference_when_search_terms_shift() {
     let state = build_test_runtime_state(false);
-    let context = routines_tool_test_context();
+    let context = admin_routines_tool_test_context();
     let initial = br#"{"content_text":"E2E preference: use TypeScript, Vitest, and concise Czech reports for E2E tests.","scope":"principal","confidence":0.9,"tags":["vitest","e2e-preference"]}"#;
     let initial_outcome =
         execute_memory_retain_tool(&state, context, "01ARZ3NDEKTSV4RRFFQ69G5FD6", initial).await;
@@ -4788,7 +4792,7 @@ async fn memory_retain_tool_replaces_conflicting_preference_when_search_terms_sh
 #[tokio::test(flavor = "multi_thread")]
 async fn memory_retain_tool_does_not_overwrite_untyped_status_note_with_loose_preference() {
     let state = build_test_runtime_state(false);
-    let context = routines_tool_test_context();
+    let context = admin_routines_tool_test_context();
     let status_note_id = "01ARZ3NDEKTSV4RRFFQ69G5FE1";
     state
         .ingest_memory_item(MemoryItemCreateRequest {
@@ -4838,7 +4842,7 @@ async fn memory_retain_tool_does_not_overwrite_untyped_status_note_with_loose_pr
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn memory_retain_tool_principal_scope_writes_normal_preferences() {
+async fn memory_retain_tool_principal_scope_requires_review_for_user_preferences() {
     let state = build_test_runtime_state(false);
     let input_json =
         br#"{"content_text":"User prefers Vitest for frontend tests","scope":"principal","confidence":0.9}"#;
@@ -4849,7 +4853,43 @@ async fn memory_retain_tool_principal_scope_writes_normal_preferences() {
         input_json,
     )
     .await;
-    assert!(outcome.success, "normal principal preference retain should return structured output");
+    assert!(!outcome.success, "normal user principal preference retain should require review");
+    let payload = parse_tool_output_json(&outcome);
+    assert_eq!(payload.get("status").and_then(Value::as_str), Some("needs_review"));
+    assert_eq!(payload.get("durable_memory_write").and_then(Value::as_bool), Some(false));
+    assert_eq!(
+        payload.get("review_state").and_then(Value::as_str),
+        Some("not_written_requires_review")
+    );
+    assert_eq!(payload.get("approval_required").and_then(Value::as_bool), Some(true));
+    assert_eq!(
+        payload.pointer("/write_classification/category").and_then(Value::as_str),
+        Some("preference")
+    );
+    assert!(
+        payload
+            .pointer("/write_classification/reason_codes")
+            .and_then(Value::as_array)
+            .is_some_and(|reasons| reasons.iter().any(|reason| {
+                reason.as_str() == Some("policy:operator_review_for_principal_scope")
+            })),
+        "principal-scope review reason should be present: {payload}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn memory_retain_tool_principal_scope_writes_admin_preferences() {
+    let state = build_test_runtime_state(false);
+    let input_json =
+        br#"{"content_text":"User prefers Vitest for frontend tests","scope":"principal","confidence":0.9}"#;
+    let outcome = execute_memory_retain_tool(
+        &state,
+        admin_routines_tool_test_context(),
+        "01ARZ3NDEKTSV4RRFFQ69G5FD8",
+        input_json,
+    )
+    .await;
+    assert!(outcome.success, "admin principal preference retain should write");
     let payload = parse_tool_output_json(&outcome);
     assert_eq!(payload.get("status").and_then(Value::as_str), Some("retained"));
     assert_eq!(payload.get("durable_memory_write").and_then(Value::as_bool), Some(true));
