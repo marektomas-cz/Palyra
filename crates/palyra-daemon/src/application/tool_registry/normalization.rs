@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{json, Map, Number, Value};
 
@@ -166,7 +166,11 @@ fn normalize_apply_patch_raw_alias(
     };
     match raw {
         Value::String(raw_text) => {
-            let patch = extract_xmlish_parameter(raw_text.as_str(), "patch")
+            let raw_parameters = parse_top_level_xmlish_parameters(raw_text.as_str());
+            let patch = raw_parameters
+                .as_ref()
+                .and_then(|parameters| parameters.get("patch"))
+                .cloned()
                 .unwrap_or_else(|| raw_text.trim().to_owned());
             if !patch.is_empty() {
                 input.insert("patch".to_owned(), Value::String(patch));
@@ -179,10 +183,13 @@ fn normalize_apply_patch_raw_alias(
             }
             if !input.contains_key("workspace_root") {
                 if let Some(workspace_root) =
-                    extract_xmlish_parameter(raw_text.as_str(), "workspace_root")
+                    raw_parameters.as_ref().and_then(|parameters| parameters.get("workspace_root"))
                 {
                     if !workspace_root.trim().is_empty() {
-                        input.insert("workspace_root".to_owned(), Value::String(workspace_root));
+                        input.insert(
+                            "workspace_root".to_owned(),
+                            Value::String(workspace_root.clone()),
+                        );
                         steps.push(ToolArgumentNormalizationStep {
                             json_pointer: "/raw".to_owned(),
                             from_type: "string".to_owned(),
@@ -226,20 +233,43 @@ fn normalize_apply_patch_raw_alias(
     Value::Object(input)
 }
 
-fn extract_xmlish_parameter(input: &str, name: &str) -> Option<String> {
-    let double_quoted = format!(r#"<parameter name="{name}">"#);
-    let single_quoted = format!("<parameter name='{name}'>");
-    let (start, marker_len) = input
-        .find(double_quoted.as_str())
-        .map(|start| (start, double_quoted.len()))
-        .or_else(|| input.find(single_quoted.as_str()).map(|start| (start, single_quoted.len())))?;
-    let rest = &input[start + marker_len..];
-    let end = rest
-        .find("</parameter>")
-        .or_else(|| rest.find(r#"<parameter name=""#))
-        .or_else(|| rest.find("<parameter name='"))
-        .unwrap_or(rest.len());
-    Some(rest[..end].trim().to_owned())
+fn parse_top_level_xmlish_parameters(input: &str) -> Option<BTreeMap<String, String>> {
+    let mut remaining = input.trim();
+    if remaining.is_empty() {
+        return None;
+    }
+
+    let mut parameters = BTreeMap::new();
+    while !remaining.is_empty() {
+        let (name, value_start) = parse_xmlish_parameter_opening(remaining)?;
+        if parameters.contains_key(name.as_str()) {
+            return None;
+        }
+        let value_body = &remaining[value_start..];
+        let value_end = value_body.find("</parameter>")?;
+        parameters.insert(name, value_body[..value_end].trim().to_owned());
+        remaining = value_body[value_end + "</parameter>".len()..].trim_start();
+    }
+
+    (!parameters.is_empty()).then_some(parameters)
+}
+
+fn parse_xmlish_parameter_opening(input: &str) -> Option<(String, usize)> {
+    let prefix = "<parameter name=";
+    let after_prefix = input.strip_prefix(prefix)?;
+    let quote = after_prefix.as_bytes().first().copied()?;
+    if !matches!(quote, b'\'' | b'"') {
+        return None;
+    }
+    let after_open_quote = &after_prefix[1..];
+    let name_end = after_open_quote.find(char::from(quote))?;
+    let name = after_open_quote[..name_end].to_owned();
+    let after_name = &after_open_quote[name_end + 1..];
+    if !after_name.starts_with('>') || name.is_empty() {
+        return None;
+    }
+
+    Some((name, prefix.len() + 1 + name_end + 1 + 1))
 }
 
 pub(crate) fn tool_call_rejection_error_payload(rejection: &ToolCallRejection) -> Value {
