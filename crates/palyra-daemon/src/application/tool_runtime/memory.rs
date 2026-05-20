@@ -468,7 +468,7 @@ pub(crate) async fn execute_memory_search_tool(
         );
     }
 
-    let scope = parsed.get("scope").and_then(Value::as_str).unwrap_or("principal");
+    let scope = parsed.get("scope").and_then(Value::as_str).unwrap_or("session");
     let (channel_scope, session_scope, resource) = match scope {
         "principal" => (None, None, "memory:principal".to_owned()),
         "channel" => {
@@ -613,13 +613,19 @@ pub(crate) async fn execute_memory_search_tool(
         None => Vec::new(),
     };
 
-    let search_hits = match runtime_state
+    let search_top_k = if scope == "principal" {
+        top_k.saturating_mul(4).clamp(top_k, MAX_MEMORY_SEARCH_TOP_K)
+    } else {
+        top_k
+    };
+
+    let mut search_hits = match runtime_state
         .search_memory(MemorySearchRequest {
             principal: principal.to_owned(),
             channel: channel_scope,
             session_id: session_scope,
             query,
-            top_k,
+            top_k: search_top_k,
             min_score,
             tags,
             sources,
@@ -638,6 +644,10 @@ pub(crate) async fn execute_memory_search_tool(
             );
         }
     };
+    if scope == "principal" {
+        search_hits.retain(|hit| hit.item.channel.is_none() && hit.item.session_id.is_none());
+        search_hits.truncate(top_k);
+    }
 
     let payload = memory_search_tool_output_payload(search_hits.as_slice());
     match serde_json::to_vec(&payload) {
@@ -841,7 +851,7 @@ pub(crate) async fn execute_memory_recall_tool(
     };
     let request = RecallRequest {
         query,
-        channel: requested_channel,
+        channel: requested_channel.or_else(|| context.channel.map(str::to_owned)),
         session_id: optional_trimmed_string(parsed.get("session_id")),
         agent_id: optional_trimmed_string(parsed.get("agent_id")),
         memory_top_k,

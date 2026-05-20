@@ -4365,6 +4365,20 @@ async fn memory_recall_tool_finds_principal_memory_without_session_override() {
         })
         .await
         .expect("manual memory ingest should seed principal recall");
+    state
+        .ingest_memory_item(MemoryItemCreateRequest {
+            memory_id: "01ARZ3NDEKTSV4RRFFQ69G5FD6".to_owned(),
+            principal: context.principal.to_owned(),
+            channel: Some("slack:ops".to_owned()),
+            session_id: None,
+            source: MemorySource::Manual,
+            content_text: format!("private slack channel should not leak {marker}"),
+            tags: vec!["e2e".to_owned()],
+            confidence: Some(0.95),
+            ttl_unix_ms: None,
+        })
+        .await
+        .expect("manual memory ingest should seed cross-channel recall noise");
 
     let input_json = br#"{"query":"e2e_memory_marker_20260502","memory_top_k":4,"workspace_top_k":0,"min_score":0.0}"#;
     let outcome =
@@ -4384,10 +4398,84 @@ async fn memory_recall_tool_finds_principal_memory_without_session_override() {
         }),
         "recall tool should surface durable CLI-ingested principal memory: {payload}"
     );
+    assert!(
+        memory_hits.iter().all(|hit| {
+            hit.get("content_text")
+                .and_then(Value::as_str)
+                .is_none_or(|content| !content.contains("private slack channel"))
+        }),
+        "recall tool must not surface same-principal memory from another channel: {payload}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn memory_search_tool_defaults_to_principal_cross_session_scope() {
+async fn memory_search_tool_defaults_to_current_session_scope() {
+    let state = build_test_runtime_state(false);
+    let context = routines_tool_test_context();
+    let marker = "PALYRA_E2E_CURRENT_SESSION_ONLY";
+    state
+        .ingest_memory_item(MemoryItemCreateRequest {
+            memory_id: "01ARZ3NDEKTSV4RRFFQ69G5FD3".to_owned(),
+            principal: context.principal.to_owned(),
+            channel: context.channel.map(str::to_owned),
+            session_id: Some(context.session_id.to_owned()),
+            source: MemorySource::Manual,
+            content_text: format!("Current session feature flag was {marker}"),
+            tags: vec!["e2e".to_owned()],
+            confidence: Some(0.95),
+            ttl_unix_ms: None,
+        })
+        .await
+        .expect("manual memory ingest should seed current-session search");
+    state
+        .ingest_memory_item(MemoryItemCreateRequest {
+            memory_id: "01ARZ3NDEKTSV4RRFFQ69G5FD4".to_owned(),
+            principal: context.principal.to_owned(),
+            channel: Some("slack:ops".to_owned()),
+            session_id: Some(context.session_id.to_owned()),
+            source: MemorySource::Manual,
+            content_text: format!("Cross-channel feature flag was {marker}"),
+            tags: vec!["e2e".to_owned()],
+            confidence: Some(0.95),
+            ttl_unix_ms: None,
+        })
+        .await
+        .expect("manual memory ingest should seed cross-channel search noise");
+
+    let outcome = execute_memory_search_tool(
+        &state,
+        context.principal,
+        context.channel,
+        context.session_id,
+        "01ARZ3NDEKTSV4RRFFQ69G5FD5",
+        br#"{"query":"PALYRA_E2E_CURRENT_SESSION_ONLY","top_k":4,"min_score":0.0}"#,
+    )
+    .await;
+
+    assert!(outcome.success, "search tool should succeed: {}", outcome.error);
+    let payload = parse_tool_output_json(&outcome);
+    let hits =
+        payload.get("hits").and_then(Value::as_array).expect("search output should include hits");
+    assert!(
+        hits.iter().any(|hit| {
+            hit.get("content_text")
+                .and_then(Value::as_str)
+                .is_some_and(|content| content.contains("Current session feature flag"))
+        }),
+        "default search should surface current-session memory: {payload}"
+    );
+    assert!(
+        hits.iter().all(|hit| {
+            hit.get("content_text")
+                .and_then(Value::as_str)
+                .is_none_or(|content| !content.contains("Cross-channel feature flag"))
+        }),
+        "default search must not surface same-principal memory from another channel: {payload}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn memory_search_tool_principal_scope_returns_principal_global_memory_only() {
     let state = build_test_runtime_state(false);
     let context = routines_tool_test_context();
     let marker = "PALYRA_E2E_BETA";
@@ -4405,6 +4493,20 @@ async fn memory_search_tool_defaults_to_principal_cross_session_scope() {
         })
         .await
         .expect("manual memory ingest should seed principal search");
+    state
+        .ingest_memory_item(MemoryItemCreateRequest {
+            memory_id: "01ARZ3NDEKTSV4RRFFQ69G5FD7".to_owned(),
+            principal: context.principal.to_owned(),
+            channel: Some("slack:ops".to_owned()),
+            session_id: None,
+            source: MemorySource::Manual,
+            content_text: format!("Cross-channel feature flag was {marker}"),
+            tags: vec!["e2e".to_owned()],
+            confidence: Some(0.95),
+            ttl_unix_ms: None,
+        })
+        .await
+        .expect("manual memory ingest should seed cross-channel principal search noise");
 
     let outcome = execute_memory_search_tool(
         &state,
@@ -4412,7 +4514,7 @@ async fn memory_search_tool_defaults_to_principal_cross_session_scope() {
         context.channel,
         "01ARZ3NDEKTSV4RRFFQ69G5FD4",
         "01ARZ3NDEKTSV4RRFFQ69G5FD5",
-        br#"{"query":"PALYRA_E2E_BETA","top_k":4,"min_score":0.0}"#,
+        br#"{"query":"PALYRA_E2E_BETA","scope":"principal","top_k":4,"min_score":0.0}"#,
     )
     .await;
 
@@ -4426,7 +4528,15 @@ async fn memory_search_tool_defaults_to_principal_cross_session_scope() {
                 .and_then(Value::as_str)
                 .is_some_and(|content| content.contains(marker))
         }),
-        "default search should surface principal memory across sessions: {payload}"
+        "principal-scope search should surface principal-global memory: {payload}"
+    );
+    assert!(
+        hits.iter().all(|hit| {
+            hit.get("content_text")
+                .and_then(Value::as_str)
+                .is_none_or(|content| !content.contains("Cross-channel feature flag"))
+        }),
+        "principal-scope search must not surface channel-scoped memory: {payload}"
     );
 }
 
