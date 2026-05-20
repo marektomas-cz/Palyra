@@ -1966,6 +1966,9 @@ fn summarize_fact(snippet: &str) -> String {
 }
 
 fn recall_fact_from_evidence(evidence: &RecallEvidenceRecord) -> Option<RecallFact> {
+    if looks_like_serialized_fragment(evidence.snippet.as_str()) {
+        return None;
+    }
     let summary = summarize_fact(evidence.snippet.as_str());
     if recall_fact_summary_is_low_quality(summary.as_str()) {
         return None;

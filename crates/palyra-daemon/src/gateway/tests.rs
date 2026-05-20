@@ -3157,13 +3157,13 @@ async fn networked_worker_cleanup_failure_is_journaled_and_fail_closed() {
 async fn networked_worker_operator_actions_are_journaled() {
     let state = build_test_runtime_state(false);
     state
-        .register_networked_worker(test_worker_attestation("worker-operator"))
+        .register_networked_worker(test_worker_attestation("worker-drain"))
         .await
         .expect("worker registration should succeed");
     state
         .assign_networked_worker_lease(
-            "worker-operator",
-            test_worker_lease_request("run-worker-operator"),
+            "worker-drain",
+            test_worker_lease_request("run-worker-drain"),
         )
         .await
         .expect("worker lease assignment should succeed");
@@ -3173,15 +3173,30 @@ async fn networked_worker_operator_actions_are_journaled() {
     assert_eq!(drain[0].reason_code, "worker.drained_by_operator");
     assert_eq!(state.worker_fleet_snapshot().failed_closed_workers, 1);
 
+    state
+        .register_networked_worker(test_worker_attestation("worker-reverify"))
+        .await
+        .expect("worker registration should succeed");
     let reverify = state
-        .reverify_networked_worker("worker-operator")
+        .reverify_networked_worker("worker-reverify")
         .await
         .expect("operator reverify should restore registered state");
     assert_eq!(reverify.reason_code, "worker.reverified_by_operator");
 
+    state
+        .register_networked_worker(test_worker_attestation("worker-cleanup"))
+        .await
+        .expect("worker registration should succeed");
+    state
+        .assign_networked_worker_lease(
+            "worker-cleanup",
+            test_worker_lease_request("run-worker-cleanup"),
+        )
+        .await
+        .expect("worker lease assignment should succeed");
     let force_cleanup = state
         .force_cleanup_networked_worker(
-            "worker-operator",
+            "worker-cleanup",
             WorkerCleanupReport {
                 removed_workspace_scope: true,
                 removed_artifacts: true,
