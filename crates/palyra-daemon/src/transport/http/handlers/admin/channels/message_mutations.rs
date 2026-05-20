@@ -4,12 +4,13 @@ use crate::application::channels::providers::{
     classify_channel_message_mutation_governance,
 };
 use crate::journal::{
-    ApprovalCreateRequest, ApprovalDecision, ApprovalPolicySnapshot, ApprovalPromptOption,
-    ApprovalPromptRecord, ApprovalRecord, ApprovalSubjectType,
+    ApprovalCreateRequest, ApprovalDecision, ApprovalDecisionScope, ApprovalPolicySnapshot,
+    ApprovalPromptOption, ApprovalPromptRecord, ApprovalRecord, ApprovalSubjectType,
 };
 use palyra_connectors::ConnectorMessageRecord;
 
 const CHANNEL_MESSAGE_APPROVAL_TIMEOUT_SECONDS: u32 = 15 * 60;
+const CHANNEL_MESSAGE_APPROVAL_POLICY_ID: &str = "discord.message.mutation.approval.v1";
 
 pub(crate) async fn channel_message_read_response(
     state: &AppState,
@@ -324,11 +325,26 @@ async fn resolve_channel_message_mutation_authorization(
         policy_config.sensitive_actions.push(policy_action.to_owned());
     }
     let resolved_approval = if governance.as_ref().is_some_and(|value| value.approval_required) {
+        let Some(governance_ref) = governance.as_ref() else {
+            return Err(runtime_status_response(tonic::Status::internal(
+                "message mutation governance is unavailable",
+            )));
+        };
+        let expected_policy_hash = build_channel_message_approval_policy_hash(
+            input.connector_id,
+            input.operation,
+            policy_action,
+            input.locator,
+            preview,
+            governance_ref,
+            &input.mutation_details,
+        );
         load_channel_message_approval(
             state,
             input.approval_id,
             subject_id.as_str(),
             context.principal.as_str(),
+            expected_policy_hash.as_str(),
         )
         .await?
     } else {
@@ -426,6 +442,7 @@ async fn load_channel_message_approval(
     approval_id: Option<&str>,
     subject_id: &str,
     principal: &str,
+    expected_policy_hash: &str,
 ) -> Result<Option<ApprovalRecord>, Response> {
     let Some(approval_id) = approval_id.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(None);
@@ -446,7 +463,24 @@ async fn load_channel_message_approval(
             "approval subject does not match the requested message mutation",
         )));
     }
+    if approval.subject_type != ApprovalSubjectType::Tool
+        || approval.policy_snapshot.policy_id != CHANNEL_MESSAGE_APPROVAL_POLICY_ID
+        || approval.policy_snapshot.policy_hash != expected_policy_hash
+    {
+        return Err(runtime_status_response(tonic::Status::permission_denied(
+            "approval does not match the requested message mutation details",
+        )));
+    }
     match approval.decision {
+        Some(ApprovalDecision::Allow)
+            if approval
+                .decision_scope
+                .is_some_and(|scope| scope != ApprovalDecisionScope::Once) =>
+        {
+            Err(runtime_status_response(tonic::Status::permission_denied(
+                "message mutation approvals must be scoped to a single mutation",
+            )))
+        }
         Some(ApprovalDecision::Allow) => Ok(Some(approval)),
         Some(ApprovalDecision::Deny) => Err(runtime_status_response(
             tonic::Status::permission_denied("message mutation approval was explicitly denied"),
@@ -471,21 +505,15 @@ async fn ensure_channel_message_approval(
     let subject_id =
         build_channel_message_subject_id(input.connector_id, input.operation, input.locator);
     let policy_action = channel_message_policy_action(input.operation);
-    let details_json = json!({
-        "connector_id": input.connector_id,
-        "operation": input.operation.as_str(),
-        "policy_action": policy_action,
-        "locator": input.locator,
-        "preview_message": input.preview,
-        "governance": {
-            "risk_level": input.governance.risk_level.as_str(),
-            "approval_required": input.governance.approval_required,
-            "reason": input.governance.reason,
-        },
-        "mutation": input.mutation_details,
-        "required_permissions": channel_message_required_permissions(input.operation),
-    })
-    .to_string();
+    let details_json = build_channel_message_approval_details_json(
+        input.connector_id,
+        input.operation,
+        policy_action,
+        input.locator,
+        input.preview,
+        input.governance,
+        &input.mutation_details,
+    );
     let policy_hash = hex::encode(Sha256::digest(details_json.as_bytes()));
     state
         .runtime
@@ -510,7 +538,7 @@ async fn ensure_channel_message_approval(
                 input.locator.message_id
             ),
             policy_snapshot: ApprovalPolicySnapshot {
-                policy_id: "discord.message.mutation.approval.v1".to_owned(),
+                policy_id: CHANNEL_MESSAGE_APPROVAL_POLICY_ID.to_owned(),
                 policy_hash,
                 evaluation_summary: format!(
                     "action={} approval_required={} risk_level={} {}",
@@ -541,6 +569,53 @@ async fn ensure_channel_message_approval(
         })
         .await
         .map_err(runtime_status_response)
+}
+
+fn build_channel_message_approval_policy_hash(
+    connector_id: &str,
+    operation: channels::DiscordMessageMutationKind,
+    policy_action: &str,
+    locator: &ConnectorMessageLocator,
+    preview: &ConnectorMessageRecord,
+    governance: &channels::DiscordMessageMutationGovernance,
+    mutation_details: &Value,
+) -> String {
+    let details_json = build_channel_message_approval_details_json(
+        connector_id,
+        operation,
+        policy_action,
+        locator,
+        preview,
+        governance,
+        mutation_details,
+    );
+    hex::encode(Sha256::digest(details_json.as_bytes()))
+}
+
+fn build_channel_message_approval_details_json(
+    connector_id: &str,
+    operation: channels::DiscordMessageMutationKind,
+    policy_action: &str,
+    locator: &ConnectorMessageLocator,
+    preview: &ConnectorMessageRecord,
+    governance: &channels::DiscordMessageMutationGovernance,
+    mutation_details: &Value,
+) -> String {
+    json!({
+        "connector_id": connector_id,
+        "operation": operation.as_str(),
+        "policy_action": policy_action,
+        "locator": locator,
+        "preview_message": preview,
+        "governance": {
+            "risk_level": governance.risk_level.as_str(),
+            "approval_required": governance.approval_required,
+            "reason": governance.reason,
+        },
+        "mutation": mutation_details,
+        "required_permissions": channel_message_required_permissions(operation),
+    })
+    .to_string()
 }
 
 fn channel_message_approval_options() -> Vec<ApprovalPromptOption> {
@@ -597,4 +672,123 @@ async fn record_channel_message_console_event(
         .record_console_event(context, event, details)
         .await
         .map_err(runtime_status_response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::journal::ApprovalRiskLevel;
+    use palyra_connectors::{
+        ConnectorConversationTarget, ConnectorMessageLocator, ConnectorMessageReactionRecord,
+    };
+
+    fn sample_locator() -> ConnectorMessageLocator {
+        ConnectorMessageLocator {
+            target: ConnectorConversationTarget {
+                conversation_id: "guild-channel-123".to_owned(),
+                thread_id: Some("thread-1".to_owned()),
+            },
+            message_id: "message-456".to_owned(),
+        }
+    }
+
+    fn sample_preview() -> ConnectorMessageRecord {
+        ConnectorMessageRecord {
+            locator: sample_locator(),
+            sender_id: "discord:user:bot".to_owned(),
+            sender_display: Some("Palyra".to_owned()),
+            body: "original message".to_owned(),
+            created_at_unix_ms: 1_700_000_000_000,
+            edited_at_unix_ms: None,
+            is_direct_message: false,
+            is_connector_authored: true,
+            link: None,
+            attachments: Vec::new(),
+            reactions: vec![ConnectorMessageReactionRecord {
+                emoji: "wave".to_owned(),
+                count: 1,
+                reacted_by_connector: false,
+            }],
+        }
+    }
+
+    fn sample_governance() -> channels::DiscordMessageMutationGovernance {
+        channels::DiscordMessageMutationGovernance {
+            risk_level: ApprovalRiskLevel::High,
+            approval_required: true,
+            reason: "public Discord message mutation requires approval".to_owned(),
+        }
+    }
+
+    #[test]
+    fn channel_message_approval_policy_hash_changes_when_mutation_changes() {
+        let locator = sample_locator();
+        let preview = sample_preview();
+        let governance = sample_governance();
+        let operation = channels::DiscordMessageMutationKind::Edit;
+        let policy_action = channel_message_policy_action(operation);
+
+        let benign_hash = build_channel_message_approval_policy_hash(
+            "discord:prod",
+            operation,
+            policy_action,
+            &locator,
+            &preview,
+            &governance,
+            &serde_json::json!({
+                "body": "benign typo fix",
+                "preview_diff": {
+                    "before_body": preview.body.as_str(),
+                    "after_body": "benign typo fix",
+                },
+            }),
+        );
+        let changed_hash = build_channel_message_approval_policy_hash(
+            "discord:prod",
+            operation,
+            policy_action,
+            &locator,
+            &preview,
+            &governance,
+            &serde_json::json!({
+                "body": "@everyone replacement",
+                "preview_diff": {
+                    "before_body": preview.body.as_str(),
+                    "after_body": "@everyone replacement",
+                },
+            }),
+        );
+
+        assert_ne!(
+            benign_hash, changed_hash,
+            "approvals must be bound to the exact Discord mutation details"
+        );
+    }
+
+    #[test]
+    fn channel_message_approval_details_include_mutation_and_preview() {
+        let locator = sample_locator();
+        let preview = sample_preview();
+        let governance = sample_governance();
+        let operation = channels::DiscordMessageMutationKind::ReactAdd;
+        let details_json = build_channel_message_approval_details_json(
+            "discord:prod",
+            operation,
+            channel_message_policy_action(operation),
+            &locator,
+            &preview,
+            &governance,
+            &serde_json::json!({
+                "emoji": "wave",
+                "existing_reactions": preview.reactions.clone(),
+            }),
+        );
+        let details = serde_json::from_str::<Value>(details_json.as_str())
+            .expect("approval details should be valid JSON");
+
+        assert_eq!(details["connector_id"], "discord:prod");
+        assert_eq!(details["operation"], "react_add");
+        assert_eq!(details["preview_message"]["body"], "original message");
+        assert_eq!(details["mutation"]["emoji"], "wave");
+    }
 }
