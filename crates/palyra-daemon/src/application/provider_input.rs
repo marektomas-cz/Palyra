@@ -178,16 +178,16 @@ pub(crate) async fn build_memory_augmented_prompt(
     if !memory_config.auto_inject_enabled || memory_config.auto_inject_max_items == 0 {
         return Ok(prompt_input_text.to_owned());
     }
-    let resource = "memory:principal";
+    let resource = format!("memory:session:{session_id}");
     if let Err(error) =
-        authorize_memory_action(context.principal.as_str(), "memory.search", resource)
+        authorize_memory_action(context.principal.as_str(), "memory.search", resource.as_str())
     {
         warn!(
             run_id,
             principal = %context.principal,
             session_id,
             status_message = %error.message(),
-            "memory auto-inject skipped because policy denied principal recall access"
+            "memory auto-inject skipped because policy denied current-session recall access"
         );
         return Ok(prompt_input_text.to_owned());
     }

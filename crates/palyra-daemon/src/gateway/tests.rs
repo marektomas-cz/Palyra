@@ -1889,7 +1889,7 @@ async fn prepare_model_provider_input_fail_mode_propagates_tape_append_error() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn memory_auto_inject_searches_current_scope_without_cross_session_leakage() {
+async fn memory_auto_inject_searches_current_scope_without_cross_session_or_channel_leakage() {
     let state = build_test_runtime_state(false);
     let mut memory_config = state.memory_config_snapshot();
     memory_config.auto_inject_enabled = true;
@@ -1950,6 +1950,22 @@ async fn memory_auto_inject_searches_current_scope_without_cross_session_leakage
         })
         .await
         .expect("memory ingest should seed current-session recall");
+    state
+        .ingest_memory_item(MemoryItemCreateRequest {
+            memory_id: "01ARZ3NDEKTSV4RRFFQ69G5FC8".to_owned(),
+            principal: context.principal.clone(),
+            channel: Some("slack:ops".to_owned()),
+            session_id: Some(current_session_id.to_owned()),
+            source: MemorySource::Manual,
+            content_text:
+                "Cross-channel private preference: TypeScript, Playwright, short Czech reports"
+                    .to_owned(),
+            tags: vec!["preference".to_owned()],
+            confidence: Some(0.95),
+            ttl_unix_ms: None,
+        })
+        .await
+        .expect("memory ingest should seed cross-channel recall noise");
 
     let mut tape_seq = 1_i64;
     let prompt = build_memory_augmented_prompt(
@@ -1975,6 +1991,10 @@ async fn memory_auto_inject_searches_current_scope_without_cross_session_leakage
     assert!(
         !prompt.contains("Ruby, Selenium, long English reports"),
         "previous-session scoped preference must not leak into current prompt: {prompt}"
+    );
+    assert!(
+        !prompt.contains("Cross-channel private preference"),
+        "same-principal memory from another channel must not leak into current prompt: {prompt}"
     );
 
     let tape = state
