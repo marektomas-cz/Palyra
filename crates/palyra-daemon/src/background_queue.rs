@@ -56,6 +56,8 @@ const BACKGROUND_QUEUE_IDLE_SLEEP: Duration = Duration::from_secs(3);
 const DEFAULT_BACKGROUND_CHANNEL: &str = "console:background";
 const CHILD_PROGRESS_MIN_INTERVAL_MS: i64 = 2_000;
 const CHILD_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
+const CHILD_PARENT_PROGRESS_TAPE_EVENT_LIMIT: usize = 1_024;
+const CHILD_PARENT_HEARTBEAT_TAPE_EVENT_LIMIT: usize = 240;
 const CHILD_PROGRESS_HISTORY_LIMIT: usize = 64;
 const CHILD_RUN_ATTACH_TIMEOUT: Duration = Duration::from_secs(5);
 const CHILD_RUN_ATTACH_POLL_INTERVAL: Duration = Duration::from_millis(25);
@@ -1064,6 +1066,7 @@ async fn run_background_task_stream(
     let mut latest_child_state = "running".to_owned();
     let mut last_progress_at_unix_ms = 0_i64;
     let mut model_token_chars = 0_usize;
+    let mut parent_tape_budget = ChildLifecycleTapeBudget::default();
     let mut heartbeat = tokio::time::interval(CHILD_HEARTBEAT_INTERVAL);
     heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let _ = heartbeat.tick().await;
@@ -1083,11 +1086,14 @@ async fn run_background_task_stream(
                                 );
                                 trim_delivery_progress_history(&mut delivery_progress_updates);
                             }
-                            let should_emit = progress.event_type != "child_progress"
-                                || progress.user_visible
-                                || now.saturating_sub(last_progress_at_unix_ms)
-                                    >= CHILD_PROGRESS_MIN_INTERVAL_MS;
+                            let should_emit = should_emit_child_stream_progress(
+                                &progress,
+                                now,
+                                last_progress_at_unix_ms,
+                            );
                             if should_emit {
+                                let lifecycle_decision =
+                                    parent_tape_budget.record_stream_event(&progress, &progress.details);
                                 let details = if delivery_progress_active {
                                     let merged_progress = merge_delivery_progress_updates(
                                         delivery_progress_updates.as_slice(),
@@ -1102,17 +1108,38 @@ async fn run_background_task_stream(
                                 } else {
                                     progress.details
                                 };
-                                append_child_lifecycle_event(
-                                    runtime,
-                                    task,
-                                    Some(run_id),
-                                    progress.event_type,
-                                    progress.child_state.as_str(),
-                                    progress.user_visible,
-                                    details,
-                                )
-                                .await?;
-                                last_progress_at_unix_ms = now;
+                                match lifecycle_decision {
+                                    ChildLifecycleTapeDecision::Emit => {
+                                        append_child_lifecycle_event(
+                                            runtime,
+                                            task,
+                                            Some(run_id),
+                                            progress.event_type,
+                                            progress.child_state.as_str(),
+                                            progress.user_visible,
+                                            details,
+                                        )
+                                        .await?;
+                                        last_progress_at_unix_ms = now;
+                                    }
+                                    ChildLifecycleTapeDecision::EmitLimitNotice {
+                                        event_type,
+                                        details,
+                                    } => {
+                                        append_child_lifecycle_event(
+                                            runtime,
+                                            task,
+                                            Some(run_id),
+                                            event_type,
+                                            progress.child_state.as_str(),
+                                            false,
+                                            details,
+                                        )
+                                        .await?;
+                                        last_progress_at_unix_ms = now;
+                                    }
+                                    ChildLifecycleTapeDecision::Suppress => {}
+                                }
                             }
                         }
                     }
@@ -1135,16 +1162,39 @@ async fn run_background_task_stream(
                 }
             }
             _ = heartbeat.tick() => {
-                append_child_lifecycle_event(
-                    runtime,
-                    task,
-                    Some(run_id),
-                    "child_heartbeat",
-                    latest_child_state.as_str(),
-                    false,
-                    json!({ "state": latest_child_state }),
-                )
-                .await?;
+                if child_run_is_terminal(runtime, run_id).await? {
+                    break;
+                }
+                match parent_tape_budget.record_scheduled_heartbeat() {
+                    ChildLifecycleTapeDecision::Emit => {
+                        append_child_lifecycle_event(
+                            runtime,
+                            task,
+                            Some(run_id),
+                            "child_heartbeat",
+                            latest_child_state.as_str(),
+                            false,
+                            json!({ "state": latest_child_state }),
+                        )
+                        .await?;
+                    }
+                    ChildLifecycleTapeDecision::EmitLimitNotice {
+                        event_type,
+                        details,
+                    } => {
+                        append_child_lifecycle_event(
+                            runtime,
+                            task,
+                            Some(run_id),
+                            event_type,
+                            latest_child_state.as_str(),
+                            false,
+                            details,
+                        )
+                        .await?;
+                    }
+                    ChildLifecycleTapeDecision::Suppress => {}
+                }
             }
         }
     }
@@ -1247,6 +1297,16 @@ async fn wait_for_background_child_run(
         }
         tokio::time::sleep(CHILD_RUN_ATTACH_POLL_INTERVAL).await;
     }
+}
+
+async fn child_run_is_terminal(
+    runtime: &Arc<GatewayRuntimeState>,
+    run_id: &str,
+) -> Result<bool, Status> {
+    let Some(snapshot) = runtime.orchestrator_run_status_snapshot(run_id.to_owned()).await? else {
+        return Ok(false);
+    };
+    Ok(is_terminal_run_state(snapshot.state.as_str()))
 }
 
 async fn create_delegated_child_binding(
@@ -1624,6 +1684,146 @@ struct ChildStreamProgress {
     child_state: String,
     user_visible: bool,
     details: Value,
+}
+
+#[derive(Debug)]
+enum ChildLifecycleTapeDecision {
+    Emit,
+    EmitLimitNotice { event_type: &'static str, details: Value },
+    Suppress,
+}
+
+struct ChildLifecycleTapeBudget {
+    progress_events: usize,
+    heartbeat_events: usize,
+    progress_limit: usize,
+    heartbeat_limit: usize,
+    progress_limit_notice_emitted: bool,
+    heartbeat_limit_notice_emitted: bool,
+}
+
+impl Default for ChildLifecycleTapeBudget {
+    fn default() -> Self {
+        Self::with_limits(
+            CHILD_PARENT_PROGRESS_TAPE_EVENT_LIMIT,
+            CHILD_PARENT_HEARTBEAT_TAPE_EVENT_LIMIT,
+        )
+    }
+}
+
+impl ChildLifecycleTapeBudget {
+    fn with_limits(progress_limit: usize, heartbeat_limit: usize) -> Self {
+        Self {
+            progress_events: 0,
+            heartbeat_events: 0,
+            progress_limit,
+            heartbeat_limit,
+            progress_limit_notice_emitted: false,
+            heartbeat_limit_notice_emitted: false,
+        }
+    }
+
+    fn record_stream_event(
+        &mut self,
+        progress: &ChildStreamProgress,
+        details: &Value,
+    ) -> ChildLifecycleTapeDecision {
+        match budgeted_child_lifecycle_kind(progress.event_type) {
+            Some(ChildLifecycleTapeKind::Progress)
+                if !is_terminal_child_progress(
+                    progress.event_type,
+                    progress.child_state.as_str(),
+                ) =>
+            {
+                Self::record_budgeted_event(
+                    &mut self.progress_events,
+                    self.progress_limit,
+                    &mut self.progress_limit_notice_emitted,
+                    "child_progress_compacted",
+                    "parent_tape_child_progress_limit",
+                    progress.event_type,
+                    stream_event_name(details),
+                )
+            }
+            Some(ChildLifecycleTapeKind::Heartbeat) => Self::record_budgeted_event(
+                &mut self.heartbeat_events,
+                self.heartbeat_limit,
+                &mut self.heartbeat_limit_notice_emitted,
+                "child_heartbeat_compacted",
+                "parent_tape_child_heartbeat_limit",
+                progress.event_type,
+                stream_event_name(details),
+            ),
+            _ => ChildLifecycleTapeDecision::Emit,
+        }
+    }
+
+    fn record_scheduled_heartbeat(&mut self) -> ChildLifecycleTapeDecision {
+        Self::record_budgeted_event(
+            &mut self.heartbeat_events,
+            self.heartbeat_limit,
+            &mut self.heartbeat_limit_notice_emitted,
+            "child_heartbeat_compacted",
+            "parent_tape_child_heartbeat_limit",
+            "child_heartbeat",
+            Some("scheduled_heartbeat"),
+        )
+    }
+
+    fn record_budgeted_event(
+        count: &mut usize,
+        limit: usize,
+        limit_notice_emitted: &mut bool,
+        limit_event_type: &'static str,
+        reason: &'static str,
+        suppressed_event_type: &'static str,
+        stream_event: Option<&str>,
+    ) -> ChildLifecycleTapeDecision {
+        if *count < limit {
+            *count += 1;
+            return ChildLifecycleTapeDecision::Emit;
+        }
+        if *limit_notice_emitted {
+            return ChildLifecycleTapeDecision::Suppress;
+        }
+        *limit_notice_emitted = true;
+        ChildLifecycleTapeDecision::EmitLimitNotice {
+            event_type: limit_event_type,
+            details: json!({
+                "reason": reason,
+                "max_events": limit,
+                "suppressed_event_type": suppressed_event_type,
+                "stream_event": stream_event,
+            }),
+        }
+    }
+}
+
+enum ChildLifecycleTapeKind {
+    Progress,
+    Heartbeat,
+}
+
+fn budgeted_child_lifecycle_kind(event_type: &str) -> Option<ChildLifecycleTapeKind> {
+    match event_type {
+        "child_progress" => Some(ChildLifecycleTapeKind::Progress),
+        "child_heartbeat" => Some(ChildLifecycleTapeKind::Heartbeat),
+        _ => None,
+    }
+}
+
+fn stream_event_name(details: &Value) -> Option<&str> {
+    details.get("stream_event").and_then(Value::as_str)
+}
+
+fn should_emit_child_stream_progress(
+    progress: &ChildStreamProgress,
+    now_unix_ms: i64,
+    last_progress_at_unix_ms: i64,
+) -> bool {
+    progress.event_type != "child_progress"
+        || is_terminal_child_progress(progress.event_type, progress.child_state.as_str())
+        || now_unix_ms.saturating_sub(last_progress_at_unix_ms) >= CHILD_PROGRESS_MIN_INTERVAL_MS
 }
 
 impl ChildStreamProgress {
@@ -2718,8 +2918,9 @@ mod tests {
         child_merge_lifecycle_details, delegated_child_timeout_message,
         evaluate_delegation_scheduler_limits, parent_merge_event_payload,
         replace_background_task_snapshot, running_delegated_children_for_parent,
-        task_has_in_flight_work_without_target, DelegationSchedulerDecision,
-        MergeDeliveryPayloadContext,
+        should_emit_child_stream_progress, task_has_in_flight_work_without_target,
+        ChildLifecycleTapeBudget, ChildLifecycleTapeDecision, ChildStreamProgress,
+        DelegationSchedulerDecision, MergeDeliveryPayloadContext,
     };
     use crate::{
         application::delivery_arbitration::{DeliveryDecision, DeliveryDecisionAction},
@@ -2733,6 +2934,101 @@ mod tests {
     };
     use palyra_common::runtime_contracts::AuxiliaryTaskState;
     use serde_json::json;
+
+    #[test]
+    fn user_visible_child_progress_is_throttled_on_parent_tape() {
+        let progress = ChildStreamProgress {
+            event_type: "child_progress",
+            child_state: "model_streaming".to_owned(),
+            user_visible: true,
+            details: json!({ "stream_event": "model_token" }),
+        };
+
+        assert!(
+            !should_emit_child_stream_progress(&progress, 1_001, 1_000),
+            "user-visible model tokens should not bypass the parent tape throttle"
+        );
+        assert!(
+            should_emit_child_stream_progress(&progress, 3_000, 1_000),
+            "parent tape progress should still be emitted after the throttle interval"
+        );
+
+        let completed = ChildStreamProgress {
+            event_type: "child_completed",
+            child_state: "completed".to_owned(),
+            user_visible: true,
+            details: json!({ "stream_event": "status" }),
+        };
+        assert!(
+            should_emit_child_stream_progress(&completed, 1_001, 1_000),
+            "terminal child lifecycle events must not be throttled"
+        );
+    }
+
+    #[test]
+    fn child_lifecycle_tape_budget_caps_progress_and_heartbeats() {
+        let mut budget = ChildLifecycleTapeBudget::with_limits(2, 1);
+        let progress = ChildStreamProgress {
+            event_type: "child_progress",
+            child_state: "model_streaming".to_owned(),
+            user_visible: true,
+            details: json!({ "stream_event": "model_token" }),
+        };
+
+        assert!(matches!(
+            budget.record_stream_event(&progress, &progress.details),
+            ChildLifecycleTapeDecision::Emit
+        ));
+        assert!(matches!(
+            budget.record_stream_event(&progress, &progress.details),
+            ChildLifecycleTapeDecision::Emit
+        ));
+        match budget.record_stream_event(&progress, &progress.details) {
+            ChildLifecycleTapeDecision::EmitLimitNotice { event_type, details } => {
+                assert_eq!(event_type, "child_progress_compacted");
+                assert_eq!(
+                    details.get("reason").and_then(serde_json::Value::as_str),
+                    Some("parent_tape_child_progress_limit")
+                );
+                assert_eq!(
+                    details.get("suppressed_event_type").and_then(serde_json::Value::as_str),
+                    Some("child_progress")
+                );
+            }
+            other => panic!("expected progress limit notice, got {other:?}"),
+        }
+        assert!(matches!(
+            budget.record_stream_event(&progress, &progress.details),
+            ChildLifecycleTapeDecision::Suppress
+        ));
+
+        let completed = ChildStreamProgress {
+            event_type: "child_completed",
+            child_state: "completed".to_owned(),
+            user_visible: true,
+            details: json!({ "stream_event": "status" }),
+        };
+        assert!(matches!(
+            budget.record_stream_event(&completed, &completed.details),
+            ChildLifecycleTapeDecision::Emit
+        ));
+
+        assert!(matches!(budget.record_scheduled_heartbeat(), ChildLifecycleTapeDecision::Emit));
+        match budget.record_scheduled_heartbeat() {
+            ChildLifecycleTapeDecision::EmitLimitNotice { event_type, details } => {
+                assert_eq!(event_type, "child_heartbeat_compacted");
+                assert_eq!(
+                    details.get("reason").and_then(serde_json::Value::as_str),
+                    Some("parent_tape_child_heartbeat_limit")
+                );
+            }
+            other => panic!("expected heartbeat limit notice, got {other:?}"),
+        }
+        assert!(matches!(
+            budget.record_scheduled_heartbeat(),
+            ChildLifecycleTapeDecision::Suppress
+        ));
+    }
 
     #[test]
     fn append_artifact_references_extracts_nested_artifacts() {
