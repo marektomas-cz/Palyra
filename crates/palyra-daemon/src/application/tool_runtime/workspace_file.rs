@@ -765,29 +765,46 @@ fn resolve_absolute_workspace_file(
     requested: &Path,
     input: &WorkspaceReadFileInput,
 ) -> Result<(usize, PathBuf, String), String> {
+    if requested.components().any(|component| matches!(component, Component::ParentDir)) {
+        return Err(format!("{WORKSPACE_READ_FILE_TOOL_NAME} path escapes agent workspace roots"));
+    }
+    let (workspace_root_index, canonical_root) =
+        find_lexical_workspace_root(canonical_roots, requested).ok_or_else(|| {
+            format!("{WORKSPACE_READ_FILE_TOOL_NAME} path escapes agent workspace roots")
+        })?;
     let canonical_target = fs::canonicalize(requested).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             format!(
                 "{WORKSPACE_READ_FILE_TOOL_NAME} file not found in agent workspace roots: {}",
-                input.path
+                display_requested_path(input.path.as_str())
             )
         } else {
             format!("{WORKSPACE_READ_FILE_TOOL_NAME} failed to resolve path: {error}")
         }
     })?;
-    for (workspace_root_index, canonical_root) in canonical_roots {
-        if canonical_target.starts_with(canonical_root) {
-            if !canonical_target.is_file() {
-                return Err(read_file_not_regular_file_error(input.path.as_str()));
-            }
-            let display_path = canonical_target
-                .strip_prefix(canonical_root)
-                .map(normalize_relative_path_display)
-                .unwrap_or_else(|_| input.path.clone());
-            return Ok((*workspace_root_index, canonical_target, display_path));
-        }
+    if !path_stays_inside_workspace_root(canonical_target.as_path(), canonical_root) {
+        return Err(format!("{WORKSPACE_READ_FILE_TOOL_NAME} path escapes agent workspace roots"));
     }
-    Err(format!("{WORKSPACE_READ_FILE_TOOL_NAME} path escapes agent workspace roots"))
+    if !canonical_target.is_file() {
+        return Err(read_file_not_regular_file_error(input.path.as_str()));
+    }
+    let display_path = canonical_target
+        .strip_prefix(canonical_root)
+        .map(normalize_relative_path_display)
+        .unwrap_or_else(|_| display_requested_path(input.path.as_str()).to_owned());
+    Ok((workspace_root_index, canonical_target, display_path))
+}
+
+fn find_lexical_workspace_root<'a>(
+    canonical_roots: &'a [(usize, PathBuf)],
+    requested: &Path,
+) -> Option<(usize, &'a Path)> {
+    canonical_roots
+        .iter()
+        .find(|(_, canonical_root)| {
+            path_stays_inside_workspace_root(requested, canonical_root.as_path())
+        })
+        .map(|(index, canonical_root)| (*index, canonical_root.as_path()))
 }
 
 fn read_file_not_regular_file_error(path: &str) -> String {
@@ -1494,13 +1511,21 @@ fn path_stays_inside_workspace_root(candidate: &Path, root: &Path) -> bool {
     }
     #[cfg(target_os = "macos")]
     {
-        return macos_path_alias_key(candidate).is_some_and(|candidate| {
+        macos_path_alias_key(candidate).is_some_and(|candidate| {
             macos_path_alias_key(root).is_some_and(|root| {
                 normalized_path_key_starts_with(candidate.as_str(), root.as_str())
             })
-        });
+        })
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        windows_path_alias_key(candidate).is_some_and(|candidate| {
+            windows_path_alias_key(root).is_some_and(|root| {
+                normalized_path_key_starts_with(candidate.as_str(), root.as_str())
+            })
+        })
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         false
     }
@@ -1529,12 +1554,32 @@ fn macos_path_alias_key(path: &Path) -> Option<String> {
     Some(normalized.to_owned())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 fn normalized_path_key_starts_with(candidate: &str, root: &str) -> bool {
     if candidate == root {
         return true;
     }
     candidate.strip_prefix(root).is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+#[cfg(windows)]
+fn windows_path_alias_key(path: &Path) -> Option<String> {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    if normalized.is_empty() {
+        return None;
+    }
+    let mut key = normalized.to_ascii_lowercase();
+    if let Some(suffix) = key.strip_prefix("//?/unc/") {
+        key = format!("//{suffix}");
+    } else if let Some(suffix) = key.strip_prefix("//?/") {
+        key = suffix.to_owned();
+    } else if let Some(suffix) = key.strip_prefix("//./") {
+        key = suffix.to_owned();
+    }
+    while key.ends_with('/') && key.len() > 3 {
+        key.pop();
+    }
+    Some(key)
 }
 
 #[cfg(target_os = "linux")]
@@ -2009,6 +2054,73 @@ mod tests {
             .expect_err("outside absolute path should be rejected");
 
         assert!(error.contains("escapes agent workspace roots"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn read_workspace_file_returns_uniform_error_for_outside_absolute_paths() {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let workspace = tempdir.path().join("workspace");
+        let outside = tempdir.path().join("outside");
+        fs::create_dir_all(&workspace).expect("workspace should exist");
+        fs::create_dir_all(&outside).expect("outside directory should exist");
+        let existing_outside = outside.join("secret.txt");
+        fs::write(existing_outside.as_path(), "secret").expect("outside file should be written");
+        let missing_outside = outside.join("missing.txt");
+        let outside_inputs = [existing_outside, missing_outside]
+            .into_iter()
+            .map(|path| WorkspaceReadFileInput {
+                path: path.to_string_lossy().into_owned(),
+                workspace_root: None,
+                offset_bytes: 0,
+                max_bytes: None,
+            })
+            .collect::<Vec<_>>();
+
+        let errors = outside_inputs
+            .iter()
+            .map(|input| {
+                read_workspace_file_from_roots(std::slice::from_ref(&workspace), input)
+                    .expect_err("outside absolute path should be rejected")
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            errors,
+            vec![
+                format!("{WORKSPACE_READ_FILE_TOOL_NAME} path escapes agent workspace roots"),
+                format!("{WORKSPACE_READ_FILE_TOOL_NAME} path escapes agent workspace roots"),
+            ]
+        );
+    }
+
+    #[test]
+    fn read_workspace_file_rejects_absolute_parent_traversal_without_probe() {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let workspace = tempdir.path().join("workspace");
+        let outside = tempdir.path().join("outside");
+        fs::create_dir_all(&workspace).expect("workspace should exist");
+        fs::create_dir_all(&outside).expect("outside directory should exist");
+        let outside_file = outside.join("secret.txt");
+        fs::write(outside_file.as_path(), "secret").expect("outside file should be written");
+        let input = WorkspaceReadFileInput {
+            path: workspace
+                .join("..")
+                .join("outside")
+                .join("secret.txt")
+                .to_string_lossy()
+                .into_owned(),
+            workspace_root: None,
+            offset_bytes: 0,
+            max_bytes: None,
+        };
+
+        let error = read_workspace_file_from_roots(&[workspace], &input)
+            .expect_err("absolute parent traversal should be rejected before resolution");
+
+        assert_eq!(
+            error,
+            format!("{WORKSPACE_READ_FILE_TOOL_NAME} path escapes agent workspace roots")
+        );
     }
 
     #[test]
