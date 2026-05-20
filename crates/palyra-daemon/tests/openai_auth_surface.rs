@@ -260,6 +260,7 @@ fn console_models_probe_and_discover_publish_live_openai_results() -> Result<()>
     let (child, admin_port) = spawn_palyrad_with_dynamic_ports(&[
         ("PALYRA_ADMIN_BOUND_PRINCIPAL".to_owned(), CONSOLE_ADMIN_PRINCIPAL.to_owned()),
         ("PALYRA_MODEL_PROVIDER_OPENAI_BASE_URL".to_owned(), format!("{}/v1", mock.base_url())),
+        ("PALYRA_MODEL_PROVIDER_ALLOW_PRIVATE_BASE_URL".to_owned(), "true".to_owned()),
     ])?;
     let mut daemon = ChildGuard::new(child);
     wait_for_health(admin_port, daemon.child_mut())?;
@@ -299,7 +300,11 @@ fn console_models_probe_and_discover_publish_live_openai_results() -> Result<()>
         .and_then(Value::as_array)
         .and_then(|providers| providers.first())
         .ok_or_else(|| anyhow::anyhow!("probe response missing provider payload"))?;
-    assert_eq!(probe_provider.get("state").and_then(Value::as_str), Some("ok"));
+    assert_eq!(
+        probe_provider.get("state").and_then(Value::as_str),
+        Some("ok"),
+        "probe provider payload should succeed: {probe_provider:#?}"
+    );
     assert_eq!(
         probe_provider.get("message").and_then(Value::as_str),
         Some("provider connection succeeded")
@@ -621,6 +626,7 @@ fn console_models_probe_redacts_provider_auth_failures() -> Result<()> {
     let (child, admin_port) = spawn_palyrad_with_dynamic_ports(&[
         ("PALYRA_ADMIN_BOUND_PRINCIPAL".to_owned(), CONSOLE_ADMIN_PRINCIPAL.to_owned()),
         ("PALYRA_MODEL_PROVIDER_ANTHROPIC_BASE_URL".to_owned(), mock.base_url()),
+        ("PALYRA_MODEL_PROVIDER_ALLOW_PRIVATE_BASE_URL".to_owned(), "true".to_owned()),
     ])?;
     let mut daemon = ChildGuard::new(child);
     wait_for_health(admin_port, daemon.child_mut())?;
@@ -659,7 +665,11 @@ fn console_models_probe_redacts_provider_auth_failures() -> Result<()> {
         .and_then(Value::as_array)
         .and_then(|providers| providers.first())
         .ok_or_else(|| anyhow::anyhow!("probe response missing anthropic provider payload"))?;
-    assert_eq!(provider.get("state").and_then(Value::as_str), Some("auth_failed"));
+    assert_eq!(
+        provider.get("state").and_then(Value::as_str),
+        Some("auth_failed"),
+        "probe provider payload should preserve auth failure: {provider:#?}"
+    );
     let message = provider
         .get("message")
         .and_then(Value::as_str)
