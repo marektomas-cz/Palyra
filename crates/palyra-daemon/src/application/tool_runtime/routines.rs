@@ -22,12 +22,13 @@ use crate::{
     },
     routines::{
         default_outcome_from_cron_status, join_run_metadata, natural_language_schedule_preview,
-        routine_delivery_preview, shadow_manual_schedule_payload_json,
-        validate_routine_prompt_self_contained, RoutineApprovalMode, RoutineApprovalPolicy,
-        RoutineDeliveryConfig, RoutineDeliveryMode, RoutineDispatchMode, RoutineExecutionConfig,
-        RoutineExecutionPosture, RoutineMetadataRecord, RoutineMetadataUpsert, RoutineQuietHours,
-        RoutineRegistry, RoutineRegistryError, RoutineRunMetadataUpsert, RoutineRunMode,
-        RoutineRunOutcomeKind, RoutineSilentPolicy, RoutineTriggerKind,
+        routine_approval_policy_with_auto_enable_guard, routine_delivery_preview,
+        shadow_manual_schedule_payload_json, validate_routine_prompt_self_contained,
+        RoutineApprovalMode, RoutineApprovalPolicy, RoutineDeliveryConfig, RoutineDeliveryMode,
+        RoutineDispatchMode, RoutineExecutionConfig, RoutineExecutionPosture,
+        RoutineMetadataRecord, RoutineMetadataUpsert, RoutineQuietHours, RoutineRegistry,
+        RoutineRegistryError, RoutineRunMetadataUpsert, RoutineRunMode, RoutineRunOutcomeKind,
+        RoutineSilentPolicy, RoutineTriggerKind,
     },
     tool_protocol::{ToolAttestation, ToolExecutionOutcome},
     transport::grpc::proto::palyra::cron::v1 as cron_v1,
@@ -452,8 +453,13 @@ async fn upsert_routine(
         optional_string_field(payload, "quiet_hours_end").as_deref(),
         optional_string_field(payload, "quiet_hours_timezone"),
     )?;
-    let approval_policy =
+    let requested_approval_policy =
         parse_approval_policy(optional_string_field(payload, "approval_mode").as_deref())?;
+    let approval_policy = routine_approval_policy_with_auto_enable_guard(
+        schedule.schedule_type,
+        schedule.schedule_payload_json.as_str(),
+        requested_approval_policy,
+    );
     validate_sensitive_tool_approval_policy(&execution, &approval_policy)?;
     let concurrency_policy =
         parse_concurrency_policy(optional_string_field(payload, "concurrency_policy").as_deref())?;
@@ -557,8 +563,13 @@ async fn set_routine_enabled(
         context.principal.as_str(),
     )
     .await?;
+    let guarded_approval_policy = routine_approval_policy_with_auto_enable_guard(
+        routine.job.schedule_type,
+        routine.job.schedule_payload_json.as_str(),
+        routine.metadata.approval_policy.clone(),
+    );
     let approval_required = enabled
-        && routine.metadata.approval_policy.mode == RoutineApprovalMode::BeforeEnable
+        && guarded_approval_policy.mode == RoutineApprovalMode::BeforeEnable
         && !routine_approval_granted(
             runtime_state,
             routine_approval_subject_id(

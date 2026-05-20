@@ -10,7 +10,7 @@ use std::{
 use crate::{
     cron::{self, CronTimezoneMode},
     gateway::proto::palyra::cron::v1 as cron_v1,
-    journal::{CronJobRecord, CronRunRecord, CronRunStatus},
+    journal::{CronJobRecord, CronRunRecord, CronRunStatus, CronScheduleType},
 };
 use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
 use palyra_common::{
@@ -29,6 +29,9 @@ const ROUTINE_RUNS_FILE: &str = "run_metadata.json";
 const MAX_ROUTINE_COUNT: usize = 2_048;
 const MAX_ROUTINE_RUN_METADATA_COUNT: usize = 8_192;
 const MIN_EVERY_INTERVAL_MS: u64 = 30 * 1_000;
+/// Recurring routine schedules below this interval require review before they
+/// can be enabled, even when the caller omits an approval policy.
+pub const MIN_AUTO_ENABLE_EVERY_INTERVAL_MS: u64 = 5 * 60 * 1_000;
 pub const SHADOW_AT_TIMESTAMP_RFC3339: &str = "2100-01-01T00:00:00Z";
 pub const ROUTINE_EXPORT_SCHEMA_ID: &str = "palyra.routine.export.v1";
 pub const ROUTINE_EXPORT_SCHEMA_VERSION: u32 = 1;
@@ -675,6 +678,46 @@ impl Default for RoutineApprovalPolicy {
     fn default() -> Self {
         Self { mode: RoutineApprovalMode::None }
     }
+}
+
+/// Applies the routine schedule auto-enable guard to an approval policy.
+///
+/// Inputs are the normalized schedule type and payload produced by the cron
+/// normalization layer. The returned policy preserves normal schedules and
+/// fail-closes high-frequency recurring schedules to `before_enable`; malformed
+/// `every` payloads are treated as high-frequency for this guard.
+#[must_use]
+pub fn routine_approval_policy_with_auto_enable_guard(
+    schedule_type: CronScheduleType,
+    schedule_payload_json: &str,
+    approval_policy: RoutineApprovalPolicy,
+) -> RoutineApprovalPolicy {
+    if schedule_requires_auto_enable_guard(schedule_type, schedule_payload_json)
+        && approval_policy.mode != RoutineApprovalMode::BeforeEnable
+    {
+        return RoutineApprovalPolicy { mode: RoutineApprovalMode::BeforeEnable };
+    }
+    approval_policy
+}
+
+/// Returns true when a normalized schedule is too frequent to auto-enable.
+#[must_use]
+pub fn schedule_requires_auto_enable_guard(
+    schedule_type: CronScheduleType,
+    schedule_payload_json: &str,
+) -> bool {
+    if schedule_type != CronScheduleType::Every {
+        return false;
+    }
+    every_interval_ms_from_schedule_payload(schedule_payload_json)
+        .is_none_or(|interval_ms| interval_ms < MIN_AUTO_ENABLE_EVERY_INTERVAL_MS)
+}
+
+fn every_interval_ms_from_schedule_payload(schedule_payload_json: &str) -> Option<u64> {
+    let payload = serde_json::from_str::<Value>(schedule_payload_json).ok()?;
+    payload.get("interval_ms").and_then(|value| {
+        value.as_u64().or_else(|| value.as_i64().and_then(|signed| u64::try_from(signed).ok()))
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2420,15 +2463,17 @@ fn humanize_duration(duration_ms: u64) -> String {
 mod tests {
     use super::{
         build_routine_export_bundle, default_outcome_from_cron_status, join_run_metadata,
-        natural_language_schedule_preview, resolve_routines_root, routine_delivery_contract,
+        natural_language_schedule_preview, resolve_routines_root,
+        routine_approval_policy_with_auto_enable_guard, routine_delivery_contract,
         routine_delivery_preview, routine_retention_dry_run, routine_run_lifecycle_snapshot,
-        routine_runtime_backfill_plan, shadow_manual_schedule_payload_json,
-        validate_routine_export_bundle, validate_routine_prompt_self_contained,
-        RoutineApprovalGateState, RoutineApprovalMode, RoutineApprovalPolicy,
-        RoutineDeliveryConfig, RoutineDeliveryContractKind, RoutineDeliveryMode,
-        RoutineExecutionConfig, RoutineMetadataRecord, RoutineRegistry, RoutineRetentionPolicy,
-        RoutineRunLeaseState, RoutineRunMetadataRecord, RoutineRunMetadataUpsert, RoutineRunMode,
-        RoutineRunOutcomeKind, RoutineSilentPolicy, RoutineTriggerKind, ROUTINE_EXPORT_SCHEMA_ID,
+        routine_runtime_backfill_plan, schedule_requires_auto_enable_guard,
+        shadow_manual_schedule_payload_json, validate_routine_export_bundle,
+        validate_routine_prompt_self_contained, RoutineApprovalGateState, RoutineApprovalMode,
+        RoutineApprovalPolicy, RoutineDeliveryConfig, RoutineDeliveryContractKind,
+        RoutineDeliveryMode, RoutineExecutionConfig, RoutineMetadataRecord, RoutineRegistry,
+        RoutineRetentionPolicy, RoutineRunLeaseState, RoutineRunMetadataRecord,
+        RoutineRunMetadataUpsert, RoutineRunMode, RoutineRunOutcomeKind, RoutineSilentPolicy,
+        RoutineTriggerKind, MIN_AUTO_ENABLE_EVERY_INTERVAL_MS, ROUTINE_EXPORT_SCHEMA_ID,
         ROUTINE_RUN_LEASE_TTL_MS,
     };
     use crate::{
@@ -2734,6 +2779,45 @@ mod tests {
             error.to_string().contains("greater than zero"),
             "error should explain minimum repeat interval"
         );
+    }
+
+    #[test]
+    fn schedule_auto_enable_guard_requires_before_enable_for_fast_every_schedules() {
+        let payload = json!({ "interval_ms": 60_000_u64 }).to_string();
+
+        assert!(schedule_requires_auto_enable_guard(CronScheduleType::Every, payload.as_str()));
+
+        let guarded = routine_approval_policy_with_auto_enable_guard(
+            CronScheduleType::Every,
+            payload.as_str(),
+            RoutineApprovalPolicy::default(),
+        );
+        assert_eq!(guarded.mode, RoutineApprovalMode::BeforeEnable);
+    }
+
+    #[test]
+    fn schedule_auto_enable_guard_preserves_normal_every_schedules() {
+        let payload = json!({ "interval_ms": MIN_AUTO_ENABLE_EVERY_INTERVAL_MS }).to_string();
+
+        assert!(!schedule_requires_auto_enable_guard(CronScheduleType::Every, payload.as_str()));
+
+        let guarded = routine_approval_policy_with_auto_enable_guard(
+            CronScheduleType::Every,
+            payload.as_str(),
+            RoutineApprovalPolicy::default(),
+        );
+        assert_eq!(guarded.mode, RoutineApprovalMode::None);
+    }
+
+    #[test]
+    fn schedule_auto_enable_guard_fail_closes_malformed_every_payloads() {
+        let guarded = routine_approval_policy_with_auto_enable_guard(
+            CronScheduleType::Every,
+            "{}",
+            RoutineApprovalPolicy { mode: RoutineApprovalMode::BeforeFirstRun },
+        );
+
+        assert_eq!(guarded.mode, RoutineApprovalMode::BeforeEnable);
     }
 
     #[test]

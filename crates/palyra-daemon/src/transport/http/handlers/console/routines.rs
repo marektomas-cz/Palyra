@@ -18,14 +18,14 @@ use crate::{
     },
     routines::{
         build_routine_export_bundle, default_outcome_from_cron_status, join_run_metadata,
-        natural_language_schedule_preview, routine_delivery_preview, routine_templates,
-        shadow_manual_schedule_payload_json, validate_routine_export_bundle,
-        validate_routine_prompt_self_contained, RoutineApprovalMode, RoutineApprovalPolicy,
-        RoutineDeliveryConfig, RoutineDeliveryMode, RoutineDispatchMode, RoutineExecutionConfig,
-        RoutineExecutionPosture, RoutineExportBundle, RoutineMetadataRecord, RoutineMetadataUpsert,
-        RoutineQuietHours, RoutineRegistryError, RoutineRunMetadataUpsert, RoutineRunMode,
-        RoutineRunOutcomeKind, RoutineSilentPolicy, RoutineTriggerKind,
-        ROUTINE_TEMPLATE_PACK_VERSION,
+        natural_language_schedule_preview, routine_approval_policy_with_auto_enable_guard,
+        routine_delivery_preview, routine_templates, shadow_manual_schedule_payload_json,
+        validate_routine_export_bundle, validate_routine_prompt_self_contained,
+        RoutineApprovalMode, RoutineApprovalPolicy, RoutineDeliveryConfig, RoutineDeliveryMode,
+        RoutineDispatchMode, RoutineExecutionConfig, RoutineExecutionPosture, RoutineExportBundle,
+        RoutineMetadataRecord, RoutineMetadataUpsert, RoutineQuietHours, RoutineRegistryError,
+        RoutineRunMetadataUpsert, RoutineRunMode, RoutineRunOutcomeKind, RoutineSilentPolicy,
+        RoutineTriggerKind, ROUTINE_TEMPLATE_PACK_VERSION,
     },
     *,
 };
@@ -335,8 +335,13 @@ pub(crate) async fn console_routine_import_handler(
     if let Some(job) = existing_job.as_ref() {
         ensure_job_owner(job, session.context.principal.as_str())?;
     }
+    let approval_policy = routine_approval_policy_with_auto_enable_guard(
+        bundle.job.schedule_type,
+        bundle.job.schedule_payload_json.as_str(),
+        bundle.routine.approval_policy.clone(),
+    );
     let approval_required = requested_enabled
-        && bundle.routine.approval_policy.mode == RoutineApprovalMode::BeforeEnable
+        && approval_policy.mode == RoutineApprovalMode::BeforeEnable
         && !routine_approval_granted(
             &state,
             routine_approval_subject_id(routine_id.as_str(), RoutineApprovalMode::BeforeEnable),
@@ -375,7 +380,7 @@ pub(crate) async fn console_routine_import_handler(
             delivery: bundle.routine.delivery.clone(),
             quiet_hours: bundle.routine.quiet_hours.clone(),
             cooldown_ms: bundle.routine.cooldown_ms,
-            approval_policy: bundle.routine.approval_policy.clone(),
+            approval_policy,
             template_id: bundle.routine.template_id.clone(),
         })
         .map_err(routine_registry_error_response)?;
@@ -456,7 +461,12 @@ pub(crate) async fn console_routine_upsert_handler(
         payload.quiet_hours_end.as_deref(),
         payload.quiet_hours_timezone,
     )?;
-    let approval_policy = parse_approval_policy(payload.approval_mode.as_deref())?;
+    let requested_approval_policy = parse_approval_policy(payload.approval_mode.as_deref())?;
+    let approval_policy = routine_approval_policy_with_auto_enable_guard(
+        schedule.schedule_type,
+        schedule.schedule_payload_json.as_str(),
+        requested_approval_policy,
+    );
     let concurrency_policy = parse_concurrency_policy(payload.concurrency_policy.as_deref())?;
     let retry_policy = parse_retry_policy(payload.retry_max_attempts, payload.retry_backoff_ms)?;
     let misfire_policy = parse_misfire_policy(payload.misfire_policy.as_deref())?;
@@ -584,8 +594,13 @@ pub(crate) async fn console_routine_set_enabled_handler(
         session.context.principal.as_str(),
     )
     .await?;
+    let guarded_approval_policy = routine_approval_policy_with_auto_enable_guard(
+        routine.job.schedule_type,
+        routine.job.schedule_payload_json.as_str(),
+        routine.metadata.approval_policy.clone(),
+    );
     let approval_required = payload.enabled
-        && routine.metadata.approval_policy.mode == RoutineApprovalMode::BeforeEnable
+        && guarded_approval_policy.mode == RoutineApprovalMode::BeforeEnable
         && !routine_approval_granted(
             &state,
             routine_approval_subject_id(
