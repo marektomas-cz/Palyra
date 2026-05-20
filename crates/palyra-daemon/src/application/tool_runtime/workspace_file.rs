@@ -3,7 +3,7 @@ use std::os::fd::AsRawFd;
 #[cfg(target_os = "macos")]
 use std::os::unix::ffi::OsStringExt;
 #[cfg(windows)]
-use std::os::windows::io::AsRawHandle;
+use std::os::windows::{ffi::OsStrExt, io::AsRawHandle};
 use std::{
     fs::{self, File},
     io::{Read, Seek, SeekFrom},
@@ -1564,7 +1564,77 @@ fn normalized_path_key_starts_with(candidate: &str, root: &str) -> bool {
 
 #[cfg(windows)]
 fn windows_path_alias_key(path: &Path) -> Option<String> {
+    windows_existing_path_alias_key(path).or_else(|| windows_lexical_path_alias_key(path))
+}
+
+#[cfg(windows)]
+fn windows_existing_path_alias_key(path: &Path) -> Option<String> {
+    if let Some(long_path) = windows_long_path_name(path) {
+        if let Some(key) = windows_normalized_path_alias_key(long_path.as_str()) {
+            return Some(key);
+        }
+    }
+
+    let deverbatim = windows_deverbatim_path_string(path)?;
+    let long_path = windows_long_path_name(Path::new(deverbatim.as_str()))?;
+    windows_normalized_path_alias_key(long_path.as_str())
+}
+
+#[cfg(windows)]
+fn windows_long_path_name(path: &Path) -> Option<String> {
+    use windows_sys::Win32::Storage::FileSystem::GetLongPathNameW;
+
+    let mut source = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    if source.is_empty() {
+        return None;
+    }
+    source.push(0);
+
+    let mut buffer = vec![0_u16; 260];
+    loop {
+        let length = unsafe {
+            // SAFETY: Both buffers are valid nul-terminated UTF-16 buffers. The destination size
+            // passed to Win32 matches the allocated buffer length.
+            GetLongPathNameW(
+                source.as_ptr(),
+                buffer.as_mut_ptr(),
+                u32::try_from(buffer.len()).ok()?,
+            )
+        };
+        if length == 0 {
+            return None;
+        }
+        let length = usize::try_from(length).ok()?;
+        if length < buffer.len() {
+            buffer.truncate(length);
+            return Some(String::from_utf16_lossy(buffer.as_slice()));
+        }
+        buffer.resize(length.saturating_add(1), 0);
+    }
+}
+
+#[cfg(windows)]
+fn windows_deverbatim_path_string(path: &Path) -> Option<String> {
     let normalized = path.to_string_lossy().replace('\\', "/");
+    let lower = normalized.to_ascii_lowercase();
+    let deverbatim = if lower.starts_with("//?/unc/") {
+        format!("//{}", &normalized[8..])
+    } else if lower.starts_with("//?/") || lower.starts_with("//./") {
+        normalized[4..].to_owned()
+    } else {
+        return None;
+    };
+    Some(deverbatim.replace('/', "\\"))
+}
+
+#[cfg(windows)]
+fn windows_lexical_path_alias_key(path: &Path) -> Option<String> {
+    windows_normalized_path_alias_key(path.to_string_lossy().as_ref())
+}
+
+#[cfg(windows)]
+fn windows_normalized_path_alias_key(path: &str) -> Option<String> {
+    let normalized = path.replace('\\', "/");
     if normalized.is_empty() {
         return None;
     }
@@ -1764,12 +1834,68 @@ fn workspace_search_outcome(
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
+    fn windows_short_path_name(path: &Path) -> Option<PathBuf> {
+        use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+
+        let mut source = path.as_os_str().encode_wide().collect::<Vec<_>>();
+        if source.is_empty() {
+            return None;
+        }
+        source.push(0);
+
+        let mut buffer = vec![0_u16; 260];
+        loop {
+            let length = unsafe {
+                // SAFETY: Both buffers are valid nul-terminated UTF-16 buffers. The destination
+                // size passed to Win32 matches the allocated buffer length.
+                GetShortPathNameW(
+                    source.as_ptr(),
+                    buffer.as_mut_ptr(),
+                    u32::try_from(buffer.len()).ok()?,
+                )
+            };
+            if length == 0 {
+                return None;
+            }
+            let length = usize::try_from(length).ok()?;
+            if length < buffer.len() {
+                buffer.truncate(length);
+                return Some(PathBuf::from(String::from_utf16_lossy(buffer.as_slice())));
+            }
+            buffer.resize(length.saturating_add(1), 0);
+        }
+    }
+
     #[test]
     fn workspace_root_scope_check_rejects_prefix_sibling() {
         assert!(!path_stays_inside_workspace_root(
             Path::new("/tmp/workspace-extra/file.txt"),
             Path::new("/tmp/workspace")
         ));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn workspace_root_scope_check_accepts_windows_short_and_opened_long_aliases() {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let workspace = tempdir.path().join("workspace");
+        fs::create_dir_all(workspace.join("nested")).expect("workspace should exist");
+        let file_path = workspace.join("nested").join("calc.js");
+        fs::write(file_path.as_path(), "export const add = (a, b) => a + b;\n")
+            .expect("workspace file should be written");
+        let short_workspace =
+            windows_short_path_name(workspace.as_path()).unwrap_or_else(|| workspace.clone());
+        let file = File::open(file_path.as_path()).expect("workspace file should open");
+        let opened_path = canonicalize_open_file_path(&file, "nested/calc.js")
+            .expect("opened workspace file should resolve");
+
+        assert!(
+            path_stays_inside_workspace_root(opened_path.as_path(), short_workspace.as_path()),
+            "opened path {} should stay inside workspace root {}",
+            opened_path.display(),
+            short_workspace.display()
+        );
     }
 
     #[test]
