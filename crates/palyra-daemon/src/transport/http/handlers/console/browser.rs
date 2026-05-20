@@ -2,6 +2,8 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 
 use crate::*;
 
+const BROWSER_CALLER_PRINCIPAL_HEADER: &str = "x-palyra-principal";
+
 fn console_browser_allows_private_targets_for_url(
     state: &AppState,
     allow_private_targets: Option<bool>,
@@ -1118,7 +1120,7 @@ pub(crate) async fn console_browser_network_log_handler(
     Path(session_id): Path<String>,
     Query(query): Query<ConsoleBrowserNetworkLogQuery>,
 ) -> Result<Json<control_plane::BrowserNetworkLogEnvelope>, Response> {
-    let _session = authorize_console_session(&state, &headers, false)?;
+    let session = authorize_console_session(&state, &headers, false)?;
     validate_console_browser_canonical_id(session_id.as_str(), "session_id")?;
     let limit = query.limit.unwrap_or(50).clamp(1, 250);
 
@@ -1131,6 +1133,10 @@ pub(crate) async fn console_browser_network_log_handler(
         max_payload_bytes: query.max_payload_bytes.unwrap_or(0),
     });
     apply_browser_service_auth(&state, request.metadata_mut())?;
+    apply_browser_caller_principal_metadata(
+        session.context.principal.as_str(),
+        request.metadata_mut(),
+    )?;
     let response = client.network_log(request).await.map_err(runtime_status_response)?.into_inner();
     let entries = response
         .entries
@@ -2487,6 +2493,26 @@ pub(crate) fn apply_browser_service_auth(
     Ok(())
 }
 
+#[allow(clippy::result_large_err)]
+pub(crate) fn apply_browser_caller_principal_metadata(
+    principal: &str,
+    metadata: &mut tonic::metadata::MetadataMap,
+) -> Result<(), Response> {
+    let principal = principal.trim();
+    if principal.is_empty() {
+        return Err(runtime_status_response(tonic::Status::unauthenticated(
+            "missing caller principal",
+        )));
+    }
+    let value = tonic::metadata::MetadataValue::try_from(principal).map_err(|_| {
+        runtime_status_response(tonic::Status::invalid_argument(
+            "failed to encode browser caller principal metadata",
+        ))
+    })?;
+    metadata.insert(BROWSER_CALLER_PRINCIPAL_HEADER, value);
+    Ok(())
+}
+
 fn console_browser_tab_to_json(tab: browser_v1::BrowserTab) -> Value {
     serde_json::to_value(control_plane_browser_tab(tab)).unwrap_or(Value::Null)
 }
@@ -2500,6 +2526,19 @@ mod tests {
         let response = required_console_browser_canonical_id("   ", "session_id")
             .expect_err("empty session_id should be rejected");
         assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn browser_network_log_metadata_includes_caller_principal() {
+        let mut metadata = tonic::metadata::MetadataMap::new();
+
+        apply_browser_caller_principal_metadata(" user:local ", &mut metadata)
+            .expect("principal metadata should attach");
+
+        assert_eq!(
+            metadata.get(BROWSER_CALLER_PRINCIPAL_HEADER).and_then(|value| value.to_str().ok()),
+            Some("user:local")
+        );
     }
 
     #[test]

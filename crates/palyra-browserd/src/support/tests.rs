@@ -1451,14 +1451,16 @@ async fn browser_service_chromium_network_log_includes_same_origin_fetch_failure
         .into_inner();
     assert!(waited.success, "fetch failure marker should render: {}", waited.error);
 
+    let mut network_log_request = Request::new(browser_v1::NetworkLogRequest {
+        v: 1,
+        session_id: Some(session_id),
+        limit: 20,
+        include_headers: false,
+        max_payload_bytes: 32 * 1024,
+    });
+    insert_principal(&mut network_log_request, "user:ops");
     let network_log = service
-        .network_log(Request::new(browser_v1::NetworkLogRequest {
-            v: 1,
-            session_id: Some(session_id),
-            limit: 20,
-            include_headers: false,
-            max_payload_bytes: 32 * 1024,
-        }))
+        .network_log(network_log_request)
         .await
         .expect("network_log should execute")
         .into_inner();
@@ -2130,14 +2132,16 @@ async fn browser_service_network_log_redacts_sensitive_values() {
         .into_inner();
     assert!(navigate.success, "navigation should succeed");
 
+    let mut without_headers_request = Request::new(browser_v1::NetworkLogRequest {
+        v: 1,
+        session_id: Some(proto::palyra::common::v1::CanonicalId { ulid: session_id.clone() }),
+        limit: 10,
+        include_headers: false,
+        max_payload_bytes: 8 * 1024,
+    });
+    insert_principal(&mut without_headers_request, "user:ops");
     let without_headers = service
-        .network_log(Request::new(browser_v1::NetworkLogRequest {
-            v: 1,
-            session_id: Some(proto::palyra::common::v1::CanonicalId { ulid: session_id.clone() }),
-            limit: 10,
-            include_headers: false,
-            max_payload_bytes: 8 * 1024,
-        }))
+        .network_log(without_headers_request)
         .await
         .expect("network_log without headers should execute")
         .into_inner();
@@ -2148,14 +2152,16 @@ async fn browser_service_network_log_redacts_sensitive_values() {
         "headers must be excluded unless explicitly requested"
     );
 
+    let mut with_headers_request = Request::new(browser_v1::NetworkLogRequest {
+        v: 1,
+        session_id: Some(proto::palyra::common::v1::CanonicalId { ulid: session_id }),
+        limit: 10,
+        include_headers: true,
+        max_payload_bytes: 8 * 1024,
+    });
+    insert_principal(&mut with_headers_request, "user:ops");
     let with_headers = service
-        .network_log(Request::new(browser_v1::NetworkLogRequest {
-            v: 1,
-            session_id: Some(proto::palyra::common::v1::CanonicalId { ulid: session_id }),
-            limit: 10,
-            include_headers: true,
-            max_payload_bytes: 8 * 1024,
-        }))
+        .network_log(with_headers_request)
         .await
         .expect("network_log with headers should execute")
         .into_inner();
@@ -4495,6 +4501,20 @@ async fn browser_service_session_diagnostics_require_matching_principal() {
         .await
         .expect_err("get_session should reject cross-principal access");
     assert_eq!(mismatched_get_status.code(), tonic::Code::PermissionDenied);
+
+    let mut mismatched_network_log = Request::new(browser_v1::NetworkLogRequest {
+        v: 1,
+        session_id: Some(session_id.clone()),
+        limit: 10,
+        include_headers: false,
+        max_payload_bytes: 8 * 1024,
+    });
+    insert_principal(&mut mismatched_network_log, "user:beta");
+    let mismatched_network_log_status = service
+        .network_log(mismatched_network_log)
+        .await
+        .expect_err("network_log should reject cross-principal access");
+    assert_eq!(mismatched_network_log_status.code(), tonic::Code::PermissionDenied);
 
     let mut mismatched_inspect = Request::new(browser_v1::InspectSessionRequest {
         v: 1,
