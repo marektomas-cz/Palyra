@@ -241,15 +241,11 @@ pub enum BrowserCommand {
     Storage {
         session_id: String,
         #[arg(long)]
-        principal: Option<String>,
-        #[arg(long)]
         output: Option<String>,
     },
     #[command(about = "Inspect failed browser actions for a session")]
     Errors {
         session_id: String,
-        #[arg(long)]
-        principal: Option<String>,
         #[arg(long)]
         limit: Option<u32>,
         #[arg(long)]
@@ -260,8 +256,6 @@ pub enum BrowserCommand {
     #[command(about = "Export a trace-like debug artifact for a browser session")]
     Trace {
         session_id: String,
-        #[arg(long)]
-        principal: Option<String>,
         #[arg(long)]
         output: Option<String>,
     },
@@ -359,23 +353,15 @@ pub enum BrowserSessionCommand {
     #[command(about = "List active browser sessions")]
     List {
         #[arg(long)]
-        principal: Option<String>,
-        #[arg(long)]
         limit: Option<u32>,
         #[arg(long, default_value_t = false)]
         json: bool,
     },
     #[command(about = "Show session summary, budget, and tabs")]
-    Show {
-        session_id: String,
-        #[arg(long)]
-        principal: Option<String>,
-    },
+    Show { session_id: String },
     #[command(about = "Inspect bounded session debug state")]
     Inspect {
         session_id: String,
-        #[arg(long)]
-        principal: Option<String>,
         #[arg(long, default_value_t = false)]
         include_cookies: bool,
         #[arg(long, default_value_t = false)]

@@ -452,15 +452,13 @@ async fn run_browser_async(command: BrowserCommand) -> Result<()> {
         BrowserCommand::Network { session_id, limit, include_headers, max_payload_bytes, json } => {
             run_browser_network(session_id, limit, include_headers, max_payload_bytes, json).await
         }
-        BrowserCommand::Storage { session_id, principal, output } => {
-            run_browser_storage(session_id, principal, output).await
+        BrowserCommand::Storage { session_id, output } => {
+            run_browser_storage(session_id, output).await
         }
-        BrowserCommand::Errors { session_id, principal, limit, output, json } => {
-            run_browser_errors(session_id, principal, limit, output, json).await
+        BrowserCommand::Errors { session_id, limit, output, json } => {
+            run_browser_errors(session_id, limit, output, json).await
         }
-        BrowserCommand::Trace { session_id, principal, output } => {
-            run_browser_trace(session_id, principal, output).await
-        }
+        BrowserCommand::Trace { session_id, output } => run_browser_trace(session_id, output).await,
         BrowserCommand::Downloads { session_id, limit, quarantined_only, json } => {
             run_browser_downloads(session_id, limit, quarantined_only, json).await
         }
@@ -1176,16 +1174,15 @@ async fn run_browser_session_command(command: BrowserSessionCommand) -> Result<(
                 json,
             )
         }
-        BrowserSessionCommand::List { principal, limit, json } => {
+        BrowserSessionCommand::List { limit, json } => {
             let resolved = resolve_browser_config(None, None, None)?;
             let mut client = connect_browser_service(&resolved.connection).await?;
-            let caller_principal =
-                resolve_browser_caller_principal(principal.clone(), app::ConnectionDefaults::USER)?;
+            let caller_principal = resolve_browser_caller_principal(app::ConnectionDefaults::USER)?;
             let response = client
                 .list_sessions(browser_request(
                     browser_v1::ListSessionsRequest {
                         v: CANONICAL_PROTOCOL_MAJOR,
-                        principal: principal.unwrap_or_default(),
+                        principal: caller_principal.clone(),
                         limit: limit.unwrap_or_default(),
                     },
                     resolved.connection.auth_token.as_deref(),
@@ -1216,9 +1213,8 @@ async fn run_browser_session_command(command: BrowserSessionCommand) -> Result<(
                 json,
             )
         }
-        BrowserSessionCommand::Show { session_id, principal } => {
-            let detail =
-                get_browser_session_detail(session_id.as_str(), principal.as_deref()).await?;
+        BrowserSessionCommand::Show { session_id } => {
+            let detail = get_browser_session_detail(session_id.as_str()).await?;
             let value = session_detail_value(&detail);
             let text = format!(
                 "browser.session.show session_id={} tabs={} private_targets={} downloads={} profile_id={}",
@@ -1235,7 +1231,6 @@ async fn run_browser_session_command(command: BrowserSessionCommand) -> Result<(
         }
         BrowserSessionCommand::Inspect {
             session_id,
-            principal,
             include_cookies,
             include_storage,
             include_action_log,
@@ -1252,7 +1247,6 @@ async fn run_browser_session_command(command: BrowserSessionCommand) -> Result<(
         } => {
             let mut value = inspect_browser_session(
                 session_id.as_str(),
-                principal.as_deref(),
                 browser_v1::InspectSessionRequest {
                     v: CANONICAL_PROTOCOL_MAJOR,
                     session_id: Some(resolve_required_canonical_id(session_id.clone())?),
@@ -2098,14 +2092,9 @@ async fn run_browser_network(
     ensure_browser_command_success("browser.network", success, error.as_str())
 }
 
-async fn run_browser_storage(
-    session_id: String,
-    principal: Option<String>,
-    output: Option<String>,
-) -> Result<()> {
+async fn run_browser_storage(session_id: String, output: Option<String>) -> Result<()> {
     let mut value = inspect_browser_session(
         session_id.as_str(),
-        principal.as_deref(),
         browser_v1::InspectSessionRequest {
             v: CANONICAL_PROTOCOL_MAJOR,
             session_id: Some(resolve_required_canonical_id(session_id.clone())?),
@@ -2146,14 +2135,12 @@ async fn run_browser_storage(
 
 async fn run_browser_errors(
     session_id: String,
-    principal: Option<String>,
     limit: Option<u32>,
     output: Option<String>,
     json: bool,
 ) -> Result<()> {
     let mut value = inspect_browser_session(
         session_id.as_str(),
-        principal.as_deref(),
         browser_v1::InspectSessionRequest {
             v: CANONICAL_PROTOCOL_MAJOR,
             session_id: Some(resolve_required_canonical_id(session_id.clone())?),
@@ -2207,14 +2194,9 @@ async fn run_browser_errors(
     )
 }
 
-async fn run_browser_trace(
-    session_id: String,
-    principal: Option<String>,
-    output: Option<String>,
-) -> Result<()> {
+async fn run_browser_trace(session_id: String, output: Option<String>) -> Result<()> {
     let mut value = inspect_browser_session(
         session_id.as_str(),
-        principal.as_deref(),
         browser_v1::InspectSessionRequest {
             v: CANONICAL_PROTOCOL_MAJOR,
             session_id: Some(resolve_required_canonical_id(session_id.clone())?),
@@ -2256,7 +2238,7 @@ async fn run_browser_trace(
 
 async fn run_browser_console(session_id: String, output: Option<String>, json: bool) -> Result<()> {
     let resolved = resolve_browser_config(None, None, None)?;
-    let caller_principal = resolve_browser_caller_principal(None, app::ConnectionDefaults::USER)?;
+    let caller_principal = resolve_browser_caller_principal(app::ConnectionDefaults::USER)?;
     let mut client = connect_browser_service(&resolved.connection).await?;
     let response = client
         .console_log(browser_request(
@@ -2297,7 +2279,7 @@ async fn run_browser_console(session_id: String, output: Option<String>, json: b
 
 async fn run_browser_pdf(session_id: String, output: Option<String>) -> Result<()> {
     let resolved = resolve_browser_config(None, None, None)?;
-    let caller_principal = resolve_browser_caller_principal(None, app::ConnectionDefaults::USER)?;
+    let caller_principal = resolve_browser_caller_principal(app::ConnectionDefaults::USER)?;
     let mut client = connect_browser_service(&resolved.connection).await?;
     let response = client
         .export_pdf(browser_request(
@@ -2345,7 +2327,7 @@ async fn run_browser_pdf(session_id: String, output: Option<String>) -> Result<(
 
 async fn run_browser_press(session_id: String, key: String) -> Result<()> {
     let resolved = resolve_browser_config(None, None, None)?;
-    let caller_principal = resolve_browser_caller_principal(None, app::ConnectionDefaults::USER)?;
+    let caller_principal = resolve_browser_caller_principal(app::ConnectionDefaults::USER)?;
     let mut client = connect_browser_service(&resolved.connection).await?;
     let response = client
         .press(browser_request(
@@ -2387,7 +2369,7 @@ async fn run_browser_press(session_id: String, key: String) -> Result<()> {
 
 async fn run_browser_select(session_id: String, selector: String, value: String) -> Result<()> {
     let resolved = resolve_browser_config(None, None, None)?;
-    let caller_principal = resolve_browser_caller_principal(None, app::ConnectionDefaults::USER)?;
+    let caller_principal = resolve_browser_caller_principal(app::ConnectionDefaults::USER)?;
     let mut client = connect_browser_service(&resolved.connection).await?;
     let response = client
         .select(browser_request(
@@ -2431,7 +2413,7 @@ async fn run_browser_select(session_id: String, selector: String, value: String)
 
 async fn run_browser_highlight(session_id: String, selector: String) -> Result<()> {
     let resolved = resolve_browser_config(None, None, None)?;
-    let caller_principal = resolve_browser_caller_principal(None, app::ConnectionDefaults::USER)?;
+    let caller_principal = resolve_browser_caller_principal(app::ConnectionDefaults::USER)?;
     let mut client = connect_browser_service(&resolved.connection).await?;
     let response = client
         .highlight(browser_request(
@@ -2679,16 +2661,11 @@ fn apply_browser_service_caller_principal(
     Ok(())
 }
 
-fn resolve_browser_caller_principal(
-    override_principal: Option<String>,
-    defaults: app::ConnectionDefaults,
-) -> Result<String> {
+fn resolve_browser_caller_principal(defaults: app::ConnectionDefaults) -> Result<String> {
     let root_context = app::current_root_context()
         .ok_or_else(|| anyhow!("CLI root context is unavailable for browser command"))?;
-    let connection = root_context.resolve_grpc_connection(
-        app::ConnectionOverrides { principal: override_principal, ..Default::default() },
-        defaults,
-    )?;
+    let connection =
+        root_context.resolve_grpc_connection(app::ConnectionOverrides::default(), defaults)?;
     Ok(connection.principal)
 }
 
@@ -2709,15 +2686,9 @@ async fn probe_browser_grpc(connection: &BrowserServiceConnection) -> Result<()>
     Ok(())
 }
 
-async fn get_browser_session_detail(
-    session_id: &str,
-    principal: Option<&str>,
-) -> Result<browser_v1::BrowserSessionDetail> {
+async fn get_browser_session_detail(session_id: &str) -> Result<browser_v1::BrowserSessionDetail> {
     let resolved = resolve_browser_config(None, None, None)?;
-    let caller_principal = resolve_browser_caller_principal(
-        principal.map(str::to_owned),
-        app::ConnectionDefaults::USER,
-    )?;
+    let caller_principal = resolve_browser_caller_principal(app::ConnectionDefaults::USER)?;
     let mut client = connect_browser_service(&resolved.connection).await?;
     let response = client
         .get_session(browser_request(
@@ -2739,14 +2710,10 @@ async fn get_browser_session_detail(
 
 async fn inspect_browser_session(
     session_id: &str,
-    principal: Option<&str>,
     request: browser_v1::InspectSessionRequest,
 ) -> Result<Value> {
     let resolved = resolve_browser_config(None, None, None)?;
-    let caller_principal = resolve_browser_caller_principal(
-        principal.map(str::to_owned),
-        app::ConnectionDefaults::USER,
-    )?;
+    let caller_principal = resolve_browser_caller_principal(app::ConnectionDefaults::USER)?;
     let mut client = connect_browser_service(&resolved.connection).await?;
     let response = client
         .inspect_session(browser_request(

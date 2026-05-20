@@ -3886,26 +3886,13 @@ fn parse_browser_session_create() {
 
 #[test]
 fn parse_browser_session_list_json_flag() {
-    let parsed = Cli::parse_from([
-        "palyra",
-        "browser",
-        "session",
-        "list",
-        "--principal",
-        "user:browser",
-        "--limit",
-        "5",
-        "--json",
-    ]);
+    let parsed =
+        Cli::parse_from(["palyra", "browser", "session", "list", "--limit", "5", "--json"]);
     assert_eq!(
         parsed.command,
         Command::Browser {
             command: BrowserCommand::Session {
-                command: BrowserSessionCommand::List {
-                    principal: Some("user:browser".to_owned()),
-                    limit: Some(5),
-                    json: true,
-                },
+                command: BrowserSessionCommand::List { limit: Some(5), json: true },
             }
         }
     );
@@ -3932,6 +3919,26 @@ fn parse_browser_session_close_json_flag() {
             }
         }
     );
+}
+
+#[test]
+fn parse_browser_diagnostics_reject_principal_override() {
+    let session_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    let rejected = [
+        vec!["palyra", "browser", "storage", session_id, "--principal", "user:victim"],
+        vec!["palyra", "browser", "errors", session_id, "--principal", "user:victim"],
+        vec!["palyra", "browser", "trace", session_id, "--principal", "user:victim"],
+        vec!["palyra", "browser", "session", "list", "--principal", "user:victim"],
+        vec!["palyra", "browser", "session", "show", session_id, "--principal", "user:victim"],
+        vec!["palyra", "browser", "session", "inspect", session_id, "--principal", "user:victim"],
+    ];
+
+    for args in rejected {
+        assert!(
+            Cli::try_parse_from(args).is_err(),
+            "sensitive browser diagnostic commands must not accept --principal overrides"
+        );
+    }
 }
 
 #[test]
