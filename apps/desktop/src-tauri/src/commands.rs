@@ -1,8 +1,9 @@
-use std::{path::Path, sync::Arc, time::Duration};
+use std::{path::Path, process::Stdio, sync::Arc, time::Duration};
 
 use anyhow::{anyhow, Context, Result};
 use palyra_control_plane as control_plane;
 use tauri::{AppHandle, Manager, State};
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use ulid::Ulid;
@@ -963,11 +964,11 @@ async fn run_desktop_node_enrollment(
         })
         .await
         .map_err(|error| command_error(anyhow!("failed to mint desktop node pairing code: {error}")))?
-        .code
         .code;
     let grpc_url = format!("https://127.0.0.1:{}", runtime.gateway_grpc_port.saturating_add(1));
     let runtime_root_for_install = runtime_root.clone();
     let device_id_for_install = device_id.clone();
+    let pairing_code_stdin = format!("{}\n", code.code);
     let install_task = tauri::async_runtime::spawn(async move {
         let args = vec![
             "node".to_owned(),
@@ -979,15 +980,29 @@ async fn run_desktop_node_enrollment(
             grpc_url,
             "--method".to_owned(),
             "pin".to_owned(),
-            "--pairing-code".to_owned(),
-            code,
+            "--pairing-code-stdin".to_owned(),
         ];
-        run_palyra_json_command_owned(runtime_root_for_install.as_path(), &args).await
-    });
-    let request_id = wait_for_pending_node_pairing_request(&control_plane, device_id.as_str())
+        run_palyra_json_command_owned_with_stdin(
+            runtime_root_for_install.as_path(),
+            &args,
+            Some(pairing_code_stdin.as_str()),
+        )
         .await
-        .map_err(command_error)?;
-    control_plane
+    });
+    let request_id = match wait_for_pending_node_pairing_request(
+        &control_plane,
+        device_id.as_str(),
+        code.created_at_unix_ms,
+    )
+    .await
+    {
+        Ok(request_id) => request_id,
+        Err(error) => {
+            install_task.abort();
+            return Err(command_error(error));
+        }
+    };
+    if let Err(error) = control_plane
         .approve_node_pairing_request(
             request_id.as_str(),
             &control_plane::NodePairingDecisionRequest {
@@ -999,7 +1014,10 @@ async fn run_desktop_node_enrollment(
             },
         )
         .await
-        .map_err(|error| command_error(anyhow!("failed to approve desktop node pairing: {error}")))?;
+    {
+        install_task.abort();
+        return Err(command_error(anyhow!("failed to approve desktop node pairing: {error}")));
+    }
     let install_payload = install_task
         .await
         .map_err(|error| command_error(anyhow!("desktop node install task failed: {error}")))?
@@ -1019,6 +1037,7 @@ async fn run_desktop_node_enrollment(
 async fn wait_for_pending_node_pairing_request(
     control_plane: &control_plane::ControlPlaneClient,
     device_id: &str,
+    min_requested_at_unix_ms: i64,
 ) -> Result<String> {
     let started = std::time::Instant::now();
     while started.elapsed() < Duration::from_secs(20) {
@@ -1029,12 +1048,11 @@ async fn wait_for_pending_node_pairing_request(
             }))
             .await
             .map_err(|error| anyhow!("failed to poll desktop node pairing requests: {error}"))?;
-        if let Some(request_id) = envelope
-            .requests
-            .into_iter()
-            .find(|record| record.device_id == device_id)
-            .map(|record| record.request_id)
-        {
+        if let Some(request_id) = select_desktop_node_pairing_request_id(
+            envelope.requests,
+            device_id,
+            min_requested_at_unix_ms,
+        )? {
             return Ok(request_id);
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
@@ -1042,6 +1060,31 @@ async fn wait_for_pending_node_pairing_request(
     Err(anyhow!(
         "timed out waiting for desktop node pairing request for device {device_id}"
     ))
+}
+
+pub(crate) fn select_desktop_node_pairing_request_id(
+    requests: Vec<control_plane::NodePairingRequestView>,
+    device_id: &str,
+    min_requested_at_unix_ms: i64,
+) -> Result<Option<String>> {
+    let matching = requests
+        .into_iter()
+        .filter(|record| {
+            record.device_id == device_id
+                && record.client_kind == "node"
+                && record.method == control_plane::NodePairingMethod::Pin
+                && record.state == control_plane::NodePairingRequestState::PendingApproval
+                && record.code_issued_by == CONSOLE_PRINCIPAL
+                && record.requested_at_unix_ms >= min_requested_at_unix_ms
+        })
+        .collect::<Vec<_>>();
+    match matching.as_slice() {
+        [] => Ok(None),
+        [record] => Ok(Some(record.request_id.clone())),
+        _ => Err(anyhow!(
+            "refusing to auto-approve ambiguous desktop node pairing requests for device {device_id}"
+        )),
+    }
 }
 
 async fn read_desktop_node_lifecycle(runtime_root: &Path) -> Result<DesktopNodeLifecyclePayload> {
@@ -1058,11 +1101,21 @@ async fn run_palyra_json_command_owned(
     runtime_root: &Path,
     args: &[String],
 ) -> Result<serde_json::Value> {
+    run_palyra_json_command_owned_with_stdin(runtime_root, args, None).await
+}
+
+async fn run_palyra_json_command_owned_with_stdin(
+    runtime_root: &Path,
+    args: &[String],
+    stdin_payload: Option<&str>,
+) -> Result<serde_json::Value> {
     let cli_path = super::resolve_binary_path("palyra", "PALYRA_DESKTOP_PALYRA_BIN")?;
+    let command_display = desktop_cli_command_for_error(args);
     let mut command = Command::new(cli_path.as_path());
     super::configure_background_command(&mut command);
+    command.kill_on_drop(true);
     command
-        .stdin(std::process::Stdio::null())
+        .stdin(if stdin_payload.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .env("PALYRA_STATE_ROOT", runtime_root.to_string_lossy().into_owned())
@@ -1073,21 +1126,75 @@ async fn run_palyra_json_command_owned(
     for arg in args {
         command.arg(arg);
     }
-    let output = command.output().await.with_context(|| {
-        format!("failed to run desktop CLI command `{}`", args.join(" "))
-    })?;
+    let output = match stdin_payload {
+        Some(payload) => {
+            let mut child = command.spawn().with_context(|| {
+                format!("failed to run desktop CLI command `{command_display}`")
+            })?;
+            let mut child_stdin = child.stdin.take().ok_or_else(|| {
+                anyhow!("desktop CLI command `{command_display}` did not expose stdin")
+            })?;
+            child_stdin
+                .write_all(payload.as_bytes())
+                .await
+                .with_context(|| {
+                    format!("failed to write desktop CLI command stdin for `{command_display}`")
+                })?;
+            drop(child_stdin);
+            child.wait_with_output().await.with_context(|| {
+                format!("failed to wait for desktop CLI command `{command_display}`")
+            })?
+        }
+        None => command.output().await.with_context(|| {
+            format!("failed to run desktop CLI command `{command_display}`")
+        })?,
+    };
     let stdout = String::from_utf8_lossy(output.stdout.as_slice()).to_string();
     let stderr = sanitize_log_line(String::from_utf8_lossy(output.stderr.as_slice()).as_ref());
     if !output.status.success() {
         return Err(anyhow!(
-            "desktop CLI command `{}` failed: {}",
-            args.join(" "),
-            stderr
+            "desktop CLI command `{command_display}` failed: {stderr}",
         ));
     }
     serde_json::from_str(stdout.as_str()).with_context(|| {
-        format!("failed to decode desktop CLI JSON output for `{}`", args.join(" "))
+        format!("failed to decode desktop CLI JSON output for `{command_display}`")
     })
+}
+
+pub(crate) fn desktop_cli_command_for_error(args: &[String]) -> String {
+    let mut redact_next = false;
+    args.iter()
+        .map(|arg| {
+            if redact_next {
+                redact_next = false;
+                return "<redacted>".to_owned();
+            }
+            if is_desktop_cli_secret_arg_name(arg.as_str()) {
+                redact_next = true;
+                return arg.clone();
+            }
+            if let Some((name, _value)) = arg.split_once('=') {
+                if is_desktop_cli_secret_arg_name(name) {
+                    return format!("{name}=<redacted>");
+                }
+            }
+            arg.clone()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn is_desktop_cli_secret_arg_name(arg: &str) -> bool {
+    matches!(
+        arg,
+        "--pairing-code"
+            | "--admin-token"
+            | "--auth-token"
+            | "--token"
+            | "--api-key"
+            | "--password"
+            | "--secret"
+    )
 }
 
 pub(crate) fn run() {

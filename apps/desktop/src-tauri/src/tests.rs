@@ -11,6 +11,7 @@ use std::{
 };
 
 use serde_json::json;
+use palyra_control_plane as control_plane;
 
 mod dashboard_access;
 mod support;
@@ -25,7 +26,10 @@ use crate::companion::{
     DesktopCompanionVoiceStateRequest,
 };
 
-use super::commands::initialize_control_center;
+use super::commands::{
+    desktop_cli_command_for_error, initialize_control_center,
+    select_desktop_node_pairing_request_id,
+};
 use super::features::onboarding::connectors::discord::{
     apply_discord_onboarding, run_discord_onboarding_preflight, verify_discord_connector,
     DiscordOnboardingRequest, DiscordVerificationRequest,
@@ -162,6 +166,77 @@ fn sanitize_log_line_redacts_sensitive_assignments_and_url_query_tokens() {
     assert!(!sanitized.contains("token=abc"));
     assert!(sanitized.contains("token=<redacted>"));
     assert!(sanitized.contains("mode=ok"));
+}
+
+#[test]
+fn desktop_cli_command_for_error_redacts_secret_arguments() {
+    let args = vec![
+        "node".to_owned(),
+        "install".to_owned(),
+        "--pairing-code".to_owned(),
+        "123456".to_owned(),
+        "--auth-token=token-secret".to_owned(),
+    ];
+    let rendered = desktop_cli_command_for_error(&args);
+    assert!(!rendered.contains("123456"));
+    assert!(!rendered.contains("token-secret"));
+    assert!(rendered.contains("--pairing-code <redacted>"));
+    assert!(rendered.contains("--auth-token=<redacted>"));
+}
+
+#[test]
+fn desktop_node_pairing_selection_requires_fresh_desktop_request() {
+    let selected = select_desktop_node_pairing_request_id(
+        vec![
+            desktop_node_pairing_request("old", "device-a", "admin:desktop-control-center", 999),
+            desktop_node_pairing_request("other", "device-a", "operator:other", 1_100),
+            desktop_node_pairing_request("selected", "device-a", "admin:desktop-control-center", 1_100),
+        ],
+        "device-a",
+        1_000,
+    )
+    .expect("selection should succeed");
+
+    assert_eq!(selected.as_deref(), Some("selected"));
+}
+
+#[test]
+fn desktop_node_pairing_selection_rejects_ambiguous_fresh_requests() {
+    let result = select_desktop_node_pairing_request_id(
+        vec![
+            desktop_node_pairing_request("first", "device-a", "admin:desktop-control-center", 1_100),
+            desktop_node_pairing_request("second", "device-a", "admin:desktop-control-center", 1_101),
+        ],
+        "device-a",
+        1_000,
+    );
+
+    assert!(result.is_err(), "multiple fresh desktop requests must not auto-approve");
+}
+
+fn desktop_node_pairing_request(
+    request_id: &str,
+    device_id: &str,
+    code_issued_by: &str,
+    requested_at_unix_ms: i64,
+) -> control_plane::NodePairingRequestView {
+    control_plane::NodePairingRequestView {
+        request_id: request_id.to_owned(),
+        session_id: request_id.to_owned(),
+        device_id: device_id.to_owned(),
+        client_kind: "node".to_owned(),
+        method: control_plane::NodePairingMethod::Pin,
+        code_issued_by: code_issued_by.to_owned(),
+        requested_at_unix_ms,
+        expires_at_unix_ms: requested_at_unix_ms + 60_000,
+        approval_id: format!("approval-{request_id}"),
+        state: control_plane::NodePairingRequestState::PendingApproval,
+        decision_reason: None,
+        decision_scope_ttl_ms: None,
+        identity_fingerprint: format!("fingerprint-{request_id}"),
+        transcript_hash_hex: format!("transcript-{request_id}"),
+        cert_expires_at_unix_ms: None,
+    }
 }
 
 #[test]

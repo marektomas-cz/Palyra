@@ -6,6 +6,7 @@ Options:
       --device-id <DEVICE_ID>
       --method <METHOD>                    [possible values: pin, qr]
       --pairing-code <PAIRING_CODE>
+      --pairing-code-stdin
       --start
       --json
   -h, --help                               Print help

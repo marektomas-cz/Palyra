@@ -1,6 +1,6 @@
 use std::{
     fs::{self, File},
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -137,12 +137,19 @@ async fn run_node_async(command: NodeCommand) -> Result<()> {
             device_id,
             method,
             pairing_code,
+            pairing_code_stdin,
             poll_interval_ms,
             json,
         } => {
             let mut config = resolve_node_host_config(grpc_url, device_id, poll_interval_ms)?;
-            ensure_node_pairing_material(&mut config, method, pairing_code, gateway_ca_file)
-                .await?;
+            ensure_node_pairing_material(
+                &mut config,
+                method,
+                pairing_code,
+                pairing_code_stdin,
+                gateway_ca_file,
+            )
+            .await?;
             write_node_host_config(&config)?;
             run_node_foreground(&config, output::preferred_json(json)).await
         }
@@ -156,13 +163,20 @@ async fn run_node_async(command: NodeCommand) -> Result<()> {
             device_id,
             method,
             pairing_code,
+            pairing_code_stdin,
             start,
             json,
         } => {
             let mut config =
                 resolve_node_host_config(grpc_url, device_id, Some(DEFAULT_NODE_POLL_INTERVAL_MS))?;
-            ensure_node_pairing_material(&mut config, method, pairing_code, gateway_ca_file)
-                .await?;
+            ensure_node_pairing_material(
+                &mut config,
+                method,
+                pairing_code,
+                pairing_code_stdin,
+                gateway_ca_file,
+            )
+            .await?;
             write_node_host_config(&config)?;
             if start {
                 run_node_start(output::preferred_json(json))
@@ -455,6 +469,7 @@ async fn ensure_node_pairing_material(
     config: &mut NodeHostConfig,
     method: Option<PairingMethodArg>,
     pairing_code: Option<String>,
+    pairing_code_stdin: bool,
     gateway_ca_file: Option<String>,
 ) -> Result<()> {
     if load_node_client_material(config).is_ok() {
@@ -464,12 +479,13 @@ async fn ensure_node_pairing_material(
     let method = method.ok_or_else(|| {
         anyhow!("node pairing bootstrap requires --method when local pairing material is absent")
     })?;
-    let pairing_code = pairing_code
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            anyhow!("node pairing bootstrap requires --pairing-code when local pairing material is absent")
-        })?;
+    let pairing_code = resolve_pairing_code_input(pairing_code, pairing_code_stdin)?.ok_or_else(
+        || {
+            anyhow!(
+                "node pairing bootstrap requires --pairing-code or --pairing-code-stdin when local pairing material is absent"
+            )
+        },
+    )?;
     let gateway_ca_certificate_pem = match gateway_ca_file.map(PathBuf::from) {
         Some(gateway_ca_file) => {
             fs::read_to_string(gateway_ca_file.as_path()).with_context(|| {
@@ -608,6 +624,28 @@ async fn ensure_node_pairing_material(
     )?;
     config.paired_at_unix_ms = Some(now_unix_ms());
     Ok(())
+}
+
+fn resolve_pairing_code_input(
+    pairing_code: Option<String>,
+    pairing_code_stdin: bool,
+) -> Result<Option<String>> {
+    if pairing_code.is_some() && pairing_code_stdin {
+        anyhow::bail!("use either --pairing-code or --pairing-code-stdin, not both");
+    }
+    if pairing_code_stdin {
+        let mut raw = String::new();
+        std::io::stdin()
+            .read_to_string(&mut raw)
+            .context("failed to read node pairing code from stdin")?;
+        return Ok(normalize_pairing_code_input(raw));
+    }
+    Ok(pairing_code.and_then(normalize_pairing_code_input))
+}
+
+fn normalize_pairing_code_input(value: String) -> Option<String> {
+    let normalized = value.trim().to_owned();
+    (!normalized.is_empty()).then_some(normalized)
 }
 
 fn build_node_status_payload(action: &str, detail: &str) -> Result<NodeLifecyclePayload> {

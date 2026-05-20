@@ -6324,8 +6324,30 @@ fn parse_node_install_with_bootstrap_material() {
                 device_id: Some("01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned()),
                 method: Some(PairingMethodArg::Pin),
                 pairing_code: Some("123456".to_owned()),
+                pairing_code_stdin: false,
                 start: true,
                 json: true,
+            }
+        }
+    );
+}
+
+#[test]
+fn parse_node_install_with_pairing_code_stdin() {
+    let parsed =
+        Cli::parse_from(["palyra", "node", "install", "--method", "pin", "--pairing-code-stdin"]);
+    assert_eq!(
+        parsed.command,
+        Command::Node {
+            command: NodeCommand::Install {
+                grpc_url: None,
+                gateway_ca_file: None,
+                device_id: None,
+                method: Some(PairingMethodArg::Pin),
+                pairing_code: None,
+                pairing_code_stdin: true,
+                start: false,
+                json: false,
             }
         }
     );
