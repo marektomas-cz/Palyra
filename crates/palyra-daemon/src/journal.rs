@@ -5557,6 +5557,7 @@ impl JournalStore {
 
     fn query_embedding_for_search(
         &self,
+        cache_scope: &str,
         query_text: &str,
         embedding_model_id: &str,
         embedding_dims: usize,
@@ -5564,6 +5565,7 @@ impl JournalStore {
         now_unix_ms: i64,
     ) -> QueryEmbeddingLookup {
         let cache_key = query_embedding_cache_key(
+            cache_scope,
             query_text,
             embedding_model_id,
             embedding_dims,
@@ -5640,9 +5642,9 @@ impl JournalStore {
                 QueryEmbeddingCacheStatus {
                     capacity: QUERY_EMBEDDING_CACHE_CAPACITY,
                     ttl_ms: QUERY_EMBEDDING_CACHE_TTL_MS,
-                    entry_count: cache.entries.len(),
-                    hits: cache.hits,
-                    misses: cache.misses,
+                    entry_count: 0,
+                    hits: 0,
+                    misses: 0,
                 }
             }
             Err(poisoned) => {
@@ -5651,9 +5653,9 @@ impl JournalStore {
                 QueryEmbeddingCacheStatus {
                     capacity: QUERY_EMBEDDING_CACHE_CAPACITY,
                     ttl_ms: QUERY_EMBEDDING_CACHE_TTL_MS,
-                    entry_count: cache.entries.len(),
-                    hits: cache.hits,
-                    misses: cache.misses,
+                    entry_count: 0,
+                    hits: 0,
+                    misses: 0,
                 }
             }
         }
@@ -13408,7 +13410,9 @@ impl JournalStore {
         let normalized_query_terms = normalized_fts_terms(query_text.as_str());
         let allow_vector_only_candidates = normalized_query_terms.len() > 1;
         let fts_queries = build_memory_fts_queries(query_text.as_str());
+        let cache_scope = memory_query_embedding_cache_scope(request);
         let query_embedding = self.query_embedding_for_search(
+            cache_scope.as_str(),
             query_text.as_str(),
             embedding_model_id.as_str(),
             embedding_dims,
@@ -14425,7 +14429,9 @@ impl JournalStore {
         let embedding_model_id = self.memory_embedding_provider.model_name().to_owned();
         let embedding_dims = self.memory_embedding_provider.dimensions();
         let now = current_unix_ms()?;
+        let cache_scope = workspace_query_embedding_cache_scope(request, prefix.as_deref());
         let query_embedding = self.query_embedding_for_search(
+            cache_scope.as_str(),
             query_text.as_str(),
             embedding_model_id.as_str(),
             embedding_dims,
@@ -14786,13 +14792,50 @@ fn workspace_candidate_key(document_id: &str, version: i64, chunk_index: usize) 
 }
 
 fn query_embedding_cache_key(
+    cache_scope: &str,
     query_text: &str,
     embedding_model_id: &str,
     embedding_dims: usize,
     embedding_version: i64,
 ) -> String {
+    let scope_digest = sha256_hex(cache_scope.as_bytes());
     let digest = sha256_hex(query_text.as_bytes());
-    format!("{embedding_model_id}:{embedding_dims}:{embedding_version}:{digest}")
+    format!("{embedding_model_id}:{embedding_dims}:{embedding_version}:{scope_digest}:{digest}")
+}
+
+fn memory_query_embedding_cache_scope(request: &MemorySearchRequest) -> String {
+    query_embedding_cache_scope(&[
+        ("surface", "memory"),
+        ("principal", request.principal.as_str()),
+        ("channel", request.channel.as_deref().unwrap_or("")),
+        ("session", request.session_id.as_deref().unwrap_or("")),
+    ])
+}
+
+fn workspace_query_embedding_cache_scope(
+    request: &WorkspaceSearchRequest,
+    normalized_prefix: Option<&str>,
+) -> String {
+    query_embedding_cache_scope(&[
+        ("surface", "workspace"),
+        ("principal", request.principal.as_str()),
+        ("channel", request.channel.as_deref().unwrap_or("")),
+        ("agent", request.agent_id.as_deref().unwrap_or("")),
+        ("prefix", normalized_prefix.unwrap_or("")),
+    ])
+}
+
+fn query_embedding_cache_scope(fields: &[(&str, &str)]) -> String {
+    let mut scope = String::new();
+    for (field, value) in fields {
+        scope.push_str(field);
+        scope.push('=');
+        scope.push_str(value.len().to_string().as_str());
+        scope.push(':');
+        scope.push_str(value);
+        scope.push(';');
+    }
+    scope
 }
 
 fn prune_query_embedding_cache(cache: &mut QueryEmbeddingCacheState, now_unix_ms: i64) {
@@ -19654,20 +19697,22 @@ mod tests {
     };
 
     use super::{
-        build_fts_query, build_memory_fts_queries, current_unix_ms, encode_vector_blob, sha256_hex,
-        ApprovalCreateRequest, ApprovalDecision, ApprovalDecisionScope, ApprovalPolicySnapshot,
-        ApprovalPromptOption, ApprovalPromptRecord, ApprovalResolveRequest, ApprovalRiskLevel,
-        ApprovalSubjectType, ApprovalsListFilter, CanvasStateTransitionRequest,
-        CronConcurrencyPolicy, CronJobCreateRequest, CronJobsListFilter, CronMisfirePolicy,
-        CronRetryPolicy, CronRunFinalizeRequest, CronRunStartRequest, CronRunStatus,
-        CronRunsListFilter, CronScheduleType, HashMemoryEmbeddingProvider, IdempotencyBeginRequest,
-        IdempotencyCompleteRequest, JournalAppendRequest, JournalConfig, JournalError,
-        JournalStore, MemoryEmbeddingProvider, MemoryItemCreateRequest, MemoryItemsListFilter,
-        MemoryMaintenanceRequest, MemoryPurgeRequest, MemoryRetentionPolicy, MemorySearchRequest,
-        MemorySource, OrchestratorCancelRequest, OrchestratorRunStartRequest,
-        OrchestratorSessionUpsertRequest, OrchestratorTapeAppendRequest, OrchestratorUsageDelta,
-        RecallArtifactCreateRequest, RecallArtifactListFilter, SessionSearchRequest,
-        SkillExecutionStatus, SkillStatusUpsertRequest, ToolJobAttachRequest, ToolJobCreateRequest,
+        build_fts_query, build_memory_fts_queries, current_unix_ms, encode_vector_blob,
+        memory_query_embedding_cache_scope, query_embedding_cache_key, sha256_hex,
+        workspace_query_embedding_cache_scope, ApprovalCreateRequest, ApprovalDecision,
+        ApprovalDecisionScope, ApprovalPolicySnapshot, ApprovalPromptOption, ApprovalPromptRecord,
+        ApprovalResolveRequest, ApprovalRiskLevel, ApprovalSubjectType, ApprovalsListFilter,
+        CanvasStateTransitionRequest, CronConcurrencyPolicy, CronJobCreateRequest,
+        CronJobsListFilter, CronMisfirePolicy, CronRetryPolicy, CronRunFinalizeRequest,
+        CronRunStartRequest, CronRunStatus, CronRunsListFilter, CronScheduleType,
+        HashMemoryEmbeddingProvider, IdempotencyBeginRequest, IdempotencyCompleteRequest,
+        JournalAppendRequest, JournalConfig, JournalError, JournalStore, MemoryEmbeddingProvider,
+        MemoryItemCreateRequest, MemoryItemsListFilter, MemoryMaintenanceRequest,
+        MemoryPurgeRequest, MemoryRetentionPolicy, MemorySearchRequest, MemorySource,
+        OrchestratorCancelRequest, OrchestratorRunStartRequest, OrchestratorSessionUpsertRequest,
+        OrchestratorTapeAppendRequest, OrchestratorUsageDelta, RecallArtifactCreateRequest,
+        RecallArtifactListFilter, SessionSearchRequest, SkillExecutionStatus,
+        SkillStatusUpsertRequest, ToolJobAttachRequest, ToolJobCreateRequest,
         ToolJobRetentionPolicy, ToolJobRetryPolicy, ToolJobRetryRequest, ToolJobState,
         ToolJobTailAppendRequest, ToolJobTailReadRequest, ToolJobTailStream,
         ToolJobTransitionRequest, ToolJobsListFilter, ToolResultArtifactCreateRequest,
@@ -23009,6 +23054,13 @@ mod tests {
         let second_outcome = store
             .search_memory_candidate_outcome(&request)
             .expect("second candidate search should succeed");
+        let calls_after_second_search = calls.load(Ordering::SeqCst);
+        let cross_principal_request =
+            MemorySearchRequest { principal: "user:other".to_owned(), ..request.clone() };
+        let cross_principal_outcome = store
+            .search_memory_candidate_outcome(&cross_principal_request)
+            .expect("cross-principal candidate search should succeed");
+        let calls_after_cross_principal_search = calls.load(Ordering::SeqCst);
 
         let status = store
             .memory_embeddings_status()
@@ -23021,6 +23073,10 @@ mod tests {
             second_outcome.diagnostics.query_embedding_cache_hit,
             "second search should report a query embedding cache hit"
         );
+        assert!(
+            !cross_principal_outcome.diagnostics.query_embedding_cache_hit,
+            "same query text under a different principal should miss the scoped cache"
+        );
         assert_eq!(second_outcome.diagnostics.source_kind, "memory");
         assert_eq!(second_outcome.diagnostics.vector_candidate_count, 1);
         assert_eq!(
@@ -23029,13 +23085,69 @@ mod tests {
             "first search should embed the query once"
         );
         assert_eq!(
-            calls.load(Ordering::SeqCst),
-            calls_after_first_search,
+            calls_after_second_search, calls_after_first_search,
             "second identical search should reuse the cached query embedding"
         );
-        assert_eq!(status.query_cache.entry_count, 1);
-        assert_eq!(status.query_cache.misses, 1);
-        assert_eq!(status.query_cache.hits, 1);
+        assert_eq!(
+            calls_after_cross_principal_search,
+            calls_after_first_search + 1,
+            "cross-principal same-query search should embed in its own cache scope"
+        );
+        assert_eq!(
+            status.query_cache.entry_count, 0,
+            "query cache status should not expose global tenant activity"
+        );
+        assert_eq!(
+            status.query_cache.misses, 0,
+            "query cache status should not expose global miss counters"
+        );
+        assert_eq!(
+            status.query_cache.hits, 0,
+            "query cache status should not expose global hit counters"
+        );
+    }
+
+    #[test]
+    fn query_embedding_cache_key_includes_search_scope() {
+        let memory_request = MemorySearchRequest {
+            principal: "user:ops".to_owned(),
+            channel: Some("cli".to_owned()),
+            session_id: Some("session-a".to_owned()),
+            query: "shared query".to_owned(),
+            top_k: 4,
+            min_score: 0.0,
+            tags: Vec::new(),
+            sources: Vec::new(),
+        };
+        let other_principal_request =
+            MemorySearchRequest { principal: "user:other".to_owned(), ..memory_request.clone() };
+        let workspace_request = WorkspaceSearchRequest {
+            principal: "user:ops".to_owned(),
+            channel: Some("cli".to_owned()),
+            agent_id: Some("agent-a".to_owned()),
+            query: "shared query".to_owned(),
+            prefix: Some("docs".to_owned()),
+            top_k: 4,
+            min_score: 0.0,
+            include_historical: false,
+            include_quarantined: false,
+        };
+
+        let memory_scope = memory_query_embedding_cache_scope(&memory_request);
+        let other_principal_scope = memory_query_embedding_cache_scope(&other_principal_request);
+        let workspace_scope =
+            workspace_query_embedding_cache_scope(&workspace_request, Some("docs"));
+
+        assert_ne!(memory_scope, other_principal_scope);
+        assert_ne!(memory_scope, workspace_scope);
+        assert_ne!(
+            query_embedding_cache_key(&memory_scope, "shared query", "model-a", 4, 1),
+            query_embedding_cache_key(&other_principal_scope, "shared query", "model-a", 4, 1)
+        );
+        assert_ne!(
+            query_embedding_cache_key(&memory_scope, "shared query", "model-a", 4, 1),
+            query_embedding_cache_key(&workspace_scope, "shared query", "model-a", 4, 1)
+        );
     }
 
     #[test]
