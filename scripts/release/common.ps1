@@ -692,6 +692,49 @@ function ConvertTo-PosixSingleQuotedLiteral {
     return $singleQuote + $Value.Replace($singleQuote, $escapedQuote) + $singleQuote
 }
 
+function ConvertTo-PowerShellSingleQuotedLiteral {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Value
+    )
+
+    $singleQuote = [string][char]39
+    return $singleQuote + $Value.Replace($singleQuote, $singleQuote + $singleQuote) + $singleQuote
+}
+
+function ConvertTo-CmdShimLiteral {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Value
+    )
+
+    $escaped = $Value.Replace("^", "^^")
+    $escaped = $escaped.Replace("%", "%%")
+    $escaped = $escaped.Replace("&", "^&")
+    $escaped = $escaped.Replace("<", "^<")
+    $escaped = $escaped.Replace(">", "^>")
+    $escaped = $escaped.Replace("|", "^|")
+    return $escaped
+}
+
+function Assert-CliShimLiteralSafe {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Value,
+        [Parameter(Mandatory = $true)]
+        [string]$Label
+    )
+
+    if ($Value.Contains("`r") -or $Value.Contains("`n") -or $Value.Contains([string][char]0)) {
+        throw "$Label cannot contain NUL or line separator characters."
+    }
+
+    return $Value
+}
+
 function Get-PalyraCliProfileBlock {
     param(
         [Parameter(Mandatory = $true)]
@@ -835,17 +878,23 @@ function Install-PalyraCliExposure {
         [bool]$PersistPath = $true
     )
 
-    $resolvedTargetBinary = Assert-FileExists -Path $TargetBinaryPath -Label "CLI binary"
+    $resolvedTargetBinary = Assert-CliShimLiteralSafe `
+        -Value (Assert-FileExists -Path $TargetBinaryPath -Label "CLI binary") `
+        -Label "CLI binary path"
     $resolvedCommandRoot = Get-PalyraCliCommandRoot -CommandRootOverride $CommandRoot
     $legacyPathCleanup = Remove-LegacyPalyraCliPathEntries -CommandRoot $resolvedCommandRoot
     New-Item -ItemType Directory -Path $resolvedCommandRoot -Force | Out-Null
     $resolvedStateRoot = $null
     if (-not [string]::IsNullOrWhiteSpace($StateRoot)) {
-        $resolvedStateRoot = [IO.Path]::GetFullPath($StateRoot)
+        $resolvedStateRoot = Assert-CliShimLiteralSafe `
+            -Value ([IO.Path]::GetFullPath($StateRoot)) `
+            -Label "StateRoot"
     }
     $resolvedConfigPath = $null
     if (-not [string]::IsNullOrWhiteSpace($ConfigPath)) {
-        $resolvedConfigPath = [IO.Path]::GetFullPath($ConfigPath)
+        $resolvedConfigPath = Assert-CliShimLiteralSafe `
+            -Value ([IO.Path]::GetFullPath($ConfigPath)) `
+            -Label "ConfigPath"
     }
 
     $commandName = "palyra"
@@ -860,13 +909,21 @@ function Install-PalyraCliExposure {
 
         New-Item -ItemType Directory -Path $Root -Force | Out-Null
 
+        $cmdTargetBinary = ConvertTo-CmdShimLiteral -Value $resolvedTargetBinary
+        $cmdStateRoot = if ($null -ne $resolvedStateRoot) { ConvertTo-CmdShimLiteral -Value $resolvedStateRoot } else { $null }
+        $cmdConfigPath = if ($null -ne $resolvedConfigPath) { ConvertTo-CmdShimLiteral -Value $resolvedConfigPath } else { $null }
+        $psTargetBinary = ConvertTo-PowerShellSingleQuotedLiteral -Value $resolvedTargetBinary
+        $psStateRoot = if ($null -ne $resolvedStateRoot) { ConvertTo-PowerShellSingleQuotedLiteral -Value $resolvedStateRoot } else { $null }
+        $psConfigPath = if ($null -ne $resolvedConfigPath) { ConvertTo-PowerShellSingleQuotedLiteral -Value $resolvedConfigPath } else { $null }
+
         $cmdShimPath = Join-Path $Root "$commandName.cmd"
         $cmdShimBody =
 @"
 @echo off
-$(if ($null -ne $resolvedStateRoot) { 'set "PALYRA_STATE_ROOT=' + $resolvedStateRoot + '"' })
-$(if ($null -ne $resolvedConfigPath) { 'set "PALYRA_CONFIG=' + $resolvedConfigPath + '"' })
-"$resolvedTargetBinary" %*
+setlocal DisableDelayedExpansion
+$(if ($null -ne $cmdStateRoot) { 'set "PALYRA_STATE_ROOT=' + $cmdStateRoot + '"' })
+$(if ($null -ne $cmdConfigPath) { 'set "PALYRA_CONFIG=' + $cmdConfigPath + '"' })
+"$cmdTargetBinary" %*
 "@
         Set-Content -LiteralPath $cmdShimPath -Value $cmdShimBody -NoNewline
 
@@ -877,12 +934,12 @@ Set-StrictMode -Version Latest
 `$ErrorActionPreference = "Stop"
 `$ProgressPreference = "SilentlyContinue"
 `$InformationPreference = "SilentlyContinue"
-$(if ($null -ne $resolvedStateRoot) { '$env:PALYRA_STATE_ROOT = "' + $resolvedStateRoot + '"' })
-$(if ($null -ne $resolvedConfigPath) { '$env:PALYRA_CONFIG = "' + $resolvedConfigPath + '"' })
+$(if ($null -ne $psStateRoot) { '$env:PALYRA_STATE_ROOT = ' + $psStateRoot })
+$(if ($null -ne $psConfigPath) { '$env:PALYRA_CONFIG = ' + $psConfigPath })
 if (`$MyInvocation.ExpectingInput) {
-    `$input | & "$resolvedTargetBinary" @args
+    `$input | & $psTargetBinary @args
 } else {
-    & "$resolvedTargetBinary" @args
+    & $psTargetBinary @args
 }
 exit `$LASTEXITCODE
 "@
@@ -897,13 +954,16 @@ exit `$LASTEXITCODE
         }
     } else {
         $shimPath = Join-Path $resolvedCommandRoot $commandName
+        $shTargetBinary = ConvertTo-PosixSingleQuotedLiteral -Value $resolvedTargetBinary
+        $shStateRoot = if ($null -ne $resolvedStateRoot) { ConvertTo-PosixSingleQuotedLiteral -Value $resolvedStateRoot } else { $null }
+        $shConfigPath = if ($null -ne $resolvedConfigPath) { ConvertTo-PosixSingleQuotedLiteral -Value $resolvedConfigPath } else { $null }
         $shimBody =
 @"
 #!/usr/bin/env sh
 set -eu
-$(if ($null -ne $resolvedStateRoot) { 'export PALYRA_STATE_ROOT="' + $resolvedStateRoot + '"' })
-$(if ($null -ne $resolvedConfigPath) { 'export PALYRA_CONFIG="' + $resolvedConfigPath + '"' })
-exec "$resolvedTargetBinary" "$@"
+$(if ($null -ne $shStateRoot) { 'export PALYRA_STATE_ROOT=' + $shStateRoot })
+$(if ($null -ne $shConfigPath) { 'export PALYRA_CONFIG=' + $shConfigPath })
+exec $shTargetBinary "$@"
 "@
         Set-Content -LiteralPath $shimPath -Value $shimBody -NoNewline
         Set-ExecutablePermissions -Path $shimPath
