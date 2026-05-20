@@ -38,6 +38,12 @@ const WORKSPACE_SEARCH_DEFAULT_MATCHES: usize = 64;
 const WORKSPACE_SEARCH_MAX_MATCHES: usize = 200;
 const WORKSPACE_SEARCH_MAX_FILES: usize = 2_000;
 const WORKSPACE_SEARCH_MAX_FILE_BYTES: u64 = 1024 * 1024;
+const WORKSPACE_SEARCH_MAX_DIRS: usize = 2_000;
+const WORKSPACE_SEARCH_MAX_DEPTH: usize = 32;
+const WORKSPACE_SEARCH_MAX_DIR_ENTRIES: usize = 2_000;
+const WORKSPACE_SEARCH_MAX_LINE_TEXT_BYTES: usize = 4 * 1024;
+const WORKSPACE_SEARCH_MAX_OUTPUT_BYTES: usize = 512 * 1024;
+const WORKSPACE_SEARCH_MATCH_JSON_OVERHEAD_BYTES: usize = 160;
 const WORKSPACE_SEARCH_SKIPPED_DIRS: &[&str] =
     &[".git", "node_modules", "target", "dist", "build", ".next", ".svelte-kit"];
 
@@ -1088,7 +1094,7 @@ fn search_workspace_path(
         .min(WORKSPACE_SEARCH_MAX_MATCHES);
     let case_sensitive = input.case_sensitive.unwrap_or(true);
     let mut state = WorkspaceSearchState::new(input.query.as_str(), case_sensitive, max_matches);
-    search_workspace_path_recursive(canonical_root, path.as_path(), &mut state)?;
+    search_workspace_path_recursive(canonical_root, path.as_path(), &mut state, 0)?;
 
     Ok(WorkspaceSearchOutput {
         query: input.query.clone(),
@@ -1115,6 +1121,8 @@ struct WorkspaceSearchState {
     files_with_matches: usize,
     skipped_files: usize,
     skipped_dirs: usize,
+    dirs_visited: usize,
+    estimated_output_bytes: usize,
 }
 
 impl WorkspaceSearchState {
@@ -1134,11 +1142,44 @@ impl WorkspaceSearchState {
             files_with_matches: 0,
             skipped_files: 0,
             skipped_dirs: 0,
+            dirs_visited: 0,
+            estimated_output_bytes: 256,
         }
     }
 
     fn has_capacity(&self) -> bool {
-        self.matches.len() < self.max_matches && self.files_scanned < WORKSPACE_SEARCH_MAX_FILES
+        self.matches.len() < self.max_matches
+            && self.files_scanned < WORKSPACE_SEARCH_MAX_FILES
+            && self.estimated_output_bytes < WORKSPACE_SEARCH_MAX_OUTPUT_BYTES
+    }
+
+    fn has_directory_capacity(&self) -> bool {
+        self.dirs_visited < WORKSPACE_SEARCH_MAX_DIRS
+    }
+
+    fn visit_directory(&mut self) -> bool {
+        if !self.has_directory_capacity() {
+            self.truncated = true;
+            self.skipped_dirs = self.skipped_dirs.saturating_add(1);
+            return false;
+        }
+        self.dirs_visited = self.dirs_visited.saturating_add(1);
+        true
+    }
+
+    fn reserve_match_output(&mut self, path: &str, line_text: &str) -> bool {
+        let estimated = path
+            .len()
+            .saturating_mul(2)
+            .saturating_add(line_text.len().saturating_mul(2))
+            .saturating_add(WORKSPACE_SEARCH_MATCH_JSON_OVERHEAD_BYTES);
+        let next = self.estimated_output_bytes.saturating_add(estimated);
+        if next > WORKSPACE_SEARCH_MAX_OUTPUT_BYTES {
+            self.truncated = true;
+            return false;
+        }
+        self.estimated_output_bytes = next;
+        true
     }
 }
 
@@ -1146,6 +1187,7 @@ fn search_workspace_path_recursive(
     canonical_root: &Path,
     path: &Path,
     state: &mut WorkspaceSearchState,
+    depth: usize,
 ) -> Result<(), String> {
     if !state.has_capacity() {
         state.truncated = true;
@@ -1158,7 +1200,12 @@ fn search_workspace_path_recursive(
         )
     })?;
     if metadata.is_dir() {
-        search_workspace_directory_recursive(canonical_root, path, state)?;
+        if depth >= WORKSPACE_SEARCH_MAX_DEPTH {
+            state.truncated = true;
+            state.skipped_dirs = state.skipped_dirs.saturating_add(1);
+            return Ok(());
+        }
+        search_workspace_directory_recursive(canonical_root, path, state, depth)?;
     } else if metadata.is_file() {
         search_workspace_file(canonical_root, path, metadata.len(), state)?;
     } else {
@@ -1171,7 +1218,11 @@ fn search_workspace_directory_recursive(
     canonical_root: &Path,
     path: &Path,
     state: &mut WorkspaceSearchState,
+    depth: usize,
 ) -> Result<(), String> {
+    if !state.visit_directory() {
+        return Ok(());
+    }
     let mut entries = Vec::new();
     for entry_result in fs::read_dir(path).map_err(|error| {
         format!(
@@ -1179,6 +1230,10 @@ fn search_workspace_directory_recursive(
             path.to_string_lossy()
         )
     })? {
+        if entries.len() >= WORKSPACE_SEARCH_MAX_DIR_ENTRIES {
+            state.truncated = true;
+            break;
+        }
         let entry = entry_result.map_err(|error| {
             format!(
                 "{WORKSPACE_SEARCH_TOOL_NAME} failed to read directory entry for {}: {error}",
@@ -1214,7 +1269,7 @@ fn search_workspace_directory_recursive(
             }
             continue;
         }
-        search_workspace_path_recursive(canonical_root, entry.path().as_path(), state)?;
+        search_workspace_path_recursive(canonical_root, entry.path().as_path(), state, depth + 1)?;
     }
     Ok(())
 }
@@ -1273,12 +1328,17 @@ fn search_workspace_line(
     state: &mut WorkspaceSearchState,
 ) {
     let haystack = if state.case_sensitive { line.to_owned() } else { line.to_ascii_lowercase() };
-    let needle = state.normalized_query.as_str();
+    let needle = state.normalized_query.clone();
+    let query_len = state.query.len().max(1);
     let mut search_start = 0usize;
-    while let Some(relative_index) = haystack[search_start..].find(needle) {
+    while let Some(relative_index) = haystack[search_start..].find(needle.as_str()) {
         let byte_index = search_start + relative_index;
         let column = line[..byte_index].chars().count() + 1;
-        let (line_text, redacted) = redact_workspace_search_line(line);
+        let excerpt = workspace_search_line_excerpt(line, byte_index, query_len);
+        let (line_text, redacted) = redact_workspace_search_line(excerpt.as_str());
+        if !state.reserve_match_output(path, line_text.as_str()) {
+            return;
+        }
         state.matches.push(WorkspaceSearchMatch {
             path: path.to_owned(),
             line: line_number,
@@ -1289,11 +1349,51 @@ fn search_workspace_line(
         if state.matches.len() >= state.max_matches {
             return;
         }
-        search_start = byte_index.saturating_add(state.query.len().max(1));
+        search_start = byte_index.saturating_add(query_len);
         if search_start >= haystack.len() {
             return;
         }
     }
+}
+
+fn workspace_search_line_excerpt(line: &str, match_start: usize, match_len: usize) -> String {
+    if line.len() <= WORKSPACE_SEARCH_MAX_LINE_TEXT_BYTES {
+        return line.to_owned();
+    }
+    let match_end = match_start.saturating_add(match_len).min(line.len());
+    let mut start = match_start.saturating_sub(WORKSPACE_SEARCH_MAX_LINE_TEXT_BYTES / 2);
+    if match_end > start.saturating_add(WORKSPACE_SEARCH_MAX_LINE_TEXT_BYTES) {
+        start = match_end.saturating_sub(WORKSPACE_SEARCH_MAX_LINE_TEXT_BYTES);
+    }
+    if line.len().saturating_sub(start) < WORKSPACE_SEARCH_MAX_LINE_TEXT_BYTES {
+        start = line.len().saturating_sub(WORKSPACE_SEARCH_MAX_LINE_TEXT_BYTES);
+    }
+    start = floor_char_boundary(line, start);
+    let mut end = start.saturating_add(WORKSPACE_SEARCH_MAX_LINE_TEXT_BYTES).min(line.len());
+    if end < match_end {
+        end = match_end;
+    }
+    end = floor_char_boundary(line, end);
+    if end <= start {
+        return String::new();
+    }
+    let mut excerpt = String::new();
+    if start > 0 {
+        excerpt.push_str("...");
+    }
+    excerpt.push_str(&line[start..end]);
+    if end < line.len() {
+        excerpt.push_str("...");
+    }
+    excerpt
+}
+
+fn floor_char_boundary(value: &str, mut index: usize) -> usize {
+    index = index.min(value.len());
+    while index > 0 && !value.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
 }
 
 fn redact_workspace_search_line(line: &str) -> (String, bool) {
@@ -2102,6 +2202,57 @@ mod tests {
         assert!(output.matches[0].redacted);
         assert!(output.matches[0].line_text.contains("[REDACTED_SECRET]"));
         assert!(!output.matches[0].line_text.contains("S020_DUMMY_SECRET_SHOULD_NOT_APPEAR"));
+    }
+
+    #[test]
+    fn search_workspace_bounds_long_line_output() {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let long_line = "a".repeat(WORKSPACE_SEARCH_MAX_FILE_BYTES as usize);
+        fs::write(tempdir.path().join("large.txt"), long_line)
+            .expect("workspace file should be written");
+        let input = parse_workspace_search_input(br#"{"query":"a","max_matches":200}"#)
+            .expect("search input should parse");
+
+        let output = search_workspace_from_roots(&[tempdir.path().to_path_buf()], &input)
+            .expect("workspace search should complete");
+        let serialized = serde_json::to_vec(&output).expect("output should serialize");
+
+        assert!(output.truncated, "search should stop at output budget");
+        assert!(!output.matches.is_empty());
+        assert!(output.matches.len() < WORKSPACE_SEARCH_MAX_MATCHES);
+        assert!(
+            output
+                .matches
+                .iter()
+                .all(|entry| entry.line_text.len() <= WORKSPACE_SEARCH_MAX_LINE_TEXT_BYTES + 6),
+            "match line excerpts should stay bounded"
+        );
+        assert!(
+            serialized.len() <= WORKSPACE_SEARCH_MAX_OUTPUT_BYTES,
+            "serialized search output should stay bounded: {}",
+            serialized.len()
+        );
+    }
+
+    #[test]
+    fn search_workspace_bounds_recursive_depth() {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let mut current = tempdir.path().to_path_buf();
+        for depth in 0..=WORKSPACE_SEARCH_MAX_DEPTH {
+            current = current.join(format!("d{depth}"));
+            fs::create_dir(current.as_path()).expect("nested directory should be created");
+        }
+        fs::write(current.join("needle.txt"), "deep needle\n")
+            .expect("deep workspace file should be written");
+        let input = parse_workspace_search_input(br#"{"query":"needle","max_matches":10}"#)
+            .expect("search input should parse");
+
+        let output = search_workspace_from_roots(&[tempdir.path().to_path_buf()], &input)
+            .expect("workspace search should complete");
+
+        assert!(output.truncated, "search should truncate at max recursion depth");
+        assert!(output.matches.is_empty(), "file past recursion depth should not be scanned");
+        assert!(output.skipped_dirs > 0, "truncated deep directory should be counted");
     }
 
     #[test]
