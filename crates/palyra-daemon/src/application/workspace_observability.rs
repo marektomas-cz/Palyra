@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
+    io::Read,
     path::{Component, Path, PathBuf},
     sync::Arc,
 };
@@ -1563,20 +1564,19 @@ fn build_post_change_checkpoint_file(
     workspace_roots: &[PathBuf],
     attestation: &WorkspacePatchFileAttestation,
 ) -> Result<WorkspaceCheckpointFileCreateRequest, Status> {
-    let workspace_root = workspace_roots
-        .get(attestation.workspace_root_index)
-        .ok_or_else(|| Status::internal("workspace checkpoint root index is out of range"))?;
-    let absolute_path = workspace_root.join(Path::new(attestation.path.as_str()));
-    let content_bytes = if attestation.after_sha256.is_some() {
-        Some(fs::read(absolute_path.as_path()).map_err(|error| {
-            Status::internal(format!(
-                "failed to read workspace checkpoint artifact {}: {error}",
-                absolute_path.display()
-            ))
-        })?)
+    let captured_content = if attestation.after_sha256.is_some() {
+        Some(read_existing_workspace_checkpoint_content(
+            workspace_roots,
+            attestation.path.as_str(),
+            attestation.workspace_root_index,
+            "post_change",
+            attestation.after_sha256.as_deref(),
+            attestation.after_size_bytes,
+        )?)
     } else {
         None
     };
+    let content_bytes = captured_content.as_ref().map(|content| content.bytes.clone());
     let content_type = infer_content_type(attestation.path.as_str(), content_bytes.as_deref());
     let (is_text, preview_text, search_text) =
         summarize_workspace_content(content_type.as_str(), content_bytes.as_deref());
@@ -1589,8 +1589,8 @@ fn build_post_change_checkpoint_file(
         change_kind: attestation.operation.clone(),
         before_content_sha256: attestation.before_sha256.clone(),
         before_size_bytes: attestation.before_size_bytes,
-        after_content_sha256: attestation.after_sha256.clone(),
-        after_size_bytes: attestation.after_size_bytes,
+        after_content_sha256: captured_content.as_ref().map(|content| content.sha256.clone()),
+        after_size_bytes: captured_content.as_ref().map(|content| content.size_bytes),
         content_type,
         is_text,
         preview_text,
@@ -1653,6 +1653,117 @@ fn build_preflight_checkpoint_files(
     }
 }
 
+struct WorkspaceCheckpointContentRead {
+    bytes: Vec<u8>,
+    sha256: String,
+    size_bytes: u64,
+}
+
+fn read_existing_workspace_checkpoint_content(
+    workspace_roots: &[PathBuf],
+    path: &str,
+    workspace_root_index: usize,
+    change_kind: &str,
+    expected_sha256: Option<&str>,
+    expected_size_bytes: Option<u64>,
+) -> Result<WorkspaceCheckpointContentRead, Status> {
+    let expected_sha256 =
+        expected_sha256.filter(|value| !value.trim().is_empty()).ok_or_else(|| {
+            Status::failed_precondition(format!(
+                "workspace checkpoint {change_kind} is missing planned content hash for {path}"
+            ))
+        })?;
+    let expected_size_bytes = expected_size_bytes.ok_or_else(|| {
+        Status::failed_precondition(format!(
+            "workspace checkpoint {change_kind} is missing planned size for {path}"
+        ))
+    })?;
+    let workspace_root = workspace_roots
+        .get(workspace_root_index)
+        .ok_or_else(|| Status::internal("workspace checkpoint root index is out of range"))?;
+    let canonical_workspace_root = canonicalize_workspace_checkpoint_root(workspace_root)?;
+    let absolute_path = resolve_existing_workspace_checkpoint_file(
+        canonical_workspace_root.as_path(),
+        Path::new(path),
+    )?;
+    let content_bytes = read_bounded_workspace_checkpoint_file(
+        absolute_path.as_path(),
+        expected_size_bytes,
+        path,
+        change_kind,
+    )?;
+    let actual_size_bytes = u64::try_from(content_bytes.len()).unwrap_or(u64::MAX);
+    if actual_size_bytes != expected_size_bytes {
+        return Err(Status::failed_precondition(format!(
+            "workspace checkpoint {change_kind} content changed before capture for {path}: expected_size={expected_size_bytes} actual_size={actual_size_bytes}"
+        )));
+    }
+    let actual_sha256 = hex::encode(sha2::Sha256::digest(content_bytes.as_slice()));
+    if !actual_sha256.eq_ignore_ascii_case(expected_sha256) {
+        return Err(Status::failed_precondition(format!(
+            "workspace checkpoint {change_kind} content changed before capture for {path}: planned hash mismatch"
+        )));
+    }
+    Ok(WorkspaceCheckpointContentRead {
+        bytes: content_bytes,
+        sha256: actual_sha256,
+        size_bytes: actual_size_bytes,
+    })
+}
+
+fn canonicalize_workspace_checkpoint_root(workspace_root: &Path) -> Result<PathBuf, Status> {
+    let canonical = fs::canonicalize(workspace_root).map_err(|error| {
+        Status::internal(format!(
+            "failed to canonicalize workspace checkpoint root {}: {error}",
+            workspace_root.display()
+        ))
+    })?;
+    if !canonical.is_dir() {
+        return Err(Status::invalid_argument(format!(
+            "workspace checkpoint root is not a directory: {}",
+            workspace_root.display()
+        )));
+    }
+    Ok(canonical)
+}
+
+fn resolve_existing_workspace_checkpoint_file(
+    workspace_root: &Path,
+    relative_path: &Path,
+) -> Result<PathBuf, Status> {
+    validate_workspace_restore_relative_path(relative_path)?;
+    let absolute_path = workspace_root.join(relative_path);
+    ensure_workspace_restore_target_confined(workspace_root, absolute_path.as_path())?;
+    Ok(absolute_path)
+}
+
+fn read_bounded_workspace_checkpoint_file(
+    absolute_path: &Path,
+    expected_size_bytes: u64,
+    display_path: &str,
+    change_kind: &str,
+) -> Result<Vec<u8>, Status> {
+    let mut file = fs::File::open(absolute_path).map_err(|error| {
+        Status::internal(format!(
+            "failed to read workspace checkpoint {change_kind} artifact {}: {error}",
+            absolute_path.display()
+        ))
+    })?;
+    let read_limit = expected_size_bytes.checked_add(1).ok_or_else(|| {
+        Status::failed_precondition(format!(
+            "workspace checkpoint {change_kind} expected size is too large for {display_path}"
+        ))
+    })?;
+    let mut content_bytes = Vec::new();
+    file.by_ref().take(read_limit).read_to_end(&mut content_bytes).map_err(|error| {
+        Status::internal(format!(
+            "failed to read workspace checkpoint {change_kind} artifact {}: {error}",
+            absolute_path.display()
+        ))
+    })?;
+    Ok(content_bytes)
+}
+
 fn build_existing_checkpoint_file(
     workspace_roots: &[PathBuf],
     path: String,
@@ -1662,22 +1773,17 @@ fn build_existing_checkpoint_file(
     content_sha256: Option<String>,
     size_bytes: Option<u64>,
 ) -> Result<WorkspaceCheckpointFileCreateRequest, Status> {
-    let workspace_root = workspace_roots
-        .get(workspace_root_index)
-        .ok_or_else(|| Status::internal("workspace checkpoint root index is out of range"))?;
-    let absolute_path = workspace_root.join(Path::new(path.as_str()));
-    let content_bytes = fs::read(absolute_path.as_path()).map_err(|error| {
-        Status::internal(format!(
-            "failed to read workspace preflight artifact {}: {error}",
-            absolute_path.display()
-        ))
-    })?;
-    let content_sha256 = content_sha256
-        .unwrap_or_else(|| hex::encode(sha2::Sha256::digest(content_bytes.as_slice())));
-    let size_bytes = size_bytes.unwrap_or(content_bytes.len() as u64);
-    let content_type = infer_content_type(path.as_str(), Some(content_bytes.as_slice()));
+    let captured_content = read_existing_workspace_checkpoint_content(
+        workspace_roots,
+        path.as_str(),
+        workspace_root_index,
+        change_kind,
+        content_sha256.as_deref(),
+        size_bytes,
+    )?;
+    let content_type = infer_content_type(path.as_str(), Some(captured_content.bytes.as_slice()));
     let (is_text, preview_text, search_text) =
-        summarize_workspace_content(content_type.as_str(), Some(content_bytes.as_slice()));
+        summarize_workspace_content(content_type.as_str(), Some(captured_content.bytes.as_slice()));
 
     Ok(WorkspaceCheckpointFileCreateRequest {
         artifact_id: Ulid::new().to_string(),
@@ -1685,15 +1791,15 @@ fn build_existing_checkpoint_file(
         workspace_root_index: workspace_root_index as u32,
         moved_from_path,
         change_kind: change_kind.to_owned(),
-        before_content_sha256: Some(content_sha256.clone()),
-        before_size_bytes: Some(size_bytes),
-        after_content_sha256: Some(content_sha256),
-        after_size_bytes: Some(size_bytes),
+        before_content_sha256: Some(captured_content.sha256.clone()),
+        before_size_bytes: Some(captured_content.size_bytes),
+        after_content_sha256: Some(captured_content.sha256),
+        after_size_bytes: Some(captured_content.size_bytes),
         content_type,
         is_text,
         preview_text,
         search_text,
-        content_bytes: Some(content_bytes),
+        content_bytes: Some(captured_content.bytes),
     })
 }
 
@@ -1910,6 +2016,71 @@ mod tests {
             .expect("destination absence entry should exist");
         assert!(destination.after_content_sha256.is_none());
         assert!(destination.content_bytes.is_none());
+    }
+
+    #[test]
+    fn preflight_checkpoint_rejects_changed_existing_content() {
+        let tempdir = tempfile::tempdir().expect("workspace tempdir should be created");
+        let target_path = tempdir.path().join("notes.txt");
+        std::fs::write(target_path.as_path(), b"old").expect("source file should be written");
+        let before_sha256 = hex::encode(Sha256::digest(b"old"));
+        std::fs::write(target_path.as_path(), b"new").expect("source file should change");
+
+        let error = build_preflight_checkpoint_files(
+            &[tempdir.path().to_path_buf()],
+            &WorkspacePatchFileAttestation {
+                path: "notes.txt".to_owned(),
+                workspace_root_index: 0,
+                operation: "update".to_owned(),
+                moved_from: None,
+                before_sha256: Some(before_sha256),
+                before_size_bytes: Some(3),
+                after_sha256: Some(hex::encode(Sha256::digest(b"patched"))),
+                after_size_bytes: Some(7),
+            },
+        )
+        .expect_err("changed preflight content should be rejected");
+
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preflight_checkpoint_rejects_symlink_swapped_parent_escape() {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::tempdir().expect("workspace tempdir should be created");
+        let workspace = tempdir.path().join("workspace");
+        let nested = workspace.join("nested");
+        std::fs::create_dir_all(nested.as_path()).expect("nested workspace dir should be created");
+        let target_path = nested.join("notes.txt");
+        std::fs::write(target_path.as_path(), b"old").expect("source file should be written");
+        let before_sha256 = hex::encode(Sha256::digest(b"old"));
+
+        let outside = tempdir.path().join("outside");
+        std::fs::create_dir_all(outside.as_path()).expect("outside dir should be created");
+        std::fs::write(outside.join("notes.txt").as_path(), b"secret")
+            .expect("outside file should be written");
+        std::fs::remove_file(target_path.as_path()).expect("source file should be removed");
+        std::fs::remove_dir(nested.as_path()).expect("nested dir should be removed");
+        symlink(outside.as_path(), nested.as_path()).expect("symlink parent should be created");
+
+        let error = build_preflight_checkpoint_files(
+            &[workspace],
+            &WorkspacePatchFileAttestation {
+                path: "nested/notes.txt".to_owned(),
+                workspace_root_index: 0,
+                operation: "update".to_owned(),
+                moved_from: None,
+                before_sha256: Some(before_sha256),
+                before_size_bytes: Some(3),
+                after_sha256: Some(hex::encode(Sha256::digest(b"patched"))),
+                after_size_bytes: Some(7),
+            },
+        )
+        .expect_err("symlink-swapped parent should be rejected before capture");
+
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
     }
 
     #[test]
