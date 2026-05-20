@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs,
+    io::Read,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -1346,8 +1347,11 @@ pub(crate) async fn apply_patch_learning_candidate(
         .await?;
     let workspace_roots =
         agent.agent.workspace_roots.iter().map(PathBuf::from).collect::<Vec<PathBuf>>();
+    let canonical_workspace_roots = canonicalize_patch_learning_roots(workspace_roots.as_slice())?;
+    let limits = WorkspacePatchLimits::default();
 
-    let base_conflicts = collect_patch_base_conflicts(workspace_roots.as_slice(), files)?;
+    let base_conflicts =
+        collect_patch_base_conflicts(canonical_workspace_roots.as_slice(), files, &limits)?;
     if !base_conflicts.is_empty() {
         let conflict_payload = json!({
             "action": "apply_patch_candidate",
@@ -1379,13 +1383,17 @@ pub(crate) async fn apply_patch_learning_candidate(
         })));
     }
 
-    let staged = stage_patch_candidate(workspace_roots.as_slice(), files, patch_document)?;
+    let staged = stage_patch_candidate(
+        canonical_workspace_roots.as_slice(),
+        files,
+        patch_document,
+        &limits,
+    )?;
     let apply_request = WorkspacePatchRequest {
         patch: patch_document.to_owned(),
         dry_run: false,
         redaction_policy: WorkspacePatchRedactionPolicy::default(),
     };
-    let limits = WorkspacePatchLimits::default();
     let applied = apply_workspace_patch(workspace_roots.as_slice(), &apply_request, &limits)
         .map_err(|error| Status::failed_precondition(format!("patch apply failed: {error}")))?;
     let skill_validation = validate_skill_patch_targets(workspace_roots.as_slice(), files)?;
@@ -1431,8 +1439,9 @@ fn patch_candidate_apply_blocked_status(status: &str) -> bool {
 }
 
 fn collect_patch_base_conflicts(
-    workspace_roots: &[PathBuf],
+    canonical_workspace_roots: &[PathBuf],
     files: &[Value],
+    limits: &WorkspacePatchLimits,
 ) -> Result<Vec<Value>, Status> {
     let mut conflicts = Vec::new();
     for file in files {
@@ -1440,31 +1449,18 @@ fn collect_patch_base_conflicts(
             file.get("workspace_root_index").and_then(Value::as_u64).ok_or_else(|| {
                 Status::failed_precondition("patch file is missing workspace_root_index")
             })?;
-        let root =
-            workspace_roots.get(usize::try_from(root_index).unwrap_or(usize::MAX)).ok_or_else(
-                || Status::failed_precondition("patch file references invalid workspace root"),
-            )?;
+        let root = canonical_workspace_roots
+            .get(usize::try_from(root_index).unwrap_or(usize::MAX))
+            .ok_or_else(|| {
+                Status::failed_precondition("patch file references invalid workspace root")
+            })?;
         let operation = file.get("operation").and_then(Value::as_str).unwrap_or("update");
         let path = file.get("path").and_then(Value::as_str).unwrap_or_default();
         let moved_from = file.get("moved_from").and_then(Value::as_str);
         let expected_before_sha256 = file.get("before_sha256").and_then(Value::as_str);
         let expected_path = if operation == "move" { moved_from.unwrap_or(path) } else { path };
-        let absolute = root.join(Path::new(expected_path));
-        let exists = absolute.exists();
-        let actual_sha256 = if exists && absolute.is_file() {
-            Some(crate::sha256_hex(
-                fs::read(absolute.as_path())
-                    .map_err(|error| {
-                        Status::internal(format!(
-                            "failed to read patch base file {}: {error}",
-                            absolute.display()
-                        ))
-                    })?
-                    .as_slice(),
-            ))
-        } else {
-            None
-        };
+        let snapshot = read_patch_learning_file_snapshot(root, expected_path, limits)?;
+        let actual_sha256 = snapshot.bytes.as_deref().map(crate::sha256_hex);
 
         match (expected_before_sha256, actual_sha256.as_deref()) {
             (Some(expected), Some(actual)) if expected == actual => {}
@@ -1474,7 +1470,7 @@ fn collect_patch_base_conflicts(
                 "workspace_root_index": root_index,
                 "expected_before_sha256": expected_before_sha256,
                 "actual_before_sha256": actual_sha256,
-                "exists": exists,
+                "exists": snapshot.exists,
             })),
         }
     }
@@ -1482,9 +1478,10 @@ fn collect_patch_base_conflicts(
 }
 
 fn stage_patch_candidate(
-    workspace_roots: &[PathBuf],
+    canonical_workspace_roots: &[PathBuf],
     files: &[Value],
     patch_document: &str,
+    limits: &WorkspacePatchLimits,
 ) -> Result<Value, Status> {
     let staging_root = std::env::temp_dir()
         .join(format!("palyra-learning-stage-{}", Ulid::new().to_string().to_ascii_lowercase()));
@@ -1516,10 +1513,11 @@ fn stage_patch_candidate(
                 file.get("workspace_root_index").and_then(Value::as_u64).ok_or_else(|| {
                     Status::failed_precondition("patch file is missing workspace_root_index")
                 })?;
-            let source_root =
-                workspace_roots.get(usize::try_from(root_index).unwrap_or(usize::MAX)).ok_or_else(
-                    || Status::failed_precondition("patch file references invalid workspace root"),
-                )?;
+            let source_root = canonical_workspace_roots
+                .get(usize::try_from(root_index).unwrap_or(usize::MAX))
+                .ok_or_else(|| {
+                    Status::failed_precondition("patch file references invalid workspace root")
+                })?;
             let staged_root =
                 staged_roots
                     .get(usize::try_from(root_index).unwrap_or(usize::MAX))
@@ -1532,11 +1530,13 @@ fn stage_patch_candidate(
             if file.get("before_sha256").and_then(Value::as_str).is_none() {
                 continue;
             }
-            let absolute_source = source_root.join(Path::new(source_path));
-            if !absolute_source.is_file() {
+            let source_snapshot =
+                read_patch_learning_file_snapshot(source_root, source_path, limits)?;
+            let Some(source_bytes) = source_snapshot.bytes.as_deref() else {
                 continue;
-            }
-            let absolute_target = staged_root.join(Path::new(source_path));
+            };
+            let relative_source = patch_learning_relative_path(source_path)?;
+            let absolute_target = staged_root.join(relative_source.as_path());
             if let Some(parent) = absolute_target.parent() {
                 fs::create_dir_all(parent).map_err(|error| {
                     Status::internal(format!(
@@ -1545,10 +1545,9 @@ fn stage_patch_candidate(
                     ))
                 })?;
             }
-            fs::copy(absolute_source.as_path(), absolute_target.as_path()).map_err(|error| {
+            fs::write(absolute_target.as_path(), source_bytes).map_err(|error| {
                 Status::internal(format!(
-                    "failed to copy {} to staging {}: {error}",
-                    absolute_source.display(),
+                    "failed to write staged patch base {}: {error}",
                     absolute_target.display()
                 ))
             })?;
@@ -1574,6 +1573,184 @@ fn stage_patch_candidate(
     })();
     let _ = fs::remove_dir_all(staging_root.as_path());
     response
+}
+
+struct PatchLearningFileSnapshot {
+    exists: bool,
+    bytes: Option<Vec<u8>>,
+}
+
+fn canonicalize_patch_learning_roots(workspace_roots: &[PathBuf]) -> Result<Vec<PathBuf>, Status> {
+    if workspace_roots.is_empty() {
+        return Err(Status::failed_precondition("patch candidate has no workspace roots"));
+    }
+    workspace_roots
+        .iter()
+        .map(|root| {
+            let canonical = fs::canonicalize(root).map_err(|error| {
+                Status::failed_precondition(format!(
+                    "patch workspace root {} is invalid: {error}",
+                    root.display()
+                ))
+            })?;
+            let metadata = fs::metadata(canonical.as_path()).map_err(|error| {
+                Status::failed_precondition(format!(
+                    "patch workspace root {} is invalid: {error}",
+                    canonical.display()
+                ))
+            })?;
+            if !metadata.is_dir() {
+                return Err(Status::failed_precondition(format!(
+                    "patch workspace root {} is not a directory",
+                    canonical.display()
+                )));
+            }
+            Ok(canonical)
+        })
+        .collect()
+}
+
+fn read_patch_learning_file_snapshot(
+    canonical_root: &Path,
+    path_label: &str,
+    limits: &WorkspacePatchLimits,
+) -> Result<PatchLearningFileSnapshot, Status> {
+    let relative = patch_learning_relative_path(path_label)?;
+    let absolute = canonical_root.join(relative.as_path());
+    let metadata = match fs::symlink_metadata(absolute.as_path()) {
+        Ok(metadata) => metadata,
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(PatchLearningFileSnapshot { exists: false, bytes: None });
+        }
+        Err(error) => {
+            return Err(Status::internal(format!(
+                "failed to inspect patch base file {path_label}: {error}"
+            )));
+        }
+    };
+    if metadata.file_type().is_symlink() {
+        return Err(Status::failed_precondition(format!(
+            "patch base file {path_label} must not be a symlink"
+        )));
+    }
+    ensure_patch_learning_path_within_root(absolute.as_path(), canonical_root, path_label)?;
+    if !metadata.is_file() {
+        return Ok(PatchLearningFileSnapshot { exists: true, bytes: None });
+    }
+    let bytes = read_patch_learning_file_capped(
+        absolute.as_path(),
+        canonical_root,
+        path_label,
+        limits.max_file_bytes,
+    )?;
+    Ok(PatchLearningFileSnapshot { exists: true, bytes: Some(bytes) })
+}
+
+fn patch_learning_relative_path(path_label: &str) -> Result<PathBuf, Status> {
+    if path_label.is_empty() {
+        return Err(Status::failed_precondition("patch file path must not be empty"));
+    }
+    let mut relative = PathBuf::new();
+    for component in Path::new(path_label).components() {
+        match component {
+            std::path::Component::Normal(value) => relative.push(value),
+            std::path::Component::CurDir => {}
+            _ => {
+                return Err(Status::failed_precondition(format!(
+                    "patch file path {path_label} must be relative and stay within the workspace"
+                )));
+            }
+        }
+    }
+    if relative.as_os_str().is_empty() {
+        return Err(Status::failed_precondition("patch file path must not be empty"));
+    }
+    Ok(relative)
+}
+
+fn ensure_patch_learning_path_within_root(
+    absolute: &Path,
+    canonical_root: &Path,
+    path_label: &str,
+) -> Result<(), Status> {
+    let canonical = fs::canonicalize(absolute).map_err(|error| {
+        Status::internal(format!("failed to canonicalize patch base file {path_label}: {error}"))
+    })?;
+    if !canonical.starts_with(canonical_root) {
+        return Err(Status::failed_precondition(format!(
+            "patch base file {path_label} escapes the workspace root"
+        )));
+    }
+    Ok(())
+}
+
+fn read_patch_learning_file_capped(
+    absolute: &Path,
+    canonical_root: &Path,
+    path_label: &str,
+    max_file_bytes: usize,
+) -> Result<Vec<u8>, Status> {
+    #[cfg(unix)]
+    let mut file = {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(absolute).map_err(
+            |error| {
+                Status::internal(format!("failed to open patch base file {path_label}: {error}"))
+            },
+        )?
+    };
+    #[cfg(not(unix))]
+    let mut file = fs::File::open(absolute).map_err(|error| {
+        Status::internal(format!("failed to open patch base file {path_label}: {error}"))
+    })?;
+
+    ensure_patch_learning_path_within_root(absolute, canonical_root, path_label)?;
+    let metadata = file.metadata().map_err(|error| {
+        Status::internal(format!("failed to stat patch base file {path_label}: {error}"))
+    })?;
+    if !metadata.is_file() {
+        return Err(Status::failed_precondition(format!(
+            "patch base file {path_label} is not a regular file"
+        )));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        let path_metadata = fs::metadata(absolute).map_err(|error| {
+            Status::internal(format!("failed to stat patch base file {path_label}: {error}"))
+        })?;
+        if metadata.dev() != path_metadata.dev() || metadata.ino() != path_metadata.ino() {
+            return Err(Status::failed_precondition(format!(
+                "patch base file {path_label} changed during validation"
+            )));
+        }
+    }
+    let size = usize::try_from(metadata.len()).unwrap_or(usize::MAX);
+    if size > max_file_bytes {
+        return Err(Status::failed_precondition(format!(
+            "patch base file {path_label} exceeds max_file_bytes={max_file_bytes} (actual={size})"
+        )));
+    }
+    let mut bytes = Vec::with_capacity(size);
+    file.by_ref()
+        .take(u64::try_from(max_file_bytes.saturating_add(1)).unwrap_or(u64::MAX))
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            Status::internal(format!("failed to read patch base file {path_label}: {error}"))
+        })?;
+    if bytes.len() > max_file_bytes {
+        return Err(Status::failed_precondition(format!(
+            "patch base file {path_label} exceeds max_file_bytes={max_file_bytes}"
+        )));
+    }
+    Ok(bytes)
 }
 
 fn validate_skill_patch_targets(
@@ -1825,6 +2002,91 @@ mod tests {
 
     fn learning_config() -> LearningRuntimeConfig {
         LearningRuntimeConfig::default()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn patch_learning_preflight_rejects_symlink_base_file() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(workspace.as_path()).expect("workspace should be created");
+        let outside = temp.path().join("outside-secret.txt");
+        fs::write(outside.as_path(), "outside secret").expect("outside file should be written");
+        symlink(outside.as_path(), workspace.join("link.txt").as_path())
+            .expect("symlink should be created");
+
+        let roots = canonicalize_patch_learning_roots(std::slice::from_ref(&workspace))
+            .expect("workspace root should canonicalize");
+        let files = vec![json!({
+            "workspace_root_index": 0,
+            "operation": "update",
+            "path": "link.txt",
+            "before_sha256": "expected",
+        })];
+
+        let error = collect_patch_base_conflicts(
+            roots.as_slice(),
+            files.as_slice(),
+            &WorkspacePatchLimits::default(),
+        )
+        .expect_err("symlink base file must fail closed before hashing");
+
+        assert!(error.message().contains("must not be a symlink"), "{error:?}");
+    }
+
+    #[test]
+    fn patch_learning_preflight_rejects_oversized_base_file() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(workspace.as_path()).expect("workspace should be created");
+        fs::write(workspace.join("large.txt").as_path(), b"0123456789abcdef")
+            .expect("large fixture should be written");
+
+        let roots = canonicalize_patch_learning_roots(std::slice::from_ref(&workspace))
+            .expect("workspace root should canonicalize");
+        let files = vec![json!({
+            "workspace_root_index": 0,
+            "operation": "update",
+            "path": "large.txt",
+            "before_sha256": "expected",
+        })];
+        let limits = WorkspacePatchLimits { max_file_bytes: 8, ..WorkspacePatchLimits::default() };
+
+        let error = collect_patch_base_conflicts(roots.as_slice(), files.as_slice(), &limits)
+            .expect_err("oversized base file must fail closed before hashing");
+
+        assert!(error.message().contains("max_file_bytes=8"), "{error:?}");
+    }
+
+    #[test]
+    fn patch_learning_staging_rejects_oversized_source_file() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(workspace.as_path()).expect("workspace should be created");
+        fs::write(workspace.join("large.txt").as_path(), b"0123456789abcdef")
+            .expect("large fixture should be written");
+
+        let roots = canonicalize_patch_learning_roots(std::slice::from_ref(&workspace))
+            .expect("workspace root should canonicalize");
+        let files = vec![json!({
+            "workspace_root_index": 0,
+            "operation": "update",
+            "path": "large.txt",
+            "before_sha256": "expected",
+        })];
+        let limits = WorkspacePatchLimits { max_file_bytes: 8, ..WorkspacePatchLimits::default() };
+
+        let error = stage_patch_candidate(
+            roots.as_slice(),
+            files.as_slice(),
+            "*** Begin Patch\n*** End Patch\n",
+            &limits,
+        )
+        .expect_err("staging must not copy oversized source files");
+
+        assert!(error.message().contains("max_file_bytes=8"), "{error:?}");
     }
 
     #[test]
