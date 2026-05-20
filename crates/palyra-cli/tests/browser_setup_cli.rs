@@ -116,6 +116,62 @@ fn browser_setup_configures_gateway_and_browserd_prerequisites() -> Result<()> {
 }
 
 #[test]
+fn browser_setup_preserves_existing_auth_token_secret_ref() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+    let config_path = workdir.path().join("palyra.toml");
+    let config_arg = config_path.to_string_lossy().into_owned();
+
+    let setup_config =
+        run_cli(&workdir, &["setup", "--mode", "local", "--path", config_arg.as_str(), "--force"])?;
+    assert!(
+        setup_config.status.success(),
+        "setup should succeed before browser setup: {}",
+        String::from_utf8_lossy(&setup_config.stderr)
+    );
+
+    let config_toml = fs::read_to_string(&config_path).context("failed to read setup config")?;
+    let mut rewritten = String::new();
+    for line in config_toml.lines() {
+        if !line.trim_start().starts_with("auth_token = ") {
+            rewritten.push_str(line);
+            rewritten.push('\n');
+        }
+    }
+    rewritten.push_str(
+        r#"
+[tool_call.browser_service.auth_token_secret_ref]
+kind = "env"
+variable = "PALYRA_BROWSER_SERVICE_AUTH_TOKEN"
+"#,
+    );
+    fs::write(&config_path, rewritten).context("failed to rewrite config with auth secret ref")?;
+
+    let browser_setup =
+        run_cli(&workdir, &["browser", "setup", "--path", config_arg.as_str(), "--json"])?;
+    assert!(
+        browser_setup.status.success(),
+        "browser setup should preserve secret-ref auth: {}",
+        String::from_utf8_lossy(&browser_setup.stderr)
+    );
+    let payload: Value = serde_json::from_slice(&browser_setup.stdout)
+        .context("browser setup stdout was not JSON")?;
+    assert_eq!(payload.get("auth_token_configured").and_then(Value::as_bool), Some(true));
+    assert_eq!(payload.get("auth_token_generated").and_then(Value::as_bool), Some(false));
+
+    let updated_toml = fs::read_to_string(&config_path).context("failed to read updated config")?;
+    assert!(
+        updated_toml.contains("[tool_call.browser_service.auth_token_secret_ref]")
+            && updated_toml.contains("variable = \"PALYRA_BROWSER_SERVICE_AUTH_TOKEN\""),
+        "browser setup must preserve configured auth token secret ref: {updated_toml}"
+    );
+    assert!(
+        !updated_toml.contains("auth_token = \""),
+        "browser setup must not downgrade secret-ref auth into an inline token: {updated_toml}"
+    );
+    Ok(())
+}
+
+#[test]
 fn browser_stop_supports_json_without_lifecycle_metadata() -> Result<()> {
     let workdir = TempDir::new().context("failed to create temporary workdir")?;
 

@@ -690,7 +690,14 @@ fn configure_browser_setup(
 
     let existing_auth_token =
         document_string(Some(&document), "tool_call.browser_service.auth_token");
-    let should_write_auth_token = force || token.is_some() || existing_auth_token.is_none();
+    let existing_auth_token_secret_ref =
+        document_value_present(Some(&document), "tool_call.browser_service.auth_token_secret_ref");
+    let should_write_auth_token = should_write_browser_setup_auth_token(
+        force,
+        token.is_some(),
+        existing_auth_token.as_deref(),
+        existing_auth_token_secret_ref,
+    );
     let mut auth_token_generated = false;
     if should_write_auth_token {
         let auth_token = match token {
@@ -742,7 +749,9 @@ fn configure_browser_setup(
     Ok(BrowserSetupPayload {
         config_path,
         browser_service_enabled: true,
-        auth_token_configured: true,
+        auth_token_configured: existing_auth_token.is_some()
+            || existing_auth_token_secret_ref
+            || should_write_auth_token,
         auth_token_generated,
         state_key_vault_ref,
         state_key_generated: should_write_state_key,
@@ -753,6 +762,15 @@ fn configure_browser_setup(
         gateway_verify_command: browser_setup_gateway_verify_command(),
         migrated: migration.migrated,
     })
+}
+
+fn should_write_browser_setup_auth_token(
+    force: bool,
+    explicit_token: bool,
+    existing_auth_token: Option<&str>,
+    existing_auth_token_secret_ref: bool,
+) -> bool {
+    force || explicit_token || (existing_auth_token.is_none() && !existing_auth_token_secret_ref)
 }
 
 pub(crate) fn configure_local_browser_prerequisites(path: Option<String>) -> Result<()> {
@@ -3263,6 +3281,10 @@ fn document_string(document: Option<&toml::Value>, path: &str) -> Option<String>
         .and_then(|document| get_value_at_path(document, path).ok().flatten())
         .and_then(|value| value.as_str().map(str::trim).map(ToOwned::to_owned))
         .filter(|value| !value.is_empty())
+}
+
+fn document_value_present(document: Option<&toml::Value>, path: &str) -> bool {
+    document.and_then(|document| get_value_at_path(document, path).ok().flatten()).is_some()
 }
 
 fn document_bool(document: Option<&toml::Value>, path: &str) -> Option<bool> {
