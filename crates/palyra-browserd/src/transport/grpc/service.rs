@@ -10,6 +10,8 @@ const MIN_VIEWPORT_HEIGHT: u32 = 50;
 const MAX_VIEWPORT_HEIGHT: u32 = 10_000;
 const DEFAULT_DEVICE_SCALE_FACTOR: f64 = 1.0;
 const MAX_DEVICE_SCALE_FACTOR: f64 = 8.0;
+const MAX_VIEWPORT_CSS_PIXELS: u64 = 16_000_000;
+const MAX_VIEWPORT_EFFECTIVE_PIXELS: f64 = 33_177_600.0;
 
 #[derive(Clone)]
 pub(crate) struct BrowserServiceImpl {
@@ -1761,6 +1763,19 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
                 "device_scale_factor must be greater than 0 and at most {MAX_DEVICE_SCALE_FACTOR}"
             )));
         };
+        let css_pixels = viewport_css_pixels(payload.width, payload.height);
+        if css_pixels > MAX_VIEWPORT_CSS_PIXELS {
+            return Err(Status::invalid_argument(format!(
+                "viewport area must be at most {MAX_VIEWPORT_CSS_PIXELS} CSS pixels"
+            )));
+        }
+        let effective_pixels = viewport_effective_pixels(css_pixels, device_scale_factor);
+        if effective_pixels > MAX_VIEWPORT_EFFECTIVE_PIXELS {
+            return Err(Status::invalid_argument(format!(
+                "effective viewport area must be at most {:.0} device pixels after device_scale_factor",
+                MAX_VIEWPORT_EFFECTIVE_PIXELS
+            )));
+        }
 
         let context = match consume_action_budget_and_snapshot(
             self.runtime.as_ref(),
@@ -3509,6 +3524,14 @@ fn request_principal(metadata: &tonic::metadata::MetadataMap) -> Result<&str, St
         return Err(Status::unauthenticated("missing caller principal"));
     }
     Ok(principal)
+}
+
+fn viewport_css_pixels(width: u32, height: u32) -> u64 {
+    u64::from(width) * u64::from(height)
+}
+
+fn viewport_effective_pixels(css_pixels: u64, device_scale_factor: f64) -> f64 {
+    css_pixels as f64 * device_scale_factor * device_scale_factor
 }
 
 fn normalize_press_key_input(raw: &str) -> String {

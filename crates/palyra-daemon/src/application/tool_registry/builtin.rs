@@ -796,15 +796,15 @@ fn browser_tool_schema(tool_name: &str) -> Value {
         "palyra.browser.viewport" => {
             properties.push((
                 "width",
-                json!({"type":"integer","minimum":50,"maximum":10000,"description":"Viewport width in CSS pixels. Use values like 375 for mobile, 768 for tablet, or 1440 for desktop verification."}),
+                json!({"type":"integer","minimum":50,"maximum":10000,"description":"Viewport width in CSS pixels. Use values like 375 for mobile, 768 for tablet, or 1440 for desktop verification; oversized width*height or scaled pixel areas are rejected by the browser service."}),
             ));
             properties.push((
                 "height",
-                json!({"type":"integer","minimum":50,"maximum":10000,"description":"Viewport height in CSS pixels. Pair with width before screenshot or observe when verifying responsive layouts."}),
+                json!({"type":"integer","minimum":50,"maximum":10000,"description":"Viewport height in CSS pixels. Pair with width before screenshot or observe when verifying responsive layouts; keep total area bounded because oversized width*height or scaled pixel areas are rejected."}),
             ));
             properties.push((
                 "device_scale_factor",
-                json!({"type":"number","exclusiveMinimum":0,"maximum":8,"default":1}),
+                json!({"type":"number","exclusiveMinimum":0,"maximum":8,"default":1,"description":"Device pixel ratio multiplier. Prefer 1 or 2; high values are rejected when width*height*device_scale_factor^2 exceeds browser safety limits."}),
             ));
             properties.push((
                 "mobile",
@@ -1023,5 +1023,11 @@ mod tests {
             .and_then(serde_json::Value::as_str)
             .expect("viewport mobile description should be visible to models");
         assert!(mobile_description.contains("mobile"));
+        let scale_description = viewport
+            .input_schema
+            .pointer("/properties/device_scale_factor/description")
+            .and_then(serde_json::Value::as_str)
+            .expect("viewport device scale description should be visible to models");
+        assert!(scale_description.contains("safety limits"));
     }
 }

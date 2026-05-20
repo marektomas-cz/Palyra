@@ -1372,6 +1372,80 @@ async fn browser_service_click_type_and_wait_for_on_fixture_page() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn browser_service_viewport_rejects_excessive_pixel_area() {
+    let runtime = simulated_runtime_for_tests();
+    let service = BrowserServiceImpl { runtime };
+    let created = create_test_session(&service, "user:ops").await;
+    let session_id = created.session_id.expect("session id should be present");
+    let (url, handle) = spawn_static_http_server(200, "<html><body>viewport</body></html>");
+    let navigate = service
+        .navigate(Request::new(browser_v1::NavigateRequest {
+            v: 1,
+            session_id: Some(session_id.clone()),
+            url,
+            timeout_ms: 1_000,
+            allow_redirects: true,
+            max_redirects: 3,
+            allow_private_targets: true,
+        }))
+        .await
+        .expect("navigate should execute")
+        .into_inner();
+    assert!(navigate.success, "navigate should succeed before viewport action: {}", navigate.error);
+
+    let accepted_4k = service
+        .set_viewport(Request::new(browser_v1::SetViewportRequest {
+            v: 1,
+            session_id: Some(session_id.clone()),
+            width: 3840,
+            height: 2160,
+            device_scale_factor: 2.0,
+            mobile: false,
+            timeout_ms: 500,
+        }))
+        .await
+        .expect("4K at 2x should remain allowed")
+        .into_inner();
+    assert!(accepted_4k.success, "4K viewport should succeed: {}", accepted_4k.error);
+
+    let css_area_status = service
+        .set_viewport(Request::new(browser_v1::SetViewportRequest {
+            v: 1,
+            session_id: Some(session_id.clone()),
+            width: 10_000,
+            height: 10_000,
+            device_scale_factor: 1.0,
+            mobile: false,
+            timeout_ms: 500,
+        }))
+        .await
+        .expect_err("extreme CSS area should be rejected before browser execution");
+    assert_eq!(css_area_status.code(), tonic::Code::InvalidArgument);
+    assert!(css_area_status.message().contains("CSS pixels"), "{}", css_area_status.message());
+
+    let effective_area_status = service
+        .set_viewport(Request::new(browser_v1::SetViewportRequest {
+            v: 1,
+            session_id: Some(session_id),
+            width: 5000,
+            height: 3000,
+            device_scale_factor: 2.0,
+            mobile: false,
+            timeout_ms: 500,
+        }))
+        .await
+        .expect_err("large scaled viewport should be rejected before browser execution");
+    assert_eq!(effective_area_status.code(), tonic::Code::InvalidArgument);
+    assert!(
+        effective_area_status.message().contains("device pixels"),
+        "{}",
+        effective_area_status.message()
+    );
+
+    handle.join().expect("test server thread should exit");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn browser_service_chromium_network_log_includes_same_origin_fetch_failures() {
     let Some(chromium_path) = resolve_chromium_path_for_tests() else {
         return;
