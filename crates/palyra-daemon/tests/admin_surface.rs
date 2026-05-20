@@ -2370,6 +2370,22 @@ fn console_memory_purge_requires_session_and_csrf() -> Result<()> {
         "memory purge endpoint must enforce csrf token"
     );
 
+    let scoped_purge_response = client
+        .post(format!("http://127.0.0.1:{admin_port}/console/v1/memory/purge"))
+        .header("Cookie", cookie.clone())
+        .header("x-palyra-csrf-token", csrf_token.clone())
+        .json(&serde_json::json!({ "purge_all_principal": false }))
+        .send()
+        .context("failed to call scoped memory purge endpoint with csrf token")?
+        .error_for_status()
+        .context("scoped memory purge endpoint returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse scoped memory purge response json")?;
+    assert!(
+        scoped_purge_response.get("deleted_count").and_then(Value::as_u64).is_some(),
+        "scoped memory purge should default to the authenticated console channel"
+    );
+
     let purge_response = client
         .post(format!("http://127.0.0.1:{admin_port}/console/v1/memory/purge"))
         .header("Cookie", cookie)

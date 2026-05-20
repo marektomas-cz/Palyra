@@ -4063,6 +4063,135 @@ async fn grpc_memory_scope_isolation_blocks_cross_principal_get() -> Result<()> 
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn grpc_memory_search_and_list_default_to_authenticated_channel() -> Result<()> {
+    let (child, admin_port, grpc_port, _journal_db_path) = spawn_palyrad_with_dynamic_ports()?;
+    let mut daemon = ChildGuard::new(child);
+    wait_for_health(admin_port, daemon.child_mut())?;
+
+    let endpoint = format!("http://127.0.0.1:{grpc_port}");
+    let mut memory_client =
+        memory_v1::memory_service_client::MemoryServiceClient::connect(endpoint)
+            .await
+            .context("failed to connect memory gRPC client")?;
+
+    let mut cli_ingest_request = tonic::Request::new(memory_v1::IngestMemoryRequest {
+        v: 1,
+        source: memory_v1::MemorySource::Manual as i32,
+        content_text: "cli default-channel boundary memory".to_owned(),
+        channel: String::new(),
+        session_id: Some(common_v1::CanonicalId { ulid: SESSION_ID.to_owned() }),
+        tags: Vec::new(),
+        confidence: 0.8,
+        ttl_unix_ms: 0,
+    });
+    authorize_metadata_with_principal_and_channel(
+        cli_ingest_request.metadata_mut(),
+        "user:ops",
+        "cli",
+    )?;
+    let cli_memory_id = memory_client
+        .ingest_memory(cli_ingest_request)
+        .await
+        .context("failed to ingest cli default-channel memory")?
+        .into_inner()
+        .item
+        .and_then(|item| item.memory_id)
+        .map(|id| id.ulid)
+        .context("cli ingest should return memory id")?;
+
+    let mut slack_ingest_request = tonic::Request::new(memory_v1::IngestMemoryRequest {
+        v: 1,
+        source: memory_v1::MemorySource::Manual as i32,
+        content_text: "slack default-channel boundary memory".to_owned(),
+        channel: String::new(),
+        session_id: Some(common_v1::CanonicalId { ulid: SESSION_ID.to_owned() }),
+        tags: Vec::new(),
+        confidence: 0.8,
+        ttl_unix_ms: 0,
+    });
+    authorize_metadata_with_principal_and_channel(
+        slack_ingest_request.metadata_mut(),
+        "user:ops",
+        "slack",
+    )?;
+    let slack_memory_id = memory_client
+        .ingest_memory(slack_ingest_request)
+        .await
+        .context("failed to ingest slack default-channel memory")?
+        .into_inner()
+        .item
+        .and_then(|item| item.memory_id)
+        .map(|id| id.ulid)
+        .context("slack ingest should return memory id")?;
+
+    let mut search_request = tonic::Request::new(memory_v1::SearchMemoryRequest {
+        v: 1,
+        query: "default-channel boundary".to_owned(),
+        channel: String::new(),
+        session_id: Some(common_v1::CanonicalId { ulid: SESSION_ID.to_owned() }),
+        top_k: 10,
+        min_score: 0.0,
+        tags: Vec::new(),
+        sources: Vec::new(),
+        include_score_breakdown: false,
+    });
+    authorize_metadata_with_principal_and_channel(
+        search_request.metadata_mut(),
+        "user:ops",
+        "cli",
+    )?;
+    let search = memory_client
+        .search_memory(search_request)
+        .await
+        .context("failed to search memory with default channel scope")?
+        .into_inner();
+    assert!(
+        search.hits.iter().any(|hit| {
+            hit.item.as_ref().and_then(|item| item.memory_id.as_ref()).map(|id| id.ulid.as_str())
+                == Some(cli_memory_id.as_str())
+        }),
+        "search without an explicit channel should use the authenticated cli channel"
+    );
+    assert!(
+        search.hits.iter().all(|hit| {
+            hit.item.as_ref().and_then(|item| item.memory_id.as_ref()).map(|id| id.ulid.as_str())
+                != Some(slack_memory_id.as_str())
+        }),
+        "search without an explicit channel must not return another authenticated channel"
+    );
+
+    let mut list_request = tonic::Request::new(memory_v1::ListMemoryItemsRequest {
+        v: 1,
+        after_memory_ulid: String::new(),
+        limit: 50,
+        channel: String::new(),
+        session_id: Some(common_v1::CanonicalId { ulid: SESSION_ID.to_owned() }),
+        tags: Vec::new(),
+        sources: Vec::new(),
+    });
+    authorize_metadata_with_principal_and_channel(list_request.metadata_mut(), "user:ops", "cli")?;
+    let listed = memory_client
+        .list_memory_items(list_request)
+        .await
+        .context("failed to list memory with default channel scope")?
+        .into_inner();
+    assert!(
+        listed.items.iter().any(|item| {
+            item.memory_id.as_ref().map(|id| id.ulid.as_str()) == Some(cli_memory_id.as_str())
+        }),
+        "list without an explicit channel should use the authenticated cli channel"
+    );
+    assert!(
+        listed.items.iter().all(|item| {
+            item.memory_id.as_ref().map(|id| id.ulid.as_str()) != Some(slack_memory_id.as_str())
+        }),
+        "list without an explicit channel must not return another authenticated channel"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn grpc_memory_purge_all_requires_explicit_approval_before_scope_evaluation() -> Result<()> {
     let (child, admin_port, grpc_port, _journal_db_path) = spawn_palyrad_with_dynamic_ports()?;
     let mut daemon = ChildGuard::new(child);

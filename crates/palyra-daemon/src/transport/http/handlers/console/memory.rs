@@ -462,11 +462,9 @@ pub(crate) async fn console_memory_purge_handler(
             ))
         })?;
     }
+    let channel = payload.channel.and_then(trim_to_option).or(session.context.channel.clone());
     let purge_all_principal = payload.purge_all_principal.unwrap_or(false);
-    if !purge_all_principal
-        && payload.channel.as_deref().is_none_or(|value| value.trim().is_empty())
-        && session_scope.is_none()
-    {
+    if !purge_all_principal && channel.is_none() && session_scope.is_none() {
         return Err(runtime_status_response(tonic::Status::invalid_argument(
             "purge request requires purge_all_principal=true or channel/session scope",
         )));
@@ -476,7 +474,7 @@ pub(crate) async fn console_memory_purge_handler(
         .runtime
         .purge_memory(MemoryPurgeRequest {
             principal: session.context.principal,
-            channel: payload.channel,
+            channel,
             session_id: session_scope,
             purge_all_principal,
         })
