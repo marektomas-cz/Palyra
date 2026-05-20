@@ -3669,15 +3669,13 @@ async fn execute_agent_stream_async(
     let json_output = !ndjson && output::preferred_json(false);
     let mut client = client::runtime::GatewayRuntimeClient::connect(connection).await?;
     let outcome = if json_output {
-        let mut events = Vec::new();
-        let outcome = stream_agent_events_async(&mut client, request, |event| {
-            events.push(agent_event_json_value(event));
-            Ok(())
-        })
-        .await
-        .map_err(|error| enrich_agent_principal_auth_error(error, principal.as_str()))?;
+        let mut events = AgentJsonStreamBuffer::default();
+        let outcome =
+            stream_agent_events_async(&mut client, request, |event| events.push_event(event))
+                .await
+                .map_err(|error| enrich_agent_principal_auth_error(error, principal.as_str()))?;
         output::print_json_pretty(
-            &json!({ "events": events }),
+            &json!({ "events": events.into_events() }),
             "failed to encode agent stream as JSON",
         )?;
         outcome.ensure_success()?;
@@ -3700,6 +3698,65 @@ async fn execute_agent_stream_async(
         outcome
     };
     Ok(outcome)
+}
+
+const AGENT_JSON_STREAM_MAX_EVENTS: usize = 20_000;
+const AGENT_JSON_STREAM_MAX_SERIALIZED_BYTES: usize = 16 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy)]
+struct AgentJsonStreamLimits {
+    max_events: usize,
+    max_serialized_bytes: usize,
+}
+
+const DEFAULT_AGENT_JSON_STREAM_LIMITS: AgentJsonStreamLimits = AgentJsonStreamLimits {
+    max_events: AGENT_JSON_STREAM_MAX_EVENTS,
+    max_serialized_bytes: AGENT_JSON_STREAM_MAX_SERIALIZED_BYTES,
+};
+
+#[derive(Debug)]
+struct AgentJsonStreamBuffer {
+    events: Vec<Value>,
+    serialized_bytes: usize,
+    limits: AgentJsonStreamLimits,
+}
+
+impl Default for AgentJsonStreamBuffer {
+    fn default() -> Self {
+        Self::new(DEFAULT_AGENT_JSON_STREAM_LIMITS)
+    }
+}
+
+impl AgentJsonStreamBuffer {
+    fn new(limits: AgentJsonStreamLimits) -> Self {
+        Self { events: Vec::new(), serialized_bytes: 0, limits }
+    }
+
+    fn push_event(&mut self, event: &common_v1::RunStreamEvent) -> Result<()> {
+        if self.events.len() >= self.limits.max_events {
+            anyhow::bail!(
+                "agent JSON stream exceeded {} events; use --ndjson for unbounded streams",
+                self.limits.max_events
+            );
+        }
+        let value = agent_event_json_value(event);
+        let event_bytes =
+            serde_json::to_vec(&value).context("failed to measure agent stream JSON event")?.len();
+        let next_serialized_bytes = self.serialized_bytes.saturating_add(event_bytes);
+        if next_serialized_bytes > self.limits.max_serialized_bytes {
+            anyhow::bail!(
+                "agent JSON stream exceeded {} serialized bytes; use --ndjson for unbounded streams",
+                self.limits.max_serialized_bytes
+            );
+        }
+        self.events.push(value);
+        self.serialized_bytes = next_serialized_bytes;
+        Ok(())
+    }
+
+    fn into_events(self) -> Vec<Value> {
+        self.events
+    }
 }
 
 fn run_agent_stream_as_acp(connection: AgentConnection, request: AgentRunInput) -> Result<()> {
@@ -4848,6 +4905,62 @@ mod agent_stream_output_tests {
         message: &str,
     ) -> common_v1::StreamStatus {
         common_v1::StreamStatus { kind: kind as i32, message: message.to_owned() }
+    }
+
+    fn model_token_event(token: &str) -> common_v1::RunStreamEvent {
+        common_v1::RunStreamEvent {
+            v: CANONICAL_PROTOCOL_MAJOR,
+            run_id: None,
+            body: Some(common_v1::run_stream_event::Body::ModelToken(common_v1::ModelToken {
+                token: token.to_owned(),
+                is_final: false,
+            })),
+        }
+    }
+
+    #[test]
+    fn agent_json_stream_buffer_accepts_bounded_events() {
+        let mut buffer = AgentJsonStreamBuffer::new(AgentJsonStreamLimits {
+            max_events: 2,
+            max_serialized_bytes: 1024,
+        });
+
+        buffer.push_event(&model_token_event("hello")).expect("event should fit limits");
+
+        let events = buffer.into_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["type"], "model.token");
+    }
+
+    #[test]
+    fn agent_json_stream_buffer_rejects_event_count_overflow() {
+        let mut buffer = AgentJsonStreamBuffer::new(AgentJsonStreamLimits {
+            max_events: 1,
+            max_serialized_bytes: 1024,
+        });
+
+        buffer.push_event(&model_token_event("first")).expect("first event should fit");
+        let error = buffer
+            .push_event(&model_token_event("second"))
+            .expect_err("second event should exceed the event count limit");
+
+        assert!(error.to_string().contains("exceeded 1 events"), "unexpected error: {error}");
+        assert!(error.to_string().contains("--ndjson"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn agent_json_stream_buffer_rejects_serialized_byte_overflow() {
+        let mut buffer = AgentJsonStreamBuffer::new(AgentJsonStreamLimits {
+            max_events: 10,
+            max_serialized_bytes: 64,
+        });
+
+        let error = buffer
+            .push_event(&model_token_event("x".repeat(256).as_str()))
+            .expect_err("large token event should exceed serialized byte limit");
+
+        assert!(error.to_string().contains("serialized bytes"), "unexpected error: {error}");
+        assert!(error.to_string().contains("--ndjson"), "unexpected error: {error}");
     }
 
     #[test]
