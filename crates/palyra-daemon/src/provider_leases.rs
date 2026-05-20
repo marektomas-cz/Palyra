@@ -334,7 +334,12 @@ impl ProviderLeaseManager {
         let run_id = request.run_id.map(ToOwned::to_owned);
         let started = Instant::now();
         let poll_ms = LEASE_WAIT_POLL_MS.max(1).min(request.max_wait_ms.max(1));
-        let mut waiting_registered = false;
+        let mut wait_guard = ProviderLeaseWaiterGuard::new(
+            self.inner.clone(),
+            provider_id.clone(),
+            credential_id.clone(),
+            request.priority,
+        );
 
         loop {
             {
@@ -348,18 +353,7 @@ impl ProviderLeaseManager {
                 );
                 match preview.state {
                     LeasePreviewState::Ready => {
-                        if waiting_registered {
-                            decrement_waiting(
-                                &mut guard.providers,
-                                provider_id.as_str(),
-                                request.priority,
-                            );
-                            decrement_waiting(
-                                &mut guard.credentials,
-                                credential_id.as_str(),
-                                request.priority,
-                            );
-                        }
+                        wait_guard.unregister_locked(&mut guard);
                         increment_active(
                             &mut guard.providers,
                             provider_id.as_str(),
@@ -404,18 +398,7 @@ impl ProviderLeaseManager {
                         });
                     }
                     LeasePreviewState::Deferred => {
-                        if waiting_registered {
-                            decrement_waiting(
-                                &mut guard.providers,
-                                provider_id.as_str(),
-                                request.priority,
-                            );
-                            decrement_waiting(
-                                &mut guard.credentials,
-                                credential_id.as_str(),
-                                request.priority,
-                            );
-                        }
+                        wait_guard.unregister_locked(&mut guard);
                         guard.deferred_total = guard.deferred_total.saturating_add(1);
                         self.inner.push_event_locked(
                             &mut guard,
@@ -443,18 +426,7 @@ impl ProviderLeaseManager {
                         let waited_ms =
                             started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
                         if waited_ms >= request.max_wait_ms {
-                            if waiting_registered {
-                                decrement_waiting(
-                                    &mut guard.providers,
-                                    provider_id.as_str(),
-                                    request.priority,
-                                );
-                                decrement_waiting(
-                                    &mut guard.credentials,
-                                    credential_id.as_str(),
-                                    request.priority,
-                                );
-                            }
+                            wait_guard.unregister_locked(&mut guard);
                             guard.timed_out_total = guard.timed_out_total.saturating_add(1);
                             guard.wait_events_total = guard.wait_events_total.saturating_add(1);
                             self.inner.push_event_locked(
@@ -475,24 +447,63 @@ impl ProviderLeaseManager {
                             );
                             return Err(ProviderLeaseAcquireError::TimedOut { waited_ms, preview });
                         }
-                        if !waiting_registered {
-                            increment_waiting(
-                                &mut guard.providers,
-                                provider_id.as_str(),
-                                request.priority,
-                            );
-                            increment_waiting(
-                                &mut guard.credentials,
-                                credential_id.as_str(),
-                                request.priority,
-                            );
-                            waiting_registered = true;
-                        }
+                        wait_guard.register_locked(&mut guard);
                     }
                 }
             }
             tokio::time::sleep(Duration::from_millis(poll_ms)).await;
         }
+    }
+}
+
+#[derive(Debug)]
+struct ProviderLeaseWaiterGuard {
+    manager: Arc<ProviderLeaseManagerInner>,
+    provider_id: String,
+    credential_id: String,
+    priority: LeasePriority,
+    registered: bool,
+}
+
+impl ProviderLeaseWaiterGuard {
+    fn new(
+        manager: Arc<ProviderLeaseManagerInner>,
+        provider_id: String,
+        credential_id: String,
+        priority: LeasePriority,
+    ) -> Self {
+        Self { manager, provider_id, credential_id, priority, registered: false }
+    }
+
+    fn register_locked(&mut self, state: &mut ProviderLeaseState) {
+        if self.registered {
+            return;
+        }
+        increment_waiting(&mut state.providers, self.provider_id.as_str(), self.priority);
+        increment_waiting(&mut state.credentials, self.credential_id.as_str(), self.priority);
+        self.registered = true;
+    }
+
+    fn unregister_locked(&mut self, state: &mut ProviderLeaseState) {
+        if !self.registered {
+            return;
+        }
+        decrement_waiting(&mut state.providers, self.provider_id.as_str(), self.priority);
+        decrement_waiting(&mut state.credentials, self.credential_id.as_str(), self.priority);
+        self.registered = false;
+    }
+}
+
+impl Drop for ProviderLeaseWaiterGuard {
+    fn drop(&mut self) {
+        if !self.registered {
+            return;
+        }
+        let manager = Arc::clone(&self.manager);
+        let mut guard = manager.state.lock().unwrap_or_else(|error| error.into_inner());
+        decrement_waiting(&mut guard.providers, self.provider_id.as_str(), self.priority);
+        decrement_waiting(&mut guard.credentials, self.credential_id.as_str(), self.priority);
+        self.registered = false;
     }
 }
 
@@ -1003,6 +1014,87 @@ mod tests {
             .expect("foreground waiter join should succeed")
             .expect("foreground waiter should eventually acquire");
         drop(acquired);
+    }
+
+    #[tokio::test]
+    async fn lease_manager_unregisters_waiter_when_acquire_is_cancelled() {
+        let manager = ProviderLeaseManager::new(2, 2);
+        manager.record_credential_feedback(ProviderCredentialFeedbackRequest {
+            provider_id: "openai".to_owned(),
+            credential_id: "cred-a".to_owned(),
+            kind: ProviderCredentialFeedbackKind::RateLimited,
+            retry_after_ms: Some(30_000),
+            reason: "provider returned 429".to_owned(),
+            observed_at_unix_ms: crate::gateway::current_unix_ms(),
+        });
+
+        let waiting_preview = manager.preview(ProviderLeasePreviewRequest {
+            provider_id: "openai",
+            credential_id: "cred-a",
+            priority: LeasePriority::Foreground,
+            max_wait_ms: 30_000,
+        });
+        assert_eq!(
+            waiting_preview.state,
+            LeasePreviewState::Waiting,
+            "interactive lease should wait through a 30 second credential cooldown"
+        );
+
+        let manager_clone = manager.clone();
+        let waiter = tokio::spawn(async move {
+            manager_clone
+                .acquire(ProviderLeaseAcquireRequest {
+                    provider_id: "openai",
+                    credential_id: "cred-a",
+                    priority: LeasePriority::Foreground,
+                    task_label: "primary_interactive",
+                    max_wait_ms: 30_000,
+                    session_id: Some("session-2"),
+                    run_id: Some("run-2"),
+                })
+                .await
+        });
+
+        sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            manager.snapshot().foreground_waiters,
+            1,
+            "pending foreground acquire should register exactly one waiter"
+        );
+
+        waiter.abort();
+        let join_error = waiter.await.expect_err("cancelled lease acquire task should abort");
+        assert!(join_error.is_cancelled(), "join error should report task cancellation");
+        assert_eq!(
+            manager.snapshot().foreground_waiters,
+            0,
+            "cancelled acquire should unregister its foreground waiter"
+        );
+
+        manager.record_credential_feedback(ProviderCredentialFeedbackRequest {
+            provider_id: "openai".to_owned(),
+            credential_id: "cred-a".to_owned(),
+            kind: ProviderCredentialFeedbackKind::Success,
+            retry_after_ms: None,
+            reason: "successful provider call".to_owned(),
+            observed_at_unix_ms: crate::gateway::current_unix_ms(),
+        });
+        let background_preview = manager.preview(ProviderLeasePreviewRequest {
+            provider_id: "openai",
+            credential_id: "cred-a",
+            priority: LeasePriority::Background,
+            max_wait_ms: 150,
+        });
+        assert_eq!(
+            background_preview.state,
+            LeasePreviewState::Ready,
+            "cleared feedback should leave background work schedulable after cancellation"
+        );
+        assert_ne!(
+            background_preview.reason.as_deref(),
+            Some("foreground_waiters_present"),
+            "cancelled foreground acquires must not leave stale fairness pressure"
+        );
     }
 
     #[tokio::test]
