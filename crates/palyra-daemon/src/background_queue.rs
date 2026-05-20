@@ -80,7 +80,7 @@ async fn poll_background_queue(
     auth: &GatewayAuthConfig,
     grpc_url: &str,
 ) -> Result<(), Status> {
-    let tasks = runtime
+    let mut tasks = runtime
         .list_orchestrator_background_tasks(crate::journal::OrchestratorBackgroundTaskListFilter {
             owner_principal: None,
             device_id: None,
@@ -90,9 +90,10 @@ async fn poll_background_queue(
             limit: 256,
         })
         .await?;
-    for task in tasks.iter() {
+    for index in 0..tasks.len() {
+        let task = tasks[index].clone();
         if let Err(error) =
-            process_background_task(runtime, auth, grpc_url, task, tasks.as_slice()).await
+            process_background_task(runtime, auth, grpc_url, &task, tasks.as_slice()).await
         {
             warn!(
                 task_id = %task.task_id,
@@ -119,6 +120,18 @@ async fn poll_background_queue(
                     completed_at_unix_ms: Some(Some(crate::gateway::current_unix_ms())),
                 })
                 .await;
+            if let Err(refresh_error) =
+                refresh_background_task_snapshot(runtime, tasks.as_mut_slice(), index).await
+            {
+                warn!(
+                    task_id = %task.task_id,
+                    status_code = ?refresh_error.code(),
+                    status_message = %refresh_error.message(),
+                    "failed to refresh background task snapshot after error"
+                );
+            }
+        } else {
+            refresh_background_task_snapshot(runtime, tasks.as_mut_slice(), index).await?;
         }
     }
     crate::flows::FlowCoordinator::poll(runtime).await?;
@@ -294,6 +307,29 @@ async fn process_background_task(
     }
 
     dispatch_background_task(runtime, auth, grpc_url, task).await
+}
+
+async fn refresh_background_task_snapshot(
+    runtime: &Arc<GatewayRuntimeState>,
+    tasks: &mut [OrchestratorBackgroundTaskRecord],
+    index: usize,
+) -> Result<(), Status> {
+    let Some(task) = tasks.get(index) else {
+        return Ok(());
+    };
+    if let Some(updated) = runtime.get_orchestrator_background_task(task.task_id.clone()).await? {
+        replace_background_task_snapshot(tasks, updated);
+    }
+    Ok(())
+}
+
+fn replace_background_task_snapshot(
+    tasks: &mut [OrchestratorBackgroundTaskRecord],
+    updated: OrchestratorBackgroundTaskRecord,
+) {
+    if let Some(task) = tasks.iter_mut().find(|task| task.task_id == updated.task_id) {
+        *task = updated;
+    }
 }
 
 async fn dispatch_background_task(
@@ -2681,8 +2717,9 @@ mod tests {
         build_background_task_running_update, categorize_child_failure,
         child_merge_lifecycle_details, delegated_child_timeout_message,
         evaluate_delegation_scheduler_limits, parent_merge_event_payload,
-        running_delegated_children_for_parent, task_has_in_flight_work_without_target,
-        DelegationSchedulerDecision, MergeDeliveryPayloadContext,
+        replace_background_task_snapshot, running_delegated_children_for_parent,
+        task_has_in_flight_work_without_target, DelegationSchedulerDecision,
+        MergeDeliveryPayloadContext,
     };
     use crate::{
         application::delivery_arbitration::{DeliveryDecision, DeliveryDecisionAction},
@@ -2823,6 +2860,98 @@ mod tests {
             }
             DelegationSchedulerDecision::Fail { .. } => {
                 panic!("concurrency pressure should defer, not fail");
+            }
+        }
+    }
+
+    #[test]
+    fn refreshed_poll_snapshot_defers_later_siblings() {
+        let concurrency_limits = DelegationRuntimeLimits {
+            max_concurrent_children: 1,
+            max_children_per_parent: 8,
+            max_total_children: 16,
+            max_parallel_groups: 2,
+            max_depth: 3,
+            max_budget_share_bps: 10_000,
+            child_budget_override: None,
+            child_timeout_ms: 60_000,
+        };
+        let first = sample_task(
+            "task-first",
+            AuxiliaryTaskState::Queued.as_str(),
+            10,
+            "group-a",
+            concurrency_limits.clone(),
+        );
+        let second = sample_task(
+            "task-second",
+            AuxiliaryTaskState::Queued.as_str(),
+            20,
+            "group-b",
+            concurrency_limits,
+        );
+        let mut tasks = vec![first.clone(), second.clone()];
+
+        assert!(
+            evaluate_delegation_scheduler_limits(tasks.as_slice(), &first).is_none(),
+            "first queued child should be dispatchable before the local snapshot is refreshed"
+        );
+        let mut running_first = first;
+        running_first.state = AuxiliaryTaskState::Running.as_str().to_owned();
+        running_first.target_run_id = Some("run-task-first".to_owned());
+        running_first.started_at_unix_ms = Some(30);
+        replace_background_task_snapshot(tasks.as_mut_slice(), running_first);
+
+        let decision = evaluate_delegation_scheduler_limits(tasks.as_slice(), &second)
+            .expect("refreshed snapshot should make the second child wait");
+        match decision {
+            DelegationSchedulerDecision::Defer { reason, .. } => {
+                assert_eq!(reason, "max_concurrent_children");
+            }
+            DelegationSchedulerDecision::Fail { .. } => {
+                panic!("concurrency pressure should defer, not fail");
+            }
+        }
+
+        let parallel_limits = DelegationRuntimeLimits {
+            max_concurrent_children: 4,
+            max_children_per_parent: 8,
+            max_total_children: 16,
+            max_parallel_groups: 1,
+            max_depth: 3,
+            max_budget_share_bps: 10_000,
+            child_budget_override: None,
+            child_timeout_ms: 60_000,
+        };
+        let first = sample_task(
+            "task-parallel-first",
+            AuxiliaryTaskState::Queued.as_str(),
+            10,
+            "group-a",
+            parallel_limits.clone(),
+        );
+        let second = sample_task(
+            "task-parallel-second",
+            AuxiliaryTaskState::Queued.as_str(),
+            20,
+            "group-b",
+            parallel_limits,
+        );
+        let mut tasks = vec![first.clone(), second.clone()];
+        let mut running_first = first;
+        running_first.state = AuxiliaryTaskState::Running.as_str().to_owned();
+        running_first.target_run_id = Some("run-task-parallel-first".to_owned());
+        running_first.started_at_unix_ms = Some(30);
+        replace_background_task_snapshot(tasks.as_mut_slice(), running_first);
+
+        let decision = evaluate_delegation_scheduler_limits(tasks.as_slice(), &second)
+            .expect("refreshed snapshot should enforce parallel group limits");
+        match decision {
+            DelegationSchedulerDecision::Defer { reason, .. } => {
+                assert_eq!(reason, "max_parallel_groups");
+            }
+            DelegationSchedulerDecision::Fail { .. } => {
+                panic!("parallel group pressure should defer, not fail");
             }
         }
     }
