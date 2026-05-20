@@ -603,7 +603,6 @@ function Get-WindowsPalyraCliAliasRoots {
 
     $roots = New-Object System.Collections.Generic.List[string]
     $roots.Add((Join-Path $localAppData "Palyra/bin")) | Out-Null
-    $roots.Add((Join-Path $localAppData "Microsoft/WindowsApps")) | Out-Null
 
     return @($roots | ForEach-Object { [IO.Path]::GetFullPath($_) } | Select-Object -Unique)
 }

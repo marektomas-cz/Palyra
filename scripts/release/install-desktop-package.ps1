@@ -72,13 +72,13 @@ try {
     Invoke-CommandQuiet -Command $browserBinary -Arguments @("--help")
     Invoke-CommandQuiet -Command $cliExposure.command_path -Arguments @("version")
     Invoke-CommandQuiet -Command $cliExposure.command_path -Arguments @("--help")
-    Invoke-CommandQuiet -Command "palyra" -Arguments @("version")
-    Invoke-CommandQuiet -Command "palyra" -Arguments @("--help")
-    Invoke-CommandQuiet -Command "palyra" -Arguments @("gateway", "--help")
-    Invoke-CommandQuiet -Command "palyra" -Arguments @("browser", "--help")
-    Invoke-CommandQuiet -Command "palyra" -Arguments @("docs", "search", "gateway")
+    Invoke-CommandQuiet -Command $cliExposure.command_path -Arguments @("version")
+    Invoke-CommandQuiet -Command $cliExposure.command_path -Arguments @("--help")
+    Invoke-CommandQuiet -Command $cliExposure.command_path -Arguments @("gateway", "--help")
+    Invoke-CommandQuiet -Command $cliExposure.command_path -Arguments @("browser", "--help")
+    Invoke-CommandQuiet -Command $cliExposure.command_path -Arguments @("docs", "search", "gateway")
     if ($null -ne $resolvedStateRoot) {
-        Invoke-CommandQuiet -Command "palyra" -Arguments @("doctor", "--json")
+        Invoke-CommandQuiet -Command $cliExposure.command_path -Arguments @("doctor", "--json")
     }
 }
 finally {

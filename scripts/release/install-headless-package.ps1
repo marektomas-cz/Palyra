@@ -64,14 +64,14 @@ try {
     Invoke-CommandQuiet -Command $cliBinary -Arguments @("config", "validate", "--path", $resolvedConfigPath)
     Invoke-CommandQuiet -Command $cliExposure.command_path -Arguments @("version")
     Invoke-CommandQuiet -Command $cliExposure.command_path -Arguments @("--help")
-    Invoke-CommandQuiet -Command "palyra" -Arguments @("version")
-    Invoke-CommandQuiet -Command "palyra" -Arguments @("--help")
-    Invoke-CommandQuiet -Command "palyra" -Arguments @("gateway", "--help")
-    Invoke-CommandQuiet -Command "palyra" -Arguments @("browser", "--help")
-    Invoke-CommandQuiet -Command "palyra" -Arguments @("node", "--help")
-    Invoke-CommandQuiet -Command "palyra" -Arguments @("nodes", "--help")
-    Invoke-CommandQuiet -Command "palyra" -Arguments @("docs", "search", "gateway")
-    Invoke-CommandQuiet -Command "palyra" -Arguments @("doctor", "--json")
+    Invoke-CommandQuiet -Command $cliExposure.command_path -Arguments @("version")
+    Invoke-CommandQuiet -Command $cliExposure.command_path -Arguments @("--help")
+    Invoke-CommandQuiet -Command $cliExposure.command_path -Arguments @("gateway", "--help")
+    Invoke-CommandQuiet -Command $cliExposure.command_path -Arguments @("browser", "--help")
+    Invoke-CommandQuiet -Command $cliExposure.command_path -Arguments @("node", "--help")
+    Invoke-CommandQuiet -Command $cliExposure.command_path -Arguments @("nodes", "--help")
+    Invoke-CommandQuiet -Command $cliExposure.command_path -Arguments @("docs", "search", "gateway")
+    Invoke-CommandQuiet -Command $cliExposure.command_path -Arguments @("doctor", "--json")
 }
 finally {
     if ($null -eq $previousStateRoot) {
