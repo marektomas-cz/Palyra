@@ -1164,7 +1164,12 @@ fn validate_allowlist_subset(
     parent_allowlist: &[String],
 ) -> Result<(), Status> {
     if parent_allowlist.is_empty() {
-        return Ok(());
+        if requested.is_empty() {
+            return Ok(());
+        }
+        return Err(Status::failed_precondition(format!(
+            "{field} cannot grant entries when the parent allowlist is empty"
+        )));
     }
     if let Some(disallowed) = requested
         .iter()
@@ -1417,6 +1422,31 @@ mod tests {
                 || error.message().contains("delegation.tool_allowlist entry"),
             "validation should explain the allowlist conflict"
         );
+    }
+
+    #[test]
+    fn resolve_delegation_request_treats_empty_parent_allowlist_as_deny_all() {
+        let mut parent = parent_context();
+        parent.parent_tool_allowlist.clear();
+        let error = resolve_delegation_request(
+            &DelegationRequestInput {
+                profile_id: Some("research".to_owned()),
+                ..Default::default()
+            },
+            &parent,
+        )
+        .expect_err("child tools must not exceed an empty parent allowlist");
+
+        assert!(error.message().contains("parent allowlist is empty"));
+        let no_tools = resolve_delegation_request(
+            &DelegationRequestInput {
+                profile_id: Some("synthesis".to_owned()),
+                ..Default::default()
+            },
+            &parent,
+        )
+        .expect("no-tool child profile should remain valid under an empty parent allowlist");
+        assert!(no_tools.tool_allowlist.is_empty());
     }
 
     #[test]

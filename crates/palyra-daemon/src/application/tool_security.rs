@@ -19,6 +19,7 @@ use crate::{
         ExecutionGatePipelineInput, ExecutionGateReport, ToolProposalApprovalState,
     },
     application::tool_runtime::networked_worker::networked_worker_supports_tool,
+    delegation::DelegationSnapshot,
     execution_backends::{
         build_execution_backend_inventory_with_worker_state, resolve_execution_backend,
         ExecutionBackendPreference, ExecutionBackendResolution,
@@ -333,6 +334,51 @@ pub(crate) fn annotate_tool_decision_with_backend_context(
     decision
 }
 
+fn allowlist_display(allowlist: &[String]) -> String {
+    if allowlist.is_empty() {
+        "<empty>".to_owned()
+    } else {
+        allowlist.join(",")
+    }
+}
+
+fn evaluate_delegation_scope_gate(
+    delegation: &DelegationSnapshot,
+    tool_name: &str,
+    skill_context: Option<&ToolSkillContext>,
+) -> Option<ToolDecision> {
+    let normalized_tool_name = tool_name.trim().to_ascii_lowercase();
+    if !delegation.tool_allowlist.iter().any(|entry| entry == &normalized_tool_name) {
+        return Some(ToolDecision {
+            allowed: false,
+            reason: format!(
+                "delegation policy blocked tool={tool_name}; reason_code=delegation.tool_allowlist_denied; delegated_profile={}; delegated_allowlist={}",
+                delegation.profile_id,
+                allowlist_display(delegation.tool_allowlist.as_slice())
+            ),
+            approval_required: false,
+            policy_enforced: true,
+        });
+    }
+    if let Some(skill_context) = skill_context {
+        let skill_id = skill_context.skill_id().to_ascii_lowercase();
+        if !delegation.skill_allowlist.iter().any(|entry| entry == &skill_id) {
+            return Some(ToolDecision {
+                allowed: false,
+                reason: format!(
+                    "delegation policy blocked skill={}; reason_code=delegation.skill_allowlist_denied; delegated_profile={}; delegated_skill_allowlist={}",
+                    skill_context.skill_id(),
+                    delegation.profile_id,
+                    allowlist_display(delegation.skill_allowlist.as_slice())
+                ),
+                approval_required: false,
+                policy_enforced: true,
+            });
+        }
+    }
+    None
+}
+
 #[allow(clippy::result_large_err)]
 pub(crate) async fn evaluate_tool_proposal_security(
     runtime_state: &Arc<GatewayRuntimeState>,
@@ -366,6 +412,35 @@ pub(crate) async fn evaluate_tool_proposal_security(
             None
         }
     };
+    if skill_gate_decision.is_none() {
+        skill_gate_decision = match runtime_state
+            .orchestrator_run_status_snapshot(run_id.to_owned())
+            .await
+        {
+            Ok(Some(run)) => run.delegation.as_ref().and_then(|delegation| {
+                evaluate_delegation_scope_gate(delegation, tool_name, skill_context.as_ref())
+            }),
+            Ok(None) => None,
+            Err(error) => {
+                warn!(
+                    run_id = %run_id,
+                    proposal_id = %proposal_id,
+                    tool_name = %tool_name,
+                    status_code = ?error.code(),
+                    "delegation policy lookup failed; proposal will be denied safely"
+                );
+                Some(ToolDecision {
+                        allowed: false,
+                        reason: format!(
+                            "delegation policy lookup failed; reason_code=delegation.lookup_failed; status_code={:?}",
+                            error.code()
+                        ),
+                        approval_required: false,
+                        policy_enforced: true,
+                    })
+            }
+        };
+    }
     if skill_gate_decision.is_none() {
         if let Some(skill_context) = skill_context.as_ref() {
             skill_gate_decision =
@@ -754,13 +829,18 @@ async fn record_skill_execution_denied_journal_event(
 #[cfg(test)]
 mod tests {
     use crate::{
+        delegation::{
+            DelegationExecutionMode, DelegationMemoryScopeKind, DelegationMergeContract,
+            DelegationMergeStrategy, DelegationRole, DelegationRuntimeLimits, DelegationSnapshot,
+        },
         execution_backends::{ExecutionBackendPreference, ExecutionBackendResolution},
+        gateway::ToolSkillContext,
         tool_protocol::ToolDecision,
     };
 
     use super::{
         annotate_tool_decision_with_backend_context, evaluate_backend_capability_gate,
-        ToolProposalBackendSelection,
+        evaluate_delegation_scope_gate, ToolProposalBackendSelection,
     };
 
     fn networked_worker_selection() -> ToolProposalBackendSelection {
@@ -775,6 +855,33 @@ mod tests {
                 approval_required: true,
                 reason: "attested worker is available".to_owned(),
             },
+        }
+    }
+
+    fn delegation_snapshot(
+        tool_allowlist: &[&str],
+        skill_allowlist: &[&str],
+    ) -> DelegationSnapshot {
+        DelegationSnapshot {
+            profile_id: "synthesis".to_owned(),
+            display_name: "Synthesis".to_owned(),
+            description: Some("test delegation".to_owned()),
+            template_id: None,
+            role: DelegationRole::Synthesis,
+            execution_mode: DelegationExecutionMode::Serial,
+            group_id: "serial-test".to_owned(),
+            model_profile: "gpt-4o-mini".to_owned(),
+            tool_allowlist: tool_allowlist.iter().map(|value| (*value).to_owned()).collect(),
+            skill_allowlist: skill_allowlist.iter().map(|value| (*value).to_owned()).collect(),
+            memory_scope: DelegationMemoryScopeKind::ParentSession,
+            budget_tokens: 1_000,
+            max_attempts: 1,
+            merge_contract: DelegationMergeContract {
+                strategy: DelegationMergeStrategy::Summarize,
+                approval_required: false,
+            },
+            runtime_limits: DelegationRuntimeLimits::default(),
+            agent_id: Some("agent:test".to_owned()),
         }
     }
 
@@ -821,6 +928,35 @@ mod tests {
         );
         assert!(decision.reason.contains("backend_requested=networked_worker"));
         assert!(decision.reason.contains("backend_reason_code=backend.available.networked_worker"));
+    }
+
+    #[test]
+    fn delegation_scope_gate_denies_tools_outside_child_allowlist() {
+        let delegation = delegation_snapshot(&[], &[]);
+        let decision = evaluate_delegation_scope_gate(&delegation, "palyra.echo", None)
+            .expect("empty delegated tool allowlist should deny every tool");
+
+        assert!(!decision.allowed);
+        assert!(decision.reason.contains("delegation.tool_allowlist_denied"));
+        assert!(decision.reason.contains("delegated_allowlist=<empty>"));
+    }
+
+    #[test]
+    fn delegation_scope_gate_allows_only_declared_tools_and_skills() {
+        let delegation = delegation_snapshot(&["palyra.plugin.run"], &["acme.allowed"]);
+        let allowed_skill = ToolSkillContext::new("acme.allowed".to_owned(), None);
+        assert!(
+            evaluate_delegation_scope_gate(&delegation, "palyra.plugin.run", Some(&allowed_skill))
+                .is_none(),
+            "declared delegated tool and skill should remain available"
+        );
+
+        let denied_skill = ToolSkillContext::new("acme.denied".to_owned(), None);
+        let decision =
+            evaluate_delegation_scope_gate(&delegation, "palyra.plugin.run", Some(&denied_skill))
+                .expect("undeclared delegated skill should be blocked");
+        assert!(!decision.allowed);
+        assert!(decision.reason.contains("delegation.skill_allowlist_denied"));
     }
 
     #[test]
