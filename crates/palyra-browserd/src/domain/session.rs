@@ -777,16 +777,40 @@ fn has_attr_value(tag_lower: &str, attr_name: &str, expected_value_lower: &str) 
 }
 
 pub(crate) fn extract_attr_value(tag_lower: &str, attr_name: &str) -> Option<String> {
-    let needle = format!("{attr_name}=");
-    let start = tag_lower.find(needle.as_str())?;
-    parse_attr_value(&tag_lower[start + needle.len()..])
+    let attr_name_lower = attr_name.to_ascii_lowercase();
+    let value_start = find_attr_value_start(tag_lower, attr_name_lower.as_str())?;
+    parse_attr_value(&tag_lower[value_start..])
 }
 
 pub(crate) fn extract_attr_value_case_insensitive(tag: &str, attr_name: &str) -> Option<String> {
     let tag_lower = tag.to_ascii_lowercase();
-    let needle = format!("{}=", attr_name.to_ascii_lowercase());
-    let start = tag_lower.find(needle.as_str())?;
-    parse_attr_value(&tag[start + needle.len()..])
+    let attr_name_lower = attr_name.to_ascii_lowercase();
+    let value_start = find_attr_value_start(tag_lower.as_str(), attr_name_lower.as_str())?;
+    parse_attr_value(&tag[value_start..])
+}
+
+fn find_attr_value_start(tag_lower: &str, attr_name_lower: &str) -> Option<usize> {
+    if attr_name_lower.is_empty() {
+        return None;
+    }
+
+    let mut cursor = 0usize;
+    while let Some(relative_start) = tag_lower[cursor..].find(attr_name_lower) {
+        let start = cursor + relative_start;
+        let end = start + attr_name_lower.len();
+        let before = tag_lower[..start].chars().next_back();
+        let before_is_boundary =
+            before.is_some_and(|ch| ch == '<' || ch == '/' || ch.is_ascii_whitespace());
+        if before_is_boundary {
+            let rest = &tag_lower[end..];
+            let trimmed = rest.trim_start();
+            if trimmed.starts_with('=') {
+                return Some(end + (rest.len() - trimmed.len()) + 1);
+            }
+        }
+        cursor = end;
+    }
+    None
 }
 
 fn parse_attr_value(raw_value: &str) -> Option<String> {
@@ -848,7 +872,9 @@ pub(crate) fn is_download_like_tag(tag: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::find_matching_html_tag;
+    use super::{
+        extract_attr_value_case_insensitive, find_matching_html_tag, is_download_like_tag,
+    };
 
     #[test]
     fn find_matching_html_tag_supports_css_attribute_selectors() {
@@ -881,5 +907,34 @@ mod tests {
         let by_boolean = find_matching_html_tag("button[disabled]", html)
             .expect("attribute existence selector should match boolean attribute");
         assert!(by_boolean.contains("disabled"));
+    }
+
+    #[test]
+    fn find_matching_html_tag_does_not_match_attribute_name_suffixes() {
+        let html = r#"
+            <button id="decoy" data-href="/file.pdf">Decoy</button>
+            <a id="real" href="/file.pdf" download>Download</a>
+        "#;
+
+        let tag = find_matching_html_tag(r#"[href="/file.pdf"]"#, html)
+            .expect("real href selector should match the anchor");
+        assert!(tag.contains(r#"id="real""#), "{tag}");
+        assert!(is_download_like_tag(tag.as_str()), "{tag}");
+
+        let html = r#"
+            <button id="decoy" data-download>Decoy</button>
+            <a id="real" download href="/file.pdf">Download</a>
+        "#;
+
+        let tag = find_matching_html_tag("[download]", html)
+            .expect("real download attribute selector should match the anchor");
+        assert!(tag.contains(r#"id="real""#), "{tag}");
+    }
+
+    #[test]
+    fn case_insensitive_attribute_extraction_requires_name_boundaries() {
+        let tag = r#"<a data-href="/decoy.pdf" HREF="/real.pdf">Download</a>"#;
+
+        assert_eq!(extract_attr_value_case_insensitive(tag, "href").as_deref(), Some("/real.pdf"));
     }
 }
