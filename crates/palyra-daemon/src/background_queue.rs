@@ -194,6 +194,9 @@ async fn process_background_task(
                 finalize_task_from_run(runtime, task, snapshot.as_ref(), "cancelled").await?;
             }
         } else {
+            if task_has_in_flight_work_without_target(task) {
+                return Ok(());
+            }
             runtime
                 .update_orchestrator_background_task(OrchestratorBackgroundTaskUpdateRequest {
                     task_id: task.task_id.clone(),
@@ -235,7 +238,9 @@ async fn process_background_task(
                 }
                 return Ok(());
             }
+            return Ok(());
         }
+        return Ok(());
     }
     if task.max_attempts > 0 && task.attempt_count >= task.max_attempts {
         runtime
@@ -747,12 +752,27 @@ fn running_delegated_children_for_parent<'a>(
     all_tasks.iter().filter(move |candidate| {
         candidate.parent_run_id.as_deref() == Some(parent_run_id)
             && candidate.delegation.is_some()
-            && matches!(
-                AuxiliaryTaskState::from_str(candidate.state.as_str()),
-                Some(AuxiliaryTaskState::Running | AuxiliaryTaskState::CancelRequested)
-            )
-            && candidate.target_run_id.is_some()
+            && task_counts_as_active_delegated_child(candidate)
     })
+}
+
+fn task_counts_as_active_delegated_child(task: &OrchestratorBackgroundTaskRecord) -> bool {
+    match AuxiliaryTaskState::from_str(task.state.as_str()) {
+        Some(AuxiliaryTaskState::Running) => true,
+        Some(AuxiliaryTaskState::CancelRequested) => {
+            task.target_run_id.is_some() || task_has_in_flight_work_without_target(task)
+        }
+        _ => false,
+    }
+}
+
+fn task_has_in_flight_work_without_target(task: &OrchestratorBackgroundTaskRecord) -> bool {
+    task.target_run_id.is_none()
+        && task.started_at_unix_ms.is_some()
+        && matches!(
+            AuxiliaryTaskState::from_str(task.state.as_str()),
+            Some(AuxiliaryTaskState::Running | AuxiliaryTaskState::CancelRequested)
+        )
 }
 
 fn task_precedes_or_equals(
@@ -1289,26 +1309,41 @@ async fn sync_parent_run_cancellation(
         return Ok(true);
     }
 
-    runtime
-        .update_orchestrator_background_task(OrchestratorBackgroundTaskUpdateRequest {
-            task_id: task.task_id.clone(),
-            state: Some(AuxiliaryTaskState::Cancelled.as_str().to_owned()),
-            target_run_id: Some(None),
-            increment_attempt_count: false,
-            last_error: Some(Some(cancellation_reason.clone())),
-            result_json: Some(Some(
-                json!({
-                    "status": "cancelled",
-                    "task_id": task.task_id,
-                    "reason": cancellation_reason,
-                    "parent_run_id": parent_run_id,
-                })
-                .to_string(),
-            )),
-            started_at_unix_ms: None,
-            completed_at_unix_ms: Some(Some(crate::gateway::current_unix_ms())),
-        })
-        .await?;
+    if task_has_in_flight_work_without_target(task) {
+        runtime
+            .update_orchestrator_background_task(OrchestratorBackgroundTaskUpdateRequest {
+                task_id: task.task_id.clone(),
+                state: Some(AuxiliaryTaskState::CancelRequested.as_str().to_owned()),
+                target_run_id: None,
+                increment_attempt_count: false,
+                last_error: Some(Some(cancellation_reason)),
+                result_json: None,
+                started_at_unix_ms: None,
+                completed_at_unix_ms: None,
+            })
+            .await?;
+    } else {
+        runtime
+            .update_orchestrator_background_task(OrchestratorBackgroundTaskUpdateRequest {
+                task_id: task.task_id.clone(),
+                state: Some(AuxiliaryTaskState::Cancelled.as_str().to_owned()),
+                target_run_id: Some(None),
+                increment_attempt_count: false,
+                last_error: Some(Some(cancellation_reason.clone())),
+                result_json: Some(Some(
+                    json!({
+                        "status": "cancelled",
+                        "task_id": task.task_id,
+                        "reason": cancellation_reason,
+                        "parent_run_id": parent_run_id,
+                    })
+                    .to_string(),
+                )),
+                started_at_unix_ms: None,
+                completed_at_unix_ms: Some(Some(crate::gateway::current_unix_ms())),
+            })
+            .await?;
+    }
     Ok(true)
 }
 
@@ -1344,7 +1379,9 @@ fn serial_sibling_blocks(
     }
     match AuxiliaryTaskState::from_str(sibling.state.as_str()) {
         Some(AuxiliaryTaskState::Running) => true,
-        Some(AuxiliaryTaskState::CancelRequested) => sibling.target_run_id.is_some(),
+        Some(AuxiliaryTaskState::CancelRequested) => {
+            sibling.target_run_id.is_some() || task_has_in_flight_work_without_target(sibling)
+        }
         Some(AuxiliaryTaskState::Queued | AuxiliaryTaskState::Paused) => {
             task_precedes_in_serial_group(sibling, current)
         }
@@ -2563,6 +2600,7 @@ mod tests {
         append_artifact_references, build_background_task_child_run_attach_update,
         build_background_task_running_update, categorize_child_failure,
         delegated_child_timeout_message, evaluate_delegation_scheduler_limits,
+        running_delegated_children_for_parent, task_has_in_flight_work_without_target,
         DelegationSchedulerDecision,
     };
     use crate::{
@@ -2653,6 +2691,48 @@ mod tests {
             }
             DelegationSchedulerDecision::Fail { .. } => {
                 panic!("concurrency pressure should defer, not fail");
+            }
+        }
+    }
+
+    #[test]
+    fn evaluate_delegation_scheduler_limits_counts_attach_pending_child_for_concurrency() {
+        let limits = DelegationRuntimeLimits {
+            max_concurrent_children: 1,
+            max_children_per_parent: 8,
+            max_total_children: 16,
+            max_parallel_groups: 2,
+            max_depth: 3,
+            max_budget_share_bps: 10_000,
+            child_budget_override: None,
+            child_timeout_ms: 60_000,
+        };
+        let mut attach_pending = sample_task(
+            "task-attach-pending",
+            AuxiliaryTaskState::Running.as_str(),
+            10,
+            "group-a",
+            limits.clone(),
+        );
+        attach_pending.target_run_id = None;
+        let queued =
+            sample_task("task-queued", AuxiliaryTaskState::Queued.as_str(), 20, "group-b", limits);
+
+        let active_tasks = vec![attach_pending.clone()];
+        let running_children =
+            running_delegated_children_for_parent(active_tasks.as_slice(), "parent-run")
+                .collect::<Vec<_>>();
+        assert_eq!(running_children.len(), 1, "attach-pending child must count as active");
+
+        let decision =
+            evaluate_delegation_scheduler_limits(&[attach_pending, queued.clone()], &queued)
+                .expect("queued child should be deferred while earlier child is attaching");
+        match decision {
+            DelegationSchedulerDecision::Defer { reason, .. } => {
+                assert_eq!(reason, "max_concurrent_children");
+            }
+            DelegationSchedulerDecision::Fail { .. } => {
+                panic!("attach-pending concurrency pressure should defer, not fail");
             }
         }
     }
@@ -2843,6 +2923,41 @@ mod tests {
         assert_eq!(update.result_json, Some(None));
         assert_eq!(update.started_at_unix_ms, Some(Some(1234)));
         assert_eq!(update.completed_at_unix_ms, Some(None));
+    }
+
+    #[test]
+    fn in_flight_work_without_target_requires_started_running_or_cancel_requested_task() {
+        let limits = DelegationRuntimeLimits {
+            max_concurrent_children: 1,
+            max_children_per_parent: 8,
+            max_total_children: 16,
+            max_parallel_groups: 1,
+            max_depth: 3,
+            max_budget_share_bps: 10_000,
+            child_budget_override: None,
+            child_timeout_ms: 60_000,
+        };
+        let mut running = sample_task(
+            "task-running",
+            AuxiliaryTaskState::Running.as_str(),
+            10,
+            "group-a",
+            limits.clone(),
+        );
+        running.target_run_id = None;
+        assert!(task_has_in_flight_work_without_target(&running));
+
+        let mut not_started = running.clone();
+        not_started.started_at_unix_ms = None;
+        assert!(!task_has_in_flight_work_without_target(&not_started));
+
+        let mut cancel_requested = running.clone();
+        cancel_requested.state = AuxiliaryTaskState::CancelRequested.as_str().to_owned();
+        assert!(task_has_in_flight_work_without_target(&cancel_requested));
+
+        let mut queued = running;
+        queued.state = AuxiliaryTaskState::Queued.as_str().to_owned();
+        assert!(!task_has_in_flight_work_without_target(&queued));
     }
 
     #[test]

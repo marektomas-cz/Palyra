@@ -2455,9 +2455,22 @@ pub(crate) async fn console_chat_background_task_cancel_handler(
                 .await
                 .map_err(runtime_status_response)?;
         } else {
-            return Err(runtime_status_response(tonic::Status::failed_precondition(
-                "running background task is missing target_run_id",
-            )));
+            state
+                .runtime
+                .update_orchestrator_background_task(
+                    journal::OrchestratorBackgroundTaskUpdateRequest {
+                        task_id: task.task_id.clone(),
+                        state: Some(AuxiliaryTaskState::CancelRequested.as_str().to_owned()),
+                        result_json: Some(Some(
+                            build_background_task_cancel_requested_result_json(
+                                task.task_id.as_str(),
+                            ),
+                        )),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .map_err(runtime_status_response)?;
         }
     } else {
         state
