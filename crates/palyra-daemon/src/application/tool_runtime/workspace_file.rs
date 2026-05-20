@@ -1323,7 +1323,7 @@ fn read_workspace_file_chunk(
         )
     })?;
     let opened_path = canonicalize_open_file_path(&file, input.path.as_str())?;
-    if !opened_path.starts_with(canonical_root) {
+    if !path_stays_inside_workspace_root(opened_path.as_path(), canonical_root) {
         return Err(format!("{WORKSPACE_READ_FILE_TOOL_NAME} path escapes agent workspace roots"));
     }
     let size_bytes = file
@@ -1384,6 +1384,51 @@ fn read_workspace_file_chunk(
         bytes_base64,
         redacted,
     })
+}
+
+fn path_stays_inside_workspace_root(candidate: &Path, root: &Path) -> bool {
+    if candidate.starts_with(root) {
+        return true;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return macos_path_alias_key(candidate).is_some_and(|candidate| {
+            macos_path_alias_key(root).is_some_and(|root| {
+                normalized_path_key_starts_with(candidate.as_str(), root.as_str())
+            })
+        });
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_path_alias_key(path: &Path) -> Option<String> {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    if normalized.is_empty() {
+        return None;
+    }
+    for alias_prefix in ["/private/var", "/private/tmp", "/private/etc"] {
+        if normalized == alias_prefix {
+            return Some(alias_prefix.trim_start_matches("/private").to_owned());
+        }
+        if let Some(suffix) = normalized.strip_prefix(alias_prefix) {
+            if suffix.starts_with('/') {
+                return Some(format!("{}{suffix}", alias_prefix.trim_start_matches("/private")));
+            }
+        }
+    }
+    Some(normalized)
+}
+
+#[cfg(target_os = "macos")]
+fn normalized_path_key_starts_with(candidate: &str, root: &str) -> bool {
+    if candidate == root {
+        return true;
+    }
+    candidate.strip_prefix(root).is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 #[cfg(unix)]
@@ -1533,6 +1578,23 @@ fn workspace_search_outcome(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_root_scope_check_rejects_prefix_sibling() {
+        assert!(!path_stays_inside_workspace_root(
+            Path::new("/tmp/workspace-extra/file.txt"),
+            Path::new("/tmp/workspace")
+        ));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn workspace_root_scope_check_accepts_private_var_alias() {
+        assert!(path_stays_inside_workspace_root(
+            Path::new("/private/var/folders/palyra/workspace/file.txt"),
+            Path::new("/var/folders/palyra/workspace")
+        ));
+    }
 
     #[test]
     fn read_workspace_file_returns_utf8_text() {
