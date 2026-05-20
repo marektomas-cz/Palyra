@@ -68,7 +68,6 @@ fn normalize_repeated_command_argument(input: &mut ProcessRunnerToolInput) {
 
     if executable_tokens_match(command, input.args[0].as_str()) {
         input.args.remove(0);
-        return;
     }
 }
 

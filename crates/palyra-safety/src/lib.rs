@@ -761,7 +761,7 @@ fn sensitive_assignment_separator_index(line: &str) -> Option<usize> {
 }
 
 fn is_colon_style_assignment_key(raw_key: &str) -> bool {
-    let raw_key = raw_key.trim().trim_start_matches(|ch| matches!(ch, '{' | '[' | ',')).trim();
+    let raw_key = raw_key.trim().trim_start_matches(['{', '[', ',']).trim();
     !raw_key.is_empty() && !raw_key.chars().any(char::is_whitespace)
 }
 
