@@ -1133,13 +1133,6 @@ fn append_wildcard_entries(
 }
 
 impl PluginCapabilityProfile {
-    pub(crate) fn is_empty(&self) -> bool {
-        self.http_hosts.is_empty()
-            && self.secrets.is_empty()
-            && self.storage_prefixes.is_empty()
-            && self.channels.is_empty()
-    }
-
     pub(crate) fn to_requested_capabilities(
         &self,
     ) -> crate::wasm_plugin_runner::WasmPluginRequestedCapabilities {

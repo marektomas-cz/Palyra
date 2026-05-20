@@ -170,7 +170,6 @@ pub(crate) async fn console_plugins_install_or_bind_handler(
     } = payload;
     let config_payload = normalize_plugin_config_payload(config)?;
     let clear_config = clear_config.unwrap_or(false);
-    let requested_capability_profile = capability_profile.clone();
     let mut skill_id = requested_skill_id.and_then(trim_to_option);
     let mut skill_version = requested_skill_version.and_then(trim_to_option);
     let mut installed_record = None::<InstalledSkillRecord>;
@@ -250,10 +249,6 @@ pub(crate) async fn console_plugins_install_or_bind_handler(
     )
     .map_err(|error| runtime_status_response(tonic::Status::invalid_argument(error.message)))?;
     apply_manifest_binding_defaults(&mut binding, &resolved);
-    if requested_capability_profile.is_none() && binding.capability_profile.is_empty() {
-        binding.capability_profile =
-            crate::plugins::plugin_capability_profile_from_manifest(&resolved.manifest);
-    }
     resolved = resolve_installed_skill_module(
         binding.skill_id.as_str(),
         binding.skill_version.as_deref(),

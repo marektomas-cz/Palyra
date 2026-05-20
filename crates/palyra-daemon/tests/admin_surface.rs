@@ -4362,6 +4362,72 @@ allowed_channels = []
         "healthy plugin bindings should not emit remediation steps"
     );
 
+    let capability_artifact_path = unique_temp_skill_artifact_path();
+    fs::write(
+        &capability_artifact_path,
+        build_test_skill_artifact_with_runtime_capabilities("acme.capability_skill", "1.0.0")
+            .context("failed to build capability-declaring test skill artifact")?,
+    )
+    .with_context(|| {
+        format!(
+            "failed to write capability-declaring test skill artifact {}",
+            capability_artifact_path.display()
+        )
+    })?;
+    let capability_plugin = client
+        .post(format!("http://127.0.0.1:{admin_port}/console/v1/plugins/install-or-bind"))
+        .header("Cookie", cookie.clone())
+        .header("x-palyra-csrf-token", csrf_token.clone())
+        .json(&json!({
+            "plugin_id": "acme-capability-plugin",
+            "artifact_path": capability_artifact_path,
+            "module_path": "modules/module.wasm",
+            "entrypoint": "run",
+            "enabled": true
+        }))
+        .send()
+        .context("failed to bind capability-declaring plugin without operator grants")?
+        .error_for_status()
+        .context("capability-declaring plugin bind returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse capability-declaring plugin bind response json")?;
+    assert_eq!(
+        capability_plugin
+            .pointer("/binding/capability_profile/http_hosts")
+            .and_then(Value::as_array)
+            .map(Vec::len),
+        Some(0),
+        "omitting capability_profile must not auto-grant manifest HTTP egress"
+    );
+    assert_eq!(
+        capability_plugin
+            .pointer("/binding/capability_profile/storage_prefixes")
+            .and_then(Value::as_array)
+            .map(Vec::len),
+        Some(0),
+        "omitting capability_profile must not auto-grant manifest storage prefixes"
+    );
+    assert_eq!(
+        capability_plugin
+            .pointer("/binding/capability_profile/secrets")
+            .and_then(Value::as_array)
+            .map(Vec::len),
+        Some(0),
+        "omitting capability_profile must not auto-grant manifest secrets"
+    );
+    let capability_diff_entries = capability_plugin
+        .pointer("/check/capabilities/entries")
+        .and_then(Value::as_array)
+        .context("capability diff entries should explain missing grants")?;
+    assert!(
+        capability_diff_entries.iter().any(|entry| {
+            entry.get("category").and_then(Value::as_str) == Some("missing_grant")
+                && entry.get("capability_kind").and_then(Value::as_str) == Some("http_hosts")
+                && entry.get("value").and_then(Value::as_str) == Some("api.internal.example")
+        }),
+        "omitted operator grants should surface manifest HTTP egress as missing_grant: {capability_plugin}"
+    );
+
     let bound_hook = client
         .post(format!("http://127.0.0.1:{admin_port}/console/v1/hooks/bind"))
         .header("Cookie", cookie.clone())
@@ -5388,6 +5454,57 @@ required_protocol_major = 1
 min_palyra_version = "0.1.0"
 "#
     );
+    build_test_skill_artifact_from_manifest(manifest_toml)
+}
+
+fn build_test_skill_artifact_with_runtime_capabilities(
+    skill_id: &str,
+    version: &str,
+) -> Result<Vec<u8>> {
+    let manifest_toml = format!(
+        r#"
+manifest_version = 1
+skill_id = "{skill_id}"
+name = "Capability Skill"
+version = "{version}"
+publisher = "acme"
+
+[entrypoints]
+[[entrypoints.tools]]
+id = "acme.hook_run"
+name = "hook_run"
+description = "Run the hook entrypoint"
+input_schema = {{ type = "object" }}
+output_schema = {{ type = "object" }}
+risk = {{ default_sensitive = false, requires_approval = false }}
+
+[capabilities.filesystem]
+read_roots = []
+write_roots = ["skills/cache"]
+
+[capabilities]
+http_egress_allowlist = ["api.internal.example"]
+device_capabilities = []
+node_capabilities = ["discord"]
+
+[[capabilities.secrets]]
+scope = "skill:{skill_id}"
+key_names = ["api_token"]
+
+[capabilities.quotas]
+wall_clock_timeout_ms = 2000
+fuel_budget = 500000
+max_memory_bytes = 1048576
+
+[compat]
+required_protocol_major = 1
+min_palyra_version = "0.1.0"
+"#
+    );
+    build_test_skill_artifact_from_manifest(manifest_toml)
+}
+
+fn build_test_skill_artifact_from_manifest(manifest_toml: String) -> Result<Vec<u8>> {
     let output =
         build_signed_skill_artifact(SkillArtifactBuildRequest {
             manifest_toml,
