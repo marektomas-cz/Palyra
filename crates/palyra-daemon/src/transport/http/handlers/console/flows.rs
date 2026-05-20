@@ -18,6 +18,7 @@ use crate::{
         FlowTransitionRequest,
     },
     runtime_status_response,
+    transport::grpc::auth::RequestContext,
 };
 
 const DEFAULT_FLOW_PAGE_LIMIT: usize = 100;
@@ -201,8 +202,7 @@ pub(crate) async fn console_flow_get_handler(
     Path(flow_id): Path<String>,
 ) -> Result<Json<Value>, Response> {
     let session = authorize_console_session(&state, &headers, false)?;
-    let bundle =
-        load_owned_flow_bundle(&state, &session.context.principal, flow_id.as_str()).await?;
+    let bundle = load_owned_flow_bundle(&state, &session.context, flow_id.as_str()).await?;
     Ok(Json(flow_bundle_view(&bundle)))
 }
 
@@ -377,7 +377,7 @@ async fn transition_console_flow(
     clear_completed_at: bool,
 ) -> Result<Json<Value>, Response> {
     let session = authorize_console_session(state, headers, true)?;
-    let bundle = load_owned_flow_bundle(state, &session.context.principal, flow_id).await?;
+    let bundle = load_owned_flow_bundle(state, &session.context, flow_id).await?;
     let completed_at_unix_ms = if clear_completed_at {
         Some(None)
     } else if next_state.is_terminal() {
@@ -417,7 +417,7 @@ async fn update_console_flow_step(
     action: ConsoleFlowStepAction<'_>,
 ) -> Result<Json<Value>, Response> {
     let session = authorize_console_session(state, headers, true)?;
-    let bundle = load_owned_flow_bundle(state, &session.context.principal, action.flow_id).await?;
+    let bundle = load_owned_flow_bundle(state, &session.context, action.flow_id).await?;
     let step =
         bundle.steps.iter().find(|step| step.step_id == action.step_id).ok_or_else(|| {
             runtime_status_response(tonic::Status::not_found("flow step not found"))
@@ -497,7 +497,7 @@ async fn update_console_flow_step(
 
 async fn load_owned_flow_bundle(
     state: &AppState,
-    principal: &str,
+    context: &RequestContext,
     flow_id: &str,
 ) -> Result<crate::journal::FlowBundleRecord, Response> {
     let bundle = state
@@ -506,12 +506,26 @@ async fn load_owned_flow_bundle(
         .await
         .map_err(runtime_status_response)?
         .ok_or_else(|| runtime_status_response(tonic::Status::not_found("flow not found")))?;
-    if bundle.flow.owner_principal != principal {
+    authorize_console_flow_bundle(&bundle, context)?;
+    Ok(bundle)
+}
+
+#[allow(clippy::result_large_err)]
+fn authorize_console_flow_bundle(
+    bundle: &crate::journal::FlowBundleRecord,
+    context: &RequestContext,
+) -> Result<(), Response> {
+    if bundle.flow.owner_principal != context.principal {
         return Err(runtime_status_response(tonic::Status::permission_denied(
             "flow belongs to a different principal",
         )));
     }
-    Ok(bundle)
+    if bundle.flow.device_id != context.device_id || bundle.flow.channel != context.channel {
+        return Err(runtime_status_response(tonic::Status::permission_denied(
+            "flow belongs to a different device or channel",
+        )));
+    }
+    Ok(())
 }
 
 fn flow_bundle_view(bundle: &crate::journal::FlowBundleRecord) -> Value {
@@ -674,4 +688,77 @@ fn flow_rollout_payload(state: &AppState) -> Value {
 
 fn json_value(raw: &str) -> Value {
     serde_json::from_str(raw).unwrap_or_else(|_| json!({ "raw": raw }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::authorize_console_flow_bundle;
+    use crate::{
+        journal::{FlowBundleRecord, FlowRecord},
+        transport::grpc::auth::RequestContext,
+    };
+
+    #[test]
+    fn authorize_console_flow_bundle_enforces_device_and_channel_scope() {
+        let bundle = flow_bundle("principal", "device-a", Some("web"));
+        let matching_context = RequestContext {
+            principal: "principal".to_owned(),
+            device_id: "device-a".to_owned(),
+            channel: Some("web".to_owned()),
+        };
+
+        authorize_console_flow_bundle(&bundle, &matching_context)
+            .expect("same principal, device, and channel should be allowed");
+
+        let cross_device_context =
+            RequestContext { device_id: "device-b".to_owned(), ..matching_context.clone() };
+        let response = authorize_console_flow_bundle(&bundle, &cross_device_context)
+            .expect_err("same-principal cross-device flow access must be rejected");
+        assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+
+        let cross_channel_context =
+            RequestContext { channel: Some("cli".to_owned()), ..matching_context.clone() };
+        let response = authorize_console_flow_bundle(&bundle, &cross_channel_context)
+            .expect_err("same-principal cross-channel flow access must be rejected");
+        assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+
+        let cross_principal_context =
+            RequestContext { principal: "other-principal".to_owned(), ..matching_context };
+        let response = authorize_console_flow_bundle(&bundle, &cross_principal_context)
+            .expect_err("cross-principal flow access must still be rejected");
+        assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+    }
+
+    fn flow_bundle(principal: &str, device_id: &str, channel: Option<&str>) -> FlowBundleRecord {
+        FlowBundleRecord {
+            flow: FlowRecord {
+                flow_id: "flow-1".to_owned(),
+                mode: "managed".to_owned(),
+                state: "running".to_owned(),
+                owner_principal: principal.to_owned(),
+                device_id: device_id.to_owned(),
+                channel: channel.map(ToOwned::to_owned),
+                session_id: Some("session-1".to_owned()),
+                origin_run_id: None,
+                objective_id: None,
+                routine_id: None,
+                webhook_id: None,
+                title: "Flow".to_owned(),
+                summary: "Flow summary".to_owned(),
+                current_step_id: None,
+                revision: 1,
+                lock_owner: None,
+                lock_expires_at_unix_ms: None,
+                retry_policy_json: "{}".to_owned(),
+                timeout_ms: None,
+                metadata_json: "{}".to_owned(),
+                created_at_unix_ms: 1,
+                updated_at_unix_ms: 1,
+                completed_at_unix_ms: None,
+            },
+            steps: Vec::new(),
+            events: Vec::new(),
+            revisions: Vec::new(),
+        }
+    }
 }
