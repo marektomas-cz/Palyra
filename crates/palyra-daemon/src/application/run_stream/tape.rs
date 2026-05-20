@@ -994,18 +994,6 @@ fn tool_result_tape_payload(
     .to_string()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::should_attempt_tool_result_compaction;
-
-    #[test]
-    fn tool_result_compaction_guard_requires_results_and_single_run_emit() {
-        assert!(!should_attempt_tool_result_compaction(0, false));
-        assert!(should_attempt_tool_result_compaction(1, false));
-        assert!(!should_attempt_tool_result_compaction(1, true));
-    }
-}
-
 fn tool_attestation_tape_payload(
     proposal_id: &str,
     attestation_id: &str,
@@ -1025,4 +1013,16 @@ fn tool_attestation_tape_payload(
         "sandbox_enforcement": sandbox_enforcement,
     })
     .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_attempt_tool_result_compaction;
+
+    #[test]
+    fn tool_result_compaction_guard_requires_results_and_single_run_emit() {
+        assert!(!should_attempt_tool_result_compaction(0, false));
+        assert!(should_attempt_tool_result_compaction(1, false));
+        assert!(!should_attempt_tool_result_compaction(1, true));
+    }
 }

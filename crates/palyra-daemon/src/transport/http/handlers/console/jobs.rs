@@ -318,9 +318,11 @@ mod tests {
 
     #[test]
     fn job_lifecycle_mutations_require_csrf() {
-        assert!(
-            REQUIRE_CSRF_FOR_JOB_MUTATION,
-            "job reference and lifecycle mutations must require the console CSRF token",
-        );
+        const {
+            assert!(
+                REQUIRE_CSRF_FOR_JOB_MUTATION,
+                "job reference and lifecycle mutations must require the console CSRF token",
+            );
+        }
     }
 }
