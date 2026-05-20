@@ -3384,7 +3384,6 @@ export interface DoctorRecoveryJob {
   job_id: string;
   state: "queued" | "running" | "succeeded" | "failed";
   requested_at_unix_ms: number;
-  idempotency_key?: string;
   requested_by_principal?: string;
   requested_by_device_id?: string;
   requested_channel?: string;

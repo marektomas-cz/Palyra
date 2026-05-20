@@ -1332,7 +1332,8 @@ pub struct DoctorRecoveryJob {
     pub job_id: String,
     pub state: DoctorRecoveryJobState,
     pub requested_at_unix_ms: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// SHA-256 digest of the client idempotency key, kept server-side for replay checks.
+    #[serde(default, skip_serializing)]
     pub idempotency_key: Option<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub requested_by_principal: String,
@@ -3209,7 +3210,7 @@ const fn default_doctor_recovery_jobs() -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::ConsoleLoginRequest;
+    use super::{ConsoleLoginRequest, DoctorRecoveryJob, DoctorRecoveryJobState};
 
     #[test]
     fn console_login_request_omits_admin_token_when_not_provided() {
@@ -3223,5 +3224,32 @@ mod tests {
         let principal = encoded.get("principal").and_then(serde_json::Value::as_str);
         assert!(encoded.get("admin_token").is_none());
         assert_eq!(principal, Some("admin:test"));
+    }
+
+    #[test]
+    fn doctor_recovery_job_omits_idempotency_key_when_serialized() {
+        let job = DoctorRecoveryJob {
+            job_id: "doctor-job-01".to_owned(),
+            state: DoctorRecoveryJobState::Queued,
+            requested_at_unix_ms: 1_700_000_000_000,
+            idempotency_key: Some("sha256:secret-digest".to_owned()),
+            requested_by_principal: "admin:test".to_owned(),
+            requested_by_device_id: "device-1".to_owned(),
+            requested_channel: Some("web".to_owned()),
+            started_at_unix_ms: None,
+            completed_at_unix_ms: None,
+            command: vec!["doctor".to_owned(), "--json".to_owned()],
+            report: None,
+            command_output: String::new(),
+            error: None,
+        };
+
+        let encoded = serde_json::to_value(&job).expect("doctor recovery job should encode");
+
+        assert!(encoded.get("idempotency_key").is_none());
+        assert_eq!(
+            encoded.get("requested_by_principal").and_then(serde_json::Value::as_str),
+            Some("admin:test")
+        );
     }
 }

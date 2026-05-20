@@ -3538,6 +3538,7 @@ pub(crate) fn list_support_bundle_jobs(
 
 pub(crate) fn list_doctor_jobs(
     state: &AppState,
+    context: &gateway::RequestContext,
     after_job_id: Option<&str>,
     limit: usize,
 ) -> Vec<control_plane::DoctorRecoveryJob> {
@@ -3546,9 +3547,34 @@ pub(crate) fn list_doctor_jobs(
     entries.sort_by(|left, right| left.job_id.cmp(&right.job_id));
     entries
         .into_iter()
+        .filter(|job| doctor_job_matches_requester(job, context))
         .filter(|job| after_job_id.is_none_or(|after| job.job_id.as_str() > after))
         .take(limit)
         .collect()
+}
+
+pub(crate) fn doctor_job_matches_requester(
+    job: &control_plane::DoctorRecoveryJob,
+    context: &gateway::RequestContext,
+) -> bool {
+    job.requested_by_principal == context.principal
+        && job.requested_by_device_id == context.device_id
+        && job.requested_channel == context.channel
+}
+
+fn doctor_idempotency_key_digest(raw_key: &str) -> String {
+    format!("sha256:{}", crate::sha256_hex(raw_key.as_bytes()))
+}
+
+fn doctor_job_matches_idempotency_boundary(
+    job: &control_plane::DoctorRecoveryJob,
+    idempotency_key_digest: &str,
+    command: &[String],
+    context: &gateway::RequestContext,
+) -> bool {
+    job.idempotency_key.as_deref() == Some(idempotency_key_digest)
+        && job.command == command
+        && doctor_job_matches_requester(job, context)
 }
 
 #[allow(clippy::result_large_err)]
@@ -3663,22 +3689,27 @@ pub(crate) fn create_doctor_job(
     context: &gateway::RequestContext,
     payload: control_plane::DoctorRecoveryCreateRequest,
 ) -> Result<control_plane::DoctorRecoveryJob, Response> {
-    let idempotency_key = payload
+    let idempotency_key_digest = payload
         .idempotency_key
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned);
+        .map(doctor_idempotency_key_digest);
     let requested_at_unix_ms = unix_ms_now().map_err(|error| {
         runtime_status_response(tonic::Status::internal(format!(
             "failed to read system clock: {error}"
         )))
     })?;
     let command = build_doctor_command_args(&payload);
-    if let Some(idempotency_key) = idempotency_key.as_deref() {
+    if let Some(idempotency_key_digest) = idempotency_key_digest.as_deref() {
         let jobs = lock_doctor_jobs(&state.doctor_jobs);
         if let Some(existing) = jobs.values().find(|job| {
-            job.idempotency_key.as_deref() == Some(idempotency_key) && job.command == command
+            doctor_job_matches_idempotency_boundary(
+                job,
+                idempotency_key_digest,
+                command.as_slice(),
+                context,
+            )
         }) {
             return Ok(existing.clone());
         }
@@ -3688,7 +3719,7 @@ pub(crate) fn create_doctor_job(
         job_id: job_id.clone(),
         state: control_plane::DoctorRecoveryJobState::Queued,
         requested_at_unix_ms,
-        idempotency_key: idempotency_key.clone(),
+        idempotency_key: idempotency_key_digest.clone(),
         requested_by_principal: context.principal.clone(),
         requested_by_device_id: context.device_id.clone(),
         requested_channel: context.channel.clone(),
@@ -5059,5 +5090,100 @@ mod support_bundle_root_tests {
         let support_root =
             resolve_support_bundle_root().expect("support bundle root should resolve");
         assert_eq!(support_root, portable_state_root.join("support-bundles"));
+    }
+}
+
+#[cfg(test)]
+mod doctor_job_security_tests {
+    use super::*;
+
+    fn request_context(
+        principal: &str,
+        device_id: &str,
+        channel: Option<&str>,
+    ) -> gateway::RequestContext {
+        gateway::RequestContext {
+            principal: principal.to_owned(),
+            device_id: device_id.to_owned(),
+            channel: channel.map(ToOwned::to_owned),
+        }
+    }
+
+    fn doctor_job(
+        idempotency_key: Option<String>,
+        command: &[String],
+        context: &gateway::RequestContext,
+    ) -> control_plane::DoctorRecoveryJob {
+        control_plane::DoctorRecoveryJob {
+            job_id: "doctor-job-01".to_owned(),
+            state: control_plane::DoctorRecoveryJobState::Queued,
+            requested_at_unix_ms: 1_700_000_000_000,
+            idempotency_key,
+            requested_by_principal: context.principal.clone(),
+            requested_by_device_id: context.device_id.clone(),
+            requested_channel: context.channel.clone(),
+            started_at_unix_ms: None,
+            completed_at_unix_ms: None,
+            command: command.to_vec(),
+            report: None,
+            command_output: String::new(),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn doctor_idempotency_digest_does_not_preserve_raw_key() {
+        let raw_key = "shared-replay-token-SECRET";
+        let digest = doctor_idempotency_key_digest(raw_key);
+
+        assert_ne!(digest, raw_key);
+        assert!(digest.starts_with("sha256:"));
+        assert_eq!(digest.len(), "sha256:".len() + 64);
+        assert_eq!(digest, doctor_idempotency_key_digest(raw_key));
+    }
+
+    #[test]
+    fn doctor_idempotency_reuse_requires_requester_boundary() {
+        let victim_context = request_context("admin:victim", "device-victim", Some("web"));
+        let other_principal = request_context("admin:attacker", "device-victim", Some("web"));
+        let other_device = request_context("admin:victim", "device-attacker", Some("web"));
+        let other_channel = request_context("admin:victim", "device-victim", Some("cli"));
+        let command = vec!["doctor".to_owned(), "--json".to_owned(), "--repair".to_owned()];
+        let digest = doctor_idempotency_key_digest("shared-replay-token-SECRET");
+        let job = doctor_job(Some(digest.clone()), command.as_slice(), &victim_context);
+
+        assert!(doctor_job_matches_idempotency_boundary(
+            &job,
+            digest.as_str(),
+            command.as_slice(),
+            &victim_context
+        ));
+        assert!(!doctor_job_matches_idempotency_boundary(
+            &job,
+            digest.as_str(),
+            command.as_slice(),
+            &other_principal
+        ));
+        assert!(!doctor_job_matches_idempotency_boundary(
+            &job,
+            digest.as_str(),
+            command.as_slice(),
+            &other_device
+        ));
+        assert!(!doctor_job_matches_idempotency_boundary(
+            &job,
+            digest.as_str(),
+            command.as_slice(),
+            &other_channel
+        ));
+
+        let different_command =
+            vec!["doctor".to_owned(), "--json".to_owned(), "--dry-run".to_owned()];
+        assert!(!doctor_job_matches_idempotency_boundary(
+            &job,
+            digest.as_str(),
+            different_command.as_slice(),
+            &victim_context
+        ));
     }
 }

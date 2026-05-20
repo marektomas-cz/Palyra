@@ -5,9 +5,9 @@ pub(crate) async fn console_doctor_jobs_list_handler(
     headers: HeaderMap,
     Query(query): Query<ConsoleDoctorJobsQuery>,
 ) -> Result<Json<control_plane::DoctorRecoveryJobListEnvelope>, Response> {
-    let _session = authorize_console_session(&state, &headers, false)?;
+    let session = authorize_console_session(&state, &headers, false)?;
     let limit = query.limit.unwrap_or(32).clamp(1, 256);
-    let jobs = list_doctor_jobs(&state, query.after_job_id.as_deref(), limit);
+    let jobs = list_doctor_jobs(&state, &session.context, query.after_job_id.as_deref(), limit);
     let next_cursor =
         if jobs.len() == limit { jobs.last().map(|job| job.job_id.clone()) } else { None };
     Ok(Json(control_plane::DoctorRecoveryJobListEnvelope {
@@ -55,11 +55,13 @@ pub(crate) async fn console_doctor_job_get_handler(
     headers: HeaderMap,
     Path(job_id): Path<String>,
 ) -> Result<Json<control_plane::DoctorRecoveryJobEnvelope>, Response> {
-    let _session = authorize_console_session(&state, &headers, false)?;
+    let session = authorize_console_session(&state, &headers, false)?;
     let job_id = normalize_non_empty_field(job_id, "job_id")?;
     let job = {
         let jobs = lock_doctor_jobs(&state.doctor_jobs);
-        jobs.get(job_id.as_str()).cloned()
+        jobs.get(job_id.as_str())
+            .filter(|job| doctor_job_matches_requester(job, &session.context))
+            .cloned()
     }
     .ok_or_else(|| {
         runtime_status_response(tonic::Status::not_found("doctor recovery job not found"))
