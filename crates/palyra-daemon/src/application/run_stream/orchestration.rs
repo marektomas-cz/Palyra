@@ -35,8 +35,8 @@ use crate::{
         OrchestratorTapeAppendRequest, OrchestratorUsageDelta,
     },
     model_provider::{
-        ProviderFinishReason, ProviderMessage, ProviderMessageRole, ProviderRequest,
-        ProviderResponse, ProviderTurnOutput,
+        bounded_provider_turn_output_for_persistence, ProviderFinishReason, ProviderMessage,
+        ProviderMessageRole, ProviderRequest, ProviderResponse, ProviderTurnOutput,
     },
     orchestrator::{is_cancel_command, RunLifecycleState, RunStateMachine, RunTransition},
     provider_leases::ProviderLeaseExecutionContext,
@@ -1106,7 +1106,7 @@ async fn process_run_stream_provider_response(
     model_token_tape_events: &mut usize,
     model_token_compaction_emitted: &mut bool,
 ) -> Result<RunStreamProviderResponseOutcome, Status> {
-    let provider_output = provider_response.output.clone();
+    let provider_output = bounded_provider_turn_output_for_persistence(&provider_response.output);
     runtime_state
         .add_orchestrator_usage(OrchestratorUsageDelta {
             run_id: run_id.to_owned(),
@@ -1765,7 +1765,8 @@ async fn persist_run_stream_provider_turn_output(
     tape_seq: &mut i64,
     output: &ProviderTurnOutput,
 ) -> Result<(), Status> {
-    let payload_json = serde_json::to_string(output).map_err(|error| {
+    let bounded_output = bounded_provider_turn_output_for_persistence(output);
+    let payload_json = serde_json::to_string(&bounded_output).map_err(|error| {
         Status::internal(format!("failed to serialize provider turn output: {error}"))
     })?;
     let payload_json =

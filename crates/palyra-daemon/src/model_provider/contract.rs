@@ -3,6 +3,8 @@ use serde_json::Value;
 
 const PROVIDER_STREAM_EVENT_TOKEN_CHUNK_SIZE: usize =
     crate::orchestrator::MAX_MODEL_TOKENS_PER_EVENT;
+pub(super) const MAX_PROVIDER_TURN_TEXT_BYTES: usize = 64 * 1024;
+const PROVIDER_OUTPUT_TRUNCATED_MARKER: &str = "\n\n[provider output truncated]";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProviderImageInput {
@@ -313,6 +315,12 @@ impl ProviderTurnOutput {
         usage: ProviderUsage,
         raw_provider_refs: ProviderRawProviderRefs,
     ) -> Self {
+        let (full_text, output_redacted) =
+            project_provider_output_text(full_text, MAX_PROVIDER_TURN_TEXT_BYTES);
+        let mut raw_provider_refs = raw_provider_refs;
+        if output_redacted && raw_provider_refs.stream_spill_ref.is_none() {
+            raw_provider_refs.stream_spill_ref = Some(provider_output_truncation_ref());
+        }
         let content_parts = if full_text.is_empty() {
             Vec::new()
         } else {
@@ -324,9 +332,105 @@ impl ProviderTurnOutput {
             finish_reason,
             usage,
             raw_provider_refs,
-            redaction_state: ProviderRedactionState::default(),
+            redaction_state: ProviderRedactionState {
+                output_redacted,
+                ..ProviderRedactionState::default()
+            },
         }
     }
+}
+
+pub(crate) fn bounded_provider_turn_output_for_persistence(
+    output: &ProviderTurnOutput,
+) -> ProviderTurnOutput {
+    let mut bounded = output.clone();
+    let (full_text, full_text_redacted) =
+        project_provider_output_text(bounded.full_text, MAX_PROVIDER_TURN_TEXT_BYTES);
+    bounded.full_text = full_text;
+    let mut output_redacted = full_text_redacted;
+    for part in &mut bounded.content_parts {
+        if let ProviderOutputContentPart::Text { text } = part {
+            let (bounded_text, text_redacted) =
+                project_provider_output_text(std::mem::take(text), MAX_PROVIDER_TURN_TEXT_BYTES);
+            *text = bounded_text;
+            output_redacted |= text_redacted;
+        }
+    }
+    if output_redacted {
+        bounded.redaction_state.output_redacted = true;
+        if bounded.raw_provider_refs.stream_spill_ref.is_none() {
+            bounded.raw_provider_refs.stream_spill_ref = Some(provider_output_truncation_ref());
+        }
+    }
+    bounded
+}
+
+pub(super) fn append_provider_text_with_hard_limit(
+    target: &mut String,
+    incoming: &str,
+    max_bytes: usize,
+) -> bool {
+    if incoming.is_empty() {
+        return false;
+    }
+    let limit = provider_output_text_limit(max_bytes);
+    if target.ends_with(PROVIDER_OUTPUT_TRUNCATED_MARKER) {
+        return true;
+    }
+    if target.len().saturating_add(incoming.len()) <= limit {
+        target.push_str(incoming);
+        return false;
+    }
+
+    let prefix_budget = limit.saturating_sub(PROVIDER_OUTPUT_TRUNCATED_MARKER.len());
+    if target.len() > prefix_budget {
+        truncate_string_to_utf8_boundary(target, prefix_budget);
+    } else if target.len() < prefix_budget {
+        let remaining = prefix_budget.saturating_sub(target.len());
+        target.push_str(utf8_prefix(incoming, remaining));
+    }
+    target.push_str(PROVIDER_OUTPUT_TRUNCATED_MARKER);
+    true
+}
+
+fn project_provider_output_text(full_text: String, max_bytes: usize) -> (String, bool) {
+    let limit = provider_output_text_limit(max_bytes);
+    if full_text.len() <= limit {
+        return (full_text, false);
+    }
+    let mut bounded = String::with_capacity(limit);
+    append_provider_text_with_hard_limit(&mut bounded, full_text.as_str(), limit);
+    (bounded, true)
+}
+
+fn provider_output_text_limit(max_bytes: usize) -> usize {
+    max_bytes.max(PROVIDER_OUTPUT_TRUNCATED_MARKER.len())
+}
+
+fn provider_output_truncation_ref() -> String {
+    "provider-output-inline-truncated".to_owned()
+}
+
+fn truncate_string_to_utf8_boundary(value: &mut String, max_bytes: usize) {
+    if value.len() <= max_bytes {
+        return;
+    }
+    let mut boundary = max_bytes;
+    while boundary > 0 && !value.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    value.truncate(boundary);
+}
+
+fn utf8_prefix(value: &str, max_bytes: usize) -> &str {
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let mut boundary = max_bytes;
+    while boundary > 0 && !value.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    &value[..boundary]
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -449,9 +553,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        provider_events_from_output, ProviderEvent, ProviderFinishReason,
-        ProviderOutputContentPart, ProviderRawProviderRefs, ProviderRedactionState,
-        ProviderTurnOutput, ProviderUsage,
+        bounded_provider_turn_output_for_persistence, provider_events_from_output, ProviderEvent,
+        ProviderFinishReason, ProviderOutputContentPart, ProviderRawProviderRefs,
+        ProviderRedactionState, ProviderTurnOutput, ProviderUsage, MAX_PROVIDER_TURN_TEXT_BYTES,
     };
 
     fn provider_output(
@@ -474,6 +578,66 @@ mod tests {
             raw_provider_refs: ProviderRawProviderRefs::default(),
             redaction_state: ProviderRedactionState::default(),
         }
+    }
+
+    #[test]
+    fn provider_turn_output_truncates_large_text_before_persistence() {
+        let output = ProviderTurnOutput::text(
+            "a".repeat(MAX_PROVIDER_TURN_TEXT_BYTES + 1024),
+            ProviderFinishReason::Stop,
+            ProviderUsage::new(1, 1, "test"),
+            ProviderRawProviderRefs::default(),
+        );
+
+        assert!(output.full_text.len() <= MAX_PROVIDER_TURN_TEXT_BYTES);
+        assert!(output.full_text.ends_with("[provider output truncated]"));
+        assert!(output.redaction_state.output_redacted);
+        assert_eq!(
+            output.raw_provider_refs.stream_spill_ref.as_deref(),
+            Some("provider-output-inline-truncated")
+        );
+        assert!(
+            matches!(
+                output.content_parts.first(),
+                Some(ProviderOutputContentPart::Text { text }) if text == &output.full_text
+            ),
+            "{:?}",
+            output.content_parts
+        );
+        let serialized = serde_json::to_vec(&output).expect("bounded output should serialize");
+        assert!(
+            serialized.len() < 256 * 1024,
+            "bounded provider turn output should fit the default journal payload limit"
+        );
+    }
+
+    #[test]
+    fn bounded_provider_turn_output_for_persistence_bounds_manual_output() {
+        let output = provider_output(
+            vec![ProviderOutputContentPart::Text {
+                text: "b".repeat(MAX_PROVIDER_TURN_TEXT_BYTES + 1024),
+            }],
+            ProviderFinishReason::Stop,
+        );
+
+        let bounded = bounded_provider_turn_output_for_persistence(&output);
+
+        assert!(bounded.full_text.len() <= MAX_PROVIDER_TURN_TEXT_BYTES);
+        assert!(bounded.redaction_state.output_redacted);
+        assert_eq!(
+            bounded.raw_provider_refs.stream_spill_ref.as_deref(),
+            Some("provider-output-inline-truncated")
+        );
+        assert!(
+            matches!(
+                bounded.content_parts.first(),
+                Some(ProviderOutputContentPart::Text { text })
+                    if text.len() <= MAX_PROVIDER_TURN_TEXT_BYTES
+                        && text.ends_with("[provider output truncated]")
+            ),
+            "{:?}",
+            bounded.content_parts
+        );
     }
 
     #[test]

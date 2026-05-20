@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::{
+    contract::{append_provider_text_with_hard_limit, MAX_PROVIDER_TURN_TEXT_BYTES},
     ProviderErrorEnvelope, ProviderEvent, ProviderFinishReason, ProviderOutputContentPart,
     ProviderRawProviderRefs, ProviderTurnOutput, ProviderUsage,
 };
@@ -34,6 +35,7 @@ pub struct ProviderStreamAccumulator {
     cancelled_reason: Option<String>,
     buffer_cap_bytes: usize,
     spill_ref: Option<String>,
+    output_truncated: bool,
 }
 
 impl ProviderStreamAccumulator {
@@ -61,6 +63,7 @@ impl ProviderStreamAccumulator {
             cancelled_reason: None,
             buffer_cap_bytes: buffer_cap_bytes.max(1),
             spill_ref: None,
+            output_truncated: false,
         }
     }
 
@@ -74,8 +77,15 @@ impl ProviderStreamAccumulator {
                 self.model_id = model_id;
             }
             ProviderStreamEvent::Delta { text } => {
-                self.full_text.push_str(text.as_str());
-                if self.full_text.len() > self.buffer_cap_bytes && self.spill_ref.is_none() {
+                let output_truncated = append_provider_text_with_hard_limit(
+                    &mut self.full_text,
+                    text.as_str(),
+                    MAX_PROVIDER_TURN_TEXT_BYTES,
+                );
+                self.output_truncated |= output_truncated;
+                if (output_truncated || self.full_text.len() > self.buffer_cap_bytes)
+                    && self.spill_ref.is_none()
+                {
                     self.spill_ref = Some(format!(
                         "provider-stream-inline-spill:{}:{}",
                         self.provider_id, self.model_id
@@ -126,6 +136,7 @@ impl ProviderStreamAccumulator {
             self.usage,
             self.raw_provider_refs,
         );
+        output.redaction_state.output_redacted |= self.output_truncated;
         output.content_parts.extend(self.tool_calls);
         output
     }

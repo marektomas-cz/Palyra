@@ -12,7 +12,9 @@ use crate::{
     application::tool_registry::ModelVisibleToolCatalogSnapshot,
     gateway::GatewayRuntimeState,
     journal::OrchestratorTapeAppendRequest,
-    model_provider::{ProviderResponse, ProviderTurnOutput},
+    model_provider::{
+        bounded_provider_turn_output_for_persistence, ProviderResponse, ProviderTurnOutput,
+    },
     transport::grpc::{
         auth::RequestContext,
         proto::palyra::{common::v1 as common_v1, gateway::v1 as gateway_v1},
@@ -134,7 +136,7 @@ pub(crate) async fn process_route_provider_response(
     remaining_tool_budget: &mut u32,
     tape_seq: &mut i64,
 ) -> Result<RouteProviderResponseOutcome, Status> {
-    let provider_output = provider_response.output.clone();
+    let provider_output = bounded_provider_turn_output_for_persistence(&provider_response.output);
     let mut reply_text = String::new();
     let mut summary_tokens = Vec::new();
     let mut ignored_tool_results = Vec::new();
@@ -199,7 +201,8 @@ async fn persist_route_provider_turn_output(
     tape_seq: &mut i64,
     output: &ProviderTurnOutput,
 ) -> Result<(), Status> {
-    let payload_json = serde_json::to_string(output).map_err(|error| {
+    let bounded_output = bounded_provider_turn_output_for_persistence(output);
+    let payload_json = serde_json::to_string(&bounded_output).map_err(|error| {
         Status::internal(format!("failed to serialize provider turn output: {error}"))
     })?;
     let payload_json =

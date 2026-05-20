@@ -25,6 +25,7 @@ mod error_envelope;
 mod streaming;
 
 use adapters::{AnthropicCompatibleChatAdapter, OpenAiCompatibleChatAdapter, ProviderChatAdapter};
+pub(crate) use contract::bounded_provider_turn_output_for_persistence;
 use contract::{provider_events_from_output, provider_request_has_vision};
 #[allow(unused_imports)]
 pub use contract::{
@@ -5540,6 +5541,28 @@ mod tests {
                     if tool_name == "palyra.echo"
             )
         }));
+    }
+
+    #[test]
+    fn scripted_provider_stream_harness_applies_hard_output_cap() {
+        let mut harness = ProviderStreamAccumulator::new("fake-provider", "fake-model");
+        harness.apply(ProviderStreamEvent::Delta {
+            text: "x".repeat(super::contract::MAX_PROVIDER_TURN_TEXT_BYTES + 1024),
+        });
+        harness.apply(ProviderStreamEvent::Completed {
+            finish_reason: super::ProviderFinishReason::Stop,
+            raw_provider_refs: ProviderRawProviderRefs::default(),
+        });
+
+        let output = harness.finalize();
+
+        assert!(output.full_text.len() <= super::contract::MAX_PROVIDER_TURN_TEXT_BYTES);
+        assert!(output.full_text.ends_with("[provider output truncated]"));
+        assert!(output.redaction_state.output_redacted);
+        assert_eq!(
+            output.raw_provider_refs.stream_spill_ref.as_deref(),
+            Some("provider-stream-inline-spill:fake-provider:fake-model")
+        );
     }
 
     #[test]
