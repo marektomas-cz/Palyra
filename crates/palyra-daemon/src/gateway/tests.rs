@@ -51,6 +51,9 @@ use super::{
     MAX_APPROVAL_PAGE_LIMIT, VAULT_RATE_LIMIT_MAX_PRINCIPAL_BUCKETS,
     VAULT_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW,
 };
+use crate::application::run_stream::orchestration::{
+    finalize_run_stream_after_provider_response, RunStreamPostProviderOutcome,
+};
 use crate::application::tool_runtime::workspace_scope::ActiveWorkspaceRoot;
 use crate::application::tool_security::ToolProposalBackendSelection;
 use crate::application::{
@@ -95,6 +98,7 @@ use crate::execution_backends::{ExecutionBackendPreference, ExecutionBackendReso
 use crate::flows::{self, FlowCoordinator, FlowCreateDescriptor, FlowLineage, FlowMode};
 use crate::media::MediaRuntimeConfig;
 use crate::model_provider::ProviderImageInput;
+use crate::orchestrator::{RunLifecycleState, RunStateMachine, RunTransition};
 use crate::sandbox_runner::{
     EgressEnforcementMode, SandboxProcessRunnerPolicy, SandboxProcessRunnerTier,
 };
@@ -3249,6 +3253,40 @@ fn cleanup_resource_registry_deduplicates_and_drains_by_run() {
     assert_eq!(resources.browser_session_ids, vec![session_id]);
     assert_eq!(resources.background_process_pids, vec![42]);
     assert!(state.take_run_cleanup_resources(run_id.as_str()).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn successful_run_finalization_forgets_cleanup_tracking() {
+    let state = build_test_runtime_state(false);
+    let session_id = Ulid::new().to_string();
+    let run_id = Ulid::new().to_string();
+    start_tool_program_test_run(&state, session_id.as_str(), run_id.as_str()).await;
+
+    state.record_run_browser_session(run_id.as_str(), "browser-session-success");
+    state.record_run_background_process(run_id.as_str(), 4242);
+
+    let (sender, _receiver) = tokio::sync::mpsc::channel(4);
+    let mut run_state = RunStateMachine::default();
+    run_state.transition(RunTransition::Accept).expect("run state should accept");
+    run_state.transition(RunTransition::StartStreaming).expect("run state should start streaming");
+    let mut tape_seq = 0;
+
+    let outcome = finalize_run_stream_after_provider_response(
+        &sender,
+        &state,
+        &mut run_state,
+        run_id.as_str(),
+        &mut tape_seq,
+    )
+    .await
+    .expect("successful run finalization should complete");
+
+    assert_eq!(outcome, RunStreamPostProviderOutcome::Completed);
+    assert_eq!(run_state.state(), RunLifecycleState::Done);
+    assert!(
+        state.take_run_cleanup_resources(run_id.as_str()).is_empty(),
+        "successful terminal path must not retain stale per-run cleanup tracking"
+    );
 }
 
 #[test]
