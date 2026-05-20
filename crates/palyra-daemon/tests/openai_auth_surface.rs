@@ -862,10 +862,17 @@ fn console_openai_api_key_flow_surfaces_invalid_credentials() -> Result<()> {
     );
     assert!(
         error
-            .get("error")
-            .and_then(Value::as_str)
-            .is_some_and(|message| message.to_ascii_lowercase().contains("invalid")),
-        "invalid API key should explain the provider credential failure: {error}"
+            .get("validation_errors")
+            .and_then(Value::as_array)
+            .is_some_and(|entries| entries.iter().any(|entry| {
+                entry.get("field").and_then(Value::as_str) == Some("api_key")
+                    && entry.get("code").and_then(Value::as_str) == Some("invalid_credential")
+                    && entry
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .is_some_and(|message| message.to_ascii_lowercase().contains("invalid"))
+            })),
+        "invalid API key should explain the provider credential failure in validation errors: {error}"
     );
 
     let profiles = get_console_json(&client, admin_port, "/console/v1/auth/profiles", &cookie)?;
