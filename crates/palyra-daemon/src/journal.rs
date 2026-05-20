@@ -97,6 +97,9 @@ const MAX_APPROVALS_QUERY_LIMIT: usize = MAX_APPROVALS_LIST_LIMIT + 1;
 const MAX_MEMORY_ITEMS_LIST_LIMIT: usize = 500;
 const MAX_MEMORY_SEARCH_CANDIDATES: usize = 256;
 const MAX_MEMORY_VECTOR_SCAN_CANDIDATES: usize = 1_024;
+// Vector-only recall has no lexical seed, so require an absolute semantic signal
+// before relative score normalization can promote the candidate.
+const MIN_VECTOR_ONLY_COSINE_SIMILARITY: f64 = 0.25;
 const QUERY_EMBEDDING_CACHE_CAPACITY: usize = 256;
 const QUERY_EMBEDDING_CACHE_TTL_MS: i64 = 5 * 60 * 1_000;
 const MAX_CANVAS_PATCHES_QUERY_LIMIT: usize = 1_000;
@@ -13633,7 +13636,7 @@ impl JournalStore {
                 existing.vector_candidate = true;
                 continue;
             }
-            if !allow_vector_only_candidates {
+            if !allow_vector_only_candidate(vector_raw, allow_vector_only_candidates) {
                 continue;
             }
             let recency_raw = recency_score(now, item.created_at_unix_ms);
@@ -14440,6 +14443,7 @@ impl JournalStore {
         );
         let query_vector = query_embedding.vector;
         let fts_query = build_fts_query(query_text.as_str());
+        let allow_vector_only_candidates = normalized_fts_terms(query_text.as_str()).len() > 1;
         let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
         let top_k = request.top_k.clamp(1, MAX_WORKSPACE_DOCUMENT_LIST_LIMIT);
         let candidate_limit = top_k.saturating_mul(8).clamp(top_k, MAX_WORKSPACE_SEARCH_CANDIDATES);
@@ -14664,6 +14668,9 @@ impl JournalStore {
                 existing.vector_candidate = true;
                 continue;
             }
+            if !allow_vector_only_candidate(vector_raw, allow_vector_only_candidates) {
+                continue;
+            }
             let recency_raw = recency_score(now, document.updated_at_unix_ms);
             candidates_by_key.insert(
                 key,
@@ -14789,6 +14796,12 @@ impl JournalStore {
 
 fn workspace_candidate_key(document_id: &str, version: i64, chunk_index: usize) -> String {
     format!("{document_id}:{version}:{chunk_index}")
+}
+
+fn allow_vector_only_candidate(vector_raw: f64, allow_vector_only_candidates: bool) -> bool {
+    allow_vector_only_candidates
+        && vector_raw.is_finite()
+        && vector_raw >= MIN_VECTOR_ONLY_COSINE_SIMILARITY
 }
 
 fn query_embedding_cache_key(
@@ -19719,7 +19732,8 @@ mod tests {
         ToolResultArtifactReadRequest, WorkspaceBootstrapRequest, WorkspaceDocumentDeleteRequest,
         WorkspaceDocumentMoveRequest, WorkspaceDocumentWriteRequest, WorkspaceSearchRequest,
         CURRENT_MEMORY_EMBEDDING_VERSION, MEMORY_RETENTION_DAY_MS, MIGRATIONS,
-        RECALL_ARTIFACT_KIND_PREVIEW, RECALL_ARTIFACT_KIND_SESSION_SEARCH,
+        MIN_VECTOR_ONLY_COSINE_SIMILARITY, RECALL_ARTIFACT_KIND_PREVIEW,
+        RECALL_ARTIFACT_KIND_SESSION_SEARCH,
     };
 
     static TEMP_DB_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -22977,6 +22991,64 @@ mod tests {
     }
 
     #[test]
+    fn memory_vector_branch_rejects_weak_unseeded_similarity() {
+        let db_path = temp_db_path();
+        let store = JournalStore::open_with_memory_embedding_provider(
+            test_journal_config(db_path, false),
+            Arc::new(FixedMemoryEmbeddingProvider {
+                model_name: "test-vector-branch-v1",
+                dimensions: 4,
+                vector: vec![1.0, 0.0, 0.0, 0.0],
+            }),
+        )
+        .expect("journal store should open");
+        let memory_id = "01ARZ3NDEKTSV4RRFFQ69G5VF2";
+        store
+            .create_memory_item(&sample_memory_request(
+                memory_id,
+                "user:ops",
+                Some("cli"),
+                None,
+                MemorySource::Manual,
+                "private billing credentials rotation notes",
+            ))
+            .expect("memory item should be created");
+
+        let weak_vector =
+            encode_vector_blob(&[(MIN_VECTOR_ONLY_COSINE_SIMILARITY / 10.0) as f32, 1.0, 0.0, 0.0]);
+        let guard = store.connection.lock().expect("connection lock should not be poisoned");
+        guard
+            .execute(
+                r#"
+                    UPDATE memory_vectors
+                    SET vector_blob = ?1, embedding_vector = ?1
+                    WHERE memory_ulid = ?2
+                "#,
+                params![weak_vector, memory_id],
+            )
+            .expect("memory vector fixture should be weakened");
+        drop(guard);
+
+        let request = MemorySearchRequest {
+            principal: "user:ops".to_owned(),
+            channel: Some("cli".to_owned()),
+            session_id: None,
+            query: "hydraulic quantum pastry".to_owned(),
+            top_k: 4,
+            min_score: 0.0,
+            tags: Vec::new(),
+            sources: Vec::new(),
+        };
+        let candidates = store
+            .search_memory_candidates(&request)
+            .expect("candidate memory search should succeed");
+        assert!(
+            candidates.iter().all(|candidate| candidate.item.memory_id != memory_id),
+            "weak vector-only similarity should not surface unrelated memory without an FTS seed"
+        );
+    }
+
+    #[test]
     fn memory_embeddings_status_guides_hash_fallback_recovery() {
         let db_path = temp_db_path();
         let store = JournalStore::open_with_memory_embedding_runtime(
@@ -24811,6 +24883,66 @@ mod tests {
             .expect("direct vector branch should surface the workspace document");
         assert!(!candidate.lexical_candidate, "fixture should not have an FTS seed");
         assert!(candidate.vector_candidate, "vector branch should generate the candidate directly");
+    }
+
+    #[test]
+    fn workspace_vector_branch_rejects_weak_unseeded_similarity() {
+        let db_path = temp_db_path();
+        let store = JournalStore::open_with_memory_embedding_provider(
+            test_journal_config(db_path, false),
+            Arc::new(FixedMemoryEmbeddingProvider {
+                model_name: "test-workspace-vector-branch-v1",
+                dimensions: 4,
+                vector: vec![1.0, 0.0, 0.0, 0.0],
+            }),
+        )
+        .expect("journal store should open");
+        let document = store
+            .upsert_workspace_document(&sample_workspace_write_request(
+                "projects/vector-weak.md",
+                "private incident review and vault export notes",
+            ))
+            .expect("workspace document should be created");
+
+        let weak_vector =
+            encode_vector_blob(&[(MIN_VECTOR_ONLY_COSINE_SIMILARITY / 10.0) as f32, 1.0, 0.0, 0.0]);
+        let guard = store.connection.lock().expect("connection lock should not be poisoned");
+        guard
+            .execute(
+                r#"
+                    UPDATE workspace_document_chunk_vectors
+                    SET embedding_vector = ?1
+                    WHERE chunk_ulid IN (
+                        SELECT chunk_ulid
+                        FROM workspace_document_chunks
+                        WHERE document_ulid = ?2
+                    )
+                "#,
+                params![weak_vector, document.document_id.as_str()],
+            )
+            .expect("workspace vector fixture should be weakened");
+        drop(guard);
+
+        let request = WorkspaceSearchRequest {
+            principal: "user:ops".to_owned(),
+            channel: Some("cli".to_owned()),
+            agent_id: Some("agent:writer".to_owned()),
+            query: "hydraulic quantum pastry".to_owned(),
+            prefix: Some("projects".to_owned()),
+            top_k: 4,
+            min_score: 0.0,
+            include_historical: false,
+            include_quarantined: false,
+        };
+        let candidates = store
+            .search_workspace_candidates(&request)
+            .expect("workspace candidate search should succeed");
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| candidate.document.document_id != document.document_id),
+            "weak vector-only similarity should not surface unrelated workspace content without an FTS seed"
+        );
     }
 
     #[test]
