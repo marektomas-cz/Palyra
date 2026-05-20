@@ -13359,7 +13359,14 @@ impl JournalStore {
                         memory_items_fts MATCH ?1 AND
                         memory.principal = ?2 AND
                         (
-                            (?4 IS NOT NULL AND memory.session_ulid = ?4) OR
+                            (
+                                ?4 IS NOT NULL AND
+                                memory.session_ulid = ?4 AND
+                                (
+                                    (?3 IS NOT NULL AND (memory.channel = ?3 OR memory.channel IS NULL)) OR
+                                    (?3 IS NULL AND memory.channel IS NULL)
+                                )
+                            ) OR
                             (
                                 memory.session_ulid IS NULL AND
                                 (
@@ -13469,7 +13476,14 @@ impl JournalStore {
                     memory.principal = ?2 AND
                     (memory.ttl_unix_ms IS NULL OR memory.ttl_unix_ms > ?5) AND
                     (
-                        (?4 IS NOT NULL AND memory.session_ulid = ?4) OR
+                        (
+                            ?4 IS NOT NULL AND
+                            memory.session_ulid = ?4 AND
+                            (
+                                (?3 IS NOT NULL AND (memory.channel = ?3 OR memory.channel IS NULL)) OR
+                                (?3 IS NULL AND memory.channel IS NULL)
+                            )
+                        ) OR
                         (
                             memory.session_ulid IS NULL AND
                             (
@@ -22862,13 +22876,14 @@ mod tests {
         let db_path = temp_db_path();
         let store = JournalStore::open(test_journal_config(db_path, false))
             .expect("journal store should open");
+        let session_id = "01ARZ3NDEKTSV4RRFFQ69G5FAS";
 
         store
             .create_memory_item(&sample_memory_request(
                 "01ARZ3NDEKTSV4RRFFQ69G5FC3",
                 "user:a",
                 Some("cli"),
-                Some("01ARZ3NDEKTSV4RRFFQ69G5FAS"),
+                Some(session_id),
                 MemorySource::Manual,
                 "alpha private memory",
             ))
@@ -22878,7 +22893,7 @@ mod tests {
                 "01ARZ3NDEKTSV4RRFFQ69G5FC4",
                 "user:b",
                 Some("cli"),
-                Some("01ARZ3NDEKTSV4RRFFQ69G5FAS"),
+                Some(session_id),
                 MemorySource::Manual,
                 "beta private memory",
             ))
@@ -22888,9 +22903,19 @@ mod tests {
                 "01ARZ3NDEKTSV4RRFFQ69G5FC5",
                 "user:a",
                 Some("slack"),
-                Some("01ARZ3NDEKTSV4RRFFQ69G5FAS"),
+                Some(session_id),
                 MemorySource::Manual,
                 "alpha slack-only memory",
+            ))
+            .expect("memory item should be created");
+        store
+            .create_memory_item(&sample_memory_request(
+                "01ARZ3NDEKTSV4RRFFQ69G5FC6",
+                "user:a",
+                None,
+                Some(session_id),
+                MemorySource::Manual,
+                "alpha channel-agnostic session memory",
             ))
             .expect("memory item should be created");
 
@@ -22926,6 +22951,44 @@ mod tests {
         assert!(
             channel_hits.iter().all(|hit| hit.item.channel.as_deref() == Some("cli")),
             "channel-scoped search must not return memories from a different channel"
+        );
+
+        let session_hits = store
+            .search_memory_candidates(&MemorySearchRequest {
+                principal: "user:a".to_owned(),
+                channel: Some("cli".to_owned()),
+                session_id: Some(session_id.to_owned()),
+                query: "slack-only memory".to_owned(),
+                top_k: 10,
+                min_score: 0.0,
+                tags: Vec::new(),
+                sources: Vec::new(),
+            })
+            .expect("session search should succeed");
+        assert!(
+            session_hits
+                .iter()
+                .all(|hit| hit.item.channel.as_deref() != Some("slack")),
+            "session-scoped channel search must not return same-session memory from another channel"
+        );
+
+        let channel_agnostic_session_hits = store
+            .search_memory(&MemorySearchRequest {
+                principal: "user:a".to_owned(),
+                channel: Some("cli".to_owned()),
+                session_id: Some(session_id.to_owned()),
+                query: "channel agnostic session memory".to_owned(),
+                top_k: 10,
+                min_score: 0.0,
+                tags: Vec::new(),
+                sources: Vec::new(),
+            })
+            .expect("session search should include channel-agnostic session memory");
+        assert!(
+            channel_agnostic_session_hits
+                .iter()
+                .any(|hit| hit.item.memory_id == "01ARZ3NDEKTSV4RRFFQ69G5FC6"),
+            "session-scoped channel search should retain channel-agnostic session memory"
         );
     }
 
