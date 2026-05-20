@@ -195,8 +195,8 @@ pub(crate) async fn build_memory_augmented_prompt(
     let search_hits = match runtime_state
         .search_memory(MemorySearchRequest {
             principal: context.principal.clone(),
-            channel: None,
-            session_id: None,
+            channel: context.channel.clone(),
+            session_id: Some(session_id.to_owned()),
             query: memory_query_text.to_owned(),
             top_k: memory_config.auto_inject_max_items,
             min_score: MEMORY_AUTO_INJECT_MIN_SCORE,

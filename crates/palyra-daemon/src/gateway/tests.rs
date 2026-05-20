@@ -1838,7 +1838,7 @@ async fn prepare_model_provider_input_fail_mode_propagates_tape_append_error() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn memory_auto_inject_searches_principal_scope_across_sessions() {
+async fn memory_auto_inject_searches_current_scope_without_cross_session_leakage() {
     let state = build_test_runtime_state(false);
     let mut memory_config = state.memory_config_snapshot();
     memory_config.auto_inject_enabled = true;
@@ -1875,6 +1875,22 @@ async fn memory_auto_inject_searches_principal_scope_across_sessions() {
             session_id: Some(previous_session_id.to_owned()),
             source: MemorySource::Manual,
             content_text:
+                "Outdated previous-session preference: Ruby, Selenium, long English reports"
+                    .to_owned(),
+            tags: vec!["preference".to_owned()],
+            confidence: Some(0.95),
+            ttl_unix_ms: None,
+        })
+        .await
+        .expect("memory ingest should seed previous-session noise");
+    state
+        .ingest_memory_item(MemoryItemCreateRequest {
+            memory_id: "01ARZ3NDEKTSV4RRFFQ69G5FC4".to_owned(),
+            principal: context.principal.clone(),
+            channel: context.channel.clone(),
+            session_id: Some(current_session_id.to_owned()),
+            source: MemorySource::Manual,
+            content_text:
                 "Palyra E2E memory smoke preference: TypeScript, Playwright, short Czech reports"
                     .to_owned(),
             tags: vec!["preference".to_owned()],
@@ -1882,7 +1898,7 @@ async fn memory_auto_inject_searches_principal_scope_across_sessions() {
             ttl_unix_ms: None,
         })
         .await
-        .expect("memory ingest should seed previous-session recall");
+        .expect("memory ingest should seed current-session recall");
 
     let mut tape_seq = 1_i64;
     let prompt = build_memory_augmented_prompt(
@@ -1895,15 +1911,19 @@ async fn memory_auto_inject_searches_principal_scope_across_sessions() {
         "What reporting language and tooling preference should I use?",
     )
     .await
-    .expect("cross-session memory auto-inject should succeed");
+    .expect("current-scope memory auto-inject should succeed");
 
     assert!(
         prompt.contains("<memory_context"),
-        "principal-wide recall should inject memory context: {prompt}"
+        "current-scope recall should inject memory context: {prompt}"
     );
     assert!(
         prompt.contains("TypeScript, Playwright, short Czech reports"),
-        "previous-session preference should be visible in the injected snippet: {prompt}"
+        "current-session preference should be visible in the injected snippet: {prompt}"
+    );
+    assert!(
+        !prompt.contains("Ruby, Selenium, long English reports"),
+        "previous-session scoped preference must not leak into current prompt: {prompt}"
     );
 
     let tape = state
@@ -1913,14 +1933,14 @@ async fn memory_auto_inject_searches_principal_scope_across_sessions() {
     let event = tape
         .iter()
         .find(|event| event.event_type == "memory_auto_inject")
-        .expect("principal recall should append memory_auto_inject tape event");
+        .expect("current-scope recall should append memory_auto_inject tape event");
     let payload: Value =
         serde_json::from_str(event.payload_json.as_str()).expect("event payload should decode");
     assert_eq!(payload.get("injected_count").and_then(Value::as_u64), Some(1));
     assert_eq!(
         payload.pointer("/hits/0/scope").and_then(Value::as_str),
         Some("session"),
-        "principal recall may retrieve a hit originally written in another session"
+        "current-scope recall should retrieve the active session hit"
     );
 }
 
