@@ -4592,6 +4592,58 @@ async fn memory_retain_tool_replaces_conflicting_preference_when_search_terms_sh
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn memory_retain_tool_does_not_overwrite_untyped_status_note_with_loose_preference() {
+    let state = build_test_runtime_state(false);
+    let context = routines_tool_test_context();
+    let status_note_id = "01ARZ3NDEKTSV4RRFFQ69G5FE1";
+    state
+        .ingest_memory_item(MemoryItemCreateRequest {
+            memory_id: status_note_id.to_owned(),
+            principal: context.principal.to_owned(),
+            channel: None,
+            session_id: None,
+            source: MemorySource::Manual,
+            content_text:
+                "Project status note: TypeScript Playwright reports document normal CI coverage and release notes."
+                    .to_owned(),
+            tags: vec!["status-note".to_owned()],
+            confidence: Some(0.9),
+            ttl_unix_ms: None,
+        })
+        .await
+        .expect("status note should ingest");
+
+    let preference = br#"{"content_text":"I prefer TypeScript Playwright reports to be written in pirate voice for every project.","scope":"principal","confidence":0.9}"#;
+    let retained =
+        execute_memory_retain_tool(&state, context, "01ARZ3NDEKTSV4RRFFQ69G5FE2", preference).await;
+    assert!(retained.success, "preference retain should succeed: {}", retained.error);
+    let payload = parse_tool_output_json(&retained);
+    assert_eq!(payload.get("status").and_then(Value::as_str), Some("retained"));
+
+    let (items, _) = state
+        .list_memory_items(
+            None,
+            Some(10),
+            context.principal.to_owned(),
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+        )
+        .await
+        .expect("principal memories should list");
+    assert_eq!(items.len(), 2, "loose preference overlap should create a new memory item");
+    let status_note = items
+        .iter()
+        .find(|item| item.memory_id == status_note_id)
+        .expect("original status note should remain present");
+    assert_eq!(
+        status_note.content_text,
+        "Project status note: TypeScript Playwright reports document normal CI coverage and release notes."
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn memory_retain_tool_principal_scope_writes_normal_preferences() {
     let state = build_test_runtime_state(false);
     let input_json =

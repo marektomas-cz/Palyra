@@ -210,6 +210,20 @@ impl MemoryWriteCategory {
             Self::TransientRuntimeFact => "transient_runtime_fact",
         }
     }
+
+    #[must_use]
+    fn from_tag_value(value: &str) -> Option<Self> {
+        match value {
+            "fact" => Some(Self::Fact),
+            "preference" => Some(Self::Preference),
+            "procedure" => Some(Self::Procedure),
+            "constraint" => Some(Self::Constraint),
+            "decision" => Some(Self::Decision),
+            "correction" => Some(Self::Correction),
+            "transient_runtime_fact" => Some(Self::TransientRuntimeFact),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -425,12 +439,12 @@ async fn retain_memory_candidate(
             })
             .await?;
         if let Some(item) = updated {
-            let status = if duplicate.exact {
+            let status = if duplicate.exact() {
                 MemoryLifecycleStatus::UpdatedExisting
             } else {
                 MemoryLifecycleStatus::Merged
             };
-            let reason = if duplicate.exact {
+            let reason = if duplicate.exact() {
                 "exact duplicate memory updated with lifecycle metadata"
             } else if replaces_with_correction {
                 "near-duplicate memory updated with replacement lifecycle content"
@@ -480,7 +494,20 @@ async fn retain_memory_candidate(
 #[derive(Debug, Clone)]
 struct LifecycleDuplicate {
     item: MemoryItemRecord,
-    exact: bool,
+    match_kind: LifecycleDuplicateMatchKind,
+}
+
+impl LifecycleDuplicate {
+    fn exact(&self) -> bool {
+        self.match_kind == LifecycleDuplicateMatchKind::Exact
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LifecycleDuplicateMatchKind {
+    Exact,
+    NearDuplicate,
+    CorrectionConflict,
 }
 
 #[allow(clippy::result_large_err)]
@@ -507,15 +534,28 @@ async fn find_lifecycle_duplicate(
         for hit in hits {
             let exact =
                 normalize_lifecycle_content(hit.item.content_text.as_str()) == request.content_text;
-            if exact
-                || hit.score >= MEMORY_RETAIN_NEAR_DUPLICATE_SCORE
-                || lifecycle_conflict_matches(
-                    classification.category,
-                    request.content_text.as_str(),
-                    hit.item.content_text.as_str(),
-                )
-            {
-                return Ok(Some(LifecycleDuplicate { item: hit.item, exact }));
+            if exact {
+                return Ok(Some(LifecycleDuplicate {
+                    item: hit.item,
+                    match_kind: LifecycleDuplicateMatchKind::Exact,
+                }));
+            }
+            if hit.score >= MEMORY_RETAIN_NEAR_DUPLICATE_SCORE {
+                return Ok(Some(LifecycleDuplicate {
+                    item: hit.item,
+                    match_kind: LifecycleDuplicateMatchKind::NearDuplicate,
+                }));
+            }
+            if lifecycle_conflict_matches(
+                classification.category,
+                request.content_text.as_str(),
+                lifecycle_item_write_category(&hit.item),
+                hit.item.content_text.as_str(),
+            ) {
+                return Ok(Some(LifecycleDuplicate {
+                    item: hit.item,
+                    match_kind: LifecycleDuplicateMatchKind::CorrectionConflict,
+                }));
             }
         }
     }
@@ -541,10 +581,7 @@ async fn find_lifecycle_conflict_by_scope_scan(
     channel_scope: Option<String>,
     session_scope: Option<String>,
 ) -> Result<Option<LifecycleDuplicate>, Status> {
-    if !matches!(
-        classification.category,
-        MemoryWriteCategory::Correction | MemoryWriteCategory::Preference
-    ) {
+    if classification.category != MemoryWriteCategory::Correction {
         return Ok(None);
     }
 
@@ -561,6 +598,7 @@ async fn find_lifecycle_conflict_by_scope_scan(
         .await?;
     Ok(lifecycle_conflict_from_scope_items(
         items,
+        classification.category,
         request.content_text.as_str(),
         channel_scope.as_deref(),
         session_scope.as_deref(),
@@ -569,6 +607,7 @@ async fn find_lifecycle_conflict_by_scope_scan(
 
 fn lifecycle_conflict_from_scope_items(
     items: Vec<MemoryItemRecord>,
+    candidate_category: MemoryWriteCategory,
     content_text: &str,
     channel_scope: Option<&str>,
     session_scope: Option<&str>,
@@ -580,18 +619,29 @@ fn lifecycle_conflict_from_scope_items(
         }
         let exact = normalize_lifecycle_content(item.content_text.as_str()) == content_text;
         if exact {
-            return Some(LifecycleDuplicate { item, exact: true });
+            return Some(LifecycleDuplicate {
+                item,
+                match_kind: LifecycleDuplicateMatchKind::Exact,
+            });
         }
-        let overlap = lifecycle_conflict_overlap_count(content_text, item.content_text.as_str());
-        if overlap < LIFECYCLE_CONFLICT_MIN_OVERLAP {
+        if !lifecycle_conflict_matches(
+            candidate_category,
+            content_text,
+            lifecycle_item_write_category(&item),
+            item.content_text.as_str(),
+        ) {
             continue;
         }
+        let overlap = lifecycle_conflict_overlap_count(content_text, item.content_text.as_str());
         if best.as_ref().is_none_or(|(_, best_overlap)| overlap > *best_overlap) {
             best = Some((item, overlap));
         }
     }
 
-    best.map(|(item, _)| LifecycleDuplicate { item, exact: false })
+    best.map(|(item, _)| LifecycleDuplicate {
+        item,
+        match_kind: LifecycleDuplicateMatchKind::CorrectionConflict,
+    })
 }
 
 fn lifecycle_item_matches_scan_scope(
@@ -733,9 +783,19 @@ fn lifecycle_significant_terms(content_text: &str) -> Vec<String> {
 fn lifecycle_conflict_matches(
     category: MemoryWriteCategory,
     candidate_content: &str,
+    existing_category: MemoryWriteCategory,
     existing_content: &str,
 ) -> bool {
-    if !matches!(category, MemoryWriteCategory::Correction | MemoryWriteCategory::Preference) {
+    if category != MemoryWriteCategory::Correction {
+        return false;
+    }
+    if !matches!(
+        existing_category,
+        MemoryWriteCategory::Correction | MemoryWriteCategory::Preference
+    ) {
+        return false;
+    }
+    if !lifecycle_correction_references_existing_value(candidate_content, existing_content) {
         return false;
     }
     lifecycle_conflict_overlap_count(candidate_content, existing_content)
@@ -752,19 +812,100 @@ fn lifecycle_conflict_overlap_count(candidate_content: &str, existing_content: &
     candidate_terms.intersection(&existing_terms).count()
 }
 
+fn lifecycle_item_write_category(item: &MemoryItemRecord) -> MemoryWriteCategory {
+    item.tags
+        .iter()
+        .find_map(|tag| tag.strip_prefix("memory_write:"))
+        .and_then(MemoryWriteCategory::from_tag_value)
+        .unwrap_or_else(|| {
+            classify_memory_write_category(item.content_text.to_ascii_lowercase().as_str())
+        })
+}
+
+fn lifecycle_correction_references_existing_value(
+    candidate_content: &str,
+    existing_content: &str,
+) -> bool {
+    let old_value_terms = lifecycle_correction_old_value_terms(candidate_content);
+    if old_value_terms.is_empty() {
+        return false;
+    }
+    let existing_terms =
+        lifecycle_significant_terms(existing_content).into_iter().collect::<BTreeSet<_>>();
+    old_value_terms.iter().any(|term| existing_terms.contains(term))
+}
+
+fn lifecycle_correction_old_value_terms(content_text: &str) -> BTreeSet<String> {
+    let normalized = content_text.to_lowercase();
+    let mut terms = BTreeSet::new();
+    for marker in [", not ", "; not ", " - not ", " instead of ", " rather than "] {
+        collect_lifecycle_old_value_terms_after_marker(normalized.as_str(), marker, &mut terms);
+    }
+    for marker in [" uz nepou", " už nepou", " nepouz", " nepouž"] {
+        collect_lifecycle_old_value_terms_before_marker(normalized.as_str(), marker, &mut terms);
+    }
+    terms
+}
+
+fn collect_lifecycle_old_value_terms_after_marker(
+    normalized: &str,
+    marker: &str,
+    terms: &mut BTreeSet<String>,
+) {
+    let mut rest = normalized;
+    while let Some(marker_index) = rest.find(marker) {
+        let segment_start = marker_index + marker.len();
+        let tail = &rest[segment_start..];
+        let segment_end = tail.find(['.', ',', ';', ')', '(']).unwrap_or(tail.len());
+        collect_lifecycle_old_value_terms(&tail[..segment_end], terms);
+        rest = &tail[segment_end..];
+    }
+}
+
+fn collect_lifecycle_old_value_terms_before_marker(
+    normalized: &str,
+    marker: &str,
+    terms: &mut BTreeSet<String>,
+) {
+    let mut rest = normalized;
+    while let Some(marker_index) = rest.find(marker) {
+        let prefix = &rest[..marker_index];
+        let segment_start =
+            prefix.rfind(['.', ',', ';', ')', '(']).map(|index| index + 1).unwrap_or(0);
+        collect_lifecycle_old_value_terms(prefix[segment_start..].trim(), terms);
+        let next_start = marker_index + marker.len();
+        rest = &rest[next_start..];
+    }
+}
+
+fn collect_lifecycle_old_value_terms(segment: &str, terms: &mut BTreeSet<String>) {
+    terms.extend(lifecycle_significant_terms(segment));
+}
+
 fn lifecycle_duplicate_replacement_content(
     classification: &MemoryWriteClassification,
     duplicate: &LifecycleDuplicate,
     content_text: &str,
 ) -> Option<String> {
-    if duplicate.exact {
+    if duplicate.exact() {
         return None;
     }
+    let existing_category = lifecycle_item_write_category(&duplicate.item);
     match classification.category {
-        MemoryWriteCategory::Correction => {
+        MemoryWriteCategory::Correction
+            if lifecycle_conflict_matches(
+                classification.category,
+                content_text,
+                existing_category,
+                duplicate.item.content_text.as_str(),
+            ) =>
+        {
             Some(lifecycle_replacement_content(classification, content_text))
         }
-        MemoryWriteCategory::Preference => {
+        MemoryWriteCategory::Preference
+            if duplicate.match_kind == LifecycleDuplicateMatchKind::NearDuplicate
+                && existing_category == MemoryWriteCategory::Preference =>
+        {
             Some(lifecycle_replacement_content(classification, content_text))
         }
         _ => None,
@@ -1694,7 +1835,38 @@ mod tests {
         assert!(lifecycle_conflict_matches(
             MemoryWriteCategory::Correction,
             "E2E testovací projekt má používat TypeScript a Playwright; Vitest už nepoužívat.",
+            MemoryWriteCategory::Preference,
             "E2E preference: for this test project use TypeScript, Vitest, and concise Czech reports.",
+        ));
+    }
+
+    #[test]
+    fn lifecycle_conflict_rejects_ordinary_preference_overlap() {
+        assert!(!lifecycle_conflict_matches(
+            MemoryWriteCategory::Preference,
+            "I prefer TypeScript Playwright reports to be written in pirate voice for every project.",
+            MemoryWriteCategory::Preference,
+            "Project preference: TypeScript Playwright reports should use concise Czech summaries.",
+        ));
+    }
+
+    #[test]
+    fn lifecycle_conflict_rejects_untyped_status_note_overlap() {
+        assert!(!lifecycle_conflict_matches(
+            MemoryWriteCategory::Correction,
+            "Correction: TypeScript Playwright reports should use concise prose, not pirate voice.",
+            MemoryWriteCategory::Fact,
+            "Project status note: TypeScript Playwright reports document normal CI coverage and release notes.",
+        ));
+    }
+
+    #[test]
+    fn lifecycle_conflict_requires_old_value_reference() {
+        assert!(!lifecycle_conflict_matches(
+            MemoryWriteCategory::Correction,
+            "Correction: TypeScript Playwright reports should use concise prose for every project.",
+            MemoryWriteCategory::Preference,
+            "Project preference: TypeScript Playwright reports should use concise Czech summaries.",
         ));
     }
 
@@ -1717,7 +1889,7 @@ mod tests {
             "01ARZ3NDEKTSV4RRFFQ69G5W01",
             None,
             None,
-            "Existing unrelated TypeScript Vitest Czech note",
+            "Existing Vitest preference for TypeScript Czech note",
         );
         let strong = lifecycle_test_memory_item(
             "01ARZ3NDEKTSV4RRFFQ69G5W02",
@@ -1728,7 +1900,8 @@ mod tests {
 
         let conflict = lifecycle_conflict_from_scope_items(
             vec![weak, strong],
-            "Prefer TypeScript Vitest Czech reports sandbox workspace boundaries",
+            MemoryWriteCategory::Correction,
+            "Correction: Prefer TypeScript Playwright Czech reports sandbox workspace boundaries, not Vitest",
             None,
             None,
         )
@@ -1754,7 +1927,8 @@ mod tests {
 
         let conflict = lifecycle_conflict_from_scope_items(
             vec![channel_item, session_item],
-            "Prefer TypeScript Vitest Czech reports sandbox workspace boundaries",
+            MemoryWriteCategory::Correction,
+            "Correction: Prefer TypeScript Playwright Czech reports sandbox workspace boundaries, not Vitest",
             None,
             None,
         );
