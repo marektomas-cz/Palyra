@@ -19195,14 +19195,14 @@ fn redact_value(value: &mut Value, key_context: Option<&str>) -> bool {
                 }
             }
 
-            let marker_redacted = redact_secret_like_markers(text);
-            if marker_redacted != *text {
-                *value = Value::String(marker_redacted);
+            if looks_like_secret(text) {
+                *value = Value::String(REDACTED_MARKER.to_owned());
                 return true;
             }
 
-            if looks_like_secret(text) {
-                *value = Value::String(REDACTED_MARKER.to_owned());
+            let marker_redacted = redact_secret_like_markers(text);
+            if marker_redacted != *text {
+                *value = Value::String(marker_redacted);
                 return true;
             }
 
@@ -19592,6 +19592,27 @@ mod tests {
         assert!(!redacted.contains("S013_DUMMY_SECRET_SHOULD_NOT_APPEAR"));
         assert!(redacted.contains("README says"));
         assert!(redacted.contains("must be printed"));
+    }
+
+    #[test]
+    fn redact_payload_json_fully_masks_mixed_secret_and_marker_text() {
+        let redacted = super::redact_payload_json(
+            br#"{"tool_output":"token=real-secret S013_DUMMY_SECRET_SHOULD_NOT_APPEAR"}"#,
+        )
+        .expect("payload redaction should succeed");
+
+        assert!(redacted.contains(r#""tool_output":"<redacted>""#), "{redacted}");
+        assert!(!redacted.contains("real-secret"), "{redacted}");
+        assert!(!redacted.contains("S013_DUMMY_SECRET_SHOULD_NOT_APPEAR"), "{redacted}");
+
+        let redacted = super::redact_payload_json(
+            br#"{"tool_output":"Authorization: Bearer real-secret S013_DUMMY_SECRET_SHOULD_NOT_APPEAR"}"#,
+        )
+        .expect("payload redaction should succeed");
+
+        assert!(redacted.contains(r#""tool_output":"<redacted>""#), "{redacted}");
+        assert!(!redacted.contains("real-secret"), "{redacted}");
+        assert!(!redacted.contains("S013_DUMMY_SECRET_SHOULD_NOT_APPEAR"), "{redacted}");
     }
 
     #[test]
