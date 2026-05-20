@@ -47,9 +47,9 @@ use super::{
     tool_approval_response_proposal_id, workspace_patch_metrics_from_output,
     CachedMemorySearchEntry, GatewayAuthConfig, GatewayJournalConfigSnapshot,
     GatewayRuntimeConfigSnapshot, GatewayRuntimeState, MemoryRuntimeConfig, ProviderRequest,
-    RequestContext, ToolApprovalOutcome, HEADER_CHANNEL, HEADER_DEVICE_ID, HEADER_PRINCIPAL,
-    MAX_APPROVAL_PAGE_LIMIT, VAULT_RATE_LIMIT_MAX_PRINCIPAL_BUCKETS,
-    VAULT_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW,
+    RequestContext, ToolApprovalOutcome, CANVAS_PATCH_HISTORY_RESPONSE_ROW_LIMIT, HEADER_CHANNEL,
+    HEADER_DEVICE_ID, HEADER_PRINCIPAL, MAX_APPROVAL_PAGE_LIMIT,
+    VAULT_RATE_LIMIT_MAX_PRINCIPAL_BUCKETS, VAULT_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW,
 };
 use crate::application::run_stream::orchestration::{
     finalize_run_stream_after_provider_response, RunStreamPostProviderOutcome,
@@ -6989,6 +6989,63 @@ fn canvas_restore_replays_prior_revision_and_appends_new_state_version() {
     assert_eq!(latest.base_state_version, third.state_version);
     assert_eq!(latest.state_version, restored.state_version);
     assert_eq!(latest.resulting_state_json, r#"{"content":"v2"}"#);
+}
+
+#[test]
+fn canvas_restore_can_target_revision_older_than_bounded_history_response() {
+    let state = build_test_runtime_state(false);
+    let context = canvas_test_context();
+    let (created, _descriptor) = state
+        .create_canvas(
+            &context,
+            None,
+            "01ARZ3NDEKTSV4RRFFQ69G5FB4".to_owned(),
+            br#"{"content":"v1"}"#,
+            1,
+            None,
+            canvas_test_bundle(br#"console.log("ok");"#),
+            vec!["https://console.example.com".to_owned()],
+            Some(600),
+        )
+        .expect("canvas create should succeed");
+    let mut current = created.clone();
+    for revision_index in 0..CANVAS_PATCH_HISTORY_RESPONSE_ROW_LIMIT + 2 {
+        let payload = format!(r#"{{"content":"v{}"}}"#, revision_index + 2);
+        current = state
+            .update_canvas_state(
+                &context,
+                created.canvas_id.as_str(),
+                Some(payload.as_bytes()),
+                None,
+                Some(current.state_version),
+                None,
+            )
+            .expect("bounded-history setup revision should succeed");
+    }
+
+    let response_history = state
+        .load_canvas_patch_history(created.canvas_id.as_str())
+        .expect("bounded patch history should load");
+    assert!(
+        response_history.len() <= CANVAS_PATCH_HISTORY_RESPONSE_ROW_LIMIT,
+        "console history response must stay row-bounded"
+    );
+    assert!(
+        response_history.iter().all(|patch| patch.state_version > created.state_version),
+        "oldest revision should no longer be present in the bounded response history"
+    );
+
+    let restored = state
+        .restore_canvas_state(&context, created.canvas_id.as_str(), created.state_version)
+        .expect("restore should use targeted revision lookup instead of bounded response history");
+    let restored_state: Value = serde_json::from_slice(restored.state_json.as_slice())
+        .expect("restored state should decode");
+    assert_eq!(
+        restored_state.get("content").and_then(Value::as_str),
+        Some("v1"),
+        "restore must still reach revisions older than the response cap"
+    );
+    assert_eq!(restored.state_version, current.state_version + 1);
 }
 
 #[test]

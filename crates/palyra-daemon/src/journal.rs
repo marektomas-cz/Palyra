@@ -12676,6 +12676,75 @@ impl JournalStore {
         Ok(records)
     }
 
+    pub fn list_recent_canvas_state_patches(
+        &self,
+        canvas_id: &str,
+        limit: usize,
+    ) -> Result<Vec<CanvasStatePatchRecord>, JournalError> {
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        let limit = limit.clamp(1, MAX_CANVAS_PATCHES_QUERY_LIMIT) as i64;
+        let mut statement = guard.prepare(
+            r#"
+                SELECT
+                    seq,
+                    canvas_ulid,
+                    state_version,
+                    base_state_version,
+                    state_schema_version,
+                    patch_json,
+                    resulting_state_json,
+                    closed,
+                    close_reason,
+                    actor_principal,
+                    actor_device_id,
+                    applied_at_unix_ms
+                FROM canvas_state_patches
+                WHERE canvas_ulid = ?1
+                ORDER BY state_version DESC
+                LIMIT ?2
+            "#,
+        )?;
+        let mut rows = statement.query(params![canvas_id, limit])?;
+        let mut records = Vec::new();
+        while let Some(row) = rows.next()? {
+            records.push(map_canvas_state_patch_row(row)?);
+        }
+        records.reverse();
+        Ok(records)
+    }
+
+    pub fn get_canvas_state_patch(
+        &self,
+        canvas_id: &str,
+        state_version: u64,
+    ) -> Result<Option<CanvasStatePatchRecord>, JournalError> {
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        let state_version = u64_to_sqlite(state_version, "canvas_state_patches.state_version")?;
+        let mut statement = guard.prepare(
+            r#"
+                SELECT
+                    seq,
+                    canvas_ulid,
+                    state_version,
+                    base_state_version,
+                    state_schema_version,
+                    patch_json,
+                    resulting_state_json,
+                    closed,
+                    close_reason,
+                    actor_principal,
+                    actor_device_id,
+                    applied_at_unix_ms
+                FROM canvas_state_patches
+                WHERE canvas_ulid = ?1
+                  AND state_version = ?2
+                LIMIT 1
+            "#,
+        )?;
+        let mut rows = statement.query(params![canvas_id, state_version])?;
+        Ok(rows.next()?.map(map_canvas_state_patch_row).transpose()?)
+    }
+
     pub fn replay_canvas_state(
         &self,
         canvas_id: &str,

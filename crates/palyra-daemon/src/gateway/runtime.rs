@@ -388,7 +388,9 @@ pub struct CanvasRuntimeDescriptor {
     pub expires_at_unix_ms: i64,
 }
 
-const CANVAS_PATCH_HISTORY_BATCH_LIMIT: usize = 1_000;
+pub(crate) const CANVAS_PATCH_HISTORY_RESPONSE_ROW_LIMIT: usize = 100;
+const CANVAS_PATCH_HISTORY_RESPONSE_BYTE_LIMIT: usize = 4 * 1024 * 1024;
+const CANVAS_PATCH_HISTORY_RESPONSE_RECORD_OVERHEAD: usize = 256;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CanvasTokenPayload {
@@ -2282,9 +2284,9 @@ impl GatewayRuntimeState {
             return Ok(record);
         }
         let target_patch = self
-            .load_canvas_patch_history(record.canvas_id.as_str())?
-            .into_iter()
-            .find(|patch| patch.state_version == target_state_version)
+            .journal_store
+            .get_canvas_state_patch(record.canvas_id.as_str(), target_state_version)
+            .map_err(|error| map_canvas_store_error("get_canvas_state_patch", error))?
             .ok_or_else(|| {
                 Status::not_found(format!(
                     "canvas state version not found: {}@{}",
@@ -2497,24 +2499,48 @@ impl GatewayRuntimeState {
         &self,
         canvas_id: &str,
     ) -> Result<Vec<CanvasStatePatchRecord>, Status> {
-        let mut history = Vec::new();
-        let mut next_after = 0_u64;
-        loop {
-            let batch = self
-                .journal_store
-                .list_canvas_state_patches(canvas_id, next_after, CANVAS_PATCH_HISTORY_BATCH_LIMIT)
-                .map_err(|error| map_canvas_store_error("list_canvas_state_patches", error))?;
-            if batch.is_empty() {
+        let history = self
+            .journal_store
+            .list_recent_canvas_state_patches(canvas_id, CANVAS_PATCH_HISTORY_RESPONSE_ROW_LIMIT)
+            .map_err(|error| map_canvas_store_error("list_recent_canvas_state_patches", error))?;
+        Ok(Self::limit_canvas_patch_history_response(
+            history,
+            CANVAS_PATCH_HISTORY_RESPONSE_BYTE_LIMIT,
+        ))
+    }
+
+    fn limit_canvas_patch_history_response(
+        history: Vec<CanvasStatePatchRecord>,
+        max_response_bytes: usize,
+    ) -> Vec<CanvasStatePatchRecord> {
+        let mut selected = Vec::new();
+        let mut selected_bytes = 0_usize;
+        for record in history.into_iter().rev() {
+            let record_bytes = Self::canvas_patch_history_response_bytes(&record);
+            if record_bytes > max_response_bytes {
+                if selected.is_empty() {
+                    continue;
+                }
                 break;
             }
-            next_after = batch.last().map(|record| record.state_version).unwrap_or(next_after);
-            let completed_batch = batch.len() < CANVAS_PATCH_HISTORY_BATCH_LIMIT;
-            history.extend(batch);
-            if completed_batch {
+            if selected_bytes.saturating_add(record_bytes) > max_response_bytes {
                 break;
             }
+            selected_bytes = selected_bytes.saturating_add(record_bytes);
+            selected.push(record);
         }
-        Ok(history)
+        selected.reverse();
+        selected
+    }
+
+    fn canvas_patch_history_response_bytes(record: &CanvasStatePatchRecord) -> usize {
+        CANVAS_PATCH_HISTORY_RESPONSE_RECORD_OVERHEAD
+            .saturating_add(record.canvas_id.len())
+            .saturating_add(record.patch_json.len())
+            .saturating_add(record.resulting_state_json.len())
+            .saturating_add(record.close_reason.as_deref().map_or(0, str::len))
+            .saturating_add(record.actor_principal.len())
+            .saturating_add(record.actor_device_id.len())
     }
 
     #[allow(clippy::result_large_err)]
@@ -8121,8 +8147,9 @@ mod tests {
     use super::{
         provider_credential_attribution_for_provider, provider_lease_timeout_status,
         request_may_failover_to_other_provider, select_default_agent_model_profile,
-        validate_memory_item_content_limits, MemoryRuntimeConfig,
+        validate_memory_item_content_limits, GatewayRuntimeState, MemoryRuntimeConfig,
     };
+    use crate::journal::CanvasStatePatchRecord;
     use crate::model_provider::{
         ProviderCapabilitiesSnapshot, ProviderCircuitBreakerSnapshot, ProviderDiscoverySnapshot,
         ProviderHealthProbeSnapshot, ProviderRegistryModelSnapshot,
@@ -8184,6 +8211,21 @@ mod tests {
     }
 
     #[test]
+    fn canvas_patch_history_response_budget_keeps_recent_records() {
+        let records = (1..=5)
+            .map(|state_version| test_canvas_patch_record(state_version, 128))
+            .collect::<Vec<_>>();
+
+        let limited = GatewayRuntimeState::limit_canvas_patch_history_response(records, 1_100);
+
+        assert_eq!(
+            limited.iter().map(|record| record.state_version).collect::<Vec<_>>(),
+            vec![4, 5],
+            "response budgeting should retain the newest contiguous revisions"
+        );
+    }
+
+    #[test]
     fn default_agent_model_profile_prefers_registry_default_model() {
         let selected = select_default_agent_model_profile(
             Some("MiniMax-M2.7"),
@@ -8193,6 +8235,28 @@ mod tests {
         );
 
         assert_eq!(selected.as_deref(), Some("MiniMax-M2.7"));
+    }
+
+    fn test_canvas_patch_record(
+        state_version: u64,
+        payload_bytes: usize,
+    ) -> CanvasStatePatchRecord {
+        let payload = "x".repeat(payload_bytes);
+        let sqlite_version = i64::try_from(state_version).expect("test version fits i64");
+        CanvasStatePatchRecord {
+            seq: sqlite_version,
+            canvas_id: "canvas-test".to_owned(),
+            state_version,
+            base_state_version: state_version.saturating_sub(1),
+            state_schema_version: 1,
+            patch_json: payload.clone(),
+            resulting_state_json: payload,
+            closed: false,
+            close_reason: None,
+            actor_principal: "admin:local".to_owned(),
+            actor_device_id: "device:test".to_owned(),
+            applied_at_unix_ms: sqlite_version,
+        }
     }
 
     #[test]
