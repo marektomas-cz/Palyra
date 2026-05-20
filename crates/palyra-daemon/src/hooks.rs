@@ -4,7 +4,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use palyra_common::{
     runtime_contracts::{
         resolve_run_lifecycle_hook_decisions, RunLifecycleHookDecision,
-        RunLifecycleHookDecisionKind, RunLifecycleHookPhase,
+        RunLifecycleHookDecisionKind, RunLifecycleHookPhase, RunLifecycleHookResolution,
     },
     versioned_json::{
         migrate_updated_at_metadata_v0_to_v1, parse_versioned_json, VersionedJsonFormat,
@@ -594,9 +594,39 @@ pub(crate) async fn dispatch_named_event(
             )
             .await;
         }
+        enforce_run_lifecycle_resolution(event, &resolution)?;
     }
 
     Ok(outcomes)
+}
+
+fn enforce_run_lifecycle_resolution(
+    event: &str,
+    resolution: &RunLifecycleHookResolution,
+) -> Result<()> {
+    if !resolution.terminal {
+        return Ok(());
+    }
+    let selected = &resolution.selected;
+    let action = match selected.kind {
+        RunLifecycleHookDecisionKind::RequestApproval => "requested approval",
+        RunLifecycleHookDecisionKind::Block => "blocked",
+        RunLifecycleHookDecisionKind::FailRun => "failed run",
+        _ => "stopped",
+    };
+    let reason = selected
+        .reason
+        .as_deref()
+        .map(sanitize_http_error_message)
+        .unwrap_or_else(|| "no reason provided".to_owned());
+    bail!(
+        "terminal lifecycle hook decision for {}: {} by hook {} plugin {} ({})",
+        event,
+        action,
+        selected.hook_id,
+        selected.plugin_id,
+        reason
+    )
 }
 
 fn hook_event_from_journal(event: JournalEventRecord) -> Option<(&'static str, Value)> {
@@ -721,12 +751,15 @@ fn normalize_hook_operator_metadata(mut operator: HookOperatorMetadata) -> HookO
 mod tests {
     use std::fs;
 
-    use palyra_common::runtime_contracts::{RunLifecycleHookDecisionKind, RunLifecycleHookPhase};
+    use palyra_common::runtime_contracts::{
+        resolve_run_lifecycle_hook_decisions, RunLifecycleHookDecision,
+        RunLifecycleHookDecisionKind, RunLifecycleHookPhase,
+    };
     use serde_json::json;
     use tempfile::tempdir;
 
     use super::{
-        attach_lifecycle_decision, hook_bindings_index_path,
+        attach_lifecycle_decision, enforce_run_lifecycle_resolution, hook_bindings_index_path,
         lifecycle_decision_kind_from_exit_code, load_hook_bindings_index, normalize_hook_event,
         HOOK_BINDINGS_LAYOUT_VERSION,
     };
@@ -790,5 +823,41 @@ mod tests {
             output.pointer("/lifecycle_decision/kind").and_then(serde_json::Value::as_str),
             Some("block")
         );
+    }
+
+    #[test]
+    fn terminal_lifecycle_resolution_is_returned_as_dispatch_error() {
+        let mut decision = RunLifecycleHookDecision::new(
+            RunLifecycleHookPhase::BeforeTool,
+            RunLifecycleHookDecisionKind::Block,
+            "hook.policy",
+            "plugin.policy",
+        );
+        decision.reason = Some("policy denied shell access".to_owned());
+        let resolution =
+            resolve_run_lifecycle_hook_decisions(RunLifecycleHookPhase::BeforeTool, vec![decision])
+                .expect("terminal lifecycle decision should resolve");
+
+        let error = enforce_run_lifecycle_resolution("run:before_tool", &resolution).unwrap_err();
+
+        assert!(error.to_string().contains("run:before_tool"));
+        assert!(error.to_string().contains("blocked"));
+        assert!(error.to_string().contains("hook.policy"));
+    }
+
+    #[test]
+    fn non_terminal_lifecycle_resolution_allows_dispatch() {
+        let decision = RunLifecycleHookDecision::new(
+            RunLifecycleHookPhase::BeforeTool,
+            RunLifecycleHookDecisionKind::Annotate,
+            "hook.note",
+            "plugin.note",
+        );
+        let resolution =
+            resolve_run_lifecycle_hook_decisions(RunLifecycleHookPhase::BeforeTool, vec![decision])
+                .expect("non-terminal lifecycle decision should resolve");
+
+        enforce_run_lifecycle_resolution("run:before_tool", &resolution)
+            .expect("non-terminal lifecycle decision should not stop dispatch");
     }
 }
