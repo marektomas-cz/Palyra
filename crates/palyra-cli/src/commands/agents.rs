@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::bail;
 
@@ -251,14 +251,9 @@ pub(crate) async fn run_agents_async(
             allow_absolute_paths,
             json: _,
         } => {
-            let current_dir = std::env::current_dir()
-                .context("failed to resolve current directory for agent workspace roots")?;
             reject_unflagged_absolute_agent_dir(agent_dir.as_deref(), allow_absolute_paths)?;
-            let (workspace_roots, allow_absolute_paths) = prepare_workspace_roots_for_create(
-                workspace_root,
-                allow_absolute_paths,
-                &current_dir,
-            )?;
+            let (workspace_roots, allow_absolute_paths) =
+                prepare_workspace_roots_for_create(workspace_root, allow_absolute_paths)?;
             let response = client
                 .create_agent(gateway_v1::CreateAgentRequest {
                     v: CANONICAL_PROTOCOL_MAJOR,
@@ -477,10 +472,8 @@ fn reject_unflagged_absolute_agent_dir(
 fn prepare_workspace_roots_for_create(
     workspace_roots: Vec<String>,
     allow_absolute_paths: bool,
-    current_dir: &Path,
 ) -> Result<(Vec<String>, bool)> {
     let mut normalized = Vec::with_capacity(workspace_roots.len());
-    let mut absolutized_relative_root = false;
     for raw in workspace_roots {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
@@ -492,12 +485,10 @@ fn prepare_workspace_roots_for_create(
             }
             normalized.push(trimmed.to_owned());
         } else {
-            let resolved = current_dir.join(PathBuf::from(trimmed));
-            normalized.push(resolved.to_string_lossy().into_owned());
-            absolutized_relative_root = true;
+            normalized.push(trimmed.to_owned());
         }
     }
-    Ok((normalized, allow_absolute_paths || absolutized_relative_root))
+    Ok((normalized, allow_absolute_paths))
 }
 
 fn is_cli_absolute_path(value: &str) -> bool {
@@ -548,18 +539,24 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn prepare_workspace_roots_resolves_relative_values_against_invocation_dir() -> Result<()> {
-        let temp = tempdir()?;
+    fn prepare_workspace_roots_preserves_relative_values_for_daemon_containment() -> Result<()> {
         let (workspace_roots, allow_absolute_paths) =
-            prepare_workspace_roots_for_create(vec![".".to_owned()], false, temp.path())?;
+            prepare_workspace_roots_for_create(vec![" workspace ".to_owned()], false)?;
 
-        assert_eq!(workspace_roots.len(), 1);
-        assert!(Path::new(workspace_roots[0].as_str()).is_absolute());
+        assert_eq!(workspace_roots, vec!["workspace".to_owned()]);
         assert!(
-            workspace_roots[0].contains(temp.path().file_name().unwrap().to_str().unwrap()),
-            "resolved root should stay under invocation directory: {}",
-            workspace_roots[0]
+            !allow_absolute_paths,
+            "relative workspace roots must not implicitly permit absolute daemon roots"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn prepare_workspace_roots_keeps_explicit_absolute_flag_only() -> Result<()> {
+        let (workspace_roots, allow_absolute_paths) =
+            prepare_workspace_roots_for_create(vec!["workspace".to_owned()], true)?;
+
+        assert_eq!(workspace_roots, vec!["workspace".to_owned()]);
         assert!(allow_absolute_paths);
         Ok(())
     }
@@ -569,7 +566,7 @@ mod tests {
         let temp = tempdir()?;
         let absolute_root = temp.path().to_string_lossy().into_owned();
 
-        let error = prepare_workspace_roots_for_create(vec![absolute_root], false, temp.path())
+        let error = prepare_workspace_roots_for_create(vec![absolute_root], false)
             .expect_err("absolute root without flag should fail");
 
         assert!(format!("{error:#}").contains("--allow-absolute-paths"));
