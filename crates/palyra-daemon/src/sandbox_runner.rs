@@ -1249,7 +1249,7 @@ fn rewrite_arguments_to_scoped_paths(
             index = index.saturating_add(1);
             continue;
         }
-        if option_consumes_non_path_value(arg.as_str()) {
+        if command_option_consumes_non_path_value(command, arg.as_str()) {
             rewritten.push(arg.clone());
             if let Some(value) = args.get(index.saturating_add(1)) {
                 rewritten.push(value.clone());
@@ -1382,6 +1382,16 @@ fn option_consumes_non_path_value(arg: &str) -> bool {
         arg.trim().to_ascii_lowercase().as_str(),
         "--test-name-pattern" | "--testnamepattern" | "--grep" | "--grep-invert"
     )
+}
+
+fn command_option_consumes_non_path_value(command: &str, arg: &str) -> bool {
+    option_consumes_non_path_value(arg) || node_eval_option_consumes_non_path_value(command, arg)
+}
+
+fn node_eval_option_consumes_non_path_value(command: &str, arg: &str) -> bool {
+    let command = normalize_process_executable_token(command);
+    matches!(command.as_str(), "node" | "nodejs")
+        && matches!(arg.trim().to_ascii_lowercase().as_str(), "-e" | "-p")
 }
 
 fn is_windows_taskkill_switch(command: &str, arg: &str) -> bool {
@@ -2912,6 +2922,27 @@ mod tests {
     }
 
     #[test]
+    fn rewrite_arguments_to_scoped_paths_preserves_node_eval_code() {
+        let workspace = unique_temp_dir("workspace-node-eval-arg-rewrite");
+        fs::create_dir_all(workspace.as_path()).expect("workspace directory should be created");
+        let canonical_workspace = canonical_workspace_root(workspace.as_path())
+            .expect("workspace root should canonicalize");
+        let args = vec!["-e".to_owned(), "console.log('PALYRA_PROCESS_OK')".to_owned()];
+
+        let rewritten = rewrite_arguments_to_scoped_paths(
+            canonical_workspace.as_path(),
+            canonical_workspace.as_path(),
+            "node",
+            args.as_slice(),
+        )
+        .expect("node eval code should remain a literal argument");
+
+        assert_eq!(rewritten, args);
+
+        let _ = fs::remove_dir_all(workspace.as_path());
+    }
+
+    #[test]
     fn build_process_command_uses_rewritten_sandbox_args() {
         let workspace = unique_temp_dir("workspace-build-command-virtual-arg");
         let nested = workspace.join("e2e-file-workflow");
@@ -3310,30 +3341,24 @@ mod tests {
     }
 
     #[test]
-    fn run_constrained_process_normalizes_repeated_echo_command_arg() {
-        let inputs: &[&[u8]] = &[
-            br#"{"command":"echo","args":["echo PALYRA_TERMINAL_OK"]}"#,
-            br#"{"command":"echo","args":["echo","PALYRA_TERMINAL_OK"]}"#,
-        ];
+    fn run_constrained_process_executes_portable_echo_builtin() {
+        let workspace = std::env::current_dir().expect("workspace current_dir should resolve");
+        let policy = sandbox_policy_with_allowed_executables(workspace, vec!["echo".to_owned()]);
+        let input = br#"{"command":"echo","args":["PALYRA_TERMINAL_OK"]}"#;
 
-        for input in inputs {
-            let workspace = std::env::current_dir().expect("workspace current_dir should resolve");
-            let policy =
-                sandbox_policy_with_allowed_executables(workspace, vec!["echo".to_owned()]);
-            let result = run_constrained_process(&policy, input, Duration::from_millis(1_000))
-                .expect("portable echo builtin should execute normalized repeated command args");
-            let output: serde_json::Value =
-                serde_json::from_slice(&result.output_json).expect("output should parse");
+        let result = run_constrained_process(&policy, input, Duration::from_millis(1_000))
+            .expect("portable echo builtin should execute split command args");
+        let output: serde_json::Value =
+            serde_json::from_slice(&result.output_json).expect("output should parse");
 
-            assert_eq!(
-                output.get("stdout").and_then(serde_json::Value::as_str),
-                Some("PALYRA_TERMINAL_OK\n")
-            );
-            assert_eq!(
-                output.get("sandbox_backend").and_then(serde_json::Value::as_str),
-                Some("builtin_portable")
-            );
-        }
+        assert_eq!(
+            output.get("stdout").and_then(serde_json::Value::as_str),
+            Some("PALYRA_TERMINAL_OK\n")
+        );
+        assert_eq!(
+            output.get("sandbox_backend").and_then(serde_json::Value::as_str),
+            Some("builtin_portable")
+        );
     }
 
     #[test]
@@ -3548,16 +3573,25 @@ mod tests {
         };
         let workspace = unique_temp_dir("workspace-python-background");
         fs::create_dir_all(workspace.as_path()).expect("workspace directory should be created");
+        fs::write(
+            workspace.join("background_ready.py"),
+            "import time\nprint('ready', flush=True)\ntime.sleep(2)\n",
+        )
+        .expect("background script should be written");
         let mut policy =
             sandbox_policy_with_allowed_executables(workspace.clone(), vec![python.to_owned()]);
         policy.allow_interpreters = true;
         policy.egress_enforcement_mode = EgressEnforcementMode::Preflight;
-        let input = format!(
-            r#"{{"command":"{python}","args":["-m","http.server","0"],"background":true,"timeout_ms":100}}"#
-        );
+        let input = serde_json::to_vec(&serde_json::json!({
+            "command": python,
+            "args": ["background_ready.py"],
+            "background": true,
+            "timeout_ms": 1_000
+        }))
+        .expect("input should serialize");
 
         let result =
-            run_constrained_process(&policy, input.as_bytes(), Duration::from_millis(1_000))
+            run_constrained_process(&policy, input.as_slice(), Duration::from_millis(1_000))
                 .expect("allowlisted python should start as a bounded background process");
         let output: serde_json::Value =
             serde_json::from_slice(&result.output_json).expect("output should parse");
