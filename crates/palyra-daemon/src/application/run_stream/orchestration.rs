@@ -1393,6 +1393,7 @@ fn final_answer_recovery_prompt(
     let normalized = message.to_ascii_lowercase();
     if !(normalized.contains("empty final answer after tool execution")
         || normalized.contains("bare acknowledgement instead of a final answer")
+        || normalized.contains("planning or intent statement")
         || normalized.contains("without matching tool evidence"))
     {
         return None;
@@ -1415,6 +1416,12 @@ fn incomplete_final_answer_without_tools(
     }
     if final_answer_is_minimal_ack(text) && !user_requested_exact_minimal_answer(text, messages) {
         return Some("model returned a bare acknowledgement as the final answer".to_owned());
+    }
+    if final_answer_is_deferred_tool_work(text) {
+        return Some(
+            "model returned a planning or intent statement as the final answer without executing any tools"
+                .to_owned(),
+        );
     }
     if final_answer_claims_tool_work_without_evidence(text) {
         return Some(
@@ -1447,6 +1454,12 @@ fn incomplete_terminal_final_answer(
                 .to_owned(),
         );
     }
+    if final_answer_is_deferred_tool_work(text) {
+        return Some(
+            "model returned a planning or intent statement as the final answer after tool execution"
+                .to_owned(),
+        );
+    }
     if final_answer_claims_tool_work_without_evidence(text)
         && !final_answer_has_matching_tool_evidence(text, messages.as_slice())
     {
@@ -1458,9 +1471,27 @@ fn incomplete_terminal_final_answer(
     None
 }
 
+fn final_answer_is_deferred_tool_work(text: &str) -> bool {
+    let normalized = normalize_final_answer_text(text);
+    if DEFERRED_TOOL_WORK_NEGATED_MARKERS.iter().any(|marker| normalized.contains(marker)) {
+        return false;
+    }
+
+    DEFERRED_TOOL_WORK_MARKERS.iter().any(|marker| normalized.contains(marker))
+        && TOOL_WORK_ACTION_MARKERS
+            .iter()
+            .any(|marker| normalized_text_has_marker(normalized.as_str(), marker))
+}
+
 fn final_answer_claims_tool_work_without_evidence(text: &str) -> bool {
     let normalized = normalize_final_answer_text(text);
     UNSUPPORTED_TOOL_WORK_CLAIMS.iter().any(|marker| normalized.contains(marker))
+}
+
+fn normalized_text_has_marker(normalized: &str, marker: &str) -> bool {
+    normalized
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .any(|token| token == marker)
 }
 
 fn normalize_final_answer_text(text: &str) -> String {
@@ -1628,6 +1659,52 @@ const UNSUPPORTED_TOOL_WORK_CLAIMS: &[&str] = &[
     "i wrote the file",
     "test passed",
     "tests passed",
+];
+
+const DEFERRED_TOOL_WORK_MARKERS: &[&str] = &[
+    "let me ",
+    "i will ",
+    "i'll ",
+    "i need to ",
+    "i should ",
+    "i am going to ",
+    "i'm going to ",
+    "next, i ",
+];
+
+const DEFERRED_TOOL_WORK_NEGATED_MARKERS: &[&str] = &[
+    "i will not ",
+    "i won't ",
+    "i should not ",
+    "i don't need to ",
+    "i do not need to ",
+    "i am not going to ",
+    "i'm not going to ",
+];
+
+const TOOL_WORK_ACTION_MARKERS: &[&str] = &[
+    "apply_patch",
+    "browse",
+    "browser",
+    "build",
+    "check",
+    "create",
+    "edit",
+    "fix",
+    "implement",
+    "inspect",
+    "list",
+    "navigate",
+    "open",
+    "patch",
+    "read",
+    "research",
+    "run",
+    "search",
+    "test",
+    "update",
+    "verify",
+    "write",
 ];
 
 const TERMINAL_TOOL_AUTHORIZATION_ERROR_MARKERS: &[&str] = &[
@@ -1969,6 +2046,28 @@ mod tests {
     }
 
     #[test]
+    fn incomplete_final_answer_without_tools_detects_deferred_work() {
+        let message = incomplete_final_answer_without_tools(
+            Some(
+                "The workspace is empty. I\u{2019}ll create the todo app files and run the tests.",
+            ),
+            &[],
+        )
+        .expect("deferred tool work must not be accepted as a final answer");
+
+        assert!(message.contains("planning or intent statement"));
+    }
+
+    #[test]
+    fn incomplete_final_answer_without_tools_allows_negated_deferred_work() {
+        assert!(incomplete_final_answer_without_tools(
+            Some("I will not edit files because you asked only for an explanation."),
+            &[]
+        )
+        .is_none());
+    }
+
+    #[test]
     fn truncated_provider_output_is_not_a_final_answer_without_tools() {
         let output = ProviderTurnOutput::text(
             "Created fixtures/app and ran".to_owned(),
@@ -2043,6 +2142,21 @@ mod tests {
     }
 
     #[test]
+    fn deferred_final_after_tool_execution_gets_one_recovery_prompt() {
+        let state =
+            loop_state_after_tool("Create fixtures/cz-validator with tests.", "palyra.fs.list_dir");
+
+        let prompt = final_answer_recovery_prompt(
+            "model returned a planning or intent statement as the final answer after tool execution",
+            &state,
+            false,
+        )
+        .expect("deferred work after tool execution should be recoverable once");
+
+        assert!(prompt.contains("issue the next minimal tool call"));
+    }
+
+    #[test]
     fn stop_finished_provider_output_can_be_final_without_tools() {
         let output = ProviderTurnOutput::text(
             "Use cargo test to run the daemon tests.".to_owned(),
@@ -2084,6 +2198,19 @@ mod tests {
             .expect("bare ack must not complete a requested tool workflow");
 
         assert!(message.contains("bare acknowledgement"));
+    }
+
+    #[test]
+    fn incomplete_terminal_final_answer_rejects_deferred_work_after_read_only_tool() {
+        let state =
+            loop_state_after_tool("Create fixtures/cz-validator with tests.", "palyra.fs.list_dir");
+        let message = incomplete_terminal_final_answer(
+            Some("Good, the directory is absent. I'll create the files next."),
+            &state,
+        )
+        .expect("deferred work after read-only discovery must not complete the run");
+
+        assert!(message.contains("planning or intent statement"));
     }
 
     #[test]
