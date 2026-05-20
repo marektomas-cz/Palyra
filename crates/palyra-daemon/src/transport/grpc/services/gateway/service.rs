@@ -1466,6 +1466,7 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
             let mut tape_seq = 0_i64;
             let mut model_token_tape_events = 0_usize;
             let mut model_token_compaction_emitted = false;
+            let mut tool_result_compaction_emitted = false;
             let mut in_progress_emitted = false;
             let mut remaining_tool_budget = state_for_stream.config.tool_call.max_calls_per_run;
             let mut previous_session_run_id = None::<String>;
@@ -1527,6 +1528,7 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                     &mut tape_seq,
                     &mut model_token_tape_events,
                     &mut model_token_compaction_emitted,
+                    &mut tool_result_compaction_emitted,
                     &mut in_progress_emitted,
                     &mut remaining_tool_budget,
                     &mut previous_session_run_id,

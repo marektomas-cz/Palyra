@@ -407,8 +407,9 @@ pub(crate) async fn maybe_compact_context_after_tool_results(
     run_id: &str,
     tape_seq: &mut i64,
     tool_result_count: usize,
+    compaction_emitted: &mut bool,
 ) -> Result<(), Status> {
-    if tool_result_count == 0 {
+    if !should_attempt_tool_result_compaction(tool_result_count, *compaction_emitted) {
         return Ok(());
     }
 
@@ -447,11 +448,13 @@ pub(crate) async fn maybe_compact_context_after_tool_results(
             reject_candidate_ids: &[],
         })
         .await?;
+        *compaction_emitted = true;
         json!({
             "event": "session.compaction.tool_results.applied",
             "artifact_id": execution.artifact.artifact_id,
             "checkpoint_id": execution.checkpoint.checkpoint_id,
             "policy": trigger_policy,
+            "cooldown_scope": "run",
             "trigger_reason": trigger_reason,
             "tool_result_count": tool_result_count,
             "source_refs": [
@@ -507,6 +510,14 @@ pub(crate) async fn maybe_compact_context_after_tool_results(
         .await?;
     *tape_seq += 1;
     Ok(())
+}
+
+#[must_use]
+fn should_attempt_tool_result_compaction(
+    tool_result_count: usize,
+    compaction_emitted: bool,
+) -> bool {
+    tool_result_count > 0 && !compaction_emitted
 }
 
 fn compaction_quality_gates(summary_json: &str) -> Value {
@@ -981,6 +992,18 @@ fn tool_result_tape_payload(
         "error": error,
     })
     .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_attempt_tool_result_compaction;
+
+    #[test]
+    fn tool_result_compaction_guard_requires_results_and_single_run_emit() {
+        assert!(!should_attempt_tool_result_compaction(0, false));
+        assert!(should_attempt_tool_result_compaction(1, false));
+        assert!(!should_attempt_tool_result_compaction(1, true));
+    }
 }
 
 fn tool_attestation_tape_payload(

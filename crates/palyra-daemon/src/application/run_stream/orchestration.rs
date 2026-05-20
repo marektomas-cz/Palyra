@@ -510,6 +510,7 @@ pub(crate) async fn process_run_stream_message(
     tape_seq: &mut i64,
     model_token_tape_events: &mut usize,
     model_token_compaction_emitted: &mut bool,
+    tool_result_compaction_emitted: &mut bool,
     in_progress_emitted: &mut bool,
     remaining_tool_budget: &mut u32,
     previous_session_run_id: &mut Option<String>,
@@ -1016,6 +1017,7 @@ pub(crate) async fn process_run_stream_message(
                     run_id.as_str(),
                     tape_seq,
                     tool_result_count,
+                    tool_result_compaction_emitted,
                 )
                 .await?;
                 append_agent_loop_tape_event(
