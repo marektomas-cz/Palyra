@@ -1,5 +1,7 @@
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
+#[cfg(target_os = "macos")]
+use std::os::unix::ffi::OsStringExt;
 #[cfg(windows)]
 use std::os::windows::io::AsRawHandle;
 use std::{
@@ -1410,6 +1412,10 @@ fn macos_path_alias_key(path: &Path) -> Option<String> {
     if normalized.is_empty() {
         return None;
     }
+    let normalized = normalized
+        .strip_prefix("/System/Volumes/Data")
+        .filter(|suffix| suffix.is_empty() || suffix.starts_with('/'))
+        .unwrap_or(normalized.as_str());
     for alias_prefix in ["/private/var", "/private/tmp", "/private/etc"] {
         if normalized == alias_prefix {
             return Some(alias_prefix.trim_start_matches("/private").to_owned());
@@ -1431,11 +1437,45 @@ fn normalized_path_key_starts_with(candidate: &str, root: &str) -> bool {
     candidate.strip_prefix(root).is_some_and(|suffix| suffix.starts_with('/'))
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn canonicalize_open_file_path(file: &File, input_path: &str) -> Result<PathBuf, String> {
-    #[cfg(target_os = "linux")]
     let fd_path = format!("/proc/self/fd/{}", file.as_raw_fd());
-    #[cfg(not(target_os = "linux"))]
+
+    fs::canonicalize(fd_path.as_str()).map_err(|error| {
+        format!(
+            "{WORKSPACE_READ_FILE_TOOL_NAME} failed to resolve opened workspace file {input_path}: {error}"
+        )
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn canonicalize_open_file_path(file: &File, input_path: &str) -> Result<PathBuf, String> {
+    let mut buffer = vec![0 as libc::c_char; libc::PATH_MAX as usize];
+    let result = unsafe {
+        // SAFETY: The file descriptor is borrowed from a live `File`, and `buffer` is a writable
+        // C buffer large enough for macOS `F_GETPATH` to write a nul-terminated path.
+        libc::fcntl(file.as_raw_fd(), libc::F_GETPATH, buffer.as_mut_ptr())
+    };
+    if result == -1 {
+        return Err(format!(
+            "{WORKSPACE_READ_FILE_TOOL_NAME} failed to resolve opened workspace file {input_path}: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let opened_path = unsafe {
+        // SAFETY: `F_GETPATH` succeeded and writes a nul-terminated path into `buffer`.
+        std::ffi::CStr::from_ptr(buffer.as_ptr())
+    };
+    let opened_path = PathBuf::from(std::ffi::OsString::from_vec(opened_path.to_bytes().to_vec()));
+    fs::canonicalize(opened_path.as_path()).map_err(|error| {
+        format!(
+            "{WORKSPACE_READ_FILE_TOOL_NAME} failed to resolve opened workspace file {input_path}: {error}"
+        )
+    })
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn canonicalize_open_file_path(file: &File, input_path: &str) -> Result<PathBuf, String> {
     let fd_path = format!("/dev/fd/{}", file.as_raw_fd());
 
     fs::canonicalize(fd_path.as_str()).map_err(|error| {
@@ -1594,6 +1634,35 @@ mod tests {
             Path::new("/private/var/folders/palyra/workspace/file.txt"),
             Path::new("/var/folders/palyra/workspace")
         ));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn workspace_root_scope_check_accepts_data_volume_private_var_alias() {
+        assert!(path_stays_inside_workspace_root(
+            Path::new("/System/Volumes/Data/private/var/folders/palyra/workspace/file.txt"),
+            Path::new("/var/folders/palyra/workspace")
+        ));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn canonicalize_open_file_path_resolves_macos_file_descriptor_target() {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let file_path = tempdir.path().join("opened.txt");
+        fs::write(file_path.as_path(), "opened").expect("workspace file should be written");
+        let file = File::open(file_path.as_path()).expect("workspace file should open");
+
+        let opened_path = canonicalize_open_file_path(&file, "opened.txt")
+            .expect("macOS opened file path should resolve to the target file");
+        let canonical_file =
+            fs::canonicalize(file_path.as_path()).expect("workspace file should canonicalize");
+
+        assert!(path_stays_inside_workspace_root(opened_path.as_path(), tempdir.path()));
+        assert_eq!(
+            macos_path_alias_key(opened_path.as_path()),
+            macos_path_alias_key(canonical_file.as_path())
+        );
     }
 
     #[test]
