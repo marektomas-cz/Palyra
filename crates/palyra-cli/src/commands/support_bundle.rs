@@ -122,10 +122,8 @@ fn run_replay_import(input: String, output_dir: String) -> Result<()> {
     fs::create_dir_all(output_dir.as_path()).with_context(|| {
         format!("failed to create replay import directory {}", output_dir.display())
     })?;
-    let hash =
-        bundle.integrity.canonical_sha256.clone().unwrap_or_else(|| sha256_hex(bytes.as_slice()));
-    let output_path =
-        output_dir.join(format!("{}.replay.json", hash.chars().take(16).collect::<String>()));
+    let output_path = replay_import_artifact_path(output_dir.as_path(), bytes.as_slice());
+    let hash = sha256_hex(bytes.as_slice());
     write_replay_artifact(output_path.as_path(), bytes.as_slice())?;
     println!(
         "support_bundle.replay_import path={} status=passed canonical_sha256={}",
@@ -133,6 +131,11 @@ fn run_replay_import(input: String, output_dir: String) -> Result<()> {
         hash
     );
     std::io::stdout().flush().context("stdout flush failed")
+}
+
+fn replay_import_artifact_path(output_dir: &Path, bundle_bytes: &[u8]) -> PathBuf {
+    let hash = sha256_hex(bundle_bytes);
+    output_dir.join(format!("{}.replay.json", hash.chars().take(16).collect::<String>()))
 }
 
 fn run_replay_run(input: String, diff_output: Option<String>) -> Result<()> {
@@ -572,6 +575,22 @@ fn extract_replay_user_input(parameter_delta_json: Option<&str>) -> Option<Value
 mod tests {
     use super::*;
     use palyra_common::replay_bundle::{replay_bundle_offline, ReplayRunStatus};
+
+    #[test]
+    fn replay_import_artifact_path_ignores_bundle_supplied_hash() {
+        let output_dir = PathBuf::from("imports");
+        let bytes = br#"{"integrity":{"canonical_sha256":"/tmp/pwn"}}"#;
+
+        let path = replay_import_artifact_path(output_dir.as_path(), bytes);
+
+        assert!(path.starts_with(output_dir.as_path()));
+        assert_eq!(path.parent(), Some(output_dir.as_path()));
+        assert_eq!(
+            path.file_name().and_then(|value| value.to_str()),
+            Some(format!("{}.replay.json", &sha256_hex(bytes)[..16]).as_str())
+        );
+        assert!(!path.to_string_lossy().contains("pwn"));
+    }
 
     #[test]
     fn replay_export_from_journal_redacts_and_replays_offline() {
