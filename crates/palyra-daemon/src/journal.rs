@@ -55,6 +55,41 @@ const SENSITIVE_KEY_FRAGMENTS: &[&str] = &[
     "signature",
 ];
 const SENSITIVE_KEY_TOKENS: &[&str] = &["pin", "pincode"];
+const SENSITIVE_VALUE_PHRASES: &[&str] = &[
+    "temporary password",
+    "one-time password",
+    "password is",
+    "password:",
+    "password =",
+    "passcode is",
+    "passcode:",
+    "otp is",
+    "otp:",
+    "api key is",
+    "api key:",
+    "api-key is",
+    "api-key:",
+    "access token is",
+    "access token:",
+    "auth token is",
+    "auth token:",
+    "bearer token is",
+    "bearer token:",
+    "refresh token is",
+    "refresh token:",
+    "client secret",
+    "secret is",
+    "secret:",
+    "private key",
+    "credential is",
+    "credentials are",
+    "ssn is",
+    "ssn:",
+    "social security number",
+    "credit card number",
+    "card number is",
+    "card number:",
+];
 const MAX_CRON_JOBS_LIST_LIMIT: usize = 500;
 const MAX_CRON_RUNS_LIST_LIMIT: usize = 500;
 const MAX_APPROVALS_LIST_LIMIT: usize = 500;
@@ -19276,6 +19311,7 @@ fn looks_like_secret(value: &str) -> bool {
         || normalized.contains("oauth_refresh_token")
         || normalized.contains("set-cookie:")
         || normalized.contains("cookie:")
+        || SENSITIVE_VALUE_PHRASES.iter().any(|phrase| normalized.contains(phrase))
 }
 
 fn redact_secret_like_markers(input: &str) -> String {
@@ -19613,6 +19649,27 @@ mod tests {
         assert!(redacted.contains(r#""tool_output":"<redacted>""#), "{redacted}");
         assert!(!redacted.contains("real-secret"), "{redacted}");
         assert!(!redacted.contains("S013_DUMMY_SECRET_SHOULD_NOT_APPEAR"), "{redacted}");
+    }
+
+    #[test]
+    fn redact_payload_json_masks_sensitive_reply_text_prose() {
+        let redacted = super::redact_payload_json(
+            br#"{"reply_text":"The temporary password is hunter2 for alice@example.test"}"#,
+        )
+        .expect("payload redaction should succeed");
+
+        assert!(redacted.contains(r#""reply_text":"<redacted>""#), "{redacted}");
+        assert!(!redacted.contains("hunter2"), "{redacted}");
+        assert!(!redacted.contains("alice@example.test"), "{redacted}");
+    }
+
+    #[test]
+    fn redact_payload_json_preserves_benign_reply_text() {
+        let redacted =
+            super::redact_payload_json(br#"{"reply_text":"Use password managers for safety."}"#)
+                .expect("payload redaction should succeed");
+
+        assert_eq!(redacted, r#"{"reply_text":"Use password managers for safety."}"#);
     }
 
     #[test]
@@ -20676,6 +20733,33 @@ mod tests {
             tape[1].payload_json.contains("<redacted>"),
             "persisted tape payloads should preserve explicit redaction marker"
         );
+    }
+
+    #[test]
+    fn orchestrator_tape_append_redacts_sensitive_reply_text() {
+        let db_path = temp_db_path();
+        let store = JournalStore::open(test_journal_config(db_path, false))
+            .expect("journal store should open");
+
+        upsert_orchestrator_session(&store, "01ARZ3NDEKTSV4RRFFQ69G5FAW");
+        start_orchestrator_run(&store, "01ARZ3NDEKTSV4RRFFQ69G5FAW", "01ARZ3NDEKTSV4RRFFQ69G5FAX");
+        store
+            .append_orchestrator_tape_event(&OrchestratorTapeAppendRequest {
+                run_id: "01ARZ3NDEKTSV4RRFFQ69G5FAX".to_owned(),
+                seq: 0,
+                event_type: "message.replied".to_owned(),
+                payload_json:
+                    r#"{"reply_text":"The temporary password is hunter2 for alice@example.test"}"#
+                        .to_owned(),
+            })
+            .expect("message reply tape event should persist");
+
+        let tape = store
+            .orchestrator_tape("01ARZ3NDEKTSV4RRFFQ69G5FAX")
+            .expect("run tape query should succeed");
+
+        assert_eq!(tape.len(), 1);
+        assert_eq!(tape[0].payload_json, r#"{"reply_text":"<redacted>"}"#);
     }
 
     #[test]
