@@ -213,11 +213,41 @@ impl ExternalRetrievalRuntime {
         let memory = store.memory_embeddings_status()?;
         let workspace: crate::journal::WorkspaceRetrievalIndexStatus =
             store.workspace_retrieval_index_status()?;
-        let mut guard = self.state.write().unwrap_or_else(|error| error.into_inner());
-        let report = external_drift_report(
+        Ok(self.detect_drift_from_counts(
+            memory.total_count,
+            workspace.chunk_count,
+            checked_at_unix_ms,
+        ))
+    }
+
+    pub(crate) fn preview_drift(
+        &self,
+        store: &JournalStore,
+        checked_at_unix_ms: i64,
+    ) -> Result<ExternalRetrievalDriftReport, JournalError> {
+        let memory = store.memory_embeddings_status()?;
+        let workspace: crate::journal::WorkspaceRetrievalIndexStatus =
+            store.workspace_retrieval_index_status()?;
+        let guard = self.state.read().unwrap_or_else(|error| error.into_inner());
+        Ok(external_drift_report(
             &guard.snapshot,
             memory.total_count,
             workspace.chunk_count,
+            checked_at_unix_ms,
+        ))
+    }
+
+    fn detect_drift_from_counts(
+        &self,
+        journal_memory_items: u64,
+        journal_workspace_chunks: u64,
+        checked_at_unix_ms: i64,
+    ) -> ExternalRetrievalDriftReport {
+        let mut guard = self.state.write().unwrap_or_else(|error| error.into_inner());
+        let report = external_drift_report(
+            &guard.snapshot,
+            journal_memory_items,
+            journal_workspace_chunks,
             checked_at_unix_ms,
         );
         guard.snapshot.indexed_memory_items = report.indexed_memory_items;
@@ -238,7 +268,7 @@ impl ExternalRetrievalRuntime {
                     .to_owned();
         }
         recompute_external_slos(&mut guard);
-        Ok(report)
+        report
     }
 
     pub(crate) fn reconcile(
@@ -586,5 +616,63 @@ mod tests {
         assert!(!reconciliation.drift_after.reconciliation_required);
         assert_eq!(reconciliation.indexer.indexed_memory_items, 2);
         assert_eq!(external_index.snapshot().scale_slos.preview_gate_state, "preview_ready");
+    }
+
+    #[test]
+    fn external_runtime_drift_preview_is_side_effect_free() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let store = JournalStore::open(JournalConfig {
+            db_path: temp.path().join("journal.sqlite3"),
+            hash_chain_enabled: false,
+            max_payload_bytes: 256 * 1024,
+            max_events: 10_000,
+        })
+        .expect("journal store should open");
+        store
+            .create_memory_item(&MemoryItemCreateRequest {
+                memory_id: "01ARZ3NDEKTSV4RRFFQ69G5M53".to_owned(),
+                principal: "user:ops".to_owned(),
+                channel: Some("cli".to_owned()),
+                session_id: None,
+                source: MemorySource::Manual,
+                content_text: "initial side effect free drift preview checkpoint".to_owned(),
+                tags: Vec::new(),
+                confidence: Some(0.88),
+                ttl_unix_ms: None,
+            })
+            .expect("memory item should be indexed in journal");
+
+        let external_index = ExternalRetrievalRuntime::default();
+        external_index.run_indexer(&store, 64, 1, 2_000).expect("first checkpoint should complete");
+        let snapshot_before = external_index.snapshot();
+        assert_eq!(snapshot_before.state, RetrievalBackendState::Ready);
+        assert_eq!(snapshot_before.drift_count, 0);
+
+        store
+            .create_memory_item(&MemoryItemCreateRequest {
+                memory_id: "01ARZ3NDEKTSV4RRFFQ69G5M54".to_owned(),
+                principal: "user:ops".to_owned(),
+                channel: Some("cli".to_owned()),
+                session_id: None,
+                source: MemorySource::Manual,
+                content_text: "new journal record should appear in read only drift preview"
+                    .to_owned(),
+                tags: Vec::new(),
+                confidence: Some(0.88),
+                ttl_unix_ms: None,
+            })
+            .expect("second memory item should be indexed in journal");
+
+        let preview = external_index
+            .preview_drift(&store, 3_000)
+            .expect("drift preview should read journal counts");
+        assert_eq!(preview.memory_drift, 1);
+        assert!(preview.reconciliation_required);
+
+        let snapshot_after = external_index.snapshot();
+        assert_eq!(snapshot_after.state, RetrievalBackendState::Ready);
+        assert_eq!(snapshot_after.drift_count, 0);
+        assert_eq!(snapshot_after.pending_reconciliation_count, 0);
+        assert_eq!(snapshot_after.scale_slos.preview_gate_state, "preview_ready");
     }
 }

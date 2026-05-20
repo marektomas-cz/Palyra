@@ -7,7 +7,7 @@ pub(crate) async fn console_memory_index_drift_handler(
 ) -> Result<Json<Value>, Response> {
     let _session = authorize_console_session(&state, &headers, false)?;
     let drift =
-        state.runtime.external_retrieval_drift_report().await.map_err(runtime_status_response)?;
+        state.runtime.preview_external_retrieval_drift().await.map_err(runtime_status_response)?;
     let retrieval_backend =
         state.runtime.retrieval_backend_snapshot().map_err(runtime_status_response)?;
     let diagnostics = build_memory_retrieval_diagnostics(

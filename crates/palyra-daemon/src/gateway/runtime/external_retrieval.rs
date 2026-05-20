@@ -44,6 +44,21 @@ impl GatewayRuntimeState {
     }
 
     #[allow(clippy::result_large_err)]
+    pub async fn preview_external_retrieval_drift(
+        self: &Arc<Self>,
+    ) -> Result<ExternalRetrievalDriftReport, Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            state
+                .external_retrieval_index
+                .preview_drift(&state.journal_store, current_unix_ms())
+                .map_err(|error| map_memory_store_error("preview external retrieval drift", error))
+        })
+        .await
+        .map_err(|_| Status::internal("external retrieval drift preview worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
     pub async fn reconcile_external_retrieval_index(
         self: &Arc<Self>,
         batch_size: usize,
