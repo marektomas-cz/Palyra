@@ -434,6 +434,7 @@ pub(crate) async fn handle_routed_route_message(
         scope_id: routing_scope_id,
         task_class: RoutingTaskClass::PrimaryInteractive,
         provider_snapshot: &provider_snapshot,
+        model_profile_override: None,
     })
     .await?;
 

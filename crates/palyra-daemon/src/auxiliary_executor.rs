@@ -261,6 +261,7 @@ pub(crate) async fn execute_auxiliary_task(
         scope_id: request.task_id.as_str(),
         task_class: contract.routing_task_class,
         provider_snapshot: &provider_snapshot,
+        model_profile_override: None,
     })
     .await?;
     record_auxiliary_lifecycle_event(

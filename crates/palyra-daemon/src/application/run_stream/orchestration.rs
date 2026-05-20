@@ -43,10 +43,7 @@ use crate::{
     self_healing::{WorkHeartbeatKind, WorkHeartbeatUpdate},
     tool_protocol::ToolRequestContext,
     transport::grpc::{auth::RequestContext, proto::palyra::common::v1 as common_v1},
-    usage_governance::{
-        plan_usage_routing, resolve_provider_binding_for_model, RoutingTaskClass,
-        UsageRoutingPlanRequest,
-    },
+    usage_governance::{plan_usage_routing, RoutingTaskClass, UsageRoutingPlanRequest},
 };
 
 use super::{
@@ -675,6 +672,10 @@ pub(crate) async fn process_run_stream_message(
         &runtime_state.config.media,
     )
     .len();
+    let session_model_override = runtime_state
+        .orchestrator_session_by_id(session_id.clone())
+        .await?
+        .and_then(|session| session.model_profile_override);
     let routing_decision = plan_usage_routing(UsageRoutingPlanRequest {
         runtime_state,
         request_context,
@@ -688,34 +689,14 @@ pub(crate) async fn process_run_stream_message(
         scope_id: session_id_for_message.as_str(),
         task_class: RoutingTaskClass::PrimaryInteractive,
         provider_snapshot: &provider_snapshot,
+        model_profile_override: session_model_override.as_deref(),
     })
     .await?;
 
-    let session_model_override = if routing_decision.mode == "enforced" {
-        None
-    } else {
-        runtime_state
-            .orchestrator_session_by_id(session_id.clone())
-            .await?
-            .and_then(|session| session.model_profile_override)
-    };
-
-    let provider_model_override = if routing_decision.mode == "enforced" {
-        Some(routing_decision.actual_model_id.clone())
-    } else {
-        session_model_override
-    };
-    let (lease_provider_id, lease_provider_kind, lease_credential_id) =
-        provider_model_override.as_deref().map_or_else(
-            || {
-                (
-                    routing_decision.provider_id.clone(),
-                    routing_decision.provider_kind.clone(),
-                    routing_decision.credential_id.clone(),
-                )
-            },
-            |model_id| resolve_provider_binding_for_model(&provider_snapshot, model_id),
-        );
+    let provider_model_override = Some(routing_decision.actual_model_id.clone());
+    let lease_provider_id = routing_decision.provider_id.clone();
+    let lease_provider_kind = routing_decision.provider_kind.clone();
+    let lease_credential_id = routing_decision.credential_id.clone();
     let mut first_turn_tool_catalog_snapshot = Some(
         build_and_record_run_stream_tool_catalog_snapshot(
             runtime_state,

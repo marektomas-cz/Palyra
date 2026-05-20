@@ -216,6 +216,7 @@ pub(crate) struct RoutingDecisionContext<'a> {
     pub mode: RoutingMode,
     pub task_class: RoutingTaskClass,
     pub default_model_id: &'a str,
+    pub model_profile_override: Option<&'a str>,
     pub prompt_text: &'a str,
     pub prompt_tokens_estimate: u64,
     pub json_mode: bool,
@@ -315,6 +316,7 @@ pub(crate) struct UsageRoutingPlanRequest<'a> {
     pub scope_id: &'a str,
     pub task_class: RoutingTaskClass,
     pub provider_snapshot: &'a ProviderStatusSnapshot,
+    pub model_profile_override: Option<&'a str>,
 }
 
 pub(crate) fn parse_routing_mode_override(
@@ -394,6 +396,7 @@ pub(crate) async fn plan_usage_routing(
         mode,
         task_class: request.task_class,
         default_model_id: default_model_id.as_str(),
+        model_profile_override: request.model_profile_override,
         prompt_text: request.prompt_text,
         prompt_tokens_estimate,
         json_mode: request.json_mode,
@@ -481,6 +484,7 @@ pub(crate) async fn plan_usage_routing(
         mode,
         task_class: request.task_class,
         default_model_id: default_model_id.as_str(),
+        model_profile_override: request.model_profile_override,
         prompt_text: request.prompt_text,
         prompt_tokens_estimate,
         json_mode: request.json_mode,
@@ -940,11 +944,41 @@ fn select_routing_models(context: &RoutingDecisionContext<'_>) -> RoutingModelSe
     } else {
         recommended_candidate
     };
+    let model_override_candidate = if context.mode == RoutingMode::Enforced {
+        None
+    } else {
+        context
+            .model_profile_override
+            .map(str::trim)
+            .filter(|model_id| !model_id.is_empty())
+            .and_then(|model_id| {
+                candidates.iter().find(|candidate| candidate.model_id == model_id).cloned()
+            })
+    };
+    if let Some(candidate) = model_override_candidate.as_ref() {
+        explanation.push(format!(
+            "Session model override {} is included as the actual model for budget, lease, and audit decisions.",
+            candidate.model_id
+        ));
+        reason_codes.push("session_model_override".to_owned());
+    } else if context.mode != RoutingMode::Enforced
+        && context.model_profile_override.is_some_and(|value| !value.trim().is_empty())
+    {
+        explanation.push(
+            "Session model override could not be used because it is not an enabled compatible chat model in the provider registry."
+                .to_owned(),
+        );
+        reason_codes.push("session_model_override_unavailable".to_owned());
+    }
+    let model_override_applied = model_override_candidate.is_some();
     let actual_candidate = match context.mode {
-        RoutingMode::Suggest | RoutingMode::DryRun => default_candidate.clone(),
+        RoutingMode::Suggest | RoutingMode::DryRun => {
+            model_override_candidate.unwrap_or_else(|| default_candidate.clone())
+        }
         RoutingMode::Enforced => recommended_candidate.clone(),
     };
     if context.mode != RoutingMode::Enforced
+        && !model_override_applied
         && (recommended_candidate.model_id != actual_candidate.model_id
             || recommended_candidate.provider_id != actual_candidate.provider_id)
     {
@@ -1700,8 +1734,8 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        latest_routing_decisions_by_run_id, select_routing_models, RoutingDecisionContext,
-        RoutingMode, RoutingTaskClass,
+        estimate_cost_for_model, latest_routing_decisions_by_run_id, select_routing_models,
+        RoutingDecisionContext, RoutingMode, RoutingTaskClass,
     };
     use crate::journal::{UsagePricingRecord, UsageRoutingDecisionRecord};
     use crate::model_provider::{
@@ -1998,6 +2032,7 @@ mod tests {
             mode: RoutingMode::Enforced,
             task_class: RoutingTaskClass::PrimaryInteractive,
             default_model_id: "cheap",
+            model_profile_override: None,
             prompt_text: &"complex request ".repeat(400),
             prompt_tokens_estimate: 2_400,
             json_mode: true,
@@ -2013,6 +2048,53 @@ mod tests {
         assert_eq!(selection.actual_model_id, "premium");
         assert_eq!(selection.provider_id, "openai");
         assert_eq!(selection.provider_kind, "openai_compatible");
+    }
+
+    #[test]
+    fn select_routing_models_applies_session_override_in_suggest_mode_for_budget_basis() {
+        let pricing = vec![pricing_record("cheap", 0.1, 0.2), pricing_record("premium", 2.0, 4.0)];
+        let lease_previews = ready_lease_previews();
+        let snapshot = provider_snapshot(
+            "cheap",
+            vec![registry_provider("openai", "openai_compatible", "ok", 0)],
+            vec![
+                registry_model("cheap", "openai", "low", "low", true, false),
+                registry_model("premium", "openai", "premium", "high", true, false),
+            ],
+        );
+
+        let selection = select_routing_models(&RoutingDecisionContext {
+            scope_kind: "session",
+            scope_id: "session-1",
+            mode: RoutingMode::Suggest,
+            task_class: RoutingTaskClass::PrimaryInteractive,
+            default_model_id: "cheap",
+            model_profile_override: Some("premium"),
+            prompt_text: "short request",
+            prompt_tokens_estimate: 1_000,
+            json_mode: false,
+            vision_inputs: 0,
+            provider_health_state: "ok",
+            provider_snapshot: &snapshot,
+            auxiliary_routing_enabled: true,
+            lease_previews: &lease_previews,
+            pricing: pricing.as_slice(),
+            budgets: &[],
+        });
+
+        let projected_cost = estimate_cost_for_model(
+            pricing.as_slice(),
+            selection.provider_kind.as_str(),
+            selection.provider_id.as_str(),
+            selection.actual_model_id.as_str(),
+            0,
+            1_000,
+            500,
+        );
+
+        assert_eq!(selection.actual_model_id, "premium");
+        assert!(selection.reason_codes.iter().any(|code| code == "session_model_override"));
+        assert_eq!(projected_cost.upper_usd, Some(0.004));
     }
 
     #[test]
@@ -2035,6 +2117,7 @@ mod tests {
             mode: RoutingMode::Enforced,
             task_class: RoutingTaskClass::PrimaryInteractive,
             default_model_id: "cheap",
+            model_profile_override: None,
             prompt_text: "summarize this request",
             prompt_tokens_estimate: 180,
             json_mode: false,
@@ -2070,6 +2153,7 @@ mod tests {
             mode: RoutingMode::Enforced,
             task_class: RoutingTaskClass::AuxiliaryClassification,
             default_model_id: "premium",
+            model_profile_override: None,
             prompt_text: &"investigate architecture regression".repeat(120),
             prompt_tokens_estimate: 2_100,
             json_mode: false,
@@ -2108,6 +2192,7 @@ mod tests {
             mode: RoutingMode::Enforced,
             task_class: RoutingTaskClass::AuxiliaryRecall,
             default_model_id: "premium",
+            model_profile_override: None,
             prompt_text: "summarize recall context",
             prompt_tokens_estimate: 120,
             json_mode: false,
@@ -2138,6 +2223,7 @@ mod tests {
             mode: RoutingMode::Enforced,
             task_class: RoutingTaskClass::BackgroundAutomation,
             default_model_id: "cheap",
+            model_profile_override: None,
             prompt_text: "background digest",
             prompt_tokens_estimate: 80,
             json_mode: false,
