@@ -15,7 +15,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use ulid::Ulid;
 
-use crate::orchestrator::estimate_token_count;
+use crate::{
+    application::tool_registry::ModelVisibleToolCatalogSnapshot, orchestrator::estimate_token_count,
+};
 
 mod adapters;
 mod contract;
@@ -2227,6 +2229,10 @@ impl RegistryBackedModelProvider {
         request: &ProviderRequest,
         model: &ProviderModelEntryConfig,
     ) -> String {
+        let tool_catalog_snapshot = request
+            .tool_catalog_snapshot
+            .as_ref()
+            .map(stable_tool_catalog_snapshot_for_response_cache);
         let payload = json!({
             "schema_version": 1,
             "provider_id": model.provider_id.as_str(),
@@ -2235,7 +2241,7 @@ impl RegistryBackedModelProvider {
             "json_mode": request.json_mode,
             "model_override": request.model_override.as_deref(),
             "messages": &request.messages,
-            "tool_catalog_snapshot": request.tool_catalog_snapshot.as_ref(),
+            "tool_catalog_snapshot": tool_catalog_snapshot.as_ref(),
             "instruction_hash": request.instruction_hash.as_deref(),
             "context_trace_id": request.context_trace_id.as_deref(),
             "budget_profile": request.budget_profile.as_deref(),
@@ -2861,6 +2867,33 @@ impl ModelProvider for RegistryBackedModelProvider {
             route_selection,
         }
     }
+}
+
+fn stable_tool_catalog_snapshot_for_response_cache(snapshot: &Value) -> Value {
+    if let Ok(snapshot) =
+        serde_json::from_value::<ModelVisibleToolCatalogSnapshot>(snapshot.clone())
+    {
+        return json!({
+            "schema_version": snapshot.schema_version,
+            "provider_dialect": snapshot.provider_dialect.as_str(),
+            "provider_kind": snapshot.provider_kind,
+            "provider_model_id": snapshot.provider_model_id,
+            "surface": snapshot.surface.as_str(),
+            "principal_hash": snapshot.principal_hash,
+            "channel_hash": snapshot.channel_hash,
+            "remaining_tool_budget": snapshot.remaining_tool_budget,
+            "tools": snapshot.tools,
+            "filtered_tools": snapshot.filtered_tools,
+        });
+    }
+
+    let mut stable_snapshot = snapshot.clone();
+    if let Value::Object(fields) = &mut stable_snapshot {
+        fields.remove("snapshot_id");
+        fields.remove("catalog_hash");
+        fields.remove("created_at_unix_ms");
+    }
+    stable_snapshot
 }
 
 fn default_model_for_provider(
@@ -5646,6 +5679,55 @@ mod tests {
         }
     }
 
+    fn tool_catalog_response_cache_fixture(
+        created_at_unix_ms: i64,
+        snapshot_id: &str,
+        catalog_hash: &str,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": 1,
+            "snapshot_id": snapshot_id,
+            "catalog_hash": catalog_hash,
+            "provider_dialect": "openai_compatible",
+            "provider_kind": "openai_compatible",
+            "provider_model_id": "gpt-4o-mini",
+            "surface": "run_stream",
+            "principal_hash": "principal_sha256",
+            "channel_hash": null,
+            "remaining_tool_budget": 8,
+            "created_at_unix_ms": created_at_unix_ms,
+            "tools": [{
+                "name": "palyra.echo",
+                "description": "Echo text for diagnostics.",
+                "version": 1,
+                "provenance": "builtin",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string"}
+                    },
+                    "required": ["text"]
+                },
+                "provider_schema": {
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string"}
+                    },
+                    "required": ["text"]
+                },
+                "internal_schema_hash": "internal_schema_sha256",
+                "provider_schema_hash": "provider_schema_sha256",
+                "description_hash": "description_sha256",
+                "capabilities": ["diagnostics"],
+                "approval_posture": "safe",
+                "projection_policy": "inline_unless_large",
+                "parallelism_policy": "read_only",
+                "exposure_reason": "allowlisted_policy_visible"
+            }],
+            "filtered_tools": []
+        })
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn deterministic_provider_preserves_full_output_and_chunks_preview() {
         let provider = build_model_provider(&ModelProviderConfig::default())
@@ -5830,6 +5912,59 @@ mod tests {
 
         openai_handle.join().expect("openai scripted server thread should exit");
         anthropic_handle.join().expect("anthropic scripted server thread should exit");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn registry_provider_response_cache_ignores_tool_catalog_audit_metadata() {
+        let (openai_base_url, openai_request_count, openai_handle) = spawn_scripted_server(vec![(
+            200_u16,
+            r#"{"choices":[{"message":{"content":"cached with tool catalog"}}]}"#.to_owned(),
+        )]);
+        let provider = build_model_provider(&multi_provider_test_config(
+            openai_base_url,
+            "http://127.0.0.1:9".to_owned(),
+        ))
+        .expect("registry-backed provider should build");
+
+        let mut first_request = ProviderRequest::from_input_text(
+            "cache tool catalog".to_owned(),
+            false,
+            Vec::new(),
+            None,
+        );
+        first_request.tool_catalog_snapshot = Some(tool_catalog_response_cache_fixture(
+            1_000,
+            "toolcat_first_audit_id",
+            "first_audit_hash",
+        ));
+        let first =
+            provider.complete(first_request).await.expect("first upstream request should succeed");
+
+        let mut second_request = ProviderRequest::from_input_text(
+            "cache tool catalog".to_owned(),
+            false,
+            Vec::new(),
+            None,
+        );
+        second_request.tool_catalog_snapshot = Some(tool_catalog_response_cache_fixture(
+            2_000,
+            "toolcat_second_audit_id",
+            "second_audit_hash",
+        ));
+        let second = provider
+            .complete(second_request)
+            .await
+            .expect("second request should be served from cache");
+
+        assert!(!first.served_from_cache);
+        assert!(second.served_from_cache);
+        assert_eq!(
+            openai_request_count.load(Ordering::Relaxed),
+            1,
+            "volatile tool catalog audit fields must not force a second upstream request"
+        );
+
+        openai_handle.join().expect("openai scripted server thread should exit");
     }
 
     #[tokio::test(flavor = "multi_thread")]
