@@ -286,12 +286,14 @@ pub fn run_constrained_process(
 
     if input.background {
         let per_call_timeout = background_process_lifetime(input.timeout_ms, execution_timeout);
+        let max_background_lifetime = background_process_lifetime_limit(execution_timeout);
         return spawn_background_process(
             policy,
             &input,
             workspace_root.as_path(),
             working_directory.as_path(),
             per_call_timeout,
+            max_background_lifetime,
         );
     }
 
@@ -1923,6 +1925,7 @@ fn spawn_background_process(
     workspace_root: &Path,
     cwd: &Path,
     lifetime: Duration,
+    max_lifetime: Duration,
 ) -> Result<SandboxProcessRunSuccess, SandboxProcessRunError> {
     let mut command = build_process_command(policy, input, workspace_root, cwd)?;
     configure_child_process_group(&mut command);
@@ -1935,9 +1938,29 @@ fn spawn_background_process(
         kind: SandboxProcessRunErrorKind::SpawnFailed,
         message: format!("sandbox process spawn failed for command '{}': {error}", input.command),
     })?;
+    let started_at = Instant::now();
+    let lifetime_ms = lifetime.as_millis() as u64;
     let output_monitor =
-        start_background_output_monitor(&mut child, policy.max_output_bytes as usize)?;
-    thread::sleep(Duration::from_millis(BACKGROUND_STARTUP_CHECK_MS));
+        match start_background_output_monitor(&mut child, policy.max_output_bytes as usize) {
+            Ok(output_monitor) => output_monitor,
+            Err(error) => {
+                terminate_background_child(child);
+                return Err(error);
+            }
+        };
+    let Some(startup_check_wait) = bounded_background_process_wait(
+        lifetime,
+        started_at.elapsed(),
+        Duration::from_millis(BACKGROUND_STARTUP_CHECK_MS),
+    ) else {
+        terminate_background_child(child);
+        return Err(background_process_lifetime_expired_error(input, lifetime_ms));
+    };
+    thread::sleep(startup_check_wait);
+    if remaining_background_process_lifetime(lifetime, started_at.elapsed()).is_none() {
+        terminate_background_child(child);
+        return Err(background_process_lifetime_expired_error(input, lifetime_ms));
+    }
     if let Some(status) = child.try_wait().map_err(|error| SandboxProcessRunError {
         kind: SandboxProcessRunErrorKind::RuntimeFailure,
         message: format!(
@@ -1945,24 +1968,41 @@ fn spawn_background_process(
             input.command
         ),
     })? {
-        let (stdout, stderr) = output_monitor.snapshot_after_startup_drain(Duration::from_millis(
-            BACKGROUND_STARTUP_OUTPUT_DRAIN_MS,
-        ));
+        let startup_output_drain = bounded_background_process_wait(
+            lifetime,
+            started_at.elapsed(),
+            Duration::from_millis(BACKGROUND_STARTUP_OUTPUT_DRAIN_MS),
+        )
+        .unwrap_or(Duration::ZERO);
+        let (stdout, stderr) = output_monitor.snapshot_after_startup_drain(startup_output_drain);
         return Err(background_process_startup_failure(input, status, &stdout, &stderr));
     }
     let pid = child.id();
-    let lifetime_ms = lifetime.as_millis() as u64;
     let cleanup = background_cleanup_metadata(pid, lifetime_ms);
-    let (stdout, stderr) = output_monitor
-        .snapshot_after_startup_drain(Duration::from_millis(BACKGROUND_STARTUP_OUTPUT_DRAIN_MS));
-    if let Some(status) = wait_for_background_process_exit(
-        &mut child,
+    let startup_output_drain = bounded_background_process_wait(
+        lifetime,
+        started_at.elapsed(),
+        Duration::from_millis(BACKGROUND_STARTUP_OUTPUT_DRAIN_MS),
+    )
+    .unwrap_or(Duration::ZERO);
+    let (stdout, stderr) = output_monitor.snapshot_after_startup_drain(startup_output_drain);
+    let post_output_exit_check = bounded_background_process_wait(
+        lifetime,
+        started_at.elapsed(),
         Duration::from_millis(BACKGROUND_POST_OUTPUT_EXIT_CHECK_MS),
-    )? {
+    )
+    .unwrap_or(Duration::ZERO);
+    if let Some(status) = wait_for_background_process_exit(&mut child, post_output_exit_check)? {
         return Err(background_process_startup_failure(input, status, &stdout, &stderr));
     }
+    let Some(remaining_lifetime) =
+        remaining_background_process_lifetime(lifetime, started_at.elapsed())
+    else {
+        terminate_background_child(child);
+        return Err(background_process_lifetime_expired_error(input, lifetime_ms));
+    };
     thread::spawn(move || {
-        thread::sleep(lifetime);
+        thread::sleep(remaining_lifetime);
         terminate_background_child(child);
     });
 
@@ -1970,6 +2010,7 @@ fn spawn_background_process(
         redacted_process_output(stdout.bytes.as_slice());
     let RedactedProcessOutputText { text: stderr_text, redacted: stderr_redacted } =
         redacted_process_output(stderr.bytes.as_slice());
+    let max_lifetime_ms = max_lifetime.as_millis() as u64;
     let output_json = serde_json::to_vec(&json!({
         "exit_code": Value::Null,
         "stdout": stdout_text,
@@ -1987,9 +2028,9 @@ fn spawn_background_process(
         "process_state": "running",
         "pid": pid,
         "lifetime_ms": lifetime_ms,
-        "max_lifetime_ms": MAX_BACKGROUND_PROCESS_LIFETIME_MS,
+        "max_lifetime_ms": max_lifetime_ms,
         "background_lifetime_note": format!(
-            "Palyra will auto-terminate this background process after {lifetime_ms}ms; set timeout_ms higher up to {MAX_BACKGROUND_PROCESS_LIFETIME_MS}ms for long browser verification loops, and use cleanup.manual_command when finished."
+            "Palyra will auto-terminate this background process after {lifetime_ms}ms; set timeout_ms up to {max_lifetime_ms}ms within the operator-configured tool execution timeout for long browser verification loops, and use cleanup.manual_command when finished."
         ),
         "process_handle": {
             "kind": "pid",
@@ -2263,12 +2304,48 @@ fn background_cleanup_note() -> &'static str {
 }
 
 fn background_process_lifetime(timeout_ms: Option<u64>, execution_timeout: Duration) -> Duration {
-    let default_lifetime =
-        execution_timeout.max(Duration::from_millis(DEFAULT_BACKGROUND_PROCESS_LIFETIME_MS));
-    timeout_ms
-        .map(Duration::from_millis)
-        .unwrap_or(default_lifetime)
-        .min(Duration::from_millis(MAX_BACKGROUND_PROCESS_LIFETIME_MS))
+    let lifetime_limit = background_process_lifetime_limit(execution_timeout);
+    let default_lifetime = Duration::from_millis(DEFAULT_BACKGROUND_PROCESS_LIFETIME_MS);
+    timeout_ms.map(Duration::from_millis).unwrap_or(default_lifetime).min(lifetime_limit)
+}
+
+fn background_process_lifetime_limit(execution_timeout: Duration) -> Duration {
+    execution_timeout.min(Duration::from_millis(MAX_BACKGROUND_PROCESS_LIFETIME_MS))
+}
+
+fn remaining_background_process_lifetime(
+    lifetime: Duration,
+    elapsed: Duration,
+) -> Option<Duration> {
+    let remaining = lifetime.saturating_sub(elapsed);
+    if remaining.is_zero() {
+        None
+    } else {
+        Some(remaining)
+    }
+}
+
+fn bounded_background_process_wait(
+    lifetime: Duration,
+    elapsed: Duration,
+    max_wait: Duration,
+) -> Option<Duration> {
+    remaining_background_process_lifetime(lifetime, elapsed)
+        .map(|remaining| remaining.min(max_wait))
+        .filter(|wait| !wait.is_zero())
+}
+
+fn background_process_lifetime_expired_error(
+    input: &ProcessRunnerInput,
+    lifetime_ms: u64,
+) -> SandboxProcessRunError {
+    SandboxProcessRunError {
+        kind: SandboxProcessRunErrorKind::TimedOut,
+        message: format!(
+            "sandbox background process exceeded its {lifetime_ms}ms lifetime during startup checks and was terminated; increase the operator-configured tool execution timeout before requesting a longer background process lifetime for command '{}'",
+            input.command
+        ),
+    }
 }
 
 fn validate_platform_resource_quota_support(
@@ -3658,15 +3735,17 @@ mod tests {
             Some("running")
         );
         assert_eq!(output.get("lifetime_ms").and_then(serde_json::Value::as_u64), Some(1_000));
-        assert_eq!(
-            output.get("max_lifetime_ms").and_then(serde_json::Value::as_u64),
-            Some(super::MAX_BACKGROUND_PROCESS_LIFETIME_MS)
-        );
+        assert_eq!(output.get("max_lifetime_ms").and_then(serde_json::Value::as_u64), Some(1_000));
         assert!(output
             .get("background_lifetime_note")
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default()
             .contains("auto-terminate"));
+        assert!(output
+            .get("background_lifetime_note")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .contains("operator-configured tool execution timeout"));
         assert!(output.get("pid").and_then(serde_json::Value::as_u64).is_some());
         assert_eq!(
             output
@@ -3879,20 +3958,80 @@ mod tests {
     }
 
     #[test]
-    fn background_process_lifetime_uses_server_friendly_default() {
+    fn background_process_lifetime_is_bounded_by_execution_timeout() {
         let lifetime = super::background_process_lifetime(None, Duration::from_millis(750));
+
+        assert_eq!(lifetime, Duration::from_millis(750));
+    }
+
+    #[test]
+    fn background_process_lifetime_preserves_default_inside_execution_timeout() {
+        let lifetime = super::background_process_lifetime(None, Duration::from_millis(20 * 60_000));
 
         assert_eq!(lifetime, Duration::from_millis(10 * 60_000));
     }
 
     #[test]
-    fn background_process_lifetime_honors_short_explicit_timeout() {
+    fn background_process_lifetime_honors_short_explicit_timeout_and_execution_cap() {
         let short = super::background_process_lifetime(Some(100), Duration::from_millis(750));
+        let execution_capped =
+            super::background_process_lifetime(Some(60_000), Duration::from_millis(750));
         let capped =
             super::background_process_lifetime(Some(60 * 60_000), Duration::from_millis(750));
 
         assert_eq!(short, Duration::from_millis(100));
-        assert_eq!(capped, Duration::from_millis(30 * 60_000));
+        assert_eq!(execution_capped, Duration::from_millis(750));
+        assert_eq!(capped, Duration::from_millis(750));
+    }
+
+    #[test]
+    fn background_process_lifetime_caps_large_execution_timeout_at_runtime_max() {
+        let capped =
+            super::background_process_lifetime(Some(60 * 60_000), Duration::from_millis(u64::MAX));
+
+        assert_eq!(capped, Duration::from_millis(super::MAX_BACKGROUND_PROCESS_LIFETIME_MS));
+    }
+
+    #[test]
+    fn remaining_background_process_lifetime_uses_elapsed_startup_time() {
+        assert_eq!(
+            super::remaining_background_process_lifetime(
+                Duration::from_millis(1_000),
+                Duration::from_millis(250)
+            ),
+            Some(Duration::from_millis(750))
+        );
+        assert_eq!(
+            super::remaining_background_process_lifetime(
+                Duration::from_millis(1_000),
+                Duration::from_millis(1_000)
+            ),
+            None
+        );
+        assert_eq!(
+            super::bounded_background_process_wait(
+                Duration::from_millis(1_000),
+                Duration::from_millis(250),
+                Duration::from_millis(500)
+            ),
+            Some(Duration::from_millis(500))
+        );
+        assert_eq!(
+            super::bounded_background_process_wait(
+                Duration::from_millis(1_000),
+                Duration::from_millis(900),
+                Duration::from_millis(500)
+            ),
+            Some(Duration::from_millis(100))
+        );
+        assert_eq!(
+            super::bounded_background_process_wait(
+                Duration::from_millis(1_000),
+                Duration::from_millis(1_000),
+                Duration::from_millis(500)
+            ),
+            None
+        );
     }
 
     #[test]
