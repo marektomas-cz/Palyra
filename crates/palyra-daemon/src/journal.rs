@@ -15903,11 +15903,61 @@ fn session_search_terms(query: &str) -> Vec<String> {
     let mut terms = query
         .split_whitespace()
         .map(|term| term.trim_matches(|ch: char| !ch.is_alphanumeric()).to_ascii_lowercase())
-        .filter(|term| term.len() >= 2)
+        .filter(|term| term.len() >= 2 && !session_search_is_stop_term(term.as_str()))
         .collect::<Vec<_>>();
     terms.sort();
     terms.dedup();
     terms
+}
+
+fn session_search_is_stop_term(term: &str) -> bool {
+    matches!(
+        term,
+        "a" | "an"
+            | "and"
+            | "are"
+            | "as"
+            | "at"
+            | "be"
+            | "by"
+            | "can"
+            | "co"
+            | "did"
+            | "do"
+            | "does"
+            | "for"
+            | "from"
+            | "had"
+            | "has"
+            | "have"
+            | "how"
+            | "is"
+            | "it"
+            | "jak"
+            | "je"
+            | "jsi"
+            | "jsem"
+            | "jsme"
+            | "na"
+            | "of"
+            | "on"
+            | "or"
+            | "se"
+            | "ta"
+            | "tam"
+            | "ten"
+            | "the"
+            | "to"
+            | "tu"
+            | "was"
+            | "were"
+            | "what"
+            | "when"
+            | "where"
+            | "which"
+            | "who"
+            | "with"
+    )
 }
 
 fn session_search_like_needles(query: &str, terms: &[String]) -> Vec<String> {
@@ -15963,7 +16013,7 @@ fn session_search_minimum_matched_terms(term_count: usize) -> usize {
         0 => 0,
         1 => 1,
         2 => 2,
-        _ => 2,
+        _ => term_count.saturating_mul(3).saturating_add(3) / 4,
     }
 }
 
@@ -20951,6 +21001,48 @@ mod tests {
         assert_eq!(outcome.groups[0].session.session_id, "01ARZ3NDEKTSV4RRFFQ69G5SF1");
         assert!(outcome.groups[0].windows[0].matched.text.contains("ORCHID-5821"));
         assert!(!outcome.groups[0].windows[0].matched.text.contains("ORCHID-9999"));
+    }
+
+    #[test]
+    fn session_search_rejects_sparse_prior_transcript_matches() {
+        let db_path = temp_db_path();
+        let store = JournalStore::open(test_journal_config(db_path, false))
+            .expect("journal store should open");
+
+        upsert_orchestrator_session(&store, "01ARZ3NDEKTSV4RRFFQ69G5SH1");
+        start_orchestrator_run(&store, "01ARZ3NDEKTSV4RRFFQ69G5SH1", "01ARZ3NDEKTSV4RRFFQ69G5RH1");
+        store
+            .append_orchestrator_tape_event(&OrchestratorTapeAppendRequest {
+                run_id: "01ARZ3NDEKTSV4RRFFQ69G5RH1".to_owned(),
+                seq: 0,
+                event_type: "message.received".to_owned(),
+                payload_json:
+                    r#"{"text":"Feature flag note PALYRA_E2E_BETA belonged to an unrelated rollout."}"#
+                        .to_owned(),
+            })
+            .expect("tape event should persist");
+
+        let outcome = store
+            .search_orchestrator_session_windows(&SessionSearchRequest {
+                principal: "user:ops".to_owned(),
+                device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+                channel: Some("cli".to_owned()),
+                session_id: None,
+                exclude_session_id: None,
+                query: "temporary feature flag owner approval".to_owned(),
+                top_k: 1,
+                min_score: 0.0,
+                window_before: 0,
+                window_after: 0,
+                max_windows_per_session: 1,
+                include_archived: false,
+            })
+            .expect("session search should succeed");
+
+        assert!(
+            outcome.groups.is_empty(),
+            "matching only feature and flag must not expose an unrelated transcript window"
+        );
     }
 
     #[test]
