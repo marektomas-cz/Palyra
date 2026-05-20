@@ -30,11 +30,11 @@ use crate::journal::{
     ApprovalPromptOption, ApprovalPromptRecord, ApprovalResolveRequest, ApprovalRiskLevel,
     ApprovalSubjectType, CronConcurrencyPolicy, CronJobCreateRequest, CronMisfirePolicy,
     CronRetryPolicy, CronRunStartRequest, CronRunStatus, CronScheduleType, JournalAppendRequest,
-    JournalConfig, JournalStore, MemoryItemCreateRequest, MemoryItemRecord, MemoryScoreBreakdown,
-    MemorySearchHit, MemorySearchRequest, MemorySource, OrchestratorBackgroundTaskCreateRequest,
-    OrchestratorBackgroundTaskUpdateRequest, OrchestratorRunStartRequest,
-    OrchestratorSessionResolveRequest, OrchestratorSessionUpsertRequest,
-    OrchestratorTapeAppendRequest,
+    JournalConfig, JournalStore, MemoryItemCreateRequest, MemoryItemLifecycleUpdateRequest,
+    MemoryItemRecord, MemoryScoreBreakdown, MemorySearchHit, MemorySearchRequest, MemorySource,
+    OrchestratorBackgroundTaskCreateRequest, OrchestratorBackgroundTaskUpdateRequest,
+    OrchestratorRunStartRequest, OrchestratorSessionResolveRequest,
+    OrchestratorSessionUpsertRequest, OrchestratorTapeAppendRequest,
 };
 use tonic::{transport::Server as TonicServer, Code};
 use ulid::Ulid;
@@ -1569,6 +1569,53 @@ async fn prepare_model_provider_input_collects_vision_inputs_for_image_attachmen
         prepared.provider_input_text.as_str(),
         "summarize screenshot",
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn update_memory_item_lifecycle_enforces_memory_item_limits() {
+    let state = build_test_runtime_state(false);
+    let mut memory_config = state.memory_config_snapshot();
+    memory_config.max_item_bytes = 128;
+    memory_config.max_item_tokens = 3;
+    state.configure_memory(memory_config);
+
+    let item = state
+        .ingest_memory_item(MemoryItemCreateRequest {
+            memory_id: "01ARZ3NDEKTSV4RRFFQ69G5FB8".to_owned(),
+            principal: "user:ops".to_owned(),
+            channel: Some("cli".to_owned()),
+            session_id: Some("01ARZ3NDEKTSV4RRFFQ69G5FB9".to_owned()),
+            source: MemorySource::Manual,
+            content_text: "small preference".to_owned(),
+            tags: vec!["preference".to_owned()],
+            confidence: Some(0.8),
+            ttl_unix_ms: None,
+        })
+        .await
+        .expect("seed memory should fit configured limits");
+
+    let error = state
+        .update_memory_item_lifecycle(MemoryItemLifecycleUpdateRequest {
+            memory_id: item.memory_id.clone(),
+            principal: item.principal.clone(),
+            channel: item.channel.clone(),
+            session_id: item.session_id.clone(),
+            content_text: Some("one two three four".to_owned()),
+            tags: item.tags.clone(),
+            confidence: item.confidence,
+            ttl_unix_ms: item.ttl_unix_ms,
+        })
+        .await
+        .expect_err("lifecycle update should enforce token limits");
+
+    assert_eq!(error.code(), Code::InvalidArgument);
+    assert!(error.message().contains("exceeds token limit"), "unexpected error: {error}");
+    let stored = state
+        .memory_item(item.memory_id)
+        .await
+        .expect("stored memory lookup should succeed")
+        .expect("seed memory should remain present");
+    assert_eq!(stored.content_text, "small preference");
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -7367,21 +7367,11 @@ impl GatewayRuntimeState {
         mut request: MemoryItemCreateRequest,
     ) -> Result<MemoryItemRecord, Status> {
         let config = self.memory_config_snapshot();
-        let payload_bytes = request.content_text.len();
-        let token_count = request.content_text.split_whitespace().count();
-        if payload_bytes > config.max_item_bytes {
+        if let Err(status) =
+            validate_memory_item_content_limits(request.content_text.as_str(), &config)
+        {
             self.counters.memory_items_rejected.fetch_add(1, Ordering::Relaxed);
-            return Err(Status::invalid_argument(format!(
-                "memory content exceeds byte limit ({payload_bytes} > {})",
-                config.max_item_bytes
-            )));
-        }
-        if token_count > config.max_item_tokens {
-            self.counters.memory_items_rejected.fetch_add(1, Ordering::Relaxed);
-            return Err(Status::invalid_argument(format!(
-                "memory content exceeds token limit ({token_count} > {})",
-                config.max_item_tokens
-            )));
+            return Err(status);
         }
         if request.ttl_unix_ms.is_none() {
             if let Some(default_ttl_ms) = config.default_ttl_ms {
@@ -7425,6 +7415,13 @@ impl GatewayRuntimeState {
         self: &Arc<Self>,
         request: MemoryItemLifecycleUpdateRequest,
     ) -> Result<Option<MemoryItemRecord>, Status> {
+        if let Some(content_text) = request.content_text.as_deref() {
+            let config = self.memory_config_snapshot();
+            if let Err(status) = validate_memory_item_content_limits(content_text, &config) {
+                self.counters.memory_items_rejected.fetch_add(1, Ordering::Relaxed);
+                return Err(status);
+            }
+        }
         let state = Arc::clone(self);
         let updated = tokio::task::spawn_blocking(move || {
             state
@@ -7964,6 +7961,27 @@ impl GatewayRuntimeState {
     }
 }
 
+fn validate_memory_item_content_limits(
+    content_text: &str,
+    config: &MemoryRuntimeConfig,
+) -> Result<(), Status> {
+    let payload_bytes = content_text.len();
+    if payload_bytes > config.max_item_bytes {
+        return Err(Status::invalid_argument(format!(
+            "memory content exceeds byte limit ({payload_bytes} > {})",
+            config.max_item_bytes
+        )));
+    }
+    let token_count = content_text.split_whitespace().count();
+    if token_count > config.max_item_tokens {
+        return Err(Status::invalid_argument(format!(
+            "memory content exceeds token limit ({token_count} > {})",
+            config.max_item_tokens
+        )));
+    }
+    Ok(())
+}
+
 fn select_default_agent_model_profile(
     registry_default_chat_model_id: Option<&str>,
     active_model_id: Option<&str>,
@@ -7986,7 +8004,10 @@ fn normalize_optional_agent_model_profile(value: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{provider_lease_timeout_status, select_default_agent_model_profile};
+    use super::{
+        provider_lease_timeout_status, select_default_agent_model_profile,
+        validate_memory_item_content_limits, MemoryRuntimeConfig,
+    };
     use crate::provider_leases::{
         LeasePreviewState, LeasePriority, ProviderLeaseExecutionContext,
         ProviderLeasePreviewSnapshot,
@@ -8050,6 +8071,30 @@ mod tests {
         );
 
         assert_eq!(selected.as_deref(), Some("MiniMax-M2.7"));
+    }
+
+    #[test]
+    fn memory_content_limit_validation_rejects_oversized_updates() {
+        let byte_config =
+            MemoryRuntimeConfig { max_item_bytes: 12, max_item_tokens: 32, ..Default::default() };
+
+        let byte_error = validate_memory_item_content_limits("0123456789abc", &byte_config)
+            .expect_err("content above byte limit should be rejected");
+        assert_eq!(byte_error.code(), Code::InvalidArgument);
+        assert!(
+            byte_error.message().contains("exceeds byte limit"),
+            "unexpected byte-limit error: {byte_error}"
+        );
+
+        let token_config =
+            MemoryRuntimeConfig { max_item_bytes: 128, max_item_tokens: 3, ..Default::default() };
+        let token_error = validate_memory_item_content_limits("one two three four", &token_config)
+            .expect_err("content above token limit should be rejected");
+        assert_eq!(token_error.code(), Code::InvalidArgument);
+        assert!(
+            token_error.message().contains("exceeds token limit"),
+            "unexpected token-limit error: {token_error}"
+        );
     }
 
     #[test]
