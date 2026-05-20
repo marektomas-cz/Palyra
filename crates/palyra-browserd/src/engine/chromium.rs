@@ -80,28 +80,74 @@ const CHROMIUM_PAGE_DIAGNOSTICS_SCRIPT: &str = r#"
   }
   state.installed = true;
   state.entries = Array.isArray(state.entries) ? state.entries : [];
+  const MAX_CONSOLE_ENTRIES = 256;
+  const MAX_CONSOLE_CHARS = 32 * 1024;
+  const MAX_CONSOLE_KIND_CHARS = 64;
+  const MAX_CONSOLE_MESSAGE_CHARS = 1024;
+  const MAX_CONSOLE_SOURCE_CHARS = 256;
+  const MAX_CONSOLE_STACK_CHARS = 1024;
+  const MAX_CONSOLE_URL_CHARS = 2048;
+  const clampString = (value, maxChars) => {
+    const text = String(value || "");
+    return text.length > maxChars ? text.slice(0, maxChars) : text;
+  };
   const stringify = (value) => {
     try {
-      if (typeof value === "string") return value;
-      return JSON.stringify(value);
+      if (typeof value === "string") return clampString(value, MAX_CONSOLE_MESSAGE_CHARS);
+      if (value && typeof value === "object") {
+        if (value instanceof Error) {
+          return clampString(value.stack || value.message || "Error", MAX_CONSOLE_MESSAGE_CHARS);
+        }
+        return clampString(Object.prototype.toString.call(value), MAX_CONSOLE_MESSAGE_CHARS);
+      }
+      return clampString(value, MAX_CONSOLE_MESSAGE_CHARS);
     } catch (_) {
-      return String(value);
+      return "";
     }
+  };
+  const normalizeEntry = (severity, kind, message, source, stackTrace) => ({
+    severity: clampString(severity, 16),
+    kind: clampString(kind, MAX_CONSOLE_KIND_CHARS),
+    message: clampString(message, MAX_CONSOLE_MESSAGE_CHARS),
+    captured_at_unix_ms: Date.now(),
+    source: clampString(source, MAX_CONSOLE_SOURCE_CHARS),
+    stack_trace: clampString(stackTrace, MAX_CONSOLE_STACK_CHARS),
+    page_url: clampString((window.location && window.location.href) || "", MAX_CONSOLE_URL_CHARS)
+  });
+  const entryChars = (entry) => (
+    String(entry.severity || "").length +
+    String(entry.kind || "").length +
+    String(entry.message || "").length +
+    String(entry.source || "").length +
+    String(entry.stack_trace || "").length +
+    String(entry.page_url || "").length +
+    96
+  );
+  const trimEntries = () => {
+    try {
+      if (!Array.isArray(state.entries)) {
+        state.entries = [];
+      }
+      while (state.entries.length > MAX_CONSOLE_ENTRIES) {
+        state.entries.shift();
+      }
+      let total = state.entries.reduce((sum, entry) => sum + entryChars(entry), 0);
+      while (state.entries.length > 0 && total > MAX_CONSOLE_CHARS) {
+        const removed = state.entries.shift();
+        total -= entryChars(removed);
+      }
+    } catch (_) {
+      state.entries = [];
+    }
+  };
+  state.snapshotEntries = () => {
+    trimEntries();
+    return state.entries.slice();
   };
   const push = (severity, kind, message, source, stackTrace) => {
     try {
-      state.entries.push({
-        severity,
-        kind,
-        message: String(message || ""),
-        captured_at_unix_ms: Date.now(),
-        source: String(source || ""),
-        stack_trace: String(stackTrace || ""),
-        page_url: String((window.location && window.location.href) || "")
-      });
-      if (state.entries.length > 512) {
-        state.entries.splice(0, state.entries.length - 512);
-      }
+      state.entries.push(normalizeEntry(severity, kind, message, source, stackTrace));
+      trimEntries();
     } catch (_) {}
   };
   const mapSeverity = (level) => {
@@ -221,7 +267,23 @@ const CHROMIUM_READ_CONSOLE_LOG_SCRIPT: &str = r#"
   if (!state || !Array.isArray(state.entries)) {
     return "[]";
   }
-  return JSON.stringify(state.entries);
+  if (typeof state.snapshotEntries === "function") {
+    return JSON.stringify(state.snapshotEntries());
+  }
+  const clamp = (value, maxChars) => {
+    const text = String(value || "");
+    return text.length > maxChars ? text.slice(0, maxChars) : text;
+  };
+  const entries = state.entries.slice(Math.max(0, state.entries.length - 256)).map((entry) => ({
+    severity: clamp(entry.severity, 16),
+    kind: clamp(entry.kind, 64),
+    message: clamp(entry.message, 1024),
+    captured_at_unix_ms: Number(entry.captured_at_unix_ms || 0),
+    source: clamp(entry.source, 256),
+    stack_trace: clamp(entry.stack_trace, 1024),
+    page_url: clamp(entry.page_url, 2048)
+  }));
+  return JSON.stringify(entries);
 })()
 "#;
 
@@ -235,6 +297,8 @@ const CHROMIUM_DRAIN_NETWORK_LOG_SCRIPT: &str = r#"
   return JSON.stringify(entries);
 })()
 "#;
+
+const MAX_CHROMIUM_CONSOLE_JSON_BYTES: usize = (DEFAULT_MAX_CONSOLE_LOG_BYTES as usize) * 4;
 
 pub(crate) async fn run_chromium_blocking<T, F>(operation: &str, task: F) -> Result<T, String>
 where
@@ -1172,8 +1236,11 @@ async fn chromium_drain_page_network_log(
 
 fn decode_chromium_console_entries_value(value: serde_json::Value) -> serde_json::Value {
     match value {
-        serde_json::Value::String(raw) => serde_json::from_str::<serde_json::Value>(raw.as_str())
-            .unwrap_or_else(|_| serde_json::Value::Array(Vec::new())),
+        serde_json::Value::String(raw) if raw.len() <= MAX_CHROMIUM_CONSOLE_JSON_BYTES => {
+            serde_json::from_str::<serde_json::Value>(raw.as_str())
+                .unwrap_or_else(|_| serde_json::Value::Array(Vec::new()))
+        }
+        serde_json::Value::String(_) => serde_json::Value::Array(Vec::new()),
         serde_json::Value::Array(_) => value,
         _ => serde_json::Value::Array(Vec::new()),
     }
@@ -1185,6 +1252,18 @@ fn decode_chromium_json_script_value(value: serde_json::Value) -> serde_json::Va
             .unwrap_or(serde_json::Value::Null),
         value => value,
     }
+}
+
+fn bounded_chromium_json_string(
+    object: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+    default: &str,
+    max_bytes: usize,
+) -> String {
+    truncate_utf8_bytes(
+        object.get(field).and_then(serde_json::Value::as_str).unwrap_or(default),
+        max_bytes,
+    )
 }
 
 fn parse_chromium_page_network_entries(value: serde_json::Value) -> Vec<NetworkLogEntryInternal> {
@@ -1295,35 +1374,40 @@ fn parse_chromium_console_entries(value: serde_json::Value) -> Vec<BrowserConsol
                         _ => browser_v1::BrowserDiagnosticSeverity::Info as i32,
                     },
                 ),
-                kind: object
-                    .get("kind")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("console")
-                    .to_owned(),
-                message: object
-                    .get("message")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned(),
+                kind: bounded_chromium_json_string(
+                    object,
+                    "kind",
+                    "console",
+                    MAX_INSPECT_CONSOLE_KIND_BYTES,
+                ),
+                message: bounded_chromium_json_string(
+                    object,
+                    "message",
+                    "",
+                    MAX_CONSOLE_MESSAGE_BYTES,
+                ),
                 captured_at_unix_ms: object
                     .get("captured_at_unix_ms")
                     .and_then(serde_json::Value::as_u64)
                     .unwrap_or(0),
-                source: object
-                    .get("source")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned(),
-                stack_trace: object
-                    .get("stack_trace")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned(),
-                page_url: object
-                    .get("page_url")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned(),
+                source: bounded_chromium_json_string(
+                    object,
+                    "source",
+                    "",
+                    MAX_CONSOLE_SOURCE_BYTES,
+                ),
+                stack_trace: bounded_chromium_json_string(
+                    object,
+                    "stack_trace",
+                    "",
+                    MAX_CONSOLE_STACK_BYTES,
+                ),
+                page_url: bounded_chromium_json_string(
+                    object,
+                    "page_url",
+                    "",
+                    MAX_NETWORK_LOG_URL_BYTES,
+                ),
             })
         })
         .collect()
@@ -2316,8 +2400,12 @@ mod tests {
         decode_chromium_console_entries_value, decode_chromium_json_script_value,
         parse_chromium_console_entries, parse_chromium_page_network_entries,
         parse_chromium_viewport_metrics, parse_key_press_spec, ChromiumObserveSnapshot,
+        MAX_CHROMIUM_CONSOLE_JSON_BYTES,
     };
-    use crate::DEFAULT_SESSION_IDLE_TTL_MS;
+    use crate::{
+        DEFAULT_SESSION_IDLE_TTL_MS, MAX_CONSOLE_MESSAGE_BYTES, MAX_CONSOLE_SOURCE_BYTES,
+        MAX_CONSOLE_STACK_BYTES, MAX_NETWORK_LOG_URL_BYTES,
+    };
     use std::time::Duration;
 
     #[test]
@@ -2359,6 +2447,42 @@ mod tests {
         assert_eq!(entries[0].message, "boom");
         assert_eq!(entries[0].source, "console.error");
         assert_eq!(entries[0].captured_at_unix_ms, 42);
+    }
+
+    #[test]
+    fn decode_chromium_console_entries_rejects_oversized_string_payload() {
+        let raw = serde_json::Value::String(format!(
+            "[{}]",
+            " ".repeat(MAX_CHROMIUM_CONSOLE_JSON_BYTES + 1)
+        ));
+
+        let decoded = decode_chromium_console_entries_value(raw);
+
+        assert!(
+            decoded.as_array().is_some_and(Vec::is_empty),
+            "oversized console payload must be dropped before serde parsing"
+        );
+    }
+
+    #[test]
+    fn parse_chromium_console_entries_truncates_fields_before_storage() {
+        let raw = serde_json::json!([{
+            "severity": "warn",
+            "kind": "console",
+            "message": "m".repeat(MAX_CONSOLE_MESSAGE_BYTES + 128),
+            "captured_at_unix_ms": 42_u64,
+            "source": "s".repeat(MAX_CONSOLE_SOURCE_BYTES + 128),
+            "stack_trace": "t".repeat(MAX_CONSOLE_STACK_BYTES + 128),
+            "page_url": "u".repeat(MAX_NETWORK_LOG_URL_BYTES + 128)
+        }]);
+
+        let entries = parse_chromium_console_entries(raw);
+
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].message.len() <= MAX_CONSOLE_MESSAGE_BYTES);
+        assert!(entries[0].source.len() <= MAX_CONSOLE_SOURCE_BYTES);
+        assert!(entries[0].stack_trace.len() <= MAX_CONSOLE_STACK_BYTES);
+        assert!(entries[0].page_url.len() <= MAX_NETWORK_LOG_URL_BYTES);
     }
 
     #[test]
