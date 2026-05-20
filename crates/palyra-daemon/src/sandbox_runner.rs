@@ -1125,11 +1125,57 @@ fn interpreter_absolute_path_argument_stays_in_workspace(
         return interpreter_absolute_path_argument_stays_in_workspace(workspace_root, cwd, value);
     }
 
+    if let Some(stays_in_workspace) =
+        interpreter_path_list_argument_stays_in_workspace(workspace_root, cwd, trimmed)?
+    {
+        return Ok(stays_in_workspace);
+    }
+
     if !token_looks_like_absolute_path(trimmed) {
         return Ok(false);
     }
 
     Ok(resolve_scoped_path(workspace_root, cwd, trimmed, false).is_ok())
+}
+
+fn interpreter_path_list_argument_stays_in_workspace(
+    workspace_root: &Path,
+    cwd: &Path,
+    argument: &str,
+) -> Result<Option<bool>, SandboxProcessRunError> {
+    if argument.contains("://") {
+        return Ok(None);
+    }
+    let components = interpreter_path_list_components(argument);
+    if components.len() < 2 {
+        return Ok(None);
+    }
+
+    let mut saw_absolute_path = false;
+    for component in components {
+        if !token_looks_like_absolute_path(component) {
+            continue;
+        }
+        saw_absolute_path = true;
+        let resolved = if let Some(file_url_path) = parse_file_url_path(component)? {
+            resolve_scoped_path(workspace_root, cwd, file_url_path.as_str(), false)
+        } else {
+            resolve_scoped_path(workspace_root, cwd, component, false)
+        };
+        if resolved.is_err() {
+            return Ok(Some(false));
+        }
+    }
+
+    Ok(saw_absolute_path.then_some(true))
+}
+
+fn interpreter_path_list_components(raw: &str) -> Vec<&str> {
+    let separator = if cfg!(windows) { ';' } else { ':' };
+    if !raw.contains(separator) {
+        return Vec::new();
+    }
+    raw.split(separator).map(str::trim).filter(|component| !component.is_empty()).collect()
 }
 
 fn is_interpreter_executable(command: &str) -> bool {
@@ -1147,7 +1193,18 @@ fn contains_embedded_absolute_path(raw: &str) -> bool {
         ch.is_whitespace()
             || matches!(ch, '"' | '\'' | '`' | ',' | ';' | '(' | ')' | '[' | ']' | '{' | '}')
     })
-    .any(token_looks_like_absolute_path)
+    .any(token_or_path_list_contains_absolute_path)
+}
+
+fn token_or_path_list_contains_absolute_path(raw: &str) -> bool {
+    let token = raw.trim();
+    if token_looks_like_absolute_path(token) {
+        return true;
+    }
+    if token.contains("://") {
+        return false;
+    }
+    interpreter_path_list_components(token).into_iter().any(token_looks_like_absolute_path)
 }
 
 fn token_looks_like_absolute_path(raw: &str) -> bool {
@@ -4583,6 +4640,75 @@ mod tests {
 
         assert_eq!(error.kind, SandboxProcessRunErrorKind::WorkspaceScopeDenied);
         assert!(error.message.contains("absolute path-like substring"));
+    }
+
+    #[test]
+    fn interpreter_guardrails_reject_path_list_with_outside_absolute_component() {
+        let workspace = unique_temp_dir("workspace-interpreter-path-list-deny");
+        let outside = unique_temp_dir("outside-interpreter-path-list-deny");
+        fs::create_dir_all(workspace.as_path()).expect("workspace directory should be created");
+        fs::create_dir_all(outside.as_path()).expect("outside directory should be created");
+        let workspace_root = canonical_workspace_root(workspace.as_path())
+            .expect("workspace root should canonicalize");
+        let separator = if cfg!(windows) { ';' } else { ':' };
+        let inside_component = workspace_root.join("missing");
+        let args = vec![format!("{}{separator}{}", inside_component.display(), outside.display())];
+
+        let error = validate_interpreter_argument_guardrails(
+            workspace_root.as_path(),
+            workspace_root.as_path(),
+            "ruby",
+            args.as_slice(),
+        )
+        .expect_err("interpreter path-list args must validate every absolute component");
+
+        assert_eq!(error.kind, SandboxProcessRunErrorKind::WorkspaceScopeDenied);
+        assert!(error.message.contains("absolute path-like substring"));
+
+        let _ = fs::remove_dir_all(workspace.as_path());
+        let _ = fs::remove_dir_all(outside.as_path());
+    }
+
+    #[test]
+    fn interpreter_guardrails_allow_path_list_inside_workspace() {
+        let workspace = unique_temp_dir("workspace-interpreter-path-list-allow");
+        let inside_one = workspace.join("lib");
+        let inside_two = workspace.join("vendor");
+        fs::create_dir_all(inside_one.as_path()).expect("first workspace directory should exist");
+        fs::create_dir_all(inside_two.as_path()).expect("second workspace directory should exist");
+        let workspace_root = canonical_workspace_root(workspace.as_path())
+            .expect("workspace root should canonicalize");
+        let separator = if cfg!(windows) { ';' } else { ':' };
+        let args = vec![format!("{}{separator}{}", inside_one.display(), inside_two.display())];
+
+        validate_interpreter_argument_guardrails(
+            workspace_root.as_path(),
+            workspace_root.as_path(),
+            "ruby",
+            args.as_slice(),
+        )
+        .expect("path-list args whose absolute components stay inside workspace should be allowed");
+
+        let _ = fs::remove_dir_all(workspace.as_path());
+    }
+
+    #[test]
+    fn interpreter_guardrails_do_not_treat_non_file_urls_as_path_lists() {
+        let workspace = unique_temp_dir("workspace-interpreter-url-arg");
+        fs::create_dir_all(workspace.as_path()).expect("workspace directory should be created");
+        let workspace_root = canonical_workspace_root(workspace.as_path())
+            .expect("workspace root should canonicalize");
+        let args = vec!["https://example.test/callback".to_owned()];
+
+        validate_interpreter_argument_guardrails(
+            workspace_root.as_path(),
+            workspace_root.as_path(),
+            "python3",
+            args.as_slice(),
+        )
+        .expect("non-file URL arguments should not be interpreted as filesystem path lists");
+
+        let _ = fs::remove_dir_all(workspace.as_path());
     }
 
     #[test]
