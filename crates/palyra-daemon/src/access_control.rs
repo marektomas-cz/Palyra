@@ -1368,7 +1368,32 @@ impl AccessRegistry {
             workspace_id,
             PERMISSION_MEMBERSHIP_MANAGE,
         )?;
+        let actor_role = self.workspace_role_for_principal(actor_principal, workspace_id)?;
         let role = WorkspaceRole::parse(role)?;
+        let target_role = self.workspace_role_for_principal(member_principal, workspace_id)?;
+        if (role == WorkspaceRole::Owner || target_role == WorkspaceRole::Owner)
+            && actor_role != WorkspaceRole::Owner
+        {
+            return Err(AccessRegistryError::AccessDenied(
+                "only workspace owners can grant or revoke owner role".to_owned(),
+            ));
+        }
+        if actor_principal == member_principal
+            && target_role != WorkspaceRole::Owner
+            && role == WorkspaceRole::Owner
+        {
+            return Err(AccessRegistryError::AccessDenied(
+                "members cannot self-promote to owner".to_owned(),
+            ));
+        }
+        if target_role == WorkspaceRole::Owner
+            && role != WorkspaceRole::Owner
+            && self.workspace_owner_count(workspace_id) <= 1
+        {
+            return Err(AccessRegistryError::AccessDenied(
+                "cannot remove or demote the last workspace owner".to_owned(),
+            ));
+        }
         {
             let membership = self
                 .data
@@ -1426,6 +1451,18 @@ impl AccessRegistry {
             workspace_id,
             PERMISSION_MEMBERSHIP_MANAGE,
         )?;
+        let actor_role = self.workspace_role_for_principal(actor_principal, workspace_id)?;
+        let target_role = self.workspace_role_for_principal(member_principal, workspace_id)?;
+        if target_role == WorkspaceRole::Owner && actor_role != WorkspaceRole::Owner {
+            return Err(AccessRegistryError::AccessDenied(
+                "only workspace owners can remove owner memberships".to_owned(),
+            ));
+        }
+        if target_role == WorkspaceRole::Owner && self.workspace_owner_count(workspace_id) <= 1 {
+            return Err(AccessRegistryError::AccessDenied(
+                "cannot remove or demote the last workspace owner".to_owned(),
+            ));
+        }
         let previous_len = self.data.memberships.len();
         self.data.memberships.retain(|membership| {
             !(membership.workspace_id == workspace_id && membership.principal == member_principal)
@@ -1572,6 +1609,16 @@ impl AccessRegistry {
                     "principal '{principal}' is not a member of workspace '{workspace_id}'"
                 ))
             })
+    }
+
+    fn workspace_owner_count(&self, workspace_id: &str) -> usize {
+        self.data
+            .memberships
+            .iter()
+            .filter(|membership| {
+                membership.workspace_id == workspace_id && membership.role == WorkspaceRole::Owner
+            })
+            .count()
     }
 
     fn telemetry_summary(&self) -> Vec<FeatureTelemetrySummary> {
@@ -2063,6 +2110,99 @@ mod tests {
         assert_eq!(accepted.workspace_id, created.workspace.workspace_id);
         assert_eq!(accepted.role, "operator");
         assert_eq!(accepted.runtime_device_id, created.workspace.runtime_device_id);
+    }
+
+    #[test]
+    fn membership_owner_transitions_enforce_owner_boundary() {
+        let temp = tempdir().expect("tempdir should exist");
+        let mut registry = AccessRegistry::open(temp.path()).expect("registry should open");
+        registry
+            .set_feature_flag(FEATURE_TEAM_MODE, true, Some("pilot".to_owned()), "user:owner", 1)
+            .expect("team mode should enable");
+        let created = registry
+            .create_workspace_bundle(
+                "user:owner",
+                WorkspaceCreateRequest {
+                    team_name: "Core Team".to_owned(),
+                    workspace_name: "Incident Ops".to_owned(),
+                },
+                2,
+            )
+            .expect("workspace should be created");
+        let workspace_id = created.workspace.workspace_id.clone();
+        let admin_invitation = registry
+            .create_invitation(
+                "user:owner",
+                InvitationCreateRequest {
+                    workspace_id: workspace_id.clone(),
+                    invited_identity: "user:admin".to_owned(),
+                    role: "admin".to_owned(),
+                    expires_at_unix_ms: 10_000,
+                },
+                3,
+            )
+            .expect("admin invitation should be created");
+        let operator_invitation = registry
+            .create_invitation(
+                "user:owner",
+                InvitationCreateRequest {
+                    workspace_id: workspace_id.clone(),
+                    invited_identity: "user:operator".to_owned(),
+                    role: "operator".to_owned(),
+                    expires_at_unix_ms: 10_000,
+                },
+                4,
+            )
+            .expect("operator invitation should be created");
+        registry
+            .accept_invitation("user:admin", admin_invitation.invitation_token.as_str(), 5)
+            .expect("admin invitation should be accepted");
+        registry
+            .accept_invitation("user:operator", operator_invitation.invitation_token.as_str(), 6)
+            .expect("operator invitation should be accepted");
+
+        assert!(
+            registry
+                .update_membership_role(
+                    "user:admin",
+                    workspace_id.as_str(),
+                    "user:admin",
+                    "owner",
+                    7,
+                )
+                .is_err(),
+            "admins must not be able to self-promote to owner"
+        );
+        assert!(
+            registry
+                .update_membership_role(
+                    "user:owner",
+                    workspace_id.as_str(),
+                    "user:owner",
+                    "admin",
+                    8,
+                )
+                .is_err(),
+            "the last workspace owner must not be demotable"
+        );
+        assert!(
+            registry
+                .remove_membership("user:admin", workspace_id.as_str(), "user:owner", 9)
+                .is_err(),
+            "admins must not be able to remove owner memberships"
+        );
+        registry
+            .update_membership_role(
+                "user:owner",
+                workspace_id.as_str(),
+                "user:operator",
+                "owner",
+                10,
+            )
+            .expect("owner should be able to promote another member to owner");
+        registry
+            .update_membership_role("user:owner", workspace_id.as_str(), "user:owner", "admin", 11)
+            .expect("owner should be demotable once another owner exists");
     }
 
     #[test]
