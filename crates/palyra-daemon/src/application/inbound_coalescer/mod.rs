@@ -14,6 +14,11 @@ const MAX_SAFE_TEXT_PREVIEW_CHARS: usize = 240;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub(crate) struct InboundCoalescingKey {
+    pub(crate) principal: String,
+    pub(crate) device_id: String,
+    pub(crate) session_id: String,
+    pub(crate) policy_scope: String,
+    pub(crate) binding_id: Option<String>,
     pub(crate) channel: String,
     pub(crate) conversation_id: Option<String>,
     pub(crate) thread_id: Option<String>,
@@ -22,17 +27,17 @@ pub(crate) struct InboundCoalescingKey {
 
 impl InboundCoalescingKey {
     #[must_use]
-    pub(crate) fn new(
-        channel: impl Into<String>,
-        conversation_id: Option<String>,
-        thread_id: Option<String>,
-        sender_identity: Option<String>,
-    ) -> Self {
+    fn from_request(request: &InboundCoalescingRequest) -> Self {
         Self {
-            channel: normalize_required_component(channel.into().as_str(), "unknown"),
-            conversation_id: normalize_optional_component(conversation_id),
-            thread_id: normalize_optional_component(thread_id),
-            sender_identity: normalize_optional_component(sender_identity),
+            principal: normalize_required_component(request.principal.as_str(), "unknown"),
+            device_id: normalize_required_component(request.device_id.as_str(), "unknown"),
+            session_id: normalize_required_component(request.session_id.as_str(), "unknown"),
+            policy_scope: normalize_required_component(request.policy_scope.as_str(), "unknown"),
+            binding_id: normalize_optional_component(request.binding_id.clone()),
+            channel: normalize_required_component(request.channel.as_str(), "unknown"),
+            conversation_id: normalize_optional_component(request.conversation_id.clone()),
+            thread_id: normalize_optional_component(request.thread_id.clone()),
+            sender_identity: normalize_optional_component(request.sender_identity.clone()),
         }
     }
 }
@@ -119,6 +124,11 @@ impl InboundCoalescingDecision {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct InboundCoalescingRequest {
     pub(crate) message_id: String,
+    pub(crate) principal: String,
+    pub(crate) device_id: String,
+    pub(crate) session_id: String,
+    pub(crate) policy_scope: String,
+    pub(crate) binding_id: Option<String>,
     pub(crate) channel: String,
     pub(crate) conversation_id: Option<String>,
     pub(crate) thread_id: Option<String>,
@@ -165,7 +175,8 @@ impl InboundCoalescer {
         &self.policy
     }
 
-    pub(crate) fn submit(
+    #[cfg(test)]
+    fn submit(
         &self,
         request: InboundCoalescingRequest,
     ) -> Result<InboundCoalescingDecision, InboundCoalescingError> {
@@ -234,20 +245,52 @@ impl InboundCoalescer {
         &self,
         request: InboundCoalescingRequest,
     ) -> Result<InboundCoalescingDecision, InboundCoalescingError> {
-        let decision = self.submit(request)?;
-        if decision.kind != InboundCoalescingDecisionKind::Pending {
-            return Ok(decision);
+        let key = request.key();
+        if !self.policy.active() {
+            return Ok(self.bypass(request, key, "policy_disabled"));
         }
-        self.force_flush(&decision.key, "route_message_immediate_flush")
-            .map(|mut flushed| {
-                flushed.ready_at_unix_ms = decision.ready_at_unix_ms;
-                flushed
-            })
-            .ok_or_else(|| InboundCoalescingError {
-                code: "inbound_coalescing/pending_bucket_missing",
-                message: "inbound coalescing pending bucket disappeared before route flush"
-                    .to_owned(),
-            })
+        if self.policy.bypass_commands && (request.is_command || request.urgent_stop) {
+            return Ok(self.bypass(request, key, "command_bypass"));
+        }
+        if self.policy.bypass_media && request.has_media {
+            return Ok(self.bypass(request, key, "media_bypass"));
+        }
+
+        let mut guard = self.pending.lock().map_err(|_| InboundCoalescingError {
+            code: "inbound_coalescing/state_unavailable",
+            message: "inbound coalescer state lock is unavailable".to_owned(),
+        })?;
+        if !guard.contains_key(&key) && guard.len() >= self.policy.max_tracked_keys {
+            return Err(InboundCoalescingError {
+                code: "inbound_coalescing/max_tracked_keys_exceeded",
+                message: format!(
+                    "inbound coalescer is tracking {} keys, max_tracked_keys={}",
+                    guard.len(),
+                    self.policy.max_tracked_keys
+                ),
+            });
+        }
+        let received_at_unix_ms = request.received_at_unix_ms;
+        let bucket = guard.entry(key.clone()).or_insert_with(|| PendingCoalescingBucket {
+            key: key.clone(),
+            messages: Vec::new(),
+            first_received_at_unix_ms: received_at_unix_ms,
+            ready_at_unix_ms: received_at_unix_ms.saturating_add(self.policy.debounce_ms as i64),
+        });
+        bucket.push(request, self.policy.debounce_ms);
+        let ready_at_unix_ms = bucket.ready_at_unix_ms;
+        let bucket = guard
+            .remove(&key)
+            .expect("immediate route bucket should still be present while lock is held");
+        let coalesced = bucket.coalesced();
+        Ok(InboundCoalescingDecision {
+            kind: InboundCoalescingDecisionKind::Ready,
+            reason: "route_message_immediate_flush".to_owned(),
+            key,
+            coalesced: Some(coalesced),
+            ready_at_unix_ms: Some(ready_at_unix_ms),
+            tracked_key_count: guard.len(),
+        })
     }
 
     #[allow(dead_code)]
@@ -281,25 +324,6 @@ impl InboundCoalescer {
         Ok(decisions)
     }
 
-    fn force_flush(
-        &self,
-        key: &InboundCoalescingKey,
-        reason: &str,
-    ) -> Option<InboundCoalescingDecision> {
-        let mut guard = self.pending.lock().ok()?;
-        let bucket = guard.remove(key)?;
-        let ready_at_unix_ms = bucket.ready_at_unix_ms;
-        let coalesced = bucket.coalesced();
-        Some(InboundCoalescingDecision {
-            kind: InboundCoalescingDecisionKind::Ready,
-            reason: reason.to_owned(),
-            key: key.clone(),
-            coalesced: Some(coalesced),
-            ready_at_unix_ms: Some(ready_at_unix_ms),
-            tracked_key_count: guard.len(),
-        })
-    }
-
     fn bypass(
         &self,
         request: InboundCoalescingRequest,
@@ -328,12 +352,7 @@ impl InboundCoalescer {
 impl InboundCoalescingRequest {
     #[must_use]
     fn key(&self) -> InboundCoalescingKey {
-        InboundCoalescingKey::new(
-            self.channel.clone(),
-            self.conversation_id.clone(),
-            self.thread_id.clone(),
-            self.sender_identity.clone(),
-        )
+        InboundCoalescingKey::from_request(self)
     }
 }
 
@@ -443,6 +462,11 @@ mod tests {
     fn request(message_id: &str, text: &str, received_at_unix_ms: i64) -> InboundCoalescingRequest {
         InboundCoalescingRequest {
             message_id: message_id.to_owned(),
+            principal: "user:ops".to_owned(),
+            device_id: "device-1".to_owned(),
+            session_id: "session-1".to_owned(),
+            policy_scope: "channel:discord:ops".to_owned(),
+            binding_id: Some("binding-1".to_owned()),
             channel: "discord:ops".to_owned(),
             conversation_id: Some("channel-1".to_owned()),
             thread_id: Some("thread-1".to_owned()),
@@ -498,6 +522,43 @@ mod tests {
         assert!(drained.iter().all(|decision| {
             decision.coalesced.as_ref().is_some_and(|input| input.provenance.len() == 1)
         }));
+    }
+
+    #[test]
+    fn different_principal_or_session_stays_separate() {
+        let coalescer = InboundCoalescer::new(policy());
+        let first = request("m-1", "first", 1_000);
+        let mut other_principal = request("m-2", "second", 1_010);
+        other_principal.principal = "user:other".to_owned();
+        other_principal.session_id = "session-2".to_owned();
+        other_principal.binding_id = Some("binding-2".to_owned());
+
+        coalescer.submit(first).expect("first submit");
+        coalescer.submit(other_principal).expect("other principal submit");
+
+        let drained = coalescer.drain_ready(1_200).expect("drain ready");
+        assert_eq!(drained.len(), 2);
+        assert!(drained.iter().all(|decision| {
+            decision.coalesced.as_ref().is_some_and(|input| input.provenance.len() == 1)
+        }));
+    }
+
+    #[test]
+    fn immediate_route_flush_does_not_share_pending_bucket() {
+        let coalescer = InboundCoalescer::new(policy());
+        let first = coalescer
+            .submit_for_immediate_route(request("m-1", "first", 1_000))
+            .expect("first immediate submit");
+        let second = coalescer
+            .submit_for_immediate_route(request("m-2", "second", 1_010))
+            .expect("second immediate submit");
+
+        assert_eq!(first.kind, InboundCoalescingDecisionKind::Ready);
+        assert_eq!(second.kind, InboundCoalescingDecisionKind::Ready);
+        assert_eq!(first.coalesced.as_ref().expect("first coalesced").text, "first");
+        assert_eq!(second.coalesced.as_ref().expect("second coalesced").text, "second");
+        assert_eq!(first.tracked_key_count, 0);
+        assert_eq!(second.tracked_key_count, 0);
     }
 
     #[test]

@@ -237,6 +237,11 @@ pub(crate) async fn handle_routed_route_message(
                 .adapter_message_id
                 .clone()
                 .unwrap_or_else(|| input.envelope_id.clone()),
+            principal: route_request_context.principal.clone(),
+            device_id: route_request_context.device_id.clone(),
+            session_id: session_id.clone(),
+            policy_scope: policy_resource.clone(),
+            binding_id: plan.binding_id.clone(),
             channel: plan.channel.clone(),
             conversation_id: input.conversation_id.clone(),
             thread_id: plan.reply_thread_id.clone().or_else(|| input.adapter_thread_id.clone()),
