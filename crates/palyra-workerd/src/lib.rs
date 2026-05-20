@@ -467,13 +467,22 @@ impl WorkerFleetManager {
             && cleanup.removed_artifacts
             && cleanup.removed_logs;
         let event = if cleanup_succeeded {
-            worker.state = WorkerLifecycleState::Completed;
+            let requires_fresh_attestation =
+                worker_fail_closed_state_requires_fresh_attestation(worker.state)
+                    && worker.lease.is_none();
+            if !requires_fresh_attestation {
+                worker.state = WorkerLifecycleState::Completed;
+            }
             worker.lease = None;
             WorkerLifecycleEvent {
                 worker_id: worker_id.to_owned(),
-                state: WorkerLifecycleState::Completed,
+                state: worker.state,
                 run_id,
-                reason_code: "worker.completed".to_owned(),
+                reason_code: if requires_fresh_attestation {
+                    "worker.cleanup_verified_requires_reattestation".to_owned()
+                } else {
+                    "worker.completed".to_owned()
+                },
                 timestamp_unix_ms: now_unix_ms,
             }
         } else {
@@ -558,6 +567,9 @@ impl WorkerFleetManager {
             .ok_or_else(|| WorkerLifecycleError::UnknownWorker(worker_id.to_owned()))?;
         if worker.lease.is_some() {
             return Err(WorkerLifecycleError::LeaseAlreadyActive(worker_id.to_owned()));
+        }
+        if worker_fail_closed_state_requires_fresh_attestation(worker.state) {
+            return Err(WorkerLifecycleError::WorkerFailClosed(worker_id.to_owned()));
         }
         worker.attestation.validate(&policy.attestation, now_unix_ms)?;
         validate_worker_compatibility(&worker.attestation, policy)?;
@@ -819,6 +831,10 @@ fn worker_heartbeat_is_fresh(
         <= i64::try_from(policy.heartbeat_timeout_ms).unwrap_or(i64::MAX)
 }
 
+fn worker_fail_closed_state_requires_fresh_attestation(state: WorkerLifecycleState) -> bool {
+    matches!(state, WorkerLifecycleState::Failed | WorkerLifecycleState::Orphaned)
+}
+
 fn assign_worker_record(
     worker_id: &str,
     worker: &mut WorkerRecord,
@@ -831,7 +847,7 @@ fn assign_worker_record(
     if worker.lease.is_some() {
         return Err(WorkerLifecycleError::LeaseAlreadyActive(worker_id.to_owned()));
     }
-    if matches!(worker.state, WorkerLifecycleState::Failed | WorkerLifecycleState::Orphaned) {
+    if worker_fail_closed_state_requires_fresh_attestation(worker.state) {
         return Err(WorkerLifecycleError::WorkerFailClosed(worker_id.to_owned()));
     }
     if matches!(worker.state, WorkerLifecycleState::Draining) {
@@ -875,13 +891,8 @@ fn worker_record_can_accept(
     now_unix_ms: i64,
 ) -> bool {
     worker.lease.is_none()
-        && !matches!(
-            worker.state,
-            WorkerLifecycleState::Failed
-                | WorkerLifecycleState::Orphaned
-                | WorkerLifecycleState::Draining
-                | WorkerLifecycleState::Offline
-        )
+        && !matches!(worker.state, WorkerLifecycleState::Draining | WorkerLifecycleState::Offline)
+        && !worker_fail_closed_state_requires_fresh_attestation(worker.state)
         && worker.attestation.validate(&policy.attestation, now_unix_ms).is_ok()
         && validate_worker_compatibility(&worker.attestation, policy).is_ok()
         && worker_heartbeat_is_fresh(worker, policy, now_unix_ms)
@@ -1137,23 +1148,28 @@ mod tests {
     }
 
     #[test]
-    fn operator_reverify_requires_fresh_attestation_and_no_active_lease() {
+    fn operator_reverify_rejects_fail_closed_workers_and_active_leases() {
         let mut manager = WorkerFleetManager::default();
         let policy = WorkerFleetPolicy::default();
         manager.register_worker(attestation("worker-j"), &policy, 2_000).unwrap();
-        manager.quarantine_worker("worker-j", "worker.operator.quarantine", 2_100).unwrap();
+        manager.assign_work("worker-j", lease_request("run-9", 500), &policy, 2_100).unwrap();
 
-        let event = manager
+        let active_lease_error = manager
             .reverify_worker("worker-j", &policy, 2_200)
-            .expect("fresh attestation should restore the worker to registered");
-        assert_eq!(event.state, WorkerLifecycleState::Registered);
-        assert_eq!(event.reason_code, "worker.reverified_by_operator");
-        manager.assign_work("worker-j", lease_request("run-9", 500), &policy, 2_500).unwrap();
+            .expect_err("active lease must not be reverified in place");
+        assert!(matches!(active_lease_error, WorkerLifecycleError::LeaseAlreadyActive(_)));
+
+        manager.quarantine_worker("worker-j", "worker.operator.quarantine", 2_300).unwrap();
 
         let error = manager
-            .reverify_worker("worker-j", &policy, 2_600)
-            .expect_err("active lease must not be reverified in place");
-        assert!(matches!(error, WorkerLifecycleError::LeaseAlreadyActive(_)));
+            .reverify_worker("worker-j", &policy, 2_400)
+            .expect_err("fail-closed worker must not be reverified without fresh registration");
+        assert!(matches!(error, WorkerLifecycleError::WorkerFailClosed(_)));
+
+        let error = manager
+            .assign_work("worker-j", lease_request("run-9b", 500), &policy, 2_500)
+            .expect_err("failed worker must stay unassignable");
+        assert!(matches!(error, WorkerLifecycleError::WorkerFailClosed(_)));
     }
 
     #[test]
@@ -1189,10 +1205,15 @@ mod tests {
                 },
                 2_900,
             )
-            .expect("verified cleanup should be accepted");
+            .expect("verified cleanup should be recorded");
         assert!(recovered.cleanup_succeeded);
-        assert_eq!(recovered.event.state, WorkerLifecycleState::Completed);
-        assert_eq!(manager.snapshot().failed_closed_workers, 0);
+        assert_eq!(recovered.event.state, WorkerLifecycleState::Failed);
+        assert_eq!(recovered.event.reason_code, "worker.cleanup_verified_requires_reattestation");
+        assert_eq!(manager.snapshot().failed_closed_workers, 1);
+        let error = manager
+            .assign_work("worker-k", lease_request("run-10b", 500), &policy, 3_000)
+            .expect_err("cleanup verification alone must not make failed workers assignable");
+        assert!(matches!(error, WorkerLifecycleError::WorkerFailClosed(_)));
     }
 
     #[test]
@@ -1236,6 +1257,26 @@ mod tests {
         let error = manager
             .assign_work("worker-m", lease_request("run-12b", 500), &policy, 2_270)
             .expect_err("orphaned stale worker must not receive work before remediation");
+        assert!(matches!(error, WorkerLifecycleError::WorkerFailClosed(_)));
+
+        let cleanup = manager
+            .force_cleanup_worker(
+                "worker-m",
+                WorkerCleanupReport {
+                    removed_workspace_scope: true,
+                    removed_artifacts: true,
+                    removed_logs: true,
+                    failure_reason: None,
+                },
+                2_280,
+            )
+            .expect("orphan cleanup verification should be recorded");
+        assert!(cleanup.cleanup_succeeded);
+        assert_eq!(cleanup.event.state, WorkerLifecycleState::Orphaned);
+        assert_eq!(cleanup.event.reason_code, "worker.cleanup_verified_requires_reattestation");
+        let error = manager
+            .assign_work("worker-m", lease_request("run-12c", 500), &policy, 2_290)
+            .expect_err("orphan cleanup verification alone must not make worker assignable");
         assert!(matches!(error, WorkerLifecycleError::WorkerFailClosed(_)));
     }
 
