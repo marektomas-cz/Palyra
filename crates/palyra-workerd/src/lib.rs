@@ -587,7 +587,7 @@ impl WorkerFleetManager {
         worker.attestation.validate(&policy.attestation, now_unix_ms)?;
         validate_worker_compatibility(&worker.attestation, policy)?;
         worker.last_heartbeat_unix_ms = now_unix_ms;
-        if matches!(worker.state, WorkerLifecycleState::Offline) {
+        if matches!(worker.state, WorkerLifecycleState::Offline) && worker.lease.is_none() {
             worker.state = WorkerLifecycleState::Registered;
         }
         let event = WorkerLifecycleEvent {
@@ -699,11 +699,16 @@ impl WorkerFleetManager {
                 continue;
             }
             let run_id = worker.lease.as_ref().map(|lease| lease.run_id.clone());
-            worker.state = WorkerLifecycleState::Offline;
+            let next_state = if worker.lease.is_some() {
+                WorkerLifecycleState::Orphaned
+            } else {
+                WorkerLifecycleState::Offline
+            };
+            worker.state = next_state;
             worker.lease = None;
             events.push(WorkerLifecycleEvent {
                 worker_id: worker_id.clone(),
-                state: WorkerLifecycleState::Offline,
+                state: next_state,
                 run_id,
                 reason_code: "worker.heartbeat_stale".to_owned(),
                 timestamp_unix_ms: now_unix_ms,
@@ -1209,7 +1214,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_heartbeat_marks_worker_offline_and_clears_active_lease() {
+    fn stale_heartbeat_with_active_lease_orphans_worker_until_remediation() {
         let mut manager = WorkerFleetManager::default();
         let policy =
             WorkerFleetPolicy { heartbeat_timeout_ms: 100, ..policy_for("tool:palyra.echo") };
@@ -1219,10 +1224,41 @@ mod tests {
         let events = manager.mark_stale_heartbeat_workers(&policy, 2_250);
 
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].state, WorkerLifecycleState::Offline);
+        assert_eq!(events[0].state, WorkerLifecycleState::Orphaned);
         assert_eq!(events[0].run_id.as_deref(), Some("run-12"));
-        assert_eq!(manager.snapshot().offline_workers, 1);
+        assert_eq!(manager.snapshot().orphaned_workers, 1);
         assert_eq!(manager.snapshot().active_leases, 0);
+
+        let heartbeat = manager
+            .heartbeat_worker("worker-m", &policy, 2_260)
+            .expect("orphaned worker heartbeat should be recorded without automatic reuse");
+        assert_eq!(heartbeat.state, WorkerLifecycleState::Orphaned);
+        let error = manager
+            .assign_work("worker-m", lease_request("run-12b", 500), &policy, 2_270)
+            .expect_err("orphaned stale worker must not receive work before remediation");
+        assert!(matches!(error, WorkerLifecycleError::WorkerFailClosed(_)));
+    }
+
+    #[test]
+    fn stale_idle_worker_can_recover_with_fresh_heartbeat() {
+        let mut manager = WorkerFleetManager::default();
+        let policy =
+            WorkerFleetPolicy { heartbeat_timeout_ms: 100, ..policy_for("tool:palyra.echo") };
+        manager.register_worker(attestation("worker-idle"), &policy, 2_000).unwrap();
+
+        let events = manager.mark_stale_heartbeat_workers(&policy, 2_250);
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].state, WorkerLifecycleState::Offline);
+        assert_eq!(manager.snapshot().offline_workers, 1);
+
+        let heartbeat = manager
+            .heartbeat_worker("worker-idle", &policy, 2_260)
+            .expect("idle offline worker should accept a fresh heartbeat");
+        assert_eq!(heartbeat.state, WorkerLifecycleState::Registered);
+        manager
+            .assign_work("worker-idle", lease_request("run-idle", 500), &policy, 2_270)
+            .expect("fresh idle worker should be reusable");
     }
 
     #[test]
