@@ -2060,7 +2060,7 @@ fn redact_json_value_tree(value: &mut Value, key_context: Option<&str>) {
                 .map(|key| key_contains_any(key, &["url", "uri", "endpoint", "location"]))
                 .unwrap_or(false)
             {
-                *raw = redact_url(raw.as_str());
+                *raw = redact_cli_json_url(raw.as_str(), key_context);
                 return;
             }
             if key_context
@@ -4701,9 +4701,120 @@ fn sanitize_stream_json_string_with_context(raw: &str, key_context: Option<&str>
         .map(|key| key_contains_any(key, &["url", "uri", "endpoint", "location"]))
         .unwrap_or(false)
     {
-        return truncate_utf8_chars(redact_url(raw).as_str(), STREAM_JSON_MAX_STRING_CHARS);
+        return truncate_utf8_chars(
+            redact_cli_json_url(raw, key_context).as_str(),
+            STREAM_JSON_MAX_STRING_CHARS,
+        );
     }
     sanitize_stream_json_string(raw)
+}
+
+fn redact_cli_json_url(raw: &str, key_context: Option<&str>) -> String {
+    let redacted = redact_url(raw);
+    redact_cli_json_url_path_secrets(redacted.as_str(), key_context)
+}
+
+fn redact_cli_json_url_path_secrets(redacted_url: &str, key_context: Option<&str>) -> String {
+    let (base, suffix) = split_url_query_or_fragment(redacted_url);
+    let Some((scheme, rest)) = base.split_once("://") else {
+        return redacted_url.to_owned();
+    };
+    let authority_end = rest.find('/').unwrap_or(rest.len());
+    if authority_end == rest.len() {
+        return redacted_url.to_owned();
+    }
+    let (authority, path) = rest.split_at(authority_end);
+    let redact_entire_path = cli_json_url_key_requires_full_path_redaction(key_context)
+        || cli_json_url_is_known_webhook_path(authority, path);
+    let redacted_path = redact_cli_json_url_path(path, redact_entire_path);
+    format!("{scheme}://{authority}{redacted_path}{suffix}")
+}
+
+fn split_url_query_or_fragment(value: &str) -> (&str, &str) {
+    let query_index = value.find('?');
+    let fragment_index = value.find('#');
+    let split_index = match (query_index, fragment_index) {
+        (Some(query_index), Some(fragment_index)) => query_index.min(fragment_index),
+        (Some(query_index), None) => query_index,
+        (None, Some(fragment_index)) => fragment_index,
+        (None, None) => return (value, ""),
+    };
+    value.split_at(split_index)
+}
+
+fn cli_json_url_key_requires_full_path_redaction(key_context: Option<&str>) -> bool {
+    key_context.map(|key| key_contains_any(key, &["webhook"])).unwrap_or(false)
+}
+
+fn cli_json_url_is_known_webhook_path(authority: &str, path: &str) -> bool {
+    let host = authority
+        .rsplit_once('@')
+        .map(|(_, host)| host)
+        .unwrap_or(authority)
+        .split_once(':')
+        .map(|(host, _)| host)
+        .unwrap_or(authority)
+        .to_ascii_lowercase();
+    (host == "hooks.slack.com" && path.starts_with("/services/"))
+        || ((host.ends_with("discord.com") || host.ends_with("discordapp.com"))
+            && path.contains("/api/webhooks/"))
+}
+
+fn redact_cli_json_url_path(path: &str, redact_entire_path: bool) -> String {
+    if redact_entire_path {
+        if path.trim_matches('/').is_empty() {
+            return path.to_owned();
+        }
+        return format!("/{REDACTED}");
+    }
+
+    let mut output = String::with_capacity(path.len());
+    let mut first = true;
+    for segment in path.split('/') {
+        if first {
+            first = false;
+        } else {
+            output.push('/');
+        }
+        if segment.is_empty() {
+            continue;
+        }
+        if cli_json_url_path_segment_looks_secret(segment) {
+            output.push_str(REDACTED);
+        } else {
+            output.push_str(segment);
+        }
+    }
+    output
+}
+
+fn cli_json_url_path_segment_looks_secret(segment: &str) -> bool {
+    let lowered = segment.to_ascii_lowercase();
+    let marker_hit = ["secret", "token", "key", "signature", "credential", "password", "bearer"]
+        .iter()
+        .any(|marker| lowered.contains(marker));
+    (marker_hit && segment.len() >= 8) || cli_json_url_path_segment_looks_opaque(segment)
+}
+
+fn cli_json_url_path_segment_looks_opaque(segment: &str) -> bool {
+    if segment.len() < 20 {
+        return false;
+    }
+    let mut urlsafe_chars = 0usize;
+    let mut has_alpha = false;
+    let mut has_digit = false;
+    for ch in segment.chars() {
+        if ch.is_ascii_alphanumeric() {
+            urlsafe_chars += 1;
+            has_alpha |= ch.is_ascii_alphabetic();
+            has_digit |= ch.is_ascii_digit();
+        } else if matches!(ch, '-' | '_' | '.' | '~' | '%') {
+            continue;
+        } else {
+            return false;
+        }
+    }
+    urlsafe_chars >= 16 && has_alpha && has_digit
 }
 
 fn sanitize_stream_json_string(raw: &str) -> String {
@@ -4914,6 +5025,8 @@ mod agent_stream_output_tests {
                     "cmd": "palyra browser wait --json",
                     "cwd": "C:/workspace",
                     "api_key": "sk-test-secret",
+                    "docs_url": "https://example.test/docs/getting-started?mode=ok",
+                    "webhook_url": "https://hooks.slack.com/services/T000/B000/SECRET-PATH?access_token=query-secret&mode=ok",
                     "args": ["--token", "raw-token", "--json"],
                     "env": {
                         "PATH": "C:/tools",
@@ -4930,12 +5043,22 @@ mod agent_stream_output_tests {
         assert_eq!(value["input_json"]["cmd"], "palyra browser wait --json");
         assert_eq!(value["input_json"]["cwd"], "C:/workspace");
         assert_eq!(value["input_json"]["api_key"], REDACTED);
+        assert_eq!(
+            value["input_json"]["docs_url"],
+            "https://example.test/docs/getting-started?mode=ok"
+        );
+        assert_eq!(
+            value["input_json"]["webhook_url"],
+            "https://hooks.slack.com/<redacted>?access_token=<redacted>&mode=ok"
+        );
         assert_eq!(value["input_json"]["args"][1], REDACTED);
         assert_eq!(value["input_json"]["env"]["PATH"], "C:/tools");
         assert_eq!(value["input_json"]["env"]["AUTHORIZATION"], REDACTED);
         let encoded = value.to_string();
         assert!(!encoded.contains("sk-test-secret"), "{encoded}");
         assert!(!encoded.contains("raw-token"), "{encoded}");
+        assert!(!encoded.contains("SECRET-PATH"), "{encoded}");
+        assert!(!encoded.contains("query-secret"), "{encoded}");
         assert!(!encoded.contains("Bearer hidden"), "{encoded}");
     }
 
@@ -11487,7 +11610,7 @@ mod diagnostics_bundle_tests {
         );
         assert_eq!(
             payload.pointer("/channels/discord:default/webhook_url").and_then(Value::as_str),
-            Some("https://discord.test/api/webhooks/1?token=<redacted>&mode=ok")
+            Some("https://discord.test/<redacted>?token=<redacted>&mode=ok")
         );
         let browser_error =
             payload.pointer("/browserd/last_error").and_then(Value::as_str).unwrap_or_default();
