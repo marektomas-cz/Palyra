@@ -1262,6 +1262,11 @@ fn rewrite_arguments_to_scoped_paths(
             index = index.saturating_add(1);
             continue;
         }
+        if command_positional_arg_is_non_path_value(command, arg.as_str()) {
+            rewritten.push(arg.clone());
+            index = index.saturating_add(1);
+            continue;
+        }
         if let Some(file_url_path) = parse_file_url_path(arg.as_str())? {
             let scoped = resolve_scoped_path(workspace_root, cwd, file_url_path.as_str(), false)?;
             rewritten.push(scoped_file_url_argument(scoped.as_path())?);
@@ -1392,6 +1397,33 @@ fn node_eval_option_consumes_non_path_value(command: &str, arg: &str) -> bool {
     let command = normalize_process_executable_token(command);
     matches!(command.as_str(), "node" | "nodejs")
         && matches!(arg.trim().to_ascii_lowercase().as_str(), "-e" | "-p")
+}
+
+fn command_positional_arg_is_non_path_value(command: &str, arg: &str) -> bool {
+    let command = normalize_process_executable_token(command);
+    matches!(command.as_str(), "sleep") && is_sleep_duration_literal(arg)
+}
+
+fn is_sleep_duration_literal(arg: &str) -> bool {
+    let trimmed = arg.trim();
+    let numeric = trimmed
+        .strip_suffix('s')
+        .or_else(|| trimmed.strip_suffix('m'))
+        .or_else(|| trimmed.strip_suffix('h'))
+        .or_else(|| trimmed.strip_suffix('d'))
+        .unwrap_or(trimmed);
+    let mut saw_digit = false;
+    let mut saw_dot = false;
+    for ch in numeric.chars() {
+        if ch.is_ascii_digit() {
+            saw_digit = true;
+        } else if ch == '.' && !saw_dot {
+            saw_dot = true;
+        } else {
+            return false;
+        }
+    }
+    saw_digit
 }
 
 fn is_windows_taskkill_switch(command: &str, arg: &str) -> bool {
@@ -2936,6 +2968,27 @@ mod tests {
             args.as_slice(),
         )
         .expect("node eval code should remain a literal argument");
+
+        assert_eq!(rewritten, args);
+
+        let _ = fs::remove_dir_all(workspace.as_path());
+    }
+
+    #[test]
+    fn rewrite_arguments_to_scoped_paths_preserves_sleep_durations() {
+        let workspace = unique_temp_dir("workspace-sleep-arg-rewrite");
+        fs::create_dir_all(workspace.as_path()).expect("workspace directory should be created");
+        let canonical_workspace = canonical_workspace_root(workspace.as_path())
+            .expect("workspace root should canonicalize");
+        let args = vec!["2".to_owned(), "0.5s".to_owned()];
+
+        let rewritten = rewrite_arguments_to_scoped_paths(
+            canonical_workspace.as_path(),
+            canonical_workspace.as_path(),
+            "sleep",
+            args.as_slice(),
+        )
+        .expect("sleep durations should remain literal arguments");
 
         assert_eq!(rewritten, args);
 
