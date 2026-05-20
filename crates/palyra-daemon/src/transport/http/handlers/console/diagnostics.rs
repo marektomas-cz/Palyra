@@ -97,8 +97,9 @@ pub(crate) async fn console_diagnostics_handler(
     };
     let objectives_payload =
         collect_console_objectives_diagnostics(&state, session.context.principal.as_str())?;
-    let flows_payload =
+    let mut flows_payload =
         collect_console_flows_diagnostics(&state, session.context.principal.as_str()).await?;
+    redact_console_diagnostics_value(&mut flows_payload, None);
     let delegation_payload = collect_console_delegation_diagnostics(&state, &session.context)
         .await
         .map_err(runtime_status_response)?;

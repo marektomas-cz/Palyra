@@ -5004,6 +5004,38 @@ mod tests {
     }
 
     #[test]
+    fn diagnostics_redaction_masks_flow_delivery_progress_details() {
+        let mut payload = serde_json::json!({
+            "recent": [{
+                "delivery_progress": {
+                    "items": [{
+                        "detail": "provider failed: Authorization: Bearer sk-live-secret https://api.example.test/v1/run?access_token=tok123&ok=1"
+                    }]
+                }
+            }]
+        });
+
+        redact_console_diagnostics_value(&mut payload, None);
+
+        let detail = payload
+            .pointer("/recent/0/delivery_progress/items/0/detail")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        assert!(
+            detail.contains("Bearer <redacted>")
+                && detail.contains("access_token=<redacted>")
+                && detail.contains("https://api.example.test/v1/run"),
+            "flow diagnostics detail should preserve useful context while redacting secrets: {detail}"
+        );
+        assert!(
+            !detail.contains("sk-live-secret")
+                && !detail.contains("tok123")
+                && !detail.contains("access_token=tok123"),
+            "flow diagnostics detail must not leak raw secret values: {detail}"
+        );
+    }
+
+    #[test]
     fn console_secret_token_is_urlsafe_and_unpadded() {
         let token = mint_console_secret_token();
         assert_eq!(
