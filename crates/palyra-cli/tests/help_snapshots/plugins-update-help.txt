@@ -5,26 +5,51 @@ Arguments:
 
 Options:
       --skill-id <SKILL_ID>
+
       --skill-version <SKILL_VERSION>
+
       --artifact <ARTIFACT_PATH>
+
       --tool-id <TOOL_ID>
+
       --module-path <MODULE_PATH>
+
       --entrypoint <ENTRYPOINT>
+
       --cap-http-host <CAPABILITY_HTTP_HOSTS>
+
       --cap-secret <CAPABILITY_SECRETS>
+
       --cap-storage-prefix <CAPABILITY_STORAGE_PREFIXES>
+
       --cap-channel <CAPABILITY_CHANNELS>
+
       --display-name <DISPLAY_NAME>
+
       --notes <NOTES>
+
       --owner-principal <OWNER_PRINCIPAL>
+
       --tag <TAGS>
+
       --config-json <CONFIG_JSON>
+          Inline JSON object for non-secret config. Use --config-json-file or --config-json-stdin for secret-bearing config.
+      --config-json-file <CONFIG_JSON_FILE>
+          Read plugin config JSON object from a local file instead of argv.
+      --config-json-stdin
+          Read plugin config JSON object from stdin instead of argv.
       --clear-config
+
       --disabled
+
       --allow-tofu
+
       --allow-untrusted
+
       --json
-  -h, --help                                              Print help
+
+  -h, --help
+          Print help
 
 Global Options:
       --profile <PROFILE>

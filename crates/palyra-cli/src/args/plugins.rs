@@ -79,8 +79,25 @@ pub enum PluginsCommand {
         owner_principal: Option<String>,
         #[arg(long = "tag")]
         tags: Vec<String>,
-        #[arg(long)]
+        #[arg(
+            long,
+            conflicts_with_all = ["config_json_file", "config_json_stdin"],
+            help = "Inline JSON object for non-secret config. Use --config-json-file or --config-json-stdin for secret-bearing config."
+        )]
         config_json: Option<String>,
+        #[arg(
+            long = "config-json-file",
+            conflicts_with_all = ["config_json", "config_json_stdin"],
+            help = "Read plugin config JSON object from a local file instead of argv."
+        )]
+        config_json_file: Option<String>,
+        #[arg(
+            long = "config-json-stdin",
+            conflicts_with_all = ["config_json", "config_json_file"],
+            default_value_t = false,
+            help = "Read plugin config JSON object from stdin instead of argv."
+        )]
+        config_json_stdin: bool,
         #[arg(long, default_value_t = false)]
         clear_config: bool,
         #[arg(long, default_value_t = false)]
@@ -122,8 +139,25 @@ pub enum PluginsCommand {
         owner_principal: Option<String>,
         #[arg(long = "tag")]
         tags: Vec<String>,
-        #[arg(long)]
+        #[arg(
+            long,
+            conflicts_with_all = ["config_json_file", "config_json_stdin"],
+            help = "Inline JSON object for non-secret config. Use --config-json-file or --config-json-stdin for secret-bearing config."
+        )]
         config_json: Option<String>,
+        #[arg(
+            long = "config-json-file",
+            conflicts_with_all = ["config_json", "config_json_stdin"],
+            help = "Read plugin config JSON object from a local file instead of argv."
+        )]
+        config_json_file: Option<String>,
+        #[arg(
+            long = "config-json-stdin",
+            conflicts_with_all = ["config_json", "config_json_file"],
+            default_value_t = false,
+            help = "Read plugin config JSON object from stdin instead of argv."
+        )]
+        config_json_stdin: bool,
         #[arg(long, default_value_t = false)]
         clear_config: bool,
         #[arg(long, default_value_t = false)]

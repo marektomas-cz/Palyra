@@ -432,6 +432,10 @@ fn plugin_operability_workflows_are_regression_tested() -> Result<()> {
         [7_u8; 32],
     )?;
     let invalid_config_artifact_string = invalid_config_artifact.display().to_string();
+    let invalid_config_json = artifacts_dir.join("echo-invalid-config.json");
+    fs::write(&invalid_config_json, "{\"api_base_url\":42,\"api_token\":\"secret-token\"}")
+        .context("failed to write plugin invalid config fixture")?;
+    let invalid_config_json_string = invalid_config_json.display().to_string();
     let invalid_config_payload = assert_json_success(
         run_cli(
             &workdir,
@@ -441,8 +445,8 @@ fn plugin_operability_workflows_are_regression_tested() -> Result<()> {
                 "acme.echo_invalid_config",
                 "--artifact",
                 invalid_config_artifact_string.as_str(),
-                "--config-json",
-                "{\"api_base_url\":42,\"api_token\":\"secret-token\"}",
+                "--config-json-file",
+                invalid_config_json_string.as_str(),
                 "--json",
             ],
             &cli_env,

@@ -3,12 +3,25 @@ use serde_json::{json, Value};
 
 use crate::*;
 
+const MAX_PLUGIN_CONFIG_JSON_BYTES: usize = 128 * 1024;
+
 pub(crate) fn run_plugins(command: PluginsCommand) -> Result<()> {
     let runtime = build_runtime()?;
     runtime.block_on(run_plugins_async(command))
 }
 
 async fn run_plugins_async(command: PluginsCommand) -> Result<()> {
+    let prevalidated_config = match &command {
+        PluginsCommand::Install { config_json, config_json_file, config_json_stdin, .. }
+        | PluginsCommand::Update { config_json, config_json_file, config_json_stdin, .. } => {
+            Some(parse_config_json_input(
+                config_json.as_deref(),
+                config_json_file.as_deref(),
+                *config_json_stdin,
+            )?)
+        }
+        _ => None,
+    };
     let context =
         client::control_plane::connect_admin_console(app::ConnectionOverrides::default()).await?;
     match command {
@@ -61,7 +74,9 @@ async fn run_plugins_async(command: PluginsCommand) -> Result<()> {
             notes,
             owner_principal,
             tags,
-            config_json,
+            config_json: _,
+            config_json_file: _,
+            config_json_stdin: _,
             clear_config,
             disabled,
             allow_tofu,
@@ -87,7 +102,8 @@ async fn run_plugins_async(command: PluginsCommand) -> Result<()> {
                         storage_prefixes: capability_storage_prefixes,
                         channels: capability_channels,
                     }),
-                    config: parse_config_json(config_json.as_deref())?,
+                    config: prevalidated_config
+                        .expect("plugin install config should be parsed before daemon connection"),
                     clear_config: clear_config.then_some(true),
                     operator: Some(control_plane::PluginOperatorMetadata {
                         display_name,
@@ -116,7 +132,9 @@ async fn run_plugins_async(command: PluginsCommand) -> Result<()> {
             notes,
             owner_principal,
             tags,
-            config_json,
+            config_json: _,
+            config_json_file: _,
+            config_json_stdin: _,
             clear_config,
             disabled,
             allow_tofu,
@@ -142,7 +160,8 @@ async fn run_plugins_async(command: PluginsCommand) -> Result<()> {
                         storage_prefixes: capability_storage_prefixes,
                         channels: capability_channels,
                     }),
-                    config: parse_config_json(config_json.as_deref())?,
+                    config: prevalidated_config
+                        .expect("plugin update config should be parsed before daemon connection"),
                     clear_config: clear_config.then_some(true),
                     operator: Some(control_plane::PluginOperatorMetadata {
                         display_name,
@@ -506,14 +525,301 @@ fn emit_plugin_contract_entries(event: &str, object: Option<&serde_json::Map<Str
     }
 }
 
-fn parse_config_json(raw: Option<&str>) -> Result<Option<Value>> {
-    let Some(raw) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+fn parse_config_json_input(
+    inline_json: Option<&str>,
+    file_path: Option<&str>,
+    stdin_enabled: bool,
+) -> Result<Option<Value>> {
+    let inline_json = inline_json.map(str::trim).filter(|value| !value.is_empty());
+    let file_path = file_path.map(str::trim).filter(|value| !value.is_empty());
+    let source_count = usize::from(inline_json.is_some())
+        + usize::from(file_path.is_some())
+        + usize::from(stdin_enabled);
+    if source_count > 1 {
+        anyhow::bail!(
+            "choose only one plugin config source: --config-json, --config-json-file, or --config-json-stdin"
+        );
+    }
+
+    if let Some(raw) = inline_json {
+        let value = parse_config_json_source(raw, "--config-json")?;
+        if let Some(value) = &value {
+            reject_inline_config_secrets(value)?;
+        }
+        return Ok(value);
+    }
+
+    if let Some(path) = file_path {
+        let raw = read_config_json_file(path)?;
+        return parse_config_json_source(raw.as_str(), "--config-json-file");
+    }
+
+    if stdin_enabled {
+        let raw = read_config_json_stdin()?;
+        return parse_config_json_source(raw.as_str(), "--config-json-stdin");
+    }
+
+    Ok(None)
+}
+
+fn parse_config_json_source(raw: &str, source: &str) -> Result<Option<Value>> {
+    let raw = raw.trim();
+    if raw.is_empty() {
         return Ok(None);
-    };
+    }
+    if raw.len() > MAX_PLUGIN_CONFIG_JSON_BYTES {
+        anyhow::bail!(
+            "{source} exceeds max bytes ({} > {})",
+            raw.len(),
+            MAX_PLUGIN_CONFIG_JSON_BYTES
+        );
+    }
     let value: Value = serde_json::from_str(raw)
-        .with_context(|| "failed to parse --config-json as JSON object")?;
+        .with_context(|| format!("failed to parse {source} as JSON object"))?;
     if !value.is_object() {
-        anyhow::bail!("--config-json must be a JSON object");
+        anyhow::bail!("{source} must be a JSON object");
     }
     Ok(Some(value))
+}
+
+fn read_config_json_file(path_raw: &str) -> Result<String> {
+    let path = Path::new(path_raw);
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("failed to inspect --config-json-file {}", path.display()))?;
+    if metadata.file_type().is_symlink() {
+        anyhow::bail!("--config-json-file must not be a symlink: {}", path.display());
+    }
+    if !metadata.is_file() {
+        anyhow::bail!("--config-json-file must point to a regular file: {}", path.display());
+    }
+    if metadata.len() > MAX_PLUGIN_CONFIG_JSON_BYTES as u64 {
+        anyhow::bail!(
+            "--config-json-file exceeds max bytes ({} > {})",
+            metadata.len(),
+            MAX_PLUGIN_CONFIG_JSON_BYTES
+        );
+    }
+
+    let file = fs::File::open(path)
+        .with_context(|| format!("failed to open --config-json-file {}", path.display()))?;
+    let mut raw = String::new();
+    let mut reader = file.take(MAX_PLUGIN_CONFIG_JSON_BYTES as u64 + 1);
+    reader
+        .read_to_string(&mut raw)
+        .with_context(|| format!("failed to read --config-json-file {}", path.display()))?;
+    ensure_config_json_size(raw.as_str(), "--config-json-file")?;
+    Ok(raw)
+}
+
+fn read_config_json_stdin() -> Result<String> {
+    let stdin = std::io::stdin();
+    let mut raw = String::new();
+    let mut reader = stdin.lock().take(MAX_PLUGIN_CONFIG_JSON_BYTES as u64 + 1);
+    reader.read_to_string(&mut raw).context("failed to read --config-json-stdin from stdin")?;
+    ensure_config_json_size(raw.as_str(), "--config-json-stdin")?;
+    Ok(raw)
+}
+
+fn ensure_config_json_size(raw: &str, source: &str) -> Result<()> {
+    if raw.len() > MAX_PLUGIN_CONFIG_JSON_BYTES {
+        anyhow::bail!(
+            "{source} exceeds max bytes ({} > {})",
+            raw.len(),
+            MAX_PLUGIN_CONFIG_JSON_BYTES
+        );
+    }
+    Ok(())
+}
+
+fn reject_inline_config_secrets(value: &Value) -> Result<()> {
+    let mut rejected_paths = Vec::new();
+    collect_inline_config_secret_paths(value, "$", &mut rejected_paths);
+    if rejected_paths.is_empty() {
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "--config-json contains secret-like inline value(s) at {}. Use --config-json-file, --config-json-stdin, or vault references for secret-bearing plugin config.",
+        rejected_paths.join(", ")
+    );
+}
+
+fn collect_inline_config_secret_paths(value: &Value, path: &str, rejected_paths: &mut Vec<String>) {
+    match value {
+        Value::Object(fields) => {
+            for (key, child) in fields {
+                let child_path = append_json_path(path, key.as_str());
+                if is_inline_secret_config_key(key.as_str())
+                    && contains_plain_inline_secret_value(child)
+                {
+                    rejected_paths.push(child_path);
+                    continue;
+                }
+                collect_inline_config_secret_paths(child, child_path.as_str(), rejected_paths);
+            }
+        }
+        Value::Array(values) => {
+            for (index, child) in values.iter().enumerate() {
+                let child_path = format!("{path}[{index}]");
+                collect_inline_config_secret_paths(child, child_path.as_str(), rejected_paths);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+}
+
+fn is_inline_secret_config_key(key: &str) -> bool {
+    let normalized = key
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch.to_ascii_lowercase() } else { '_' })
+        .collect::<String>();
+    const SECRET_KEY_MARKERS: &[&str] = &[
+        "access_token",
+        "api_key",
+        "apikey",
+        "authorization",
+        "bearer",
+        "client_secret",
+        "cookie",
+        "credential",
+        "password",
+        "private_key",
+        "refresh_token",
+        "secret",
+        "set_cookie",
+        "signature",
+        "token",
+        "vault_ref",
+        "x_amz_credential",
+        "x_amz_security_token",
+        "x_amz_signature",
+        "x_goog_credential",
+        "x_goog_signature",
+    ];
+    SECRET_KEY_MARKERS.iter().any(|marker| normalized.contains(marker))
+}
+
+fn contains_plain_inline_secret_value(value: &Value) -> bool {
+    match value {
+        Value::String(raw) => !is_safe_inline_secret_reference(raw.as_str()),
+        Value::Array(values) => values.iter().any(contains_plain_inline_secret_value),
+        Value::Object(fields) => {
+            !is_structured_vault_reference(fields)
+                && fields.values().any(contains_plain_inline_secret_value)
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => false,
+    }
+}
+
+fn is_structured_vault_reference(fields: &serde_json::Map<String, Value>) -> bool {
+    const ALLOWED_KEYS: &[&str] = &[
+        "kind",
+        "vault_ref",
+        "required",
+        "refresh_policy",
+        "snapshot_policy",
+        "max_bytes",
+        "redaction_label",
+        "display_name",
+    ];
+    if !fields.keys().all(|key| ALLOWED_KEYS.contains(&key.as_str())) {
+        return false;
+    }
+
+    let Some(vault_ref) = fields.get("vault_ref").and_then(Value::as_str) else {
+        return false;
+    };
+    let kind_is_vault =
+        fields.get("kind").and_then(Value::as_str).map(|kind| kind == "vault").unwrap_or(true);
+    kind_is_vault && is_safe_inline_secret_reference(vault_ref)
+}
+
+fn is_safe_inline_secret_reference(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed == REDACTED {
+        return true;
+    }
+    let vault_ref = trimmed
+        .strip_prefix("vault://")
+        .or_else(|| trimmed.strip_prefix("vault:"))
+        .unwrap_or(trimmed);
+    VaultRef::parse(vault_ref).is_ok()
+}
+
+fn append_json_path(parent: &str, key: &str) -> String {
+    if key.chars().all(|ch| ch == '_' || ch == '-' || ch.is_ascii_alphanumeric()) {
+        format!("{parent}.{key}")
+    } else {
+        format!("{parent}[{}]", json!(key))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inline_plugin_config_rejects_plain_secret_values() {
+        let error = parse_config_json_input(
+            Some(r#"{"api_token":"sk-test-secret","timeout_ms":1000}"#),
+            None,
+            false,
+        )
+        .expect_err("plain inline api token should be rejected")
+        .to_string();
+
+        assert!(error.contains("--config-json"), "{error}");
+        assert!(error.contains("$.api_token"), "{error}");
+        assert!(error.contains("--config-json-file"), "{error}");
+        assert!(error.contains("--config-json-stdin"), "{error}");
+    }
+
+    #[test]
+    fn inline_plugin_config_accepts_vault_refs_for_sensitive_keys() {
+        let parsed = parse_config_json_input(
+            Some(r#"{"api_token":"vault://global/openai_api_key","nested":{"client_secret":{"kind":"vault","vault_ref":"global/client_secret"}}}"#),
+            None,
+            false,
+        )
+        .expect("vault-backed inline config should parse")
+        .expect("config should be present");
+
+        assert_eq!(parsed["api_token"], Value::String("vault://global/openai_api_key".to_owned()));
+        assert_eq!(parsed["nested"]["client_secret"]["kind"], Value::String("vault".to_owned()));
+    }
+
+    #[test]
+    fn file_plugin_config_allows_secret_values_outside_argv() {
+        let path = unique_plugin_config_path("plain-secret");
+        std::fs::write(&path, r#"{"api_token":"sk-test-secret"}"#)
+            .expect("write temp plugin config");
+
+        let parsed = parse_config_json_input(
+            None,
+            Some(path.to_str().expect("temp plugin config path should be UTF-8")),
+            false,
+        )
+        .expect("file-backed config should parse")
+        .expect("config should be present");
+
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(parsed["api_token"], Value::String("sk-test-secret".to_owned()));
+    }
+
+    #[test]
+    fn plugin_config_rejects_multiple_sources() {
+        let error = parse_config_json_input(Some("{}"), Some("config.json"), false)
+            .expect_err("multiple config sources should be rejected")
+            .to_string();
+        assert!(error.contains("choose only one plugin config source"), "{error}");
+    }
+
+    fn unique_plugin_config_path(label: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir()
+            .join(format!("palyra-plugin-config-{label}-{}-{nonce}.json", std::process::id()))
+    }
 }

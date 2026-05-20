@@ -88,6 +88,8 @@ fn cli_parity_report_covers_plugin_operability_surface() -> Result<()> {
         "`plugins-install-help.txt`",
         "`plugins-update-help.txt`",
         "`--config-json`",
+        "`--config-json-file`",
+        "`--config-json-stdin`",
         "`--clear-config`",
     ] {
         assert!(report.contains(expected), "CLI parity report should mention {expected}");

@@ -1177,7 +1177,7 @@ category = "nested_surface"
 status = "done"
 summary = "Plugin bind/install workflow."
 required_aliases = ["bind"]
-required_flags = ["artifact", "config-json", "clear-config", "allow-tofu", "allow-untrusted", "json"]
+required_flags = ["artifact", "config-json", "config-json-file", "config-json-stdin", "clear-config", "allow-tofu", "allow-untrusted", "json"]
 
 [entries.snapshot]
 path = "plugins install"
@@ -1233,7 +1233,7 @@ path = "plugins update"
 category = "nested_surface"
 status = "done"
 summary = "Plugin binding update workflow with operator metadata and config contract management."
-required_flags = ["artifact", "config-json", "clear-config", "allow-tofu", "allow-untrusted", "json"]
+required_flags = ["artifact", "config-json", "config-json-file", "config-json-stdin", "clear-config", "allow-tofu", "allow-untrusted", "json"]
 
 [entries.snapshot]
 path = "plugins update"

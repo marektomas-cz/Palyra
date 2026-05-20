@@ -208,6 +208,8 @@ fn parse_plugins_install_legacy_flags_command() {
                     owner_principal: Some("user:ops".to_owned()),
                     tags: vec!["prod".to_owned()],
                     config_json: None,
+                    config_json_file: None,
+                    config_json_stdin: false,
                     clear_config: false,
                     disabled: false,
                     allow_tofu: true,
@@ -317,6 +319,8 @@ fn parse_plugins_install_command() {
                         owner_principal,
                         tags,
                         config_json,
+                        config_json_file,
+                        config_json_stdin,
                         clear_config,
                         disabled,
                         allow_tofu,
@@ -340,6 +344,8 @@ fn parse_plugins_install_command() {
                 assert_eq!(owner_principal.as_deref(), Some("user:ops"));
                 assert_eq!(tags, vec!["prod".to_owned()]);
                 assert_eq!(config_json.as_deref(), Some("{\"api_token\":\"vault:global/openai\"}"));
+                assert_eq!(config_json_file, None);
+                assert!(!config_json_stdin);
                 assert!(!clear_config);
                 assert!(disabled);
                 assert!(!allow_tofu);
@@ -440,6 +446,8 @@ fn parse_plugins_update_command() {
                         owner_principal,
                         tags,
                         config_json,
+                        config_json_file,
+                        config_json_stdin,
                         clear_config,
                         disabled,
                         allow_tofu,
@@ -463,6 +471,8 @@ fn parse_plugins_update_command() {
                 assert_eq!(owner_principal, None);
                 assert!(tags.is_empty());
                 assert_eq!(config_json, None);
+                assert_eq!(config_json_file, None);
+                assert!(!config_json_stdin);
                 assert!(clear_config);
                 assert!(!disabled);
                 assert!(!allow_tofu);
