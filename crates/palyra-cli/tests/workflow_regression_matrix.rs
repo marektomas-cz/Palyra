@@ -390,6 +390,7 @@ fn plugin_operability_workflows_are_regression_tested() -> Result<()> {
                 "run",
                 "--cap-http-host",
                 "api.example.com",
+                "--allow-tofu",
                 "--json",
             ],
             &cli_env,
