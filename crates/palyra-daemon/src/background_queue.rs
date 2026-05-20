@@ -24,8 +24,9 @@ use crate::{
     application::{
         delivery_arbitration::{
             arbitrate_delivery, delivery_review_summary, merge_delivery_progress_updates,
-            resolve_delivery_policy, DeliveryDecision, DeliveryDecisionInput, DeliveryPolicySet,
-            DeliveryProgressUpdate, MergedDeliveryProgress, DELIVERY_ARBITRATION_POLICY_ID,
+            resolve_delivery_policy, DeliveryDecision, DeliveryDecisionAction,
+            DeliveryDecisionInput, DeliveryPolicySet, DeliveryProgressUpdate,
+            MergedDeliveryProgress, DELIVERY_ARBITRATION_POLICY_ID,
         },
         learning::{process_post_run_reflection_task, REFLECTION_TASK_KIND},
     },
@@ -2154,11 +2155,25 @@ async fn append_parent_merge_event(
         "cancelled" => "child_run_cancelled",
         _ => "child_run_merged",
     };
-    let merge_status = merge_status_for_result(run, merge_result);
-    let delegated_state = if run.state == "done" {
+    let (delivery_policy, delivery_decision) =
+        evaluate_delivery_arbitration_for_merge(runtime, task, run, merge_result).await?;
+    let hold_for_review = delivery_holds_merge_result(&delivery_decision);
+    let merge_status = if hold_for_review {
+        DelegationMergeStatus::ApprovalRequired
+    } else {
+        merge_status_for_result(run, merge_result)
+    };
+    let delegated_state = if hold_for_review {
+        DelegatedRunState::WaitingForApproval
+    } else if run.state == "done" {
         DelegatedRunState::Merged
     } else {
         DelegatedRunState::from_child_state(run.state.as_str())
+    };
+    let delegated_reason = if hold_for_review {
+        "child output held for final review"
+    } else {
+        "child output merge preview produced for parent context"
     };
     let delegated_run = build_task_delegated_record(
         task,
@@ -2166,37 +2181,43 @@ async fn append_parent_merge_event(
         delegated_state,
         merge_status,
         event_type,
-        "child output merge preview produced for parent context",
+        delegated_reason,
     )?;
     let graph_explain =
         build_delegated_run_graph(parent_run_id.to_owned(), vec![delegated_run.clone()])
             .explain_json();
-    let (delivery_policy, delivery_decision) =
-        evaluate_delivery_arbitration_for_merge(runtime, task, run, merge_result).await?;
+    let merge_preview = merge_preview_json(run, merge_result);
+    let delegated_run_snapshot = delegated_run.safe_snapshot_json();
+    let payload_context = MergeDeliveryPayloadContext {
+        task_id: task.task_id.as_str(),
+        child_run_id: run.run_id.as_str(),
+        child_state: run.state.as_str(),
+        legacy_event_type: event_type,
+        merge_result,
+        merge_preview: &merge_preview,
+        delegated_run: &delegated_run_snapshot,
+        graph_explain: &graph_explain,
+        delivery_decision: &delivery_decision,
+    };
+    let parent_event_type = if hold_for_review { "child_run_delivery_held" } else { event_type };
     append_parent_tape_event(
         runtime,
         parent_run_id,
-        event_type,
-        json!({
-            "task_id": task.task_id,
-            "child_run_id": run.run_id,
-            "child_state": run.state,
-            "merge_result": merge_result,
-            "merge_preview": merge_preview_json(run, merge_result),
-            "delegated_run": delegated_run.safe_snapshot_json(),
-            "graph_explain": graph_explain,
-            "delivery_review": delivery_review_summary(&merge_result.approval_summary),
-            "delivery_arbitration": delivery_decision.explain_json.clone(),
-        }),
+        parent_event_type,
+        parent_merge_event_payload(&payload_context),
     )
     .await?;
     emit_delivery_arbitration_audit(runtime, task, run, &delivery_policy, &delivery_decision)
         .await?;
-    let (child_event_type, child_state) = match run.state.as_str() {
-        "done" => ("child_completed", "completed"),
-        "failed" => ("child_failed", "failed"),
-        "cancelled" => ("child_failed", "cancelled"),
-        other => ("child_completed", other),
+    let (child_event_type, child_state) = if hold_for_review {
+        ("child_review_required", "waiting_for_approval")
+    } else {
+        match run.state.as_str() {
+            "done" => ("child_completed", "completed"),
+            "failed" => ("child_failed", "failed"),
+            "cancelled" => ("child_failed", "cancelled"),
+            other => ("child_completed", other),
+        }
     };
     append_child_lifecycle_event(
         runtime,
@@ -2205,16 +2226,75 @@ async fn append_parent_merge_event(
         child_event_type,
         child_state,
         true,
-        json!({
-            "legacy_event_type": event_type,
-            "merge_result": merge_result,
-            "merge_preview": merge_preview_json(run, merge_result),
-            "delegated_run": delegated_run.safe_snapshot_json(),
-            "delivery_review": delivery_review_summary(&merge_result.approval_summary),
-            "delivery_arbitration": delivery_decision.explain_json.clone(),
-        }),
+        child_merge_lifecycle_details(&payload_context),
     )
     .await
+}
+
+fn delivery_holds_merge_result(decision: &DeliveryDecision) -> bool {
+    matches!(decision.action, DeliveryDecisionAction::HoldForReview)
+}
+
+struct MergeDeliveryPayloadContext<'a> {
+    task_id: &'a str,
+    child_run_id: &'a str,
+    child_state: &'a str,
+    legacy_event_type: &'a str,
+    merge_result: &'a DelegationMergeResult,
+    merge_preview: &'a Value,
+    delegated_run: &'a Value,
+    graph_explain: &'a Value,
+    delivery_decision: &'a DeliveryDecision,
+}
+
+fn parent_merge_event_payload(context: &MergeDeliveryPayloadContext<'_>) -> Value {
+    if delivery_holds_merge_result(context.delivery_decision) {
+        return json!({
+            "task_id": context.task_id,
+            "child_run_id": context.child_run_id,
+            "child_state": context.child_state,
+            "merge_held": true,
+            "hold_reason": context.delivery_decision.reason.as_str(),
+            "delegated_run": context.delegated_run,
+            "graph_explain": context.graph_explain,
+            "delivery_review": delivery_review_summary(&context.merge_result.approval_summary),
+            "delivery_arbitration": context.delivery_decision.explain_json.clone(),
+        });
+    }
+
+    json!({
+        "task_id": context.task_id,
+        "child_run_id": context.child_run_id,
+        "child_state": context.child_state,
+        "merge_result": context.merge_result,
+        "merge_preview": context.merge_preview,
+        "delegated_run": context.delegated_run,
+        "graph_explain": context.graph_explain,
+        "delivery_review": delivery_review_summary(&context.merge_result.approval_summary),
+        "delivery_arbitration": context.delivery_decision.explain_json.clone(),
+    })
+}
+
+fn child_merge_lifecycle_details(context: &MergeDeliveryPayloadContext<'_>) -> Value {
+    if delivery_holds_merge_result(context.delivery_decision) {
+        return json!({
+            "legacy_event_type": context.legacy_event_type,
+            "merge_held": true,
+            "hold_reason": context.delivery_decision.reason.as_str(),
+            "delegated_run": context.delegated_run,
+            "delivery_review": delivery_review_summary(&context.merge_result.approval_summary),
+            "delivery_arbitration": context.delivery_decision.explain_json.clone(),
+        });
+    }
+
+    json!({
+        "legacy_event_type": context.legacy_event_type,
+        "merge_result": context.merge_result,
+        "merge_preview": context.merge_preview,
+        "delegated_run": context.delegated_run,
+        "delivery_review": delivery_review_summary(&context.merge_result.approval_summary),
+        "delivery_arbitration": context.delivery_decision.explain_json.clone(),
+    })
 }
 
 async fn evaluate_delivery_arbitration_for_merge(
@@ -2599,15 +2679,18 @@ mod tests {
     use super::{
         append_artifact_references, build_background_task_child_run_attach_update,
         build_background_task_running_update, categorize_child_failure,
-        delegated_child_timeout_message, evaluate_delegation_scheduler_limits,
+        child_merge_lifecycle_details, delegated_child_timeout_message,
+        evaluate_delegation_scheduler_limits, parent_merge_event_payload,
         running_delegated_children_for_parent, task_has_in_flight_work_without_target,
-        DelegationSchedulerDecision,
+        DelegationSchedulerDecision, MergeDeliveryPayloadContext,
     };
     use crate::{
+        application::delivery_arbitration::{DeliveryDecision, DeliveryDecisionAction},
         delegation::{
             DelegationExecutionMode, DelegationMemoryScopeKind, DelegationMergeApprovalSummary,
-            DelegationMergeContract, DelegationMergeFailureCategory, DelegationMergeStrategy,
-            DelegationRole, DelegationRuntimeLimits, DelegationSnapshot,
+            DelegationMergeContract, DelegationMergeFailureCategory, DelegationMergeResult,
+            DelegationMergeStrategy, DelegationMergeUsageSummary, DelegationRole,
+            DelegationRuntimeLimits, DelegationSnapshot,
         },
         journal::{OrchestratorBackgroundTaskRecord, OrchestratorRunStatusSnapshot},
     };
@@ -2659,6 +2742,55 @@ mod tests {
             categorize_child_failure(&run, &[], &[], &approval),
             Some(DelegationMergeFailureCategory::Approval)
         );
+    }
+
+    #[test]
+    fn hold_for_review_payloads_withhold_merge_result() {
+        let merge_result = sample_merge_result(true);
+        let decision = DeliveryDecision {
+            action: DeliveryDecisionAction::HoldForReview,
+            reason: "final_review_required".to_owned(),
+            parent_superseded: false,
+            parent_suppressed: false,
+            would_suppress_parent: false,
+            descendant_preferred: false,
+            review_required: true,
+            approval_pending: true,
+            audit_retained: true,
+            explain_json: json!({
+                "action": "hold_for_review",
+                "reason": "final_review_required"
+            }),
+        };
+
+        let merge_preview = json!({ "summary": "unreviewed child output" });
+        let delegated_run = json!({ "state": "waiting_for_approval" });
+        let graph_explain = json!({ "nodes": [] });
+        let context = MergeDeliveryPayloadContext {
+            task_id: "task-1",
+            child_run_id: "child-run",
+            child_state: "done",
+            legacy_event_type: "child_run_merged",
+            merge_result: &merge_result,
+            merge_preview: &merge_preview,
+            delegated_run: &delegated_run,
+            graph_explain: &graph_explain,
+            delivery_decision: &decision,
+        };
+
+        let parent_payload = parent_merge_event_payload(&context);
+        assert_eq!(parent_payload.get("merge_held").and_then(|value| value.as_bool()), Some(true));
+        assert_eq!(
+            parent_payload.get("hold_reason").and_then(|value| value.as_str()),
+            Some("final_review_required")
+        );
+        assert!(parent_payload.get("merge_result").is_none());
+        assert!(parent_payload.get("merge_preview").is_none());
+
+        let child_details = child_merge_lifecycle_details(&context);
+        assert_eq!(child_details.get("merge_held").and_then(|value| value.as_bool()), Some(true));
+        assert!(child_details.get("merge_result").is_none());
+        assert!(child_details.get("merge_preview").is_none());
     }
 
     #[test]
@@ -2997,6 +3129,35 @@ mod tests {
             delegation: None,
             merge_result: None,
             tape_events: 0,
+        }
+    }
+
+    fn sample_merge_result(approval_required: bool) -> DelegationMergeResult {
+        DelegationMergeResult {
+            status: "done".to_owned(),
+            strategy: DelegationMergeStrategy::Summarize,
+            summary_text: "unreviewed child output".to_owned(),
+            warnings: Vec::new(),
+            failure_category: None,
+            approval_required,
+            approval_summary: DelegationMergeApprovalSummary {
+                approval_required,
+                approval_events: 0,
+                approval_pending: approval_required,
+                approval_denied: false,
+            },
+            usage_summary: DelegationMergeUsageSummary {
+                prompt_tokens: 1,
+                completion_tokens: 1,
+                total_tokens: 2,
+                started_at_unix_ms: Some(1),
+                completed_at_unix_ms: Some(2),
+                duration_ms: Some(1),
+            },
+            artifact_references: Vec::new(),
+            tool_trace_summary: Vec::new(),
+            provenance: Vec::new(),
+            merged_at_unix_ms: Some(3),
         }
     }
 
