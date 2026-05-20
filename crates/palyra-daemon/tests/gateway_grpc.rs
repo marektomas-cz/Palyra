@@ -1823,13 +1823,13 @@ async fn grpc_route_message_executes_allowlisted_memory_search_tool() -> Result<
         v: 1,
         source: memory_v1::MemorySource::Manual as i32,
         content_text: "rollback checklist for route tool call".to_owned(),
-        channel: "cli".to_owned(),
-        session_id: Some(common_v1::CanonicalId { ulid: SESSION_ID.to_owned() }),
+        channel: String::new(),
+        session_id: None,
         tags: vec!["route-tool".to_owned()],
         confidence: 0.9,
         ttl_unix_ms: 0,
     });
-    authorize_metadata(ingest_request.metadata_mut())?;
+    authorize_metadata_with_context(ingest_request.metadata_mut(), "user:ops", DEVICE_ID, None)?;
     let ingested_memory_id = memory_client
         .ingest_memory(ingest_request)
         .await
@@ -1882,7 +1882,8 @@ async fn grpc_route_message_executes_allowlisted_memory_search_tool() -> Result<
     );
     assert!(
         outbound.text.contains(ingested_memory_id.as_str()),
-        "tool output preview should include ingested memory id to prove runtime execution"
+        "tool output preview should include ingested memory id to prove runtime execution; outbound={}",
+        outbound.text
     );
     assert_eq!(
         request_count.load(Ordering::Relaxed),
@@ -5489,7 +5490,7 @@ async fn grpc_run_stream_executes_memory_recall_tool_and_emits_memory_attestatio
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn grpc_run_stream_memory_search_principal_scope_crosses_channels() -> Result<()> {
+async fn grpc_run_stream_memory_search_principal_scope_uses_durable_memory() -> Result<()> {
     let response_body = openai_tool_call_response(
         "palyra.memory.search",
         &serde_json::json!({
@@ -5518,10 +5519,31 @@ async fn grpc_run_stream_memory_search_principal_scope_crosses_channels() -> Res
             .await
             .context("failed to connect memory gRPC client")?;
 
+    let mut durable_ingest = tonic::Request::new(memory_v1::IngestMemoryRequest {
+        v: 1,
+        source: memory_v1::MemorySource::Manual as i32,
+        content_text: "cross-channel marker durable principal".to_owned(),
+        channel: String::new(),
+        session_id: None,
+        tags: Vec::new(),
+        confidence: 0.9,
+        ttl_unix_ms: 0,
+    });
+    authorize_metadata_with_context(durable_ingest.metadata_mut(), "user:ops", DEVICE_ID, None)?;
+    let durable_memory_id = memory_client
+        .ingest_memory(durable_ingest)
+        .await
+        .context("failed to ingest durable memory for principal-scope test")?
+        .into_inner()
+        .item
+        .and_then(|item| item.memory_id)
+        .map(|id| id.ulid)
+        .context("durable ingest should return memory id")?;
+
     let mut cli_ingest = tonic::Request::new(memory_v1::IngestMemoryRequest {
         v: 1,
         source: memory_v1::MemorySource::Manual as i32,
-        content_text: "cross-channel marker cli".to_owned(),
+        content_text: "cross-channel marker cli scoped".to_owned(),
         channel: "cli".to_owned(),
         session_id: Some(common_v1::CanonicalId { ulid: SESSION_ID.to_owned() }),
         tags: Vec::new(),
@@ -5532,17 +5554,17 @@ async fn grpc_run_stream_memory_search_principal_scope_crosses_channels() -> Res
     let cli_memory_id = memory_client
         .ingest_memory(cli_ingest)
         .await
-        .context("failed to ingest cli memory for principal-scope test")?
+        .context("failed to ingest cli-scoped memory for principal-scope test")?
         .into_inner()
         .item
         .and_then(|item| item.memory_id)
         .map(|id| id.ulid)
-        .context("cli ingest should return memory id")?;
+        .context("cli-scoped ingest should return memory id")?;
 
     let mut slack_ingest = tonic::Request::new(memory_v1::IngestMemoryRequest {
         v: 1,
         source: memory_v1::MemorySource::Manual as i32,
-        content_text: "cross-channel marker slack".to_owned(),
+        content_text: "cross-channel marker slack scoped".to_owned(),
         channel: "slack".to_owned(),
         session_id: Some(common_v1::CanonicalId { ulid: SESSION_ID.to_owned() }),
         tags: Vec::new(),
@@ -5557,12 +5579,12 @@ async fn grpc_run_stream_memory_search_principal_scope_crosses_channels() -> Res
     let slack_memory_id = memory_client
         .ingest_memory(slack_ingest)
         .await
-        .context("failed to ingest slack memory for principal-scope test")?
+        .context("failed to ingest slack-scoped memory for principal-scope test")?
         .into_inner()
         .item
         .and_then(|item| item.memory_id)
         .map(|id| id.ulid)
-        .context("slack ingest should return memory id")?;
+        .context("slack-scoped ingest should return memory id")?;
 
     let mut gateway_client =
         gateway_v1::gateway_service_client::GatewayServiceClient::connect(endpoint)
@@ -5599,12 +5621,16 @@ async fn grpc_run_stream_memory_search_principal_scope_crosses_channels() -> Res
                     .filter_map(|hit| hit.get("memory_id").and_then(Value::as_str))
                     .collect::<Vec<_>>();
                 assert!(
-                    returned_ids.contains(&cli_memory_id.as_str()),
-                    "principal-scope tool search from cli channel should include cli memory"
+                    returned_ids.contains(&durable_memory_id.as_str()),
+                    "principal-scope tool search should include durable principal memory"
                 );
                 assert!(
-                    returned_ids.contains(&slack_memory_id.as_str()),
-                    "principal-scope tool search should include same-principal memory from other channels"
+                    !returned_ids.contains(&cli_memory_id.as_str()),
+                    "principal-scope tool search must not include cli-scoped scratch memory"
+                );
+                assert!(
+                    !returned_ids.contains(&slack_memory_id.as_str()),
+                    "principal-scope tool search must not include another channel's scoped memory"
                 );
                 saw_memory_result = true;
             }
@@ -5613,7 +5639,7 @@ async fn grpc_run_stream_memory_search_principal_scope_crosses_channels() -> Res
 
     assert!(
         saw_memory_result,
-        "principal-scope memory tool search should produce a successful tool result"
+        "principal-scope memory tool search should produce a successful durable-memory tool result"
     );
     server_handle.join().expect("scripted openai server thread should exit");
     Ok(())
