@@ -474,104 +474,7 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
             last_error: binding_error,
             observed_at_unix_ms,
         };
-        match command_registry.parse_text(input.text.as_str()) {
-            ChannelCommandParseOutcome::NotCommand => {}
-            ChannelCommandParseOutcome::Malformed(error) => {
-                self.state.counters.channel_messages_rejected.fetch_add(1, Ordering::Relaxed);
-                let response =
-                    build_malformed_command_response(&error, &command_scope, &command_runtime);
-                let session_id = Ulid::new().to_string();
-                let run_id = Ulid::new().to_string();
-                let _ = record_message_router_journal_event(
-                    &self.state,
-                    &context,
-                    session_id.as_str(),
-                    run_id.as_str(),
-                    "channel.command.rejected",
-                    common_v1::journal_event::EventActor::System as i32,
-                    response.audit_json.clone(),
-                )
-                .await;
-                return Ok(Response::new(command_route_response(
-                    &input,
-                    response.text,
-                    response.code,
-                    retry_attempt,
-                    self.state.channel_router.queue_depth() as u32,
-                )));
-            }
-            ChannelCommandParseOutcome::Parsed(invocation) => {
-                let policy_resource = format!("channel:{}", input.channel);
-                let response = match authorize_message_action(
-                    context.principal.as_str(),
-                    invocation.command.policy_action(),
-                    policy_resource.as_str(),
-                    Some(input.channel.as_str()),
-                    None,
-                    None,
-                ) {
-                    Ok(()) => build_channel_command_response(
-                        &invocation,
-                        &command_scope,
-                        &command_runtime,
-                    ),
-                    Err(error) => {
-                        self.state.record_denied();
-                        build_policy_denied_command_response(
-                            &invocation,
-                            &command_scope,
-                            &command_runtime,
-                            error.message(),
-                        )
-                    }
-                };
-                if response.ok {
-                    self.state.record_channel_message_routed();
-                } else {
-                    self.state.counters.channel_messages_rejected.fetch_add(1, Ordering::Relaxed);
-                }
-                let session_id = Ulid::new().to_string();
-                let run_id = Ulid::new().to_string();
-                let _ = record_message_router_journal_event(
-                    &self.state,
-                    &context,
-                    session_id.as_str(),
-                    run_id.as_str(),
-                    "message.received",
-                    common_v1::journal_event::EventActor::User as i32,
-                    json!({
-                        "event": "message.received",
-                        "envelope_id": input.envelope_id.clone(),
-                        "channel": input.channel.clone(),
-                        "is_channel_command": true,
-                        "config_hash": route_config_hash.clone(),
-                        "actor": {
-                            "connector_channel": actor_connector.clone(),
-                            "gateway_principal": actor_gateway_principal.clone(),
-                            "gateway_device_id": actor_gateway_device_id.clone(),
-                        }
-                    }),
-                )
-                .await;
-                let _ = record_message_router_journal_event(
-                    &self.state,
-                    &context,
-                    session_id.as_str(),
-                    run_id.as_str(),
-                    "channel.command.executed",
-                    common_v1::journal_event::EventActor::System as i32,
-                    response.audit_json.clone(),
-                )
-                .await;
-                return Ok(Response::new(command_route_response(
-                    &input,
-                    response.text,
-                    response.code,
-                    retry_attempt,
-                    self.state.channel_router.queue_depth() as u32,
-                )));
-            }
-        }
+        let command_parse_outcome = command_registry.parse_text(input.text.as_str());
 
         if input.is_direct_message {
             if let Some(pairing_code) = extract_pairing_code_command(input.text.as_str()) {
@@ -962,6 +865,115 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
             }
             RouteOutcome::Routed(routed) => {
                 let ChannelRoutedMessage { plan, lease: route_lease } = *routed;
+                match command_parse_outcome {
+                    ChannelCommandParseOutcome::NotCommand => {}
+                    ChannelCommandParseOutcome::Malformed(error) => {
+                        drop(route_lease);
+                        self.state
+                            .counters
+                            .channel_messages_rejected
+                            .fetch_add(1, Ordering::Relaxed);
+                        let response = build_malformed_command_response(
+                            &error,
+                            &command_scope,
+                            &command_runtime,
+                        );
+                        let session_id = Ulid::new().to_string();
+                        let run_id = Ulid::new().to_string();
+                        let _ = record_message_router_journal_event(
+                            &self.state,
+                            &context,
+                            session_id.as_str(),
+                            run_id.as_str(),
+                            "channel.command.rejected",
+                            common_v1::journal_event::EventActor::System as i32,
+                            response.audit_json.clone(),
+                        )
+                        .await;
+                        return Ok(Response::new(command_route_response(
+                            &input,
+                            response.text,
+                            response.code,
+                            retry_attempt,
+                            self.state.channel_router.queue_depth() as u32,
+                        )));
+                    }
+                    ChannelCommandParseOutcome::Parsed(invocation) => {
+                        drop(route_lease);
+                        let policy_resource = format!("channel:{}", input.channel);
+                        let response = match authorize_message_action(
+                            context.principal.as_str(),
+                            invocation.command.policy_action(),
+                            policy_resource.as_str(),
+                            Some(input.channel.as_str()),
+                            None,
+                            None,
+                        ) {
+                            Ok(()) => build_channel_command_response(
+                                &invocation,
+                                &command_scope,
+                                &command_runtime,
+                            ),
+                            Err(error) => {
+                                self.state.record_denied();
+                                build_policy_denied_command_response(
+                                    &invocation,
+                                    &command_scope,
+                                    &command_runtime,
+                                    error.message(),
+                                )
+                            }
+                        };
+                        if response.ok {
+                            self.state.record_channel_message_routed();
+                        } else {
+                            self.state
+                                .counters
+                                .channel_messages_rejected
+                                .fetch_add(1, Ordering::Relaxed);
+                        }
+                        let session_id = Ulid::new().to_string();
+                        let run_id = Ulid::new().to_string();
+                        let _ = record_message_router_journal_event(
+                            &self.state,
+                            &context,
+                            session_id.as_str(),
+                            run_id.as_str(),
+                            "message.received",
+                            common_v1::journal_event::EventActor::User as i32,
+                            json!({
+                                "event": "message.received",
+                                "envelope_id": input.envelope_id.clone(),
+                                "channel": input.channel.clone(),
+                                "is_channel_command": true,
+                                "config_hash": route_config_hash.clone(),
+                                "actor": {
+                                    "connector_channel": actor_connector.clone(),
+                                    "gateway_principal": actor_gateway_principal.clone(),
+                                    "gateway_device_id": actor_gateway_device_id.clone(),
+                                }
+                            }),
+                        )
+                        .await;
+                        let _ = record_message_router_journal_event(
+                            &self.state,
+                            &context,
+                            session_id.as_str(),
+                            run_id.as_str(),
+                            "channel.command.executed",
+                            common_v1::journal_event::EventActor::System as i32,
+                            response.audit_json.clone(),
+                        )
+                        .await;
+                        return Ok(Response::new(command_route_response(
+                            &input,
+                            response.text,
+                            response.code,
+                            retry_attempt,
+                            self.state.channel_router.queue_depth() as u32,
+                        )));
+                    }
+                }
                 let response = handle_routed_route_message(
                     &self.state,
                     &context,

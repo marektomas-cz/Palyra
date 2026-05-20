@@ -481,7 +481,7 @@ async fn grpc_route_message_channel_command_returns_scoped_status_without_provid
         .context("failed to connect gRPC client")?;
 
     let adapter = FakeChannelAdapter::default();
-    let response = adapter.inject_message(&mut client, "/palyra status", false).await?;
+    let response = adapter.inject_message(&mut client, "/palyra status", true).await?;
 
     assert!(response.accepted, "channel command should return an immediate response");
     assert!(!response.queued_for_retry);
@@ -509,6 +509,57 @@ async fn grpc_route_message_channel_command_returns_scoped_status_without_provid
                 && payload.get("command").and_then(Value::as_str) == Some("status")
         }),
         "command flow should persist an evaluated command event"
+    );
+
+    server_handle.join().expect("scripted openai server thread should exit");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn grpc_route_message_channel_command_obeys_router_mention_policy() -> Result<()> {
+    let (openai_base_url, request_count, server_handle) = spawn_scripted_openai_server(Vec::new())?;
+    let (child, admin_port, grpc_port, journal_db_path, config_path) =
+        spawn_palyrad_with_openai_provider_and_channel_router(
+            openai_base_url.as_str(),
+            OPENAI_API_KEY,
+        )?;
+    let _config_guard = TempFileGuard::new(config_path);
+    let mut daemon = ChildGuard::new(child);
+    wait_for_health(admin_port, daemon.child_mut())?;
+
+    let endpoint = format!("http://127.0.0.1:{grpc_port}");
+    let mut client = gateway_v1::gateway_service_client::GatewayServiceClient::connect(endpoint)
+        .await
+        .context("failed to connect gRPC client")?;
+
+    let adapter = FakeChannelAdapter::default();
+    let response = adapter.inject_message(&mut client, "/palyra status", false).await?;
+
+    assert!(!response.accepted, "channel command must be blocked by router policy");
+    assert!(!response.queued_for_retry);
+    assert_eq!(response.decision_reason, "no_matching_mention_or_dm_policy");
+    assert!(response.outputs.is_empty(), "blocked command must not emit an outbound reply");
+    assert_eq!(response.route_key, "");
+    assert_eq!(
+        request_count.load(Ordering::Relaxed),
+        0,
+        "blocked command should not call the provider"
+    );
+
+    let message_events = load_message_router_journal_events(&journal_db_path)?;
+    assert!(
+        message_events.iter().any(|payload| {
+            payload.get("event").and_then(Value::as_str) == Some("message.rejected")
+                && payload.get("reason").and_then(Value::as_str)
+                    == Some("no_matching_mention_or_dm_policy")
+        }),
+        "blocked command should be journaled as a router policy rejection"
+    );
+    assert!(
+        !message_events.iter().any(|payload| {
+            payload.get("event").and_then(Value::as_str) == Some("channel.command.executed")
+        }),
+        "router-blocked commands must not reach command execution"
     );
 
     server_handle.join().expect("scripted openai server thread should exit");
@@ -562,7 +613,7 @@ async fn grpc_route_message_persists_conversation_binding_and_command_resolves_i
         .map(|value| value.ulid.clone())
         .context("routed message should resolve a session")?;
 
-    let status = adapter.inject_message(&mut client, "/palyra status", false).await?;
+    let status = adapter.inject_message(&mut client, "/palyra status", true).await?;
     let status_text = status
         .outputs
         .first()
