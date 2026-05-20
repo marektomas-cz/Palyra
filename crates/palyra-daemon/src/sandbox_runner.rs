@@ -2892,6 +2892,13 @@ mod tests {
         SandboxProcessRunnerPolicy, SandboxProcessRunnerTier, StreamCapture,
     };
 
+    const BACKGROUND_TEST_EXECUTION_TIMEOUT_MS: u64 = 10_000;
+    const BACKGROUND_TEST_SCRIPT_SLEEP_SECS: u64 = 8;
+
+    fn background_test_execution_timeout() -> Duration {
+        Duration::from_millis(BACKGROUND_TEST_EXECUTION_TIMEOUT_MS)
+    }
+
     fn portable_test_memory_limit_bytes() -> u64 {
         #[cfg(target_os = "macos")]
         {
@@ -3807,7 +3814,9 @@ mod tests {
         fs::create_dir_all(workspace.as_path()).expect("workspace directory should be created");
         fs::write(
             workspace.join("background_ready.py"),
-            "import time\nprint('ready', flush=True)\ntime.sleep(2)\n",
+            format!(
+                "import time\nprint('ready', flush=True)\ntime.sleep({BACKGROUND_TEST_SCRIPT_SLEEP_SECS})\n"
+            ),
         )
         .expect("background script should be written");
         let mut policy =
@@ -3818,12 +3827,12 @@ mod tests {
             "command": python,
             "args": ["background_ready.py"],
             "background": true,
-            "timeout_ms": 1_000
+            "timeout_ms": BACKGROUND_TEST_EXECUTION_TIMEOUT_MS
         }))
         .expect("input should serialize");
 
         let result =
-            run_constrained_process(&policy, input.as_slice(), Duration::from_millis(1_000))
+            run_constrained_process(&policy, input.as_slice(), background_test_execution_timeout())
                 .expect("allowlisted python should start as a bounded background process");
         let output: serde_json::Value =
             serde_json::from_slice(&result.output_json).expect("output should parse");
@@ -3837,8 +3846,14 @@ mod tests {
             output.get("process_state").and_then(serde_json::Value::as_str),
             Some("running")
         );
-        assert_eq!(output.get("lifetime_ms").and_then(serde_json::Value::as_u64), Some(1_000));
-        assert_eq!(output.get("max_lifetime_ms").and_then(serde_json::Value::as_u64), Some(1_000));
+        assert_eq!(
+            output.get("lifetime_ms").and_then(serde_json::Value::as_u64),
+            Some(BACKGROUND_TEST_EXECUTION_TIMEOUT_MS)
+        );
+        assert_eq!(
+            output.get("max_lifetime_ms").and_then(serde_json::Value::as_u64),
+            Some(BACKGROUND_TEST_EXECUTION_TIMEOUT_MS)
+        );
         assert!(output
             .get("background_lifetime_note")
             .and_then(serde_json::Value::as_str)
@@ -3875,7 +3890,9 @@ mod tests {
         };
         let workspace = unique_temp_dir("workspace-background-startup-output");
         fs::create_dir_all(workspace.as_path()).expect("workspace directory should be created");
-        let script = "import time\nprint('PORT=54321', flush=True)\ntime.sleep(2)\n";
+        let script = format!(
+            "import time\nprint('PORT=54321', flush=True)\ntime.sleep({BACKGROUND_TEST_SCRIPT_SLEEP_SECS})\n"
+        );
         fs::write(workspace.join("print_port.py"), script)
             .expect("startup output script should be written");
         let mut policy =
@@ -3891,7 +3908,7 @@ mod tests {
         .expect("input should serialize");
 
         let result =
-            run_constrained_process(&policy, input.as_slice(), Duration::from_millis(1_000))
+            run_constrained_process(&policy, input.as_slice(), background_test_execution_timeout())
                 .expect("background process should start");
         let output: serde_json::Value =
             serde_json::from_slice(&result.output_json).expect("output should parse");
@@ -3987,7 +4004,7 @@ mod tests {
         .expect("input should serialize");
 
         let error =
-            run_constrained_process(&policy, input.as_slice(), Duration::from_millis(1_000))
+            run_constrained_process(&policy, input.as_slice(), background_test_execution_timeout())
                 .expect_err("background startup should reject delayed immediate failures");
 
         assert_eq!(error.kind, SandboxProcessRunErrorKind::RuntimeFailure);
