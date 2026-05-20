@@ -174,6 +174,7 @@ struct BrowserControlPlaneSnapshot {
     reachable: bool,
     browser_enabled: Option<bool>,
     error: Option<String>,
+    auth_probe_skipped: bool,
 }
 
 struct BrowserOpenArgs {
@@ -606,7 +607,7 @@ async fn run_browser_status(
         fetch_browser_health(resolved.connection.health_base_url.as_str()).await.ok();
     let grpc_error =
         probe_browser_grpc(&resolved.connection).await.err().map(|error| error.to_string());
-    let control_plane = probe_browser_control_plane_policy().await;
+    let control_plane = browser_status_control_plane_policy_snapshot();
     let browserd_reachable = health_response.is_some() || grpc_error.is_none();
     let lifecycle_running =
         effective_browser_lifecycle_running(cli_lifecycle_running, browserd_reachable);
@@ -3017,25 +3018,15 @@ fn ensure_browser_service_enabled(
     );
 }
 
-async fn probe_browser_control_plane_policy() -> BrowserControlPlaneSnapshot {
-    match client::control_plane::connect_admin_console(app::ConnectionOverrides::default()).await {
-        Ok(context) => match context.client.get_diagnostics().await {
-            Ok(diagnostics) => BrowserControlPlaneSnapshot {
-                reachable: true,
-                browser_enabled: diagnostics.pointer("/browserd/enabled").and_then(Value::as_bool),
-                error: None,
-            },
-            Err(error) => BrowserControlPlaneSnapshot {
-                reachable: true,
-                browser_enabled: None,
-                error: Some(sanitize_diagnostic_error(error.to_string().as_str())),
-            },
-        },
-        Err(error) => BrowserControlPlaneSnapshot {
-            reachable: false,
-            browser_enabled: None,
-            error: Some(sanitize_diagnostic_error(error.to_string().as_str())),
-        },
+fn browser_status_control_plane_policy_snapshot() -> BrowserControlPlaneSnapshot {
+    BrowserControlPlaneSnapshot {
+        reachable: false,
+        browser_enabled: None,
+        error: Some(
+            "authenticated gateway diagnostics skipped by `palyra browser status` to avoid sending admin credentials; use `palyra status --json` for authenticated runtime diagnostics"
+                .to_owned(),
+        ),
+        auth_probe_skipped: true,
     }
 }
 
@@ -3074,7 +3065,11 @@ fn browser_status_warnings(
                 .to_owned(),
         );
     }
-    if policy.configured_enabled && browserd_reachable && !control_plane.reachable {
+    if policy.configured_enabled
+        && browserd_reachable
+        && !control_plane.reachable
+        && !control_plane.auth_probe_skipped
+    {
         warnings.push(
             "browserd is reachable, but the gateway runtime policy could not be verified; if browser service was enabled while the gateway was already running, restart the gateway before using browser action commands"
                 .to_owned(),
@@ -3642,13 +3637,14 @@ fn format_browser_status_text(payload: &BrowserStatusPayload) -> String {
         ));
     }
     lines.push(format!(
-        "browser.control_plane reachable={} browser_enabled={} error={}",
+        "browser.control_plane reachable={} browser_enabled={} auth_probe_skipped={} error={}",
         payload.control_plane.reachable,
         payload
             .control_plane
             .browser_enabled
             .map(|value| value.to_string())
             .unwrap_or_else(|| "-".to_owned()),
+        payload.control_plane.auth_probe_skipped,
         payload.control_plane.error.as_deref().unwrap_or("-"),
     ));
     for warning in &payload.warnings {
@@ -4226,13 +4222,14 @@ mod tests {
         browser_service_stop_complete, browser_service_stop_pending_reasons,
         browser_session_handle_text, browser_setup_gateway_reload_warning,
         browser_snapshot_emits_json_to_stdout, browser_start_auth_token_warnings,
-        browser_status_warnings, effective_browser_lifecycle_running,
-        ensure_browser_command_success, ensure_browser_gateway_auth_token_alignment,
-        ensure_browser_service_enabled, ensure_browser_start_preflight,
-        format_browser_console_text, format_browser_session_summary_text,
-        normalize_session_scoped_output, redact_browser_output_value, session_summary_value,
-        BrowserControlPlaneSnapshot, BrowserOutputMode, BrowserPolicySnapshot,
-        BrowserResolvedConfig, BrowserServiceConnection, BrowserServiceMetadata,
+        browser_status_control_plane_policy_snapshot, browser_status_warnings,
+        effective_browser_lifecycle_running, ensure_browser_command_success,
+        ensure_browser_gateway_auth_token_alignment, ensure_browser_service_enabled,
+        ensure_browser_start_preflight, format_browser_console_text,
+        format_browser_session_summary_text, normalize_session_scoped_output,
+        redact_browser_output_value, session_summary_value, BrowserControlPlaneSnapshot,
+        BrowserOutputMode, BrowserPolicySnapshot, BrowserResolvedConfig, BrowserServiceConnection,
+        BrowserServiceMetadata,
     };
     use crate::{args::BrowserCommand, browser_v1, common_v1};
     use palyra_control_plane as control_plane;
@@ -4813,6 +4810,44 @@ mod tests {
     }
 
     #[test]
+    fn browser_status_control_plane_probe_skips_admin_credentials() {
+        let snapshot = browser_status_control_plane_policy_snapshot();
+
+        assert!(!snapshot.reachable);
+        assert!(snapshot.auth_probe_skipped);
+        assert!(snapshot.browser_enabled.is_none());
+        assert!(
+            snapshot
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("avoid sending admin credentials")),
+            "skipped browser status probe should explain why authenticated diagnostics are absent: {snapshot:?}"
+        );
+    }
+
+    #[test]
+    fn browser_status_skipped_control_plane_probe_does_not_emit_restart_warning() {
+        let mut policy = disabled_policy();
+        policy.configured_enabled = true;
+        policy.browser_tools_allowlisted = true;
+        policy.missing_browser_tools = Vec::new();
+        let warnings = browser_status_warnings(
+            &policy,
+            &browser_status_control_plane_policy_snapshot(),
+            true,
+            None,
+            None,
+        );
+
+        assert!(
+            !warnings
+                .iter()
+                .any(|warning| warning.contains("gateway runtime policy could not be verified")),
+            "skipping authenticated diagnostics should not emit the stale-gateway warning by itself: {warnings:?}"
+        );
+    }
+
+    #[test]
     fn browserd_state_key_validation_requires_base64_32_bytes() {
         super::validate_browserd_state_encryption_key(
             "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
@@ -4841,6 +4876,7 @@ mod tests {
                 reachable: true,
                 browser_enabled: Some(false),
                 error: None,
+                auth_probe_skipped: false,
             },
             true,
             None,
@@ -4875,6 +4911,7 @@ mod tests {
                 reachable: true,
                 browser_enabled: Some(true),
                 error: None,
+                auth_probe_skipped: false,
             },
             true,
             None,
@@ -4912,6 +4949,7 @@ mod tests {
                 reachable: true,
                 browser_enabled: Some(true),
                 error: None,
+                auth_probe_skipped: false,
             },
             true,
             None,
@@ -4990,6 +5028,7 @@ mod tests {
                 reachable: true,
                 browser_enabled: Some(true),
                 error: None,
+                auth_probe_skipped: false,
             },
             true,
             Some(&metadata),
