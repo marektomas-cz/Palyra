@@ -125,24 +125,6 @@ fn consume_admin_rate_limit(state: &AppState, remote_addr: SocketAddr) -> bool {
     consume_admin_rate_limit_with_now(&state.admin_rate_limit, remote_addr.ip(), Instant::now())
 }
 
-pub(crate) fn is_loopback_admin_rate_limit_exempt(
-    remote_ip: IpAddr,
-    method: &Method,
-    path: &str,
-) -> bool {
-    if !remote_ip.is_loopback() {
-        return false;
-    }
-    matches!(
-        (method, path),
-        (&Method::POST, "/console/v1/auth/login")
-            | (&Method::GET, "/console/v1/auth/session")
-            | (&Method::POST, "/console/v1/auth/browser-handoff")
-            | (&Method::GET, "/console/v1/auth/browser-handoff/consume")
-            | (&Method::POST, "/console/v1/auth/browser-handoff/session")
-    )
-}
-
 fn admin_rate_limit_budget(remote_ip: IpAddr) -> u32 {
     if remote_ip.is_loopback() {
         return ADMIN_RATE_LIMIT_LOOPBACK_MAX_REQUESTS_PER_WINDOW;
@@ -195,9 +177,7 @@ pub(crate) async fn admin_rate_limit_middleware(
 ) -> Response {
     let method = request.method().clone();
     let path = request.uri().path().to_owned();
-    if !is_loopback_admin_rate_limit_exempt(remote_addr.ip(), &method, path.as_str())
-        && !consume_admin_rate_limit(&state, remote_addr)
-    {
+    if !consume_admin_rate_limit(&state, remote_addr) {
         state.runtime.record_denied();
         let response = runtime_status_response(tonic::Status::resource_exhausted(format!(
             "admin API rate limit exceeded for {}",
@@ -332,49 +312,4 @@ pub(crate) async fn canvas_rate_limit_middleware(
         )));
     }
     next.run(request).await
-}
-
-#[cfg(test)]
-mod tests {
-    use std::{net::IpAddr, str::FromStr};
-
-    use axum::http::Method;
-
-    use super::is_loopback_admin_rate_limit_exempt;
-
-    #[test]
-    fn admin_rate_limit_exempts_loopback_console_auth_bootstrap_paths() {
-        let loopback_ip = IpAddr::from_str("127.0.0.1").expect("IP literal should parse");
-        for (method, path) in [
-            (Method::POST, "/console/v1/auth/login"),
-            (Method::GET, "/console/v1/auth/session"),
-            (Method::POST, "/console/v1/auth/browser-handoff"),
-            (Method::GET, "/console/v1/auth/browser-handoff/consume"),
-            (Method::POST, "/console/v1/auth/browser-handoff/session"),
-        ] {
-            assert!(
-                is_loopback_admin_rate_limit_exempt(loopback_ip, &method, path),
-                "loopback auth bootstrap path should bypass the generic admin rate limit: {} {}",
-                method,
-                path
-            );
-        }
-
-        assert!(
-            !is_loopback_admin_rate_limit_exempt(
-                loopback_ip,
-                &Method::GET,
-                "/console/v1/diagnostics"
-            ),
-            "non-auth console routes must remain rate limited on loopback"
-        );
-        assert!(
-            !is_loopback_admin_rate_limit_exempt(
-                IpAddr::from_str("203.0.113.10").expect("IP literal should parse"),
-                &Method::POST,
-                "/console/v1/auth/browser-handoff"
-            ),
-            "remote clients must not inherit the loopback auth bootstrap exemption"
-        );
-    }
 }
