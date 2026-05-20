@@ -10,6 +10,9 @@ const DEFAULT_PROVIDER_MAX_ACTIVE: u16 = 4;
 const DEFAULT_CREDENTIAL_MAX_ACTIVE: u16 = 2;
 const RECENT_LEASE_EVENTS_LIMIT: usize = 24;
 const LEASE_WAIT_POLL_MS: u64 = 25;
+const DEFAULT_RATE_LIMIT_RETRY_AFTER_MS: u64 = 30_000;
+const DEFAULT_TRANSIENT_FAILURE_RETRY_AFTER_MS: u64 = 5_000;
+const DEFAULT_USER_ACTION_RETRY_AFTER_MS: u64 = 30_000;
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -702,10 +705,14 @@ struct ProviderCredentialFeedbackState {
 impl ProviderCredentialFeedbackState {
     fn from_request(request: ProviderCredentialFeedbackRequest) -> Self {
         let default_retry_after_ms = match request.kind {
-            ProviderCredentialFeedbackKind::RateLimited => Some(30_000),
-            ProviderCredentialFeedbackKind::TransientFailure => Some(5_000),
+            ProviderCredentialFeedbackKind::RateLimited => Some(DEFAULT_RATE_LIMIT_RETRY_AFTER_MS),
+            ProviderCredentialFeedbackKind::TransientFailure => {
+                Some(DEFAULT_TRANSIENT_FAILURE_RETRY_AFTER_MS)
+            }
             ProviderCredentialFeedbackKind::QuotaExhausted
-            | ProviderCredentialFeedbackKind::AuthFailed => None,
+            | ProviderCredentialFeedbackKind::AuthFailed => {
+                Some(DEFAULT_USER_ACTION_RETRY_AFTER_MS)
+            }
             ProviderCredentialFeedbackKind::Success => None,
         };
         let retry_after_ms = request.retry_after_ms.or(default_retry_after_ms);
@@ -725,7 +732,7 @@ impl ProviderCredentialFeedbackState {
     fn is_active(&self, now_unix_ms: i64) -> bool {
         match self.blocked_until_unix_ms {
             Some(blocked_until_unix_ms) => blocked_until_unix_ms > now_unix_ms,
-            None => true,
+            None => false,
         }
     }
 
@@ -878,8 +885,9 @@ fn decrement_waiting(
 mod tests {
     use super::{
         LeasePreviewState, LeasePriority, ProviderCredentialFeedbackKind,
-        ProviderCredentialFeedbackRequest, ProviderLeaseAcquireError, ProviderLeaseAcquireRequest,
-        ProviderLeaseManager, ProviderLeasePreviewRequest,
+        ProviderCredentialFeedbackRequest, ProviderCredentialFeedbackState,
+        ProviderLeaseAcquireError, ProviderLeaseAcquireRequest, ProviderLeaseManager,
+        ProviderLeasePreviewRequest, DEFAULT_USER_ACTION_RETRY_AFTER_MS,
     };
     use tokio::time::{sleep, Duration};
 
@@ -1188,5 +1196,81 @@ mod tests {
         });
         assert_eq!(ready.state, LeasePreviewState::Ready);
         assert!(manager.snapshot().credential_feedback.is_empty());
+    }
+
+    #[tokio::test]
+    async fn lease_manager_bounds_user_action_feedback_without_retry_after() {
+        let manager = ProviderLeaseManager::new(2, 2);
+        let now_unix_ms = crate::gateway::current_unix_ms();
+        manager.record_credential_feedback(ProviderCredentialFeedbackRequest {
+            provider_id: "openai".to_owned(),
+            credential_id: "cred-a".to_owned(),
+            kind: ProviderCredentialFeedbackKind::QuotaExhausted,
+            retry_after_ms: None,
+            reason: "provider returned quota exhaustion without retry-after".to_owned(),
+            observed_at_unix_ms: now_unix_ms,
+        });
+
+        let preview = manager.preview(ProviderLeasePreviewRequest {
+            provider_id: "openai",
+            credential_id: "cred-a",
+            priority: LeasePriority::Foreground,
+            max_wait_ms: 100,
+        });
+        assert_eq!(
+            preview.state,
+            LeasePreviewState::Deferred,
+            "quota feedback should still cool the credential briefly"
+        );
+        assert_eq!(preview.credential_state.as_deref(), Some("quota_exhausted"));
+        assert!(
+            preview
+                .retry_after_ms
+                .is_some_and(|value| value > 0 && value <= DEFAULT_USER_ACTION_RETRY_AFTER_MS),
+            "quota feedback without provider retry-after must publish a bounded retry-after"
+        );
+
+        manager.record_credential_feedback(ProviderCredentialFeedbackRequest {
+            provider_id: "openai".to_owned(),
+            credential_id: "cred-a".to_owned(),
+            kind: ProviderCredentialFeedbackKind::AuthFailed,
+            retry_after_ms: None,
+            reason: "provider returned auth failure without retry-after".to_owned(),
+            observed_at_unix_ms: now_unix_ms
+                .saturating_sub(DEFAULT_USER_ACTION_RETRY_AFTER_MS as i64 + 1),
+        });
+        let ready = manager.preview(ProviderLeasePreviewRequest {
+            provider_id: "openai",
+            credential_id: "cred-a",
+            priority: LeasePriority::Foreground,
+            max_wait_ms: 100,
+        });
+        assert_eq!(
+            ready.state,
+            LeasePreviewState::Ready,
+            "auth feedback without provider retry-after must expire instead of blocking forever"
+        );
+        assert!(
+            manager.snapshot().credential_feedback.is_empty(),
+            "expired auth feedback should not remain visible as an active provider cooldown"
+        );
+    }
+
+    #[test]
+    fn credential_feedback_without_deadline_is_inactive() {
+        let feedback = ProviderCredentialFeedbackState {
+            provider_id: "openai".to_owned(),
+            credential_id: "cred-a".to_owned(),
+            state: "auth_failed".to_owned(),
+            retry_after_ms: None,
+            blocked_until_unix_ms: None,
+            reason: "legacy feedback missing a retry-after".to_owned(),
+            observed_at_unix_ms: crate::gateway::current_unix_ms(),
+        };
+
+        assert!(
+            !feedback.is_active(crate::gateway::current_unix_ms()),
+            "credential feedback without a deadline must not become a permanent active block"
+        );
     }
 }
