@@ -6261,6 +6261,7 @@ fn resolve_daemon_journal_db_path(db_path_override: Option<String>) -> Result<Pa
     let installed_journal_path = discover_installed_journal_db_path()?;
     if let Some(context) = app::current_root_context() {
         return Ok(select_preferred_journal_db_path(
+            context.state_root(),
             context.state_root().join(DEFAULT_JOURNAL_DB_PATH),
             installed_journal_path,
         ));
@@ -6275,15 +6276,40 @@ fn resolve_daemon_journal_db_path(db_path_override: Option<String>) -> Result<Pa
 }
 
 fn select_preferred_journal_db_path(
+    active_state_root: &Path,
     root_context_default_path: PathBuf,
     installed_journal_path: Option<PathBuf>,
 ) -> PathBuf {
-    match installed_journal_path {
-        Some(installed_journal_path) if !root_context_default_path.is_file() => {
-            installed_journal_path
-        }
-        _ => root_context_default_path,
+    if root_context_default_path.is_file() {
+        return root_context_default_path;
     }
+
+    if let Some(installed_journal_path) = installed_journal_path {
+        if installed_journal_path_belongs_to_state_root(
+            installed_journal_path.as_path(),
+            active_state_root,
+        ) {
+            return installed_journal_path;
+        }
+    }
+
+    root_context_default_path
+}
+
+fn installed_journal_path_belongs_to_state_root(
+    installed_journal_path: &Path,
+    active_state_root: &Path,
+) -> bool {
+    if !installed_journal_path.is_file() {
+        return false;
+    }
+    let Ok(installed_journal_path) = installed_journal_path.canonicalize() else {
+        return false;
+    };
+    let Ok(active_state_root) = active_state_root.canonicalize() else {
+        return false;
+    };
+    installed_journal_path.starts_with(active_state_root)
 }
 
 fn resolve_config_relative_path(config_path: &Path, raw_path: &str) -> PathBuf {
@@ -12071,17 +12097,41 @@ mod journal_path_tests {
     }
 
     #[test]
-    fn installed_journal_path_overrides_missing_root_context_default() -> Result<()> {
+    fn installed_journal_path_does_not_override_missing_root_context_default_outside_state_root(
+    ) -> Result<()> {
         let tempdir = tempdir()?;
-        let root_context_default_path =
-            tempdir.path().join("state-root").join(DEFAULT_JOURNAL_DB_PATH);
+        let state_root = tempdir.path().join("state-root");
+        let root_context_default_path = state_root.join(DEFAULT_JOURNAL_DB_PATH);
         let installed_journal_path = tempdir.path().join("install").join(DEFAULT_JOURNAL_DB_PATH);
 
         fs::create_dir_all(installed_journal_path.parent().expect("installed journal parent"))?;
         fs::write(installed_journal_path.as_path(), [])?;
 
         let resolved = select_preferred_journal_db_path(
+            state_root.as_path(),
             root_context_default_path.clone(),
+            Some(installed_journal_path),
+        );
+
+        assert_eq!(resolved, root_context_default_path);
+        Ok(())
+    }
+
+    #[test]
+    fn installed_journal_path_inside_active_state_root_can_fallback_when_default_missing(
+    ) -> Result<()> {
+        let tempdir = tempdir()?;
+        let state_root = tempdir.path().join("state-root");
+        let root_context_default_path = state_root.join(DEFAULT_JOURNAL_DB_PATH);
+        let installed_journal_path =
+            state_root.join("desktop-install").join(DEFAULT_JOURNAL_DB_PATH);
+
+        fs::create_dir_all(installed_journal_path.parent().expect("installed journal parent"))?;
+        fs::write(installed_journal_path.as_path(), [])?;
+
+        let resolved = select_preferred_journal_db_path(
+            state_root.as_path(),
+            root_context_default_path,
             Some(installed_journal_path.clone()),
         );
 
@@ -12102,6 +12152,7 @@ mod journal_path_tests {
         fs::write(installed_journal_path.as_path(), [])?;
 
         let resolved = select_preferred_journal_db_path(
+            tempdir.path().join("state-root").as_path(),
             root_context_default_path.clone(),
             Some(installed_journal_path),
         );
