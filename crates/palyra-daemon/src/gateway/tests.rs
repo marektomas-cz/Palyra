@@ -3498,6 +3498,65 @@ async fn tool_program_runtime_denies_sensitive_child_without_nested_approval() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn tool_program_runtime_respects_disabled_child_tool_posture() {
+    let state = build_test_runtime_state(false);
+    let session_id = "session-tool-program-child-disabled";
+    let run_id = "run-tool-program-child-disabled";
+    state
+        .upsert_tool_posture_override(crate::tool_posture::ToolPostureOverrideUpsertRequest {
+            tool_name: "palyra.echo".to_owned(),
+            scope_kind: crate::tool_posture::ToolPostureScopeKind::Session,
+            scope_id: session_id.to_owned(),
+            state: crate::tool_posture::ToolPostureState::Disabled,
+            reason: Some("disabled for nested rpc regression test".to_owned()),
+            actor_principal: "admin:ops".to_owned(),
+            source: "test".to_owned(),
+            expires_at_unix_ms: None,
+            now_unix_ms: super::current_unix_ms(),
+        })
+        .expect("tool posture override should persist");
+    start_tool_program_test_run(&state, session_id, run_id).await;
+
+    let outcome = super::execute_tool_with_runtime_dispatch(
+        &state,
+        super::ToolRuntimeExecutionContext {
+            principal: "user:ops",
+            device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            channel: Some("cli"),
+            session_id,
+            run_id,
+            execution_backend: ExecutionBackendPreference::LocalSandbox,
+            backend_reason_code: "backend.default.local_sandbox",
+        },
+        "proposal-tool-program-child-disabled",
+        super::TOOL_PROGRAM_RUN_TOOL_NAME,
+        br#"{
+            "schema_version": 1,
+            "program_id": "program-child-disabled",
+            "granted_tools": ["palyra.echo"],
+            "steps": [
+                {"step_id": "echo", "tool": "palyra.echo", "input": {"text": "must not run"}}
+            ]
+        }"#,
+    )
+    .await;
+
+    assert!(!outcome.success, "disabled child posture should fail closed");
+    let output = parse_tool_output_json(&outcome);
+    assert_eq!(output.get("status").and_then(Value::as_str), Some("failed"));
+    assert_eq!(output.pointer("/steps/0/status").and_then(Value::as_str), Some("denied"));
+    assert_eq!(output.pointer("/steps/0/approval_required").and_then(Value::as_bool), Some(false));
+    assert_eq!(output.pointer("/budget/child_runs_used").and_then(Value::as_u64), Some(0));
+    assert!(
+        output
+            .pointer("/steps/0/error")
+            .and_then(Value::as_str)
+            .is_some_and(|error| error.contains("tool posture disabled")),
+        "denial should include the child tool posture reason"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn auth_refresh_journal_event_redacts_reason_text() {
     let state = build_test_runtime_state(false);
     let context = RequestContext {

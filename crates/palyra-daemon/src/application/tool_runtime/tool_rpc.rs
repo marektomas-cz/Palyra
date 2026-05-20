@@ -5,10 +5,18 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::{
+    application::{
+        execution_gate::ToolProposalApprovalState,
+        tool_security::{
+            evaluate_tool_proposal_security, resolve_tool_proposal_decision_for_context,
+            ResolvedToolProposalDecision, ToolProposalSecurityEvaluation,
+        },
+    },
     gateway::{
         execute_tool_with_runtime_dispatch, GatewayRuntimeState, ToolRuntimeExecutionContext,
     },
-    tool_protocol::{decide_tool_call, ToolAttestation, ToolRequestContext},
+    tool_protocol::{self, ToolAttestation},
+    transport::grpc::auth::RequestContext,
 };
 
 pub(crate) const TOOL_RPC_SCHEMA_VERSION: u32 = 1;
@@ -131,42 +139,66 @@ pub(crate) async fn execute_granted_tool_rpc_call(
         }
     };
 
-    let mut remaining_budget = 1;
-    let decision = decide_tool_call(
-        &runtime_state.config.tool_call,
-        &mut remaining_budget,
-        &ToolRequestContext {
-            principal: context.principal.to_owned(),
-            device_id: Some(context.device_id.to_owned()),
-            channel: context.channel.map(ToOwned::to_owned),
-            session_id: Some(context.session_id.to_owned()),
-            run_id: Some(context.run_id.to_owned()),
-            skill_id: None,
-        },
+    let child_proposal_id = format!("{parent_proposal_id}:{}", request.call_id);
+    let request_context = RequestContext {
+        principal: context.principal.to_owned(),
+        device_id: context.device_id.to_owned(),
+        channel: context.channel.map(ToOwned::to_owned),
+    };
+    let ToolProposalSecurityEvaluation {
+        skill_context,
+        skill_gate_decision,
+        approval_subject_id: _,
+        proposal_approval_required,
+        effective_posture,
+        backend_selection,
+    } = evaluate_tool_proposal_security(
+        runtime_state,
+        &request_context,
+        context.session_id,
+        context.run_id,
+        child_proposal_id.as_str(),
         request.tool_name.as_str(),
-        false,
-    );
+        input_bytes.as_slice(),
+    )
+    .await;
+    let mut remaining_budget = 1;
+    let ResolvedToolProposalDecision { decision, gate_report: _ } =
+        resolve_tool_proposal_decision_for_context(
+            runtime_state,
+            &request_context,
+            context.channel,
+            context.session_id,
+            context.run_id,
+            request.tool_name.as_str(),
+            skill_context.as_ref(),
+            &mut remaining_budget,
+            skill_gate_decision,
+            proposal_approval_required,
+            &effective_posture,
+            &backend_selection,
+            ToolProposalApprovalState::default(),
+        );
+    let child_tool_requires_approval =
+        tool_protocol::tool_requires_approval(request.tool_name.as_str());
+    if proposal_approval_required || child_tool_requires_approval || decision.approval_required {
+        let denial_reason =
+            nested_approval_denial_reason(request.tool_name.as_str(), decision.reason.as_str());
+        return denied_response(request, denial_reason, true);
+    }
     if !decision.allowed {
-        return ToolRpcResponse {
-            schema_version: TOOL_RPC_SCHEMA_VERSION,
-            call_id: request.call_id,
-            tool_name: request.tool_name,
-            status: ToolRpcStatus::Denied,
-            success: false,
-            decision_reason: decision.reason.clone(),
-            approval_required: decision.approval_required,
-            output: json!({}),
-            error: decision.reason,
-            redacted_preview: String::new(),
-            attestation: None,
-        };
+        return denied_response(request, decision.reason, false);
     }
 
-    let child_proposal_id = format!("{parent_proposal_id}:{}", request.call_id);
     let timeout = request.timeout_ms.map(Duration::from_millis);
+    let child_context = ToolRuntimeExecutionContext {
+        execution_backend: backend_selection.resolution.resolved,
+        backend_reason_code: backend_selection.resolution.reason_code.as_str(),
+        ..context
+    };
     let execution = Box::pin(execute_tool_with_runtime_dispatch(
         runtime_state,
-        context,
+        child_context,
         child_proposal_id.as_str(),
         request.tool_name.as_str(),
         input_bytes.as_slice(),
@@ -268,6 +300,12 @@ pub(crate) fn build_python_tool_rpc_bridge_context(
         allowed_tools: grants.iter().cloned().collect(),
         environment,
     }
+}
+
+fn nested_approval_denial_reason(tool_name: &str, original_reason: &str) -> String {
+    format!(
+        "tool program cannot self-approve approval-required child tool; tool={tool_name}; original_reason={original_reason}"
+    )
 }
 
 fn validate_tool_rpc_request(request: &ToolRpcRequest) -> Result<(), String> {
