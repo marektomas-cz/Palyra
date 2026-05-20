@@ -448,6 +448,10 @@ fn normalize_palyra_patch_fences(patch: &str) -> Option<String> {
         lines.push(line);
     }
 
+    if lines.is_empty() {
+        return None;
+    }
+
     if patch_control_line(lines[0].as_str()) != "*** Begin Patch" {
         return None;
     }
@@ -2436,6 +2440,27 @@ mod tests {
                 .expect("report should be created"),
             "# Node LTS\nUse active LTS releases for production.\n"
         );
+    }
+
+    #[test]
+    fn apply_workspace_patch_rejects_wrapper_only_markers_without_panic() {
+        let temp = tempdir().expect("tempdir should be created");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace should exist");
+
+        for patch in ["*** End File", "*** Begin Body\n*** End Body"] {
+            let error = apply_workspace_patch(
+                std::slice::from_ref(&workspace),
+                &default_request(patch, true),
+                &default_limits(),
+            )
+            .expect_err("wrapper-only patch markers should be rejected as invalid patches");
+
+            assert!(
+                matches!(error, WorkspacePatchError::Parse { .. }),
+                "wrapper-only marker input should return a parse error, got {error:?}"
+            );
+        }
     }
 
     #[test]
