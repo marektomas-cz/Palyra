@@ -33,6 +33,7 @@ pub(super) struct WorkspacePatchMutationRequest<'a> {
     pub(super) redaction_policy: &'a WorkspacePatchRedactionPolicy,
     pub(super) limits: &'a WorkspacePatchLimits,
     pub(super) workspace_roots: &'a [PathBuf],
+    pub(super) risk_path_prefixes: &'a [String],
     pub(super) planned_outcome: WorkspacePatchOutcome,
 }
 
@@ -52,10 +53,14 @@ pub(super) async fn execute_workspace_patch_mutation(
         redaction_policy,
         limits,
         workspace_roots,
+        risk_path_prefixes,
         planned_outcome,
     } = request;
     let mutation_id = Ulid::new().to_string();
-    let risk = assess_workspace_mutation_risk(planned_outcome.files_touched.as_slice());
+    let risk = assess_workspace_mutation_risk(
+        planned_outcome.files_touched.as_slice(),
+        risk_path_prefixes,
+    );
     let mut preflight_checkpoint = None;
     let mut preflight_error = None;
 
@@ -269,6 +274,7 @@ struct WorkspaceMutationRisk {
 
 fn assess_workspace_mutation_risk(
     files_touched: &[WorkspacePatchFileAttestation],
+    risk_path_prefixes: &[String],
 ) -> WorkspaceMutationRisk {
     let mut level = if files_touched.len() > 4 {
         WorkspaceMutationRiskLevel::Medium
@@ -280,13 +286,16 @@ fn assess_workspace_mutation_risk(
     }
     for file in files_touched {
         if matches!(file.operation.as_str(), "delete" | "move")
-            || is_high_risk_workspace_path(file.path.as_str())
-            || file.moved_from.as_deref().is_some_and(is_high_risk_workspace_path)
+            || has_high_risk_workspace_path(file.path.as_str(), risk_path_prefixes)
+            || file
+                .moved_from
+                .as_deref()
+                .is_some_and(|path| has_high_risk_workspace_path(path, risk_path_prefixes))
         {
             level = WorkspaceMutationRiskLevel::High;
             break;
         }
-        if is_medium_risk_workspace_path(file.path.as_str()) {
+        if has_medium_risk_workspace_path(file.path.as_str(), risk_path_prefixes) {
             level = WorkspaceMutationRiskLevel::Medium;
         }
     }
@@ -299,6 +308,36 @@ fn assess_workspace_mutation_risk(
         },
         fail_closed_without_preflight: level == WorkspaceMutationRiskLevel::High,
     }
+}
+
+fn has_high_risk_workspace_path(path: &str, risk_path_prefixes: &[String]) -> bool {
+    is_high_risk_workspace_path(path)
+        || risk_path_prefixes.iter().any(|prefix| {
+            is_high_risk_workspace_path(prefixed_workspace_risk_path(prefix, path).as_str())
+        })
+}
+
+fn has_medium_risk_workspace_path(path: &str, risk_path_prefixes: &[String]) -> bool {
+    is_medium_risk_workspace_path(path)
+        || risk_path_prefixes.iter().any(|prefix| {
+            is_medium_risk_workspace_path(prefixed_workspace_risk_path(prefix, path).as_str())
+        })
+}
+
+fn prefixed_workspace_risk_path(prefix: &str, path: &str) -> String {
+    let normalized_prefix = normalize_workspace_risk_path(prefix);
+    let normalized_path = normalize_workspace_risk_path(path);
+    if normalized_prefix.is_empty() {
+        normalized_path
+    } else if normalized_path.is_empty() {
+        normalized_prefix
+    } else {
+        format!("{normalized_prefix}/{normalized_path}")
+    }
+}
+
+fn normalize_workspace_risk_path(path: &str) -> String {
+    path.replace('\\', "/").trim().trim_start_matches("./").trim_matches('/').to_owned()
 }
 
 fn is_high_risk_workspace_path(path: &str) -> bool {
@@ -564,4 +603,50 @@ fn workspace_patch_preflight_failure_outcome(
             "palyra.fs.apply_patch refused high-risk mutation because preflight checkpoint failed: {checkpoint_error}"
         ),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{assess_workspace_mutation_risk, WorkspaceMutationRiskLevel};
+    use palyra_common::workspace_patch::WorkspacePatchFileAttestation;
+
+    fn attestation(path: &str, operation: &str) -> WorkspacePatchFileAttestation {
+        WorkspacePatchFileAttestation {
+            path: path.to_owned(),
+            workspace_root_index: 0,
+            operation: operation.to_owned(),
+            moved_from: None,
+            before_sha256: None,
+            before_size_bytes: None,
+            after_sha256: Some("sha256".to_owned()),
+            after_size_bytes: Some(1),
+        }
+    }
+
+    #[test]
+    fn risk_assessment_applies_workspace_root_prefixes() {
+        let files = vec![attestation("ci.yml", "add")];
+
+        let without_prefix = assess_workspace_mutation_risk(files.as_slice(), &[]);
+        assert_eq!(without_prefix.level, WorkspaceMutationRiskLevel::Medium);
+        assert!(!without_prefix.fail_closed_without_preflight);
+
+        let prefixes = vec![".github/workflows".to_owned()];
+        let with_prefix = assess_workspace_mutation_risk(files.as_slice(), prefixes.as_slice());
+        assert_eq!(with_prefix.level, WorkspaceMutationRiskLevel::High);
+        assert!(with_prefix.fail_closed_without_preflight);
+        assert_eq!(with_prefix.review_posture, "review_required");
+    }
+
+    #[test]
+    fn risk_assessment_applies_workspace_root_prefixes_to_moved_from_paths() {
+        let mut file = attestation("safe.rs", "replace");
+        file.moved_from = Some("old.rs".to_owned());
+        let prefixes = vec!["crates/palyra-auth".to_owned()];
+
+        let risk = assess_workspace_mutation_risk(&[file], prefixes.as_slice());
+
+        assert_eq!(risk.level, WorkspaceMutationRiskLevel::High);
+        assert!(risk.fail_closed_without_preflight);
+    }
 }
