@@ -100,7 +100,8 @@ use palyra_common::{
     config_system::{
         backup_path, format_toml_value, get_value_at_path, parse_document_with_migration,
         parse_toml_value_literal, recover_config_from_backup, serialize_document_pretty,
-        set_value_at_path, unset_value_at_path, write_document_with_backups, ConfigMigrationInfo,
+        set_value_at_path, unset_value_at_path, write_document_with_backups,
+        write_secret_document_with_backups, ConfigMigrationInfo,
     },
     daemon_config_schema::{
         redact_secret_config_values, FileModelProviderConfig, FileModelProviderRegistryEntry,

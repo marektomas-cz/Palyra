@@ -18,6 +18,12 @@ use crate::{
 };
 
 const CONFIGURE_BACKUPS: usize = 5;
+const INLINE_SECRET_CONFIG_PATHS: &[&str] = &[
+    "admin.auth_token",
+    "model_provider.openai_api_key",
+    "model_provider.anthropic_api_key",
+    "tool_call.browser_service.auth_token",
+];
 const DEFAULT_TEXT_MODEL: &str = "gpt-4o-mini";
 const DEFAULT_EMBEDDINGS_MODEL: &str = "text-embedding-3-small";
 const DEFAULT_EMBEDDINGS_DIMS: u32 = 1536;
@@ -695,7 +701,7 @@ pub(crate) fn run_configure_wizard(request: ConfigureWizardRequest) -> Result<()
         format!("mutated config {} does not match daemon schema", path_ref.display())
     })?;
     if document != original_document {
-        write_document_with_backups(path_ref, &document, CONFIGURE_BACKUPS)
+        write_operator_document_with_backups(path_ref, &document)
             .with_context(|| format!("failed to persist config {}", path_ref.display()))?;
     }
     dedupe_strings(&mut changed_sections);
@@ -714,6 +720,24 @@ pub(crate) fn run_configure_wizard(request: ConfigureWizardRequest) -> Result<()
         warnings,
     };
     emit_configure_summary(&summary, output::preferred_json(request.json))
+}
+
+fn write_operator_document_with_backups(path: &Path, document: &toml::Value) -> Result<()> {
+    if document_contains_inline_secret(document)? {
+        write_secret_document_with_backups(path, document, CONFIGURE_BACKUPS)?;
+    } else {
+        write_document_with_backups(path, document, CONFIGURE_BACKUPS)?;
+    }
+    Ok(())
+}
+
+fn document_contains_inline_secret(document: &toml::Value) -> Result<bool> {
+    for path in INLINE_SECRET_CONFIG_PATHS {
+        if get_string_value_at_path(document, path)?.is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn resolve_onboarding_flow(
@@ -1857,7 +1881,7 @@ fn apply_onboarding_plan(
     validate_daemon_compatible_document(&document).with_context(|| {
         format!("generated config {} does not match daemon schema", context.config_path.display())
     })?;
-    write_document_with_backups(context.config_path.as_path(), &document, CONFIGURE_BACKUPS)
+    write_operator_document_with_backups(context.config_path.as_path(), &document)
         .with_context(|| format!("failed to persist config {}", context.config_path.display()))?;
 
     if plan.deployment_profile == palyra_common::deployment_profiles::DeploymentProfileId::Local {
@@ -3903,6 +3927,62 @@ mod tests {
                 & 0o777;
             assert_eq!(mode, 0o600, "new token-bearing config should be owner-only");
         }
+    }
+
+    #[test]
+    fn document_contains_inline_secret_detects_admin_token() {
+        let mut document = toml::Value::Table(Default::default());
+        assert!(
+            !document_contains_inline_secret(&document).expect("secret scan should succeed"),
+            "empty config should not require secret-bearing write mode"
+        );
+
+        set_value_at_path(
+            &mut document,
+            "admin.auth_token",
+            toml::Value::String("admin-secret-test-token".to_owned()),
+        )
+        .expect("admin token should be set");
+
+        assert!(
+            document_contains_inline_secret(&document).expect("secret scan should succeed"),
+            "inline admin tokens must force owner-only config persistence"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_operator_document_with_backups_tightens_existing_secret_config_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_path = temp.path().join("palyra.toml");
+        fs::write(config_path.as_path(), "version = 1\n").expect("seed config");
+        fs::set_permissions(config_path.as_path(), fs::Permissions::from_mode(0o644))
+            .expect("seed config permissions");
+        let mut document = toml::Value::Table(Default::default());
+        set_value_at_path(
+            &mut document,
+            "admin.auth_token",
+            toml::Value::String("admin-secret-test-token".to_owned()),
+        )
+        .expect("admin token should be set");
+
+        write_operator_document_with_backups(config_path.as_path(), &document)
+            .expect("secret-bearing config should be persisted securely");
+
+        let mode = fs::metadata(config_path.as_path())
+            .expect("config metadata should be readable")
+            .permissions()
+            .mode()
+            & 0o777;
+        let backup_mode = fs::metadata(backup_path(config_path.as_path(), 1))
+            .expect("backup metadata should be readable")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "secret-bearing config should be owner-only");
+        assert_eq!(backup_mode, 0o600, "backup should be tightened before rotation");
     }
 
     #[test]

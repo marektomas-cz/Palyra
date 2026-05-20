@@ -233,12 +233,34 @@ pub fn write_document_with_backups(
     write_content_with_backups(path, &content, max_backups)
 }
 
+pub fn write_secret_document_with_backups(
+    path: &Path,
+    document: &Value,
+    max_backups: usize,
+) -> Result<(), ConfigSystemError> {
+    let content = serialize_document_pretty(document)?;
+    write_secret_content_with_backups(path, &content, max_backups)
+}
+
 pub fn write_content_with_backups(
     path: &Path,
     content: &str,
     max_backups: usize,
 ) -> Result<(), ConfigSystemError> {
     let target_permissions = resolve_target_permissions(path)?;
+    if path.exists() {
+        rotate_backups(path, max_backups)?;
+    }
+    write_atomically(path, content, target_permissions)
+}
+
+pub fn write_secret_content_with_backups(
+    path: &Path,
+    content: &str,
+    max_backups: usize,
+) -> Result<(), ConfigSystemError> {
+    let target_permissions = default_secure_permissions()?;
+    tighten_existing_file_permissions(path, target_permissions.as_ref())?;
     if path.exists() {
         rotate_backups(path, max_backups)?;
     }
@@ -401,6 +423,20 @@ fn resolve_target_permissions(path: &Path) -> Result<Option<fs::Permissions>, Co
     }
 }
 
+fn tighten_existing_file_permissions(
+    path: &Path,
+    permissions: Option<&fs::Permissions>,
+) -> Result<(), ConfigSystemError> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let Some(permissions) = permissions else {
+        return Ok(());
+    };
+    fs::set_permissions(path, permissions.clone())
+        .map_err(|source| ConfigSystemError::WriteFile { path: path.to_path_buf(), source })
+}
+
 #[cfg(unix)]
 fn default_secure_permissions() -> Result<Option<fs::Permissions>, ConfigSystemError> {
     Ok(Some(fs::Permissions::from_mode(0o600)))
@@ -438,8 +474,8 @@ mod tests {
     use super::{
         backup_path, format_toml_value, get_value_at_path, parse_document_with_migration,
         parse_toml_value_literal, recover_config_from_backup, set_value_at_path,
-        unset_value_at_path, write_document_with_backups, ConfigMigrationInfo, ConfigSystemError,
-        CONFIG_VERSION_V1,
+        unset_value_at_path, write_document_with_backups, write_secret_document_with_backups,
+        ConfigMigrationInfo, ConfigSystemError, CONFIG_VERSION_V1,
     };
 
     #[test]
@@ -591,6 +627,39 @@ mod tests {
 
         let mode = fs::metadata(&config_path)?.permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "new config writes must default to owner-only permissions");
+        Ok(())
+    }
+
+    #[test]
+    fn write_secret_document_with_backups_persists_document() -> Result<()> {
+        let tempdir = TempDir::new().expect("failed to create tempdir");
+        let config_path = tempdir.path().join("palyra.toml");
+        let mut document = Value::Table(Default::default());
+        set_value_at_path(&mut document, "admin.auth_token", Value::String("secret".to_owned()))?;
+
+        write_secret_document_with_backups(&config_path, &document, 0)?;
+
+        let persisted = fs::read_to_string(&config_path)?;
+        assert!(persisted.contains("auth_token = \"secret\""));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_secret_document_with_backups_tightens_existing_file_permissions() -> Result<()> {
+        let tempdir = TempDir::new().expect("failed to create tempdir");
+        let config_path = tempdir.path().join("palyra.toml");
+        fs::write(&config_path, "version = 1\n")?;
+        fs::set_permissions(&config_path, fs::Permissions::from_mode(0o644))?;
+        let mut document = Value::Table(Default::default());
+        set_value_at_path(&mut document, "admin.auth_token", Value::String("secret".to_owned()))?;
+
+        write_secret_document_with_backups(&config_path, &document, 1)?;
+
+        let mode = fs::metadata(&config_path)?.permissions().mode() & 0o777;
+        let backup_mode = fs::metadata(backup_path(&config_path, 1))?.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "secret-bearing config must be owner-only after rewrite");
+        assert_eq!(backup_mode, 0o600, "rotated backups must inherit owner-only permissions");
         Ok(())
     }
 

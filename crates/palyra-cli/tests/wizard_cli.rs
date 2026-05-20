@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::{
     ffi::OsString,
     fs,
@@ -798,6 +800,10 @@ fn setup_wizard_reuse_backfills_admin_defaults() -> Result<()> {
     let config_path = workdir.path().join("palyra.toml");
     fs::write(config_path.as_path(), "version = 1\n")
         .with_context(|| format!("failed to write {}", config_path.display()))?;
+    #[cfg(unix)]
+    fs::set_permissions(config_path.as_path(), fs::Permissions::from_mode(0o644)).with_context(
+        || format!("failed to seed broad permissions for {}", config_path.display()),
+    )?;
     let config_path_string = config_path.to_string_lossy().into_owned();
 
     let output = run_cli(
@@ -1122,6 +1128,10 @@ fn configure_auth_model_backfills_admin_defaults_for_resume_path() -> Result<()>
         .context("failed to create config parent")?;
     fs::write(config_path.as_path(), "version = 1\n")
         .with_context(|| format!("failed to write {}", config_path.display()))?;
+    #[cfg(unix)]
+    fs::set_permissions(config_path.as_path(), fs::Permissions::from_mode(0o644)).with_context(
+        || format!("failed to seed broad permissions for {}", config_path.display()),
+    )?;
 
     let config_path_string = config_path.to_string_lossy().into_owned();
     let output = run_cli_with_stdin(
@@ -1227,6 +1237,18 @@ fn configure_auth_model_backfills_admin_defaults_for_resume_path() -> Result<()>
         written.contains("bind_profile = \"loopback_only\""),
         "configure auth-model should backfill loopback bind profile for preflight: {written}"
     );
+    #[cfg(unix)]
+    {
+        let mode = fs::metadata(config_path.as_path())
+            .with_context(|| format!("failed to stat {}", config_path.display()))?
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "configure auth-model must tighten existing config permissions before writing generated admin token"
+        );
+    }
     Ok(())
 }
 
