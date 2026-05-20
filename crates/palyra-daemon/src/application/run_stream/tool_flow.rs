@@ -644,7 +644,7 @@ async fn execute_parallel_prepared_tool_group(
                 completed.insert(order, (prepared, outcome));
             }
             Ok(Ok(ParallelToolExecutionTaskOutcome::Cancelled)) => {
-                join_set.abort_all();
+                drain_parallel_tool_group_after_cancel(&mut join_set).await?;
                 append_tool_parallel_group_tape_event(
                     runtime_state,
                     run_id,
@@ -653,7 +653,7 @@ async fn execute_parallel_prepared_tool_group(
                     group_id.as_str(),
                     "cancelled",
                     &[],
-                    Some("cancel_requested"),
+                    Some("cancel_requested_after_parallel_drain"),
                 )
                 .await?;
                 transition_run_stream_to_cancelled(
@@ -707,6 +707,25 @@ async fn execute_parallel_prepared_tool_group(
     )
     .await?;
     Ok(RunStreamPreparedToolExecutionBatchOutcome::Completed(finalized))
+}
+
+#[allow(clippy::result_large_err)]
+async fn drain_parallel_tool_group_after_cancel(
+    join_set: &mut JoinSet<Result<ParallelToolExecutionTaskOutcome, Status>>,
+) -> Result<(), Status> {
+    while let Some(joined) = join_set.join_next().await {
+        match joined {
+            Ok(Ok(ParallelToolExecutionTaskOutcome::Completed { .. }))
+            | Ok(Ok(ParallelToolExecutionTaskOutcome::Cancelled)) => {}
+            Ok(Err(error)) => return Err(error),
+            Err(error) => {
+                return Err(Status::internal(format!(
+                    "parallel tool execution task failed to join while draining cancellation: {error}"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[allow(clippy::result_large_err)]
@@ -1531,13 +1550,22 @@ fn truncate_utf8(value: &str, max_bytes: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        allow_sensitive_tools_approval_outcome, classify_tool_parallelism, ToolParallelism,
+        allow_sensitive_tools_approval_outcome, classify_tool_parallelism,
+        drain_parallel_tool_group_after_cancel, ParallelToolExecutionTaskOutcome, ToolParallelism,
     };
     use crate::journal::{ApprovalDecision, ApprovalDecisionScope};
     use crate::tool_protocol::{ToolAttestation, ToolExecutionOutcome};
     use palyra_common::runtime_contracts::ToolTurnBudget;
     use palyra_common::validate_canonical_id;
     use serde_json::json;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    use tokio::{
+        task::JoinSet,
+        time::{sleep, Duration},
+    };
 
     #[test]
     fn tool_parallelism_classifies_safe_and_unsafe_tools() {
@@ -1593,6 +1621,27 @@ mod tests {
         );
         validate_canonical_id(outcome.approval_id.as_str())
             .expect("auto approval id should be canonical");
+    }
+
+    #[tokio::test]
+    async fn parallel_cancel_drain_waits_for_sibling_tasks() {
+        let sibling_completed = Arc::new(AtomicBool::new(false));
+        let sibling_completed_for_task = Arc::clone(&sibling_completed);
+        let mut join_set = JoinSet::new();
+        join_set.spawn(async move {
+            sleep(Duration::from_millis(10)).await;
+            sibling_completed_for_task.store(true, Ordering::SeqCst);
+            Ok(ParallelToolExecutionTaskOutcome::Cancelled)
+        });
+
+        drain_parallel_tool_group_after_cancel(&mut join_set)
+            .await
+            .expect("drain should wait for sibling tasks");
+
+        assert!(
+            sibling_completed.load(Ordering::SeqCst),
+            "parallel cancellation must wait instead of aborting sibling tasks"
+        );
     }
 
     #[test]
