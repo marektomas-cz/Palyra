@@ -9,7 +9,7 @@ use super::diagnostics::{authorize_console_session, build_page_info};
 
 use crate::{
     cron::{self, CronTimezoneMode},
-    gateway::proto::palyra::cron::v1 as cron_v1,
+    gateway::{proto::palyra::cron::v1 as cron_v1, validate_cron_job_channel_context},
     journal::{
         ApprovalCreateRequest, ApprovalPolicySnapshot, ApprovalPromptOption, ApprovalPromptRecord,
         ApprovalRiskLevel, CronConcurrencyPolicy, CronJobCreateRequest, CronJobRecord,
@@ -328,7 +328,7 @@ pub(crate) async fn console_routine_import_handler(
     };
     let owner_principal = session.context.principal.clone();
     let channel =
-        normalize_channel(Some(bundle.job.channel.as_str()), session.context.channel.as_deref());
+        normalize_channel(Some(bundle.job.channel.as_str()), session.context.channel.as_deref())?;
     let requested_enabled = payload.enabled.unwrap_or(bundle.job.enabled);
     let existing_job =
         state.runtime.cron_job(routine_id.clone()).await.map_err(runtime_status_response)?;
@@ -422,7 +422,8 @@ pub(crate) async fn console_routine_upsert_handler(
         .map_err(runtime_status_response)?;
     let owner_principal =
         normalize_owner_principal(&payload.owner_principal, session.context.principal.as_str())?;
-    let channel = normalize_channel(payload.channel.as_deref(), session.context.channel.as_deref());
+    let channel =
+        normalize_channel(payload.channel.as_deref(), session.context.channel.as_deref())?;
     let enabled = payload.enabled.unwrap_or(true);
 
     let existing_job =
@@ -2385,13 +2386,18 @@ fn normalize_owner_principal(
     }
 }
 
-fn normalize_channel(requested: Option<&str>, session_channel: Option<&str>) -> String {
-    requested
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+#[allow(clippy::result_large_err)]
+fn normalize_channel(
+    requested: Option<&str>,
+    session_channel: Option<&str>,
+) -> Result<String, Response> {
+    let requested_channel = requested.map(str::trim).filter(|value| !value.is_empty());
+    validate_cron_job_channel_context(session_channel, requested_channel)
+        .map_err(runtime_status_response)?;
+    Ok(requested_channel
         .map(ToOwned::to_owned)
         .or_else(|| session_channel.map(ToOwned::to_owned))
-        .unwrap_or_else(|| DEFAULT_ROUTINE_CHANNEL.to_owned())
+        .unwrap_or_else(|| DEFAULT_ROUTINE_CHANNEL.to_owned()))
 }
 
 fn normalize_optional_text(value: Option<&str>) -> Option<String> {
@@ -2503,9 +2509,9 @@ fn internal_console_error(error: anyhow::Error) -> Response {
 #[cfg(test)]
 mod tests {
     use super::{
-        compare_optional_matchers, is_in_quiet_hours, parse_delivery, parse_execution_config,
-        parse_quiet_hours, routine_matches_trigger, routine_output_fields_from_session,
-        routine_output_text_from_tape_events,
+        compare_optional_matchers, is_in_quiet_hours, normalize_channel, parse_delivery,
+        parse_execution_config, parse_quiet_hours, routine_matches_trigger,
+        routine_output_fields_from_session, routine_output_text_from_tape_events,
     };
     use crate::journal::{OrchestratorSessionRecord, OrchestratorTapeRecord};
     use crate::routines::{
@@ -2513,6 +2519,7 @@ mod tests {
         RoutineExecutionPosture, RoutineMetadataRecord, RoutineRunMode, RoutineSilentPolicy,
         RoutineTriggerKind,
     };
+    use axum::http::StatusCode;
     use chrono::{TimeZone, Utc};
     use serde_json::json;
 
@@ -2562,6 +2569,32 @@ mod tests {
         assert_eq!(delivery.mode, RoutineDeliveryMode::SpecificChannel);
         assert_eq!(delivery.failure_mode, Some(RoutineDeliveryMode::LogsOnly));
         assert_eq!(delivery.silent_policy, RoutineSilentPolicy::FailureOnly);
+    }
+
+    #[test]
+    fn normalize_channel_rejects_cross_channel_routine_writes() {
+        let response = normalize_channel(Some("tenant:victim"), Some("tenant:operator"))
+            .expect_err("requested channel should match session channel");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn normalize_channel_preserves_authorized_routine_channels() {
+        assert_eq!(
+            normalize_channel(None, Some("tenant:operator")).expect("session channel is valid"),
+            "tenant:operator"
+        );
+        assert_eq!(
+            normalize_channel(Some("tenant:operator"), Some("tenant:operator"))
+                .expect("matching requested channel is valid"),
+            "tenant:operator"
+        );
+        assert_eq!(
+            normalize_channel(Some("system:cron"), Some("tenant:operator"))
+                .expect("system cron channel is allowed for scheduler compatibility"),
+            "system:cron"
+        );
     }
 
     #[test]
