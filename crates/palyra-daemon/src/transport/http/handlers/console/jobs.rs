@@ -1,5 +1,6 @@
 use crate::*;
 use crate::{
+    app::state::ConsoleSession,
     gateway::current_unix_ms,
     journal::{
         ToolJobAttachRequest, ToolJobRecord, ToolJobRetryRequest, ToolJobState,
@@ -43,6 +44,8 @@ pub(crate) struct ConsoleJobRecoverRequest {
     pub(crate) stale_after_ms: Option<i64>,
     pub(crate) limit: Option<usize>,
 }
+
+const REQUIRE_CSRF_FOR_JOB_MUTATION: bool = true;
 
 pub(crate) async fn console_jobs_list_handler(
     State(state): State<AppState>,
@@ -160,7 +163,7 @@ pub(crate) async fn console_job_retry_handler(
     Path(job_id): Path<String>,
     Json(payload): Json<ConsoleJobActionRequest>,
 ) -> Result<Json<Value>, Response> {
-    let session = authorize_console_session(&state, &headers, true)?;
+    let session = authorize_console_job_mutation(&state, &headers)?;
     let job = state
         .runtime
         .retry_tool_job(ToolJobRetryRequest {
@@ -179,7 +182,7 @@ pub(crate) async fn console_job_attach_handler(
     headers: HeaderMap,
     Path(job_id): Path<String>,
 ) -> Result<Json<Value>, Response> {
-    let session = authorize_console_session(&state, &headers, false)?;
+    let session = authorize_console_job_mutation(&state, &headers)?;
     let job = state
         .runtime
         .attach_tool_job(ToolJobAttachRequest {
@@ -196,7 +199,7 @@ pub(crate) async fn console_job_release_handler(
     headers: HeaderMap,
     Path(job_id): Path<String>,
 ) -> Result<Json<Value>, Response> {
-    let session = authorize_console_session(&state, &headers, false)?;
+    let session = authorize_console_job_mutation(&state, &headers)?;
     let job_id = normalize_non_empty_field(job_id, "job_id")?;
     let _job =
         load_authorized_job(&state, job_id.clone(), session.context.principal.as_str()).await?;
@@ -210,7 +213,7 @@ pub(crate) async fn console_jobs_sweep_expired_handler(
     headers: HeaderMap,
     Json(payload): Json<ConsoleJobSweepRequest>,
 ) -> Result<Json<Value>, Response> {
-    let _session = authorize_console_session(&state, &headers, true)?;
+    let _session = authorize_console_job_mutation(&state, &headers)?;
     let jobs = state
         .runtime
         .sweep_expired_tool_jobs(
@@ -230,7 +233,7 @@ pub(crate) async fn console_jobs_recover_stale_handler(
     headers: HeaderMap,
     Json(payload): Json<ConsoleJobRecoverRequest>,
 ) -> Result<Json<Value>, Response> {
-    let _session = authorize_console_session(&state, &headers, true)?;
+    let _session = authorize_console_job_mutation(&state, &headers)?;
     let jobs = state
         .runtime
         .recover_stale_tool_jobs(
@@ -254,7 +257,7 @@ async fn transition_authorized_job(
     reason: String,
     last_error: Option<String>,
 ) -> Result<Json<Value>, Response> {
-    let session = authorize_console_session(&state, &headers, true)?;
+    let session = authorize_console_job_mutation(&state, &headers)?;
     let job_id = normalize_non_empty_field(job_id, "job_id")?;
     let _job =
         load_authorized_job(&state, job_id.clone(), session.context.principal.as_str()).await?;
@@ -272,6 +275,14 @@ async fn transition_authorized_job(
         .await
         .map_err(runtime_status_response)?;
     Ok(Json(job_envelope(job)))
+}
+
+#[allow(clippy::result_large_err)]
+fn authorize_console_job_mutation(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<ConsoleSession, Response> {
+    authorize_console_session(state, headers, REQUIRE_CSRF_FOR_JOB_MUTATION)
 }
 
 async fn load_authorized_job(
@@ -299,4 +310,17 @@ fn job_envelope(job: ToolJobRecord) -> Value {
         "contract": contract_descriptor(),
         "job": job,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::REQUIRE_CSRF_FOR_JOB_MUTATION;
+
+    #[test]
+    fn job_lifecycle_mutations_require_csrf() {
+        assert!(
+            REQUIRE_CSRF_FOR_JOB_MUTATION,
+            "job reference and lifecycle mutations must require the console CSRF token",
+        );
+    }
 }
