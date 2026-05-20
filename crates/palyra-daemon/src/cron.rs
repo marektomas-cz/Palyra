@@ -2262,14 +2262,10 @@ async fn execute_single_job_attempt(
     let mut tool_denies = 0_u64;
     let mut successful_completion_tools = 0_u64;
     let mut tool_names_by_proposal = HashMap::<String, String>::new();
-    let mut final_output = String::new();
     while let Some(event) = stream.next().await {
         let event =
             event.map_err(|error| Status::internal(format!("run stream read failed: {error}")))?;
         match event.body {
-            Some(common_v1::run_stream_event::Body::ModelToken(token)) => {
-                final_output.push_str(token.token.as_str());
-            }
             Some(common_v1::run_stream_event::Body::ToolProposal(proposal)) => {
                 if let Some(proposal_id) = proposal.proposal_id.as_ref() {
                     tool_names_by_proposal.insert(proposal_id.ulid.clone(), proposal.tool_name);
@@ -2318,7 +2314,6 @@ async fn execute_single_job_attempt(
         saw_failed,
         tool_denies,
         successful_completion_tools,
-        final_output.as_str(),
     );
 
     let error_kind = if terminal_status == CronRunStatus::Succeeded {
@@ -2359,13 +2354,9 @@ fn cron_terminal_status_from_stream(
     saw_failed: bool,
     tool_denies: u64,
     successful_completion_tools: u64,
-    final_output: &str,
 ) -> CronRunStatus {
     if saw_done {
-        if tool_denies > 0
-            && (successful_completion_tools == 0
-                || cron_done_output_indicates_policy_blocked(final_output, tool_denies))
-        {
+        if tool_denies > 0 && successful_completion_tools == 0 {
             return CronRunStatus::Denied;
         }
         return CronRunStatus::Succeeded;
@@ -2477,24 +2468,6 @@ fn scheduled_routine_trigger_payload(job: &CronJobRecord) -> Value {
     })
 }
 
-fn cron_done_output_indicates_policy_blocked(output: &str, tool_denies: u64) -> bool {
-    if tool_denies == 0 {
-        return false;
-    }
-    let normalized = output.to_ascii_lowercase();
-    [
-        "status: blocked",
-        "blocked by policy",
-        "blocked by your security policy",
-        "all significant tools are blocked",
-        "all filesystem and process tools remain blocked",
-        "policy0 blocks",
-        "tools are blocked by policy",
-    ]
-    .iter()
-    .any(|marker| normalized.contains(marker))
-}
-
 fn fallback_usage_snapshot(
     run_id: &str,
     session_id: &str,
@@ -2601,8 +2574,7 @@ mod tests {
 
     use super::{
         budgeted_objective_run_count, build_cron_prompt, build_scheduler_health_snapshot,
-        compute_misfire_recovery_plan, compute_next_run_after,
-        cron_done_output_indicates_policy_blocked, cron_misfire_audit_payload,
+        compute_misfire_recovery_plan, compute_next_run_after, cron_misfire_audit_payload,
         cron_successful_completion_tool, cron_terminal_status_from_stream,
         decide_concurrency_policy, load_periodic_reaudit_skills_index, normalize_schedule,
         now_unix_ms_or_fallback, parse_skill_reaudit_interval, periodic_reaudit_targets,
@@ -2795,49 +2767,14 @@ mod tests {
     }
 
     #[test]
-    fn cron_done_output_policy_blocked_requires_denies_and_blocked_text() {
-        assert!(cron_done_output_indicates_policy_blocked(
-            "**S028 Smoke Test - Status: BLOCKED**\nAll significant tools are blocked by policy0.",
-            5,
-        ));
-        assert!(cron_done_output_indicates_policy_blocked(
-            "All filesystem and process tools remain blocked by your security policy.",
-            1,
-        ));
-        assert!(!cron_done_output_indicates_policy_blocked(
-            "A non-critical diagnostic was denied, but the report was created and tests passed.",
-            1,
-        ));
-        assert!(!cron_done_output_indicates_policy_blocked(
-            "**Status: BLOCKED**\nNo tool deny events were observed.",
-            0,
-        ));
-    }
-
-    #[test]
-    fn cron_terminal_status_denies_done_runs_with_unrecovered_policy_denies() {
+    fn cron_terminal_status_uses_structured_completion_tools_for_done_runs() {
+        assert_eq!(cron_terminal_status_from_stream(true, false, 1, 0), CronRunStatus::Denied,);
         assert_eq!(
-            cron_terminal_status_from_stream(true, false, 1, 0, "I need approval to write file.md"),
-            CronRunStatus::Denied,
-        );
-        assert_eq!(
-            cron_terminal_status_from_stream(
-                true,
-                false,
-                1,
-                1,
-                "The report was created and tests passed.",
-            ),
+            cron_terminal_status_from_stream(true, false, 1, 1),
             CronRunStatus::Succeeded,
+            "model text must not spoof policy denial after a structured completion tool succeeds",
         );
-        assert_eq!(
-            cron_terminal_status_from_stream(true, false, 1, 1, "Status: blocked by policy."),
-            CronRunStatus::Denied,
-        );
-        assert_eq!(
-            cron_terminal_status_from_stream(true, false, 0, 0, "cron smoke test OK"),
-            CronRunStatus::Succeeded,
-        );
+        assert_eq!(cron_terminal_status_from_stream(true, false, 0, 0), CronRunStatus::Succeeded,);
     }
 
     #[test]
@@ -2888,8 +2825,7 @@ mod tests {
     fn model_induced_tool_denials_do_not_pause_recurring_jobs() {
         let every_job =
             sample_every_job("01ARZ3NDEKTSV4RRFFQ69G5FAV", Some(1_000), CronMisfirePolicy::Skip);
-        let terminal_status =
-            cron_terminal_status_from_stream(true, false, 1, 0, "I need approval to write file.md");
+        let terminal_status = cron_terminal_status_from_stream(true, false, 1, 0);
 
         assert_eq!(terminal_status, CronRunStatus::Denied);
         assert!(!should_pause_recurring_cron_after_policy_denied(
