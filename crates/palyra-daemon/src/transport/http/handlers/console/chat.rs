@@ -20,6 +20,9 @@ use palyra_common::{
 };
 use serde::Serialize;
 
+const ATTACHMENT_DERIVED_INDEX_OMITTED_MESSAGE: &str =
+    "attachment-derived content omitted; use device-scoped derived artifact endpoints";
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, Default)]
 struct ConsoleChatCanvasTranscriptReference {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -773,13 +776,9 @@ pub(crate) async fn console_chat_derived_artifact_detail_handler(
             "derived_artifact_id must be a canonical ULID",
         ))
     })?;
-    let derived_artifact = load_console_derived_artifact(
-        &state,
-        &session.context,
-        derived_artifact_id.as_str(),
-        false,
-    )
-    .map_err(|response| *response)?;
+    let derived_artifact =
+        load_console_derived_artifact(&state, &session.context, derived_artifact_id.as_str(), true)
+            .map_err(|response| *response)?;
     Ok(Json(json!({
         "derived_artifact": derived_artifact,
         "contract": contract_descriptor(),
@@ -793,13 +792,9 @@ pub(crate) async fn console_chat_derived_artifact_quarantine_handler(
     Json(payload): Json<ConsoleDerivedArtifactLifecycleRequest>,
 ) -> Result<Json<Value>, Response> {
     let session = authorize_console_session(&state, &headers, true)?;
-    let _existing = load_console_derived_artifact(
-        &state,
-        &session.context,
-        derived_artifact_id.as_str(),
-        false,
-    )
-    .map_err(|response| *response)?;
+    let _existing =
+        load_console_derived_artifact(&state, &session.context, derived_artifact_id.as_str(), true)
+            .map_err(|response| *response)?;
     let reason = payload.reason.and_then(trim_to_option);
     let derived_artifact = state
         .channels
@@ -823,13 +818,9 @@ pub(crate) async fn console_chat_derived_artifact_release_handler(
     Path(derived_artifact_id): Path<String>,
 ) -> Result<Json<Value>, Response> {
     let session = authorize_console_session(&state, &headers, true)?;
-    let _existing = load_console_derived_artifact(
-        &state,
-        &session.context,
-        derived_artifact_id.as_str(),
-        false,
-    )
-    .map_err(|response| *response)?;
+    let _existing =
+        load_console_derived_artifact(&state, &session.context, derived_artifact_id.as_str(), true)
+            .map_err(|response| *response)?;
     let derived_artifact = state
         .channels
         .release_derived_artifact(derived_artifact_id.as_str())
@@ -1008,13 +999,9 @@ pub(crate) async fn console_chat_derived_artifact_purge_handler(
     Path(derived_artifact_id): Path<String>,
 ) -> Result<Json<Value>, Response> {
     let session = authorize_console_session(&state, &headers, true)?;
-    let existing = load_console_derived_artifact(
-        &state,
-        &session.context,
-        derived_artifact_id.as_str(),
-        false,
-    )
-    .map_err(|response| *response)?;
+    let existing =
+        load_console_derived_artifact(&state, &session.context, derived_artifact_id.as_str(), true)
+            .map_err(|response| *response)?;
     if let Some(memory_item_id) = existing.memory_item_id.as_deref() {
         let _ = state
             .runtime
@@ -5417,7 +5404,7 @@ async fn index_derived_artifact_targets(
     artifact: &media::MediaArtifactPayload,
     record: &media::MediaDerivedArtifactRecord,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let Some(content_text) = record.content_text.as_deref() else {
+    let Some(_content_text) = record.content_text.as_deref() else {
         return Ok(());
     };
 
@@ -5432,9 +5419,11 @@ async fn index_derived_artifact_targets(
             .await;
     }
 
-    let workspace_content = format!(
-        "source_artifact_id: {}\nkind: {}\nfilename: {}\ncontent_type: {}\n\n{}",
-        artifact.artifact_id, record.kind, artifact.filename, artifact.content_type, content_text
+    let workspace_content = derived_artifact_index_content(
+        artifact.artifact_id.as_str(),
+        record.kind.as_str(),
+        artifact.filename.as_str(),
+        artifact.content_type.as_str(),
     );
     let workspace_record = state
         .runtime
@@ -5490,6 +5479,17 @@ async fn index_derived_artifact_targets(
 
 fn console_attachment_workspace_path(session_id: &str, artifact_id: &str, kind: &str) -> String {
     format!("projects/attachments/{session_id}/{artifact_id}/{kind}.md")
+}
+
+fn derived_artifact_index_content(
+    artifact_id: &str,
+    kind: &str,
+    filename: &str,
+    content_type: &str,
+) -> String {
+    format!(
+        "source_artifact_id: {artifact_id}\nkind: {kind}\nfilename: {filename}\ncontent_type: {content_type}\n\n{ATTACHMENT_DERIVED_INDEX_OMITTED_MESSAGE}"
+    )
 }
 
 fn build_console_chat_message_envelope(
@@ -5714,10 +5714,11 @@ mod tests {
     use super::{
         build_background_task_cancel_requested_result_json,
         build_background_task_cancelled_result_json, console_attachment_workspace_path,
-        derive_canvas_transcript_reference, extract_canvas_id_from_frame_reference,
+        derive_canvas_transcript_reference, derived_artifact_index_content,
+        derived_artifact_matches_console_context, extract_canvas_id_from_frame_reference,
         run_matches_console_context,
     };
-    use crate::{domain::workspace::normalize_workspace_path, gateway, journal};
+    use crate::{domain::workspace::normalize_workspace_path, gateway, journal, media};
 
     #[test]
     fn run_matches_console_context_rejects_mismatched_principal() {
@@ -5747,6 +5748,39 @@ mod tests {
             run_matches_console_context(&run, &context),
             "run ownership check should allow the originating console context"
         );
+    }
+
+    #[test]
+    fn derived_artifact_context_requires_device_when_requested() {
+        let record = sample_derived_artifact_record();
+        let same_device = gateway::RequestContext {
+            principal: "admin:web-console".to_owned(),
+            device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+            channel: Some("web".to_owned()),
+        };
+        let other_device = gateway::RequestContext {
+            principal: "admin:web-console".to_owned(),
+            device_id: "01ARZ3NDEKTSV4RRFFQ69G5FB0".to_owned(),
+            channel: Some("web".to_owned()),
+        };
+
+        assert!(derived_artifact_matches_console_context(&record, &same_device, true));
+        assert!(derived_artifact_matches_console_context(&record, &other_device, false));
+        assert!(
+            !derived_artifact_matches_console_context(&record, &other_device, true),
+            "derived artifact detail and lifecycle APIs must preserve the attachment device boundary"
+        );
+    }
+
+    #[test]
+    fn derived_artifact_index_content_omits_extracted_attachment_text() {
+        let sensitive_text = "sensitive attachment body should not be copied into workspace memory";
+        let content =
+            derived_artifact_index_content("artifact-1", "text", "contract.txt", "text/plain");
+
+        assert!(content.contains("source_artifact_id: artifact-1"));
+        assert!(content.contains(super::ATTACHMENT_DERIVED_INDEX_OMITTED_MESSAGE));
+        assert!(!content.contains(sensitive_text));
     }
 
     #[test]
@@ -5885,6 +5919,43 @@ mod tests {
             delegation: None,
             merge_result: None,
             tape_events: 0,
+        }
+    }
+
+    fn sample_derived_artifact_record() -> media::MediaDerivedArtifactRecord {
+        media::MediaDerivedArtifactRecord {
+            derived_artifact_id: "01ARZ3NDEKTSV4RRFFQ69G5FB1".to_owned(),
+            source_artifact_id: "01ARZ3NDEKTSV4RRFFQ69G5FB2".to_owned(),
+            attachment_id: Some("01ARZ3NDEKTSV4RRFFQ69G5FB3".to_owned()),
+            session_id: Some("01ARZ3NDEKTSV4RRFFQ69G5FB4".to_owned()),
+            principal: Some("admin:web-console".to_owned()),
+            device_id: Some("01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned()),
+            channel: Some("web".to_owned()),
+            filename: "contract.txt".to_owned(),
+            declared_content_type: "text/plain".to_owned(),
+            kind: "text".to_owned(),
+            state: "succeeded".to_owned(),
+            parser_name: "test-parser".to_owned(),
+            parser_version: "1".to_owned(),
+            source_content_hash: "source-hash".to_owned(),
+            content_hash: Some("content-hash".to_owned()),
+            content_text: Some("attachment text".to_owned()),
+            summary_text: None,
+            language: None,
+            duration_ms: None,
+            processing_ms: None,
+            warnings: Vec::new(),
+            anchors: Vec::new(),
+            failure_reason: None,
+            quarantine_reason: None,
+            workspace_document_id: Some("01ARZ3NDEKTSV4RRFFQ69G5FB5".to_owned()),
+            memory_item_id: Some("01ARZ3NDEKTSV4RRFFQ69G5FB6".to_owned()),
+            background_task_id: None,
+            recompute_required: false,
+            orphaned: false,
+            created_at_unix_ms: 1,
+            updated_at_unix_ms: 2,
+            purged_at_unix_ms: None,
         }
     }
 }
