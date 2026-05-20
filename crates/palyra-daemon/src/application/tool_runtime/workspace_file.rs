@@ -1426,7 +1426,7 @@ fn macos_path_alias_key(path: &Path) -> Option<String> {
             }
         }
     }
-    Some(normalized)
+    Some(normalized.to_owned())
 }
 
 #[cfg(target_os = "macos")]
