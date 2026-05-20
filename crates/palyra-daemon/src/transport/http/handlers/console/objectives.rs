@@ -38,6 +38,7 @@ const MAX_OBJECTIVE_PAGE_LIMIT: usize = 500;
 const OBJECTIVE_FOCUS_BLOCK_ID: &str = "objective-focus";
 const OBJECTIVE_HEARTBEAT_BLOCK_ID: &str = "objective-heartbeats";
 const OBJECTIVE_INBOX_BLOCK_ID: &str = "objective-inbox";
+const OBJECTIVE_WORKSPACE_PROJECTION_WARNING: &str = "Objective lifecycle action was applied, but workspace projection did not update. Repair malformed Palyra managed blocks or retry after workspace storage recovers.";
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct ConsoleObjectiveListQuery {
@@ -463,7 +464,9 @@ pub(crate) async fn console_objective_lifecycle_handler(
     let mut preflight_objective = objective.clone();
     apply_lifecycle_workspace_projection(action.as_str(), &mut preflight_objective)
         .map_err(runtime_status_response)?;
-    preflight_objective_workspace_projection(&state, &preflight_objective).await?;
+    if lifecycle_action_requires_workspace_preflight(action.as_str()) {
+        preflight_objective_workspace_projection(&state, &preflight_objective).await?;
+    }
     match action.as_str() {
         "fire" => apply_fire_action(&state, &mut objective, reason).await?,
         "pause" => apply_pause_action(&state, &mut objective, reason).await?,
@@ -480,15 +483,27 @@ pub(crate) async fn console_objective_lifecycle_handler(
         .objectives
         .upsert_objective(ObjectiveUpsert { record: objective })
         .map_err(objective_registry_error_response)?;
-    project_objective_workspace(
+    let workspace_projection_warning = match project_objective_workspace(
         &state,
         updated.owner_principal.as_str(),
         updated.channel.as_deref(),
         updated.workspace.session_key.as_deref(),
         &updated,
     )
-    .await?;
-    Ok(Json(json!({ "objective": build_objective_view(&state, updated).await? })))
+    .await
+    {
+        Ok(()) => None,
+        Err(_) if lifecycle_action_tolerates_workspace_projection_failure(action.as_str()) => {
+            Some(OBJECTIVE_WORKSPACE_PROJECTION_WARNING)
+        }
+        Err(error) => return Err(error),
+    };
+    let objective_view = build_objective_view(&state, updated).await?;
+    let mut response = json!({ "objective": objective_view });
+    if let Some(warning) = workspace_projection_warning {
+        response["workspace_projection_warning"] = json!(warning);
+    }
+    Ok(Json(response))
 }
 
 pub(crate) async fn console_objective_attempt_handler(
@@ -1387,6 +1402,14 @@ fn apply_lifecycle_workspace_projection(
     Ok(())
 }
 
+fn lifecycle_action_requires_workspace_preflight(action: &str) -> bool {
+    matches!(action, "fire" | "resume")
+}
+
+fn lifecycle_action_tolerates_workspace_projection_failure(action: &str) -> bool {
+    matches!(action, "pause" | "cancel" | "archive")
+}
+
 async fn project_objective_workspace(
     state: &AppState,
     owner_principal: &str,
@@ -2075,13 +2098,15 @@ fn internal_console_error(error: anyhow::Error) -> Response {
 mod tests {
     use super::{
         apply_lifecycle_workspace_projection, compute_objective_health,
-        default_objective_execution_posture, initial_objective_state, managed_entry,
-        normalize_budget, normalize_lifecycle_reason, objective_attempts_for_view,
-        objective_record_block, objective_routine_snapshot_from_binding,
-        owner_objective_block_updates, parse_objective_execution_config, parse_objective_kind,
-        parse_objective_priority, preserved_run_from_objective_attempt,
-        reconcile_objective_attempts_with_latest_run, render_objective_summary_markdown,
-        ConsoleObjectiveBudgetPayload,
+        default_objective_execution_posture, initial_objective_state,
+        lifecycle_action_requires_workspace_preflight,
+        lifecycle_action_tolerates_workspace_projection_failure, managed_entry, normalize_budget,
+        normalize_lifecycle_reason, objective_attempts_for_view, objective_record_block,
+        objective_routine_snapshot_from_binding, owner_objective_block_updates,
+        parse_objective_execution_config, parse_objective_kind, parse_objective_priority,
+        preserved_run_from_objective_attempt, reconcile_objective_attempts_with_latest_run,
+        render_objective_summary_markdown, ConsoleObjectiveBudgetPayload,
+        OBJECTIVE_WORKSPACE_PROJECTION_WARNING,
     };
     use crate::domain::workspace::{
         sync_workspace_managed_block, WorkspaceManagedBlockError, WorkspaceManagedBlockUpdate,
@@ -2378,6 +2403,42 @@ mod tests {
         assert_eq!(objective.state, ObjectiveState::Paused);
         assert!(!objective.automation.enabled);
         assert!(objective.lifecycle_history.is_empty());
+    }
+
+    #[test]
+    fn stop_lifecycle_actions_do_not_require_workspace_preflight() {
+        for action in ["pause", "cancel", "archive"] {
+            assert!(
+                !lifecycle_action_requires_workspace_preflight(action),
+                "{action} must not let malformed workspace blocks block stop side effects"
+            );
+            assert!(
+                lifecycle_action_tolerates_workspace_projection_failure(action),
+                "{action} should report projection failures as warnings after the action applies"
+            );
+        }
+        for action in ["fire", "resume"] {
+            assert!(
+                lifecycle_action_requires_workspace_preflight(action),
+                "{action} should still fail before enabling or dispatching automation"
+            );
+            assert!(
+                !lifecycle_action_tolerates_workspace_projection_failure(action),
+                "{action} should not hide workspace projection failures"
+            );
+        }
+    }
+
+    #[test]
+    fn stop_lifecycle_workspace_projection_warning_is_explicit() {
+        assert!(
+            OBJECTIVE_WORKSPACE_PROJECTION_WARNING.contains("action was applied"),
+            "warning must make clear the stop action was not rolled back"
+        );
+        assert!(
+            OBJECTIVE_WORKSPACE_PROJECTION_WARNING.contains("workspace projection did not update"),
+            "warning must make the projection failure explicit"
+        );
     }
 
     #[test]
