@@ -416,6 +416,7 @@ jobs:
         with:
           node-version-file: .node-version
           cache: true
+          run-install: true
 
       - name: Reinstall root workspace from clean checkout
         shell: pwsh
@@ -423,6 +424,7 @@ jobs:
           if (Test-Path node_modules) {
             Remove-Item -LiteralPath node_modules -Recurse -Force
           }
+          npm ci
           vp install
 
       - name: Run clean-room web validation

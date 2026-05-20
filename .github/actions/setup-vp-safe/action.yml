@@ -1,5 +1,5 @@
 name: Setup Vite+ Safe
-description: Install Vite+ via the pinned upstream action and guarantee a working vp CLI on PATH.
+description: Install Vite+ from the committed lockfile and guarantee a working vp CLI on PATH.
 
 inputs:
   node-version-file:
@@ -10,7 +10,7 @@ inputs:
     required: false
     default: "true"
   run-install:
-    description: Whether setup-vp should run install automatically.
+    description: Whether the action should install workspace dependencies from the committed lockfile.
     required: false
     default: "false"
 
@@ -31,11 +31,32 @@ runs:
       with:
         node-version-file: ${{ inputs.node-version-file }}
 
+    - name: Install workspace dependencies from lockfile
+      if: ${{ inputs.run-install == 'true' }}
+      shell: pwsh
+      run: npm ci
+
+    - name: Expose workspace npm binaries
+      shell: pwsh
+      run: |
+        $workspaceBin = Join-Path $PWD "node_modules/.bin"
+        if (Test-Path -LiteralPath $workspaceBin) {
+          if ($IsWindows) {
+            $env:PATH = "$workspaceBin;$env:PATH"
+          } else {
+            $env:PATH = "${workspaceBin}:$env:PATH"
+          }
+
+          if ($env:GITHUB_PATH) {
+            $workspaceBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          }
+        }
+
     - name: Ensure Vite+ CLI
       shell: pwsh
       run: ./scripts/ci/ensure-vp.ps1
 
-    - name: Install workspace dependencies
+    - name: Install Vite+ managed tools
       if: ${{ inputs.run-install == 'true' }}
       shell: pwsh
       run: vp install
