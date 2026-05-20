@@ -239,7 +239,7 @@ async fn process_background_task(
         return Ok(());
     }
     if AuxiliaryTaskState::from_str(task.state.as_str()) == Some(AuxiliaryTaskState::Running) {
-        if task.task_kind == REFLECTION_TASK_KIND && task.target_run_id.is_none() {
+        if running_task_should_wait_for_in_flight_work(task) {
             return Ok(());
         }
         if let Some(target_run_id) = task.target_run_id.as_deref() {
@@ -803,6 +803,11 @@ fn task_counts_as_active_delegated_child(task: &OrchestratorBackgroundTaskRecord
         }
         _ => false,
     }
+}
+
+fn running_task_should_wait_for_in_flight_work(task: &OrchestratorBackgroundTaskRecord) -> bool {
+    task.target_run_id.is_none()
+        && (task.task_kind == REFLECTION_TASK_KIND || task_has_in_flight_work_without_target(task))
 }
 
 fn task_has_in_flight_work_without_target(task: &OrchestratorBackgroundTaskRecord) -> bool {
@@ -2918,9 +2923,10 @@ mod tests {
         child_merge_lifecycle_details, delegated_child_timeout_message,
         evaluate_delegation_scheduler_limits, parent_merge_event_payload,
         replace_background_task_snapshot, running_delegated_children_for_parent,
-        should_emit_child_stream_progress, task_has_in_flight_work_without_target,
-        ChildLifecycleTapeBudget, ChildLifecycleTapeDecision, ChildStreamProgress,
-        DelegationSchedulerDecision, MergeDeliveryPayloadContext,
+        running_task_should_wait_for_in_flight_work, should_emit_child_stream_progress,
+        task_has_in_flight_work_without_target, ChildLifecycleTapeBudget,
+        ChildLifecycleTapeDecision, ChildStreamProgress, DelegationSchedulerDecision,
+        MergeDeliveryPayloadContext,
     };
     use crate::{
         application::delivery_arbitration::{DeliveryDecision, DeliveryDecisionAction},
@@ -3515,6 +3521,35 @@ mod tests {
         let mut queued = running;
         queued.state = AuxiliaryTaskState::Queued.as_str().to_owned();
         assert!(!task_has_in_flight_work_without_target(&queued));
+    }
+
+    #[test]
+    fn running_auxiliary_task_without_target_waits_for_in_flight_work() {
+        let limits = DelegationRuntimeLimits {
+            max_concurrent_children: 1,
+            max_children_per_parent: 8,
+            max_total_children: 16,
+            max_parallel_groups: 1,
+            max_depth: 3,
+            max_budget_share_bps: 10_000,
+            child_budget_override: None,
+            child_timeout_ms: 60_000,
+        };
+        let mut task = sample_task(
+            "task-aux-summary",
+            AuxiliaryTaskState::Running.as_str(),
+            10,
+            "group-a",
+            limits,
+        );
+        task.task_kind = "summary".to_owned();
+        task.target_run_id = None;
+        task.started_at_unix_ms = Some(123);
+
+        assert!(
+            running_task_should_wait_for_in_flight_work(&task),
+            "running auxiliary tasks without target_run_id are provider work in flight"
+        );
     }
 
     #[test]
