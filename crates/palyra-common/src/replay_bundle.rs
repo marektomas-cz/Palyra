@@ -392,13 +392,14 @@ pub fn build_replay_bundle(input: ReplayBundleBuildInput) -> Result<ReplayBundle
         normalize_lifecycle_transitions(input.lifecycle_transitions, &mut normalizer)?;
     let idempotency_records =
         normalize_idempotency_records(input.idempotency_records, &mut normalizer)?;
+    let artifact_refs = normalize_artifact_refs(input.artifact_refs, &mut normalizer);
     let expected = expected_outputs_from_capture(
         &tape_events,
         &tool_exchanges,
         &approvals,
         &http_exchanges,
         ReplayCaptureCounts {
-            artifact_refs: input.artifact_refs.len(),
+            artifact_refs: artifact_refs.len(),
             auxiliary_tasks: auxiliary_tasks.len(),
             flow_events: flow_events.len(),
             lifecycle_transitions: lifecycle_transitions.len(),
@@ -435,7 +436,7 @@ pub fn build_replay_bundle(input: ReplayBundleBuildInput) -> Result<ReplayBundle
         flow_events,
         lifecycle_transitions,
         idempotency_records,
-        artifact_refs: input.artifact_refs,
+        artifact_refs,
         expected,
         redaction: normalizer.redaction,
         integrity: ReplayIntegrity {
@@ -446,6 +447,20 @@ pub fn build_replay_bundle(input: ReplayBundleBuildInput) -> Result<ReplayBundle
 
     finalize_replay_bundle(&mut bundle)?;
     Ok(bundle)
+}
+
+fn normalize_artifact_refs(
+    refs: Vec<ReplayArtifactRef>,
+    normalizer: &mut ReplayNormalizer,
+) -> Vec<ReplayArtifactRef> {
+    refs.into_iter()
+        .map(|mut artifact| {
+            if !artifact.reference.trim().is_empty() {
+                artifact.reference = normalizer.alias_for_identifier(artifact.reference.as_str());
+            }
+            artifact
+        })
+        .collect()
 }
 
 pub fn finalize_replay_bundle(bundle: &mut ReplayBundle) -> Result<()> {
@@ -1078,7 +1093,14 @@ fn string_contains_unredacted_secret(raw: &str, key_context: Option<&str>) -> bo
         "api_key=",
         "authorization=",
         "client_secret=",
+        "credential=",
         "password=",
+        "sig=",
+        "signature=",
+        "token=",
+        "x-amz-credential=",
+        "x-amz-signature=",
+        "x-goog-signature=",
     ] {
         if lowered.contains(marker) {
             return true;
@@ -1361,12 +1383,59 @@ mod tests {
     }
 
     #[test]
+    fn bundle_build_redacts_artifact_references() {
+        let mut input = sample_input();
+        input.artifact_refs = vec![ReplayArtifactRef {
+            artifact_id: "artifact-1".to_owned(),
+            kind: "http_fixture".to_owned(),
+            reference: "https://bucket.example.test/object?X-Amz-Credential=AKIA&X-Amz-Signature=deadbeef&mode=ok".to_owned(),
+            sha256: Some("abc123".to_owned()),
+            size_bytes: Some(42),
+        }];
+
+        let bundle = build_replay_bundle(input).expect("bundle should build");
+        let encoded = String::from_utf8(
+            canonical_replay_bundle_bytes(&bundle).expect("bundle should encode"),
+        )
+        .expect("json should be utf8");
+
+        assert_eq!(bundle.artifact_refs.len(), 1);
+        assert!(bundle.artifact_refs[0].reference.starts_with("id:"));
+        assert_eq!(bundle.artifact_refs[0].sha256.as_deref(), Some("abc123"));
+        assert_eq!(bundle.artifact_refs[0].size_bytes, Some(42));
+        assert!(!encoded.contains("X-Amz-Credential=AKIA"));
+        assert!(!encoded.contains("X-Amz-Signature=deadbeef"));
+        assert!(validate_replay_bundle(&bundle).valid);
+    }
+
+    #[test]
     fn validator_rejects_raw_sensitive_fields() {
         let mut bundle = build_replay_bundle(sample_input()).expect("bundle should build");
         bundle.config_snapshot = json!({ "token": "raw-secret" });
         let report = validate_replay_bundle(&bundle);
         assert!(!report.valid);
         assert!(report.issues.iter().any(|issue| issue.path.contains("token")));
+    }
+
+    #[test]
+    fn validator_rejects_signed_artifact_url_markers() {
+        let mut bundle = build_replay_bundle(sample_input()).expect("bundle should build");
+        bundle.artifact_refs = vec![ReplayArtifactRef {
+            artifact_id: "artifact-1".to_owned(),
+            kind: "http_fixture".to_owned(),
+            reference: "https://bucket.example.test/object?X-Amz-Signature=deadbeef&mode=ok"
+                .to_owned(),
+            sha256: None,
+            size_bytes: None,
+        }];
+
+        let report = validate_replay_bundle(&bundle);
+
+        assert!(!report.valid);
+        assert!(
+            report.issues.iter().any(|issue| issue.path == "$.artifact_refs[0].reference"),
+            "artifact reference signed URL should be flagged: {report:#?}"
+        );
     }
 
     #[test]
