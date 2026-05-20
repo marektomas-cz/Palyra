@@ -21,8 +21,8 @@ use crate::{
     },
     gateway::{
         build_and_ingest_tool_result_memory_summary, execute_tool_with_runtime_dispatch,
-        record_tool_execution_outcome_metrics, GatewayRuntimeState, ToolExecutionTraceContext,
-        ToolRuntimeExecutionContext,
+        record_tool_execution_outcome_metrics, shared_tool_budget, shared_tool_budget_remaining,
+        GatewayRuntimeState, ToolExecutionTraceContext, ToolRuntimeExecutionContext,
     },
     journal::OrchestratorTapeAppendRequest,
     tool_protocol::{denied_execution_outcome, ToolExecutionOutcome},
@@ -167,6 +167,7 @@ pub(crate) async fn process_route_tool_proposal_event(
     let execution_outcome = if decision.allowed {
         runtime_state.record_tool_execution_attempt();
         let started_at = Instant::now();
+        let nested_tool_budget = shared_tool_budget(*remaining_tool_budget);
         let outcome = execute_tool_with_runtime_dispatch(
             runtime_state,
             ToolRuntimeExecutionContext {
@@ -181,8 +182,10 @@ pub(crate) async fn process_route_tool_proposal_event(
             proposal_id,
             tool_name,
             input_json,
+            Some(nested_tool_budget.clone()),
         )
         .await;
+        *remaining_tool_budget = shared_tool_budget_remaining(&nested_tool_budget);
         record_tool_execution_outcome_metrics(
             runtime_state,
             ToolExecutionTraceContext {

@@ -3196,6 +3196,7 @@ async fn networked_worker_runtime_executes_echo_with_artifact_transport_journal(
         "proposal-networked-worker-runtime",
         "palyra.echo",
         br#"{"text":"remote worker"}"#,
+        None,
     )
     .await;
 
@@ -3252,6 +3253,7 @@ async fn networked_worker_runtime_rejects_unsupported_context_tools() {
         "proposal-networked-worker-runtime-unsupported",
         "palyra.memory.search",
         br#"{"query":"incident"}"#,
+        None,
     )
     .await;
 
@@ -3427,6 +3429,7 @@ async fn tool_program_runtime_executes_echo_and_emits_child_attestation() {
                 {"step_id": "echo", "tool": "palyra.echo", "input": {"text": "nested ok"}}
             ]
         }"#,
+        None,
     )
     .await;
 
@@ -3449,6 +3452,57 @@ async fn tool_program_runtime_executes_echo_and_emits_child_attestation() {
             .and_then(Value::as_str)
             .is_some_and(|digest| !digest.is_empty()),
         "child attestation must include execution digest"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tool_program_runtime_consumes_shared_child_budget() {
+    let state = build_test_runtime_state(false);
+    let session_id = "session-tool-program-budget";
+    let run_id = "run-tool-program-budget";
+    start_tool_program_test_run(&state, session_id, run_id).await;
+    let remaining_tool_budget = super::shared_tool_budget(1);
+
+    let outcome = super::execute_tool_with_runtime_dispatch(
+        &state,
+        super::ToolRuntimeExecutionContext {
+            principal: "user:ops",
+            device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            channel: Some("cli"),
+            session_id,
+            run_id,
+            execution_backend: ExecutionBackendPreference::LocalSandbox,
+            backend_reason_code: "backend.default.local_sandbox",
+        },
+        "proposal-tool-program-budget",
+        super::TOOL_PROGRAM_RUN_TOOL_NAME,
+        br#"{
+            "schema_version": 1,
+            "program_id": "program-budget",
+            "granted_tools": ["palyra.echo"],
+            "steps": [
+                {"step_id": "echo-1", "tool": "palyra.echo", "input": {"text": "first"}},
+                {"step_id": "echo-2", "tool": "palyra.echo", "input": {"text": "second"}}
+            ]
+        }"#,
+        Some(remaining_tool_budget.clone()),
+    )
+    .await;
+
+    assert!(!outcome.success, "second child should be denied by shared run budget");
+    assert_eq!(super::shared_tool_budget_remaining(&remaining_tool_budget), 0);
+    let output = parse_tool_output_json(&outcome);
+    assert_eq!(output.get("status").and_then(Value::as_str), Some("failed"));
+    assert_eq!(output.pointer("/steps/0/status").and_then(Value::as_str), Some("completed"));
+    assert_eq!(output.pointer("/steps/1/status").and_then(Value::as_str), Some("denied"));
+    assert_eq!(output.pointer("/budget/child_runs_used").and_then(Value::as_u64), Some(1));
+    assert_eq!(output.pointer("/budget/rejected_payloads").and_then(Value::as_u64), Some(1));
+    assert!(
+        output
+            .pointer("/steps/1/error")
+            .and_then(Value::as_str)
+            .is_some_and(|error| error.contains("tool execution budget exhausted for run")),
+        "denial should use the normal run budget reason"
     );
 }
 
@@ -3478,6 +3532,7 @@ async fn tool_program_runtime_denies_sensitive_child_without_nested_approval() {
                 {"step_id": "process", "tool": "palyra.process.run", "input": {"command": "echo", "args": ["blocked"]}}
             ]
         }"#,
+        None,
     )
     .await;
 
@@ -3538,6 +3593,7 @@ async fn tool_program_runtime_respects_disabled_child_tool_posture() {
                 {"step_id": "echo", "tool": "palyra.echo", "input": {"text": "must not run"}}
             ]
         }"#,
+        None,
     )
     .await;
 

@@ -42,8 +42,9 @@ use crate::{
     gateway::{
         await_tool_approval_response, best_effort_mark_approval_error,
         build_and_ingest_tool_result_memory_summary, execute_tool_with_runtime_dispatch,
-        record_tool_execution_outcome_metrics, tool_cancellation_requires_execution_drain,
-        GatewayRuntimeState, RunStreamToolExecutionOutcome, ToolApprovalOutcome,
+        record_tool_execution_outcome_metrics, shared_tool_budget, shared_tool_budget_remaining,
+        tool_cancellation_requires_execution_drain, GatewayRuntimeState,
+        RunStreamToolExecutionOutcome, SharedToolBudget, ToolApprovalOutcome,
         ToolRuntimeExecutionContext, TOOL_APPROVAL_RESPONSE_TIMEOUT,
     },
     journal::{
@@ -177,6 +178,7 @@ pub(crate) async fn process_run_stream_tool_proposal_event(
                 run_state,
                 run_id,
                 prepared,
+                remaining_tool_budget,
                 tape_seq,
             )
             .await
@@ -384,6 +386,7 @@ pub(crate) async fn execute_prepared_run_stream_tool_proposals_ordered(
     run_state: &mut RunStateMachine,
     run_id: &str,
     prepared_tools: Vec<RunStreamPreparedToolExecution>,
+    remaining_tool_budget: &mut u32,
     tape_seq: &mut i64,
 ) -> Result<RunStreamPreparedToolExecutionBatchOutcome, Status> {
     let mut completed = Vec::new();
@@ -397,6 +400,7 @@ pub(crate) async fn execute_prepared_run_stream_tool_proposals_ordered(
                 run_state,
                 run_id,
                 group.tools,
+                remaining_tool_budget,
                 tape_seq,
             )
             .await?
@@ -417,6 +421,7 @@ pub(crate) async fn execute_prepared_run_stream_tool_proposals_ordered(
                     run_state,
                     run_id,
                     prepared,
+                    remaining_tool_budget,
                     tape_seq,
                 )
                 .await?
@@ -599,6 +604,7 @@ async fn execute_parallel_prepared_tool_group(
     run_state: &mut RunStateMachine,
     run_id: &str,
     prepared_tools: Vec<RunStreamPreparedToolExecution>,
+    remaining_tool_budget: &mut u32,
     tape_seq: &mut i64,
 ) -> Result<RunStreamPreparedToolExecutionBatchOutcome, Status> {
     let group_id = Ulid::new().to_string();
@@ -615,16 +621,19 @@ async fn execute_parallel_prepared_tool_group(
     .await?;
 
     let mut join_set = JoinSet::new();
+    let nested_tool_budget = shared_tool_budget(*remaining_tool_budget);
     for (order, prepared) in prepared_tools.into_iter().enumerate() {
         let runtime_state = Arc::clone(runtime_state);
         let request_context = request_context.clone();
         let run_id = run_id.to_owned();
+        let nested_tool_budget = nested_tool_budget.clone();
         join_set.spawn(async move {
             match execute_prepared_tool_runtime(
                 &runtime_state,
                 &request_context,
                 run_id.as_str(),
                 &prepared,
+                Some(nested_tool_budget),
             )
             .await?
             {
@@ -678,6 +687,7 @@ async fn execute_parallel_prepared_tool_group(
             }
         }
     }
+    *remaining_tool_budget = shared_tool_budget_remaining(&nested_tool_budget);
 
     let mut finalized = Vec::with_capacity(completed.len());
     for (_, (prepared, execution_outcome)) in completed {
@@ -1151,25 +1161,27 @@ async fn execute_prepared_run_stream_tool_proposal(
     run_state: &mut RunStateMachine,
     run_id: &str,
     prepared: RunStreamPreparedToolExecution,
+    remaining_tool_budget: &mut u32,
     tape_seq: &mut i64,
 ) -> Result<RunStreamToolExecutionOutcome, Status> {
-    let execution_outcome =
-        match execute_prepared_tool_runtime(runtime_state, request_context, run_id, &prepared)
-            .await?
-        {
-            Some(outcome) => outcome,
-            None => {
-                transition_run_stream_to_cancelled(
-                    sender,
-                    runtime_state,
-                    run_state,
-                    run_id,
-                    tape_seq,
-                )
+    let nested_tool_budget = shared_tool_budget(*remaining_tool_budget);
+    let execution_outcome = match execute_prepared_tool_runtime(
+        runtime_state,
+        request_context,
+        run_id,
+        &prepared,
+        Some(nested_tool_budget.clone()),
+    )
+    .await?
+    {
+        Some(outcome) => outcome,
+        None => {
+            transition_run_stream_to_cancelled(sender, runtime_state, run_state, run_id, tape_seq)
                 .await?;
-                return Ok(RunStreamToolExecutionOutcome::Cancelled);
-            }
-        };
+            return Ok(RunStreamToolExecutionOutcome::Cancelled);
+        }
+    };
+    *remaining_tool_budget = shared_tool_budget_remaining(&nested_tool_budget);
     finalize_prepared_tool_execution_outcome(
         sender,
         runtime_state,
@@ -1188,6 +1200,7 @@ async fn execute_prepared_tool_runtime(
     request_context: &RequestContext,
     run_id: &str,
     prepared: &RunStreamPreparedToolExecution,
+    remaining_tool_budget: Option<SharedToolBudget>,
 ) -> Result<Option<ToolExecutionOutcome>, Status> {
     if !prepared.decision.allowed {
         return Ok(Some(denied_execution_outcome(
@@ -1227,6 +1240,7 @@ async fn execute_prepared_tool_runtime(
             prepared.proposal_id.as_str(),
             prepared.tool_name.as_str(),
             prepared.input_json.as_slice(),
+            remaining_tool_budget,
         )
         .instrument(tool_span),
     );

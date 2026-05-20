@@ -18,7 +18,7 @@ use ulid::Ulid;
 
 use crate::{
     gateway::{
-        current_unix_ms, GatewayRuntimeState, ToolRuntimeExecutionContext,
+        current_unix_ms, GatewayRuntimeState, SharedToolBudget, ToolRuntimeExecutionContext,
         TOOL_PROGRAM_RUN_TOOL_NAME,
     },
     journal::{
@@ -241,6 +241,7 @@ pub(crate) async fn execute_tool_program_run_tool(
     context: ToolRuntimeExecutionContext<'_>,
     proposal_id: &str,
     input_json: &[u8],
+    remaining_tool_budget: SharedToolBudget,
 ) -> ToolExecutionOutcome {
     let request = match parse_and_validate_request(input_json) {
         Ok(request) => request,
@@ -256,7 +257,15 @@ pub(crate) async fn execute_tool_program_run_tool(
         }
     };
 
-    match execute_validated_program(runtime_state, context, proposal_id, input_json, request).await
+    match execute_validated_program(
+        runtime_state,
+        context,
+        proposal_id,
+        input_json,
+        request,
+        remaining_tool_budget,
+    )
+    .await
     {
         Ok((response, error)) => {
             let success = response.status == ToolProgramStatus::Completed;
@@ -279,6 +288,7 @@ async fn execute_validated_program(
     proposal_id: &str,
     input_json: &[u8],
     request: ToolProgramRunRequest,
+    remaining_tool_budget: SharedToolBudget,
 ) -> Result<(ToolProgramRunResponse, String), String> {
     let started_at = Instant::now();
     let mut budget = ToolProgramBudgetReport::default();
@@ -389,6 +399,7 @@ async fn execute_validated_program(
                     step,
                     &budget_snapshot,
                     &grants,
+                    Some(remaining_tool_budget.clone()),
                 )
             });
             join_all(futures).await
@@ -405,6 +416,7 @@ async fn execute_validated_program(
                         step,
                         &budget,
                         &grants,
+                        Some(remaining_tool_budget.clone()),
                     )
                     .await,
                 );
@@ -503,6 +515,7 @@ async fn execute_validated_program(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_program_step(
     runtime_state: &Arc<GatewayRuntimeState>,
     context: ToolRuntimeExecutionContext<'_>,
@@ -511,6 +524,7 @@ async fn execute_program_step(
     step: &ToolProgramStep,
     budget_snapshot: &ToolProgramBudgetReport,
     grants: &BTreeSet<String>,
+    remaining_tool_budget: Option<SharedToolBudget>,
 ) -> Result<(ToolProgramStepResult, Option<ChildToolAttestation>, ToolProgramBudgetReport), String>
 {
     let mut budget_delta =
@@ -561,6 +575,7 @@ async fn execute_program_step(
         context,
         proposal_id,
         grants,
+        remaining_tool_budget,
         ToolRpcRequest {
             schema_version: TOOL_RPC_SCHEMA_VERSION,
             call_id: step.step_id.clone(),

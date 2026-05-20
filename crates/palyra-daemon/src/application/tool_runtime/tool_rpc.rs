@@ -13,7 +13,8 @@ use crate::{
         },
     },
     gateway::{
-        execute_tool_with_runtime_dispatch, GatewayRuntimeState, ToolRuntimeExecutionContext,
+        execute_tool_with_runtime_dispatch, GatewayRuntimeState, SharedToolBudget,
+        ToolRuntimeExecutionContext,
     },
     tool_protocol::{self, ToolAttestation},
     transport::grpc::auth::RequestContext,
@@ -115,6 +116,7 @@ pub(crate) async fn execute_granted_tool_rpc_call(
     context: ToolRuntimeExecutionContext<'_>,
     parent_proposal_id: &str,
     grants: &BTreeSet<String>,
+    remaining_tool_budget: Option<SharedToolBudget>,
     request: ToolRpcRequest,
 ) -> ToolRpcResponse {
     if let Err(error) = validate_tool_rpc_request(&request) {
@@ -162,23 +164,24 @@ pub(crate) async fn execute_granted_tool_rpc_call(
         input_bytes.as_slice(),
     )
     .await;
-    let mut remaining_budget = 1;
     let ResolvedToolProposalDecision { decision, gate_report: _ } =
-        resolve_tool_proposal_decision_for_context(
-            runtime_state,
-            &request_context,
-            context.channel,
-            context.session_id,
-            context.run_id,
-            request.tool_name.as_str(),
-            skill_context.as_ref(),
-            &mut remaining_budget,
-            skill_gate_decision,
-            proposal_approval_required,
-            &effective_posture,
-            &backend_selection,
-            ToolProposalApprovalState::default(),
-        );
+        with_tool_rpc_budget(remaining_tool_budget.as_ref(), 1, |remaining_budget| {
+            resolve_tool_proposal_decision_for_context(
+                runtime_state,
+                &request_context,
+                context.channel,
+                context.session_id,
+                context.run_id,
+                request.tool_name.as_str(),
+                skill_context.as_ref(),
+                remaining_budget,
+                skill_gate_decision,
+                proposal_approval_required,
+                &effective_posture,
+                &backend_selection,
+                ToolProposalApprovalState::default(),
+            )
+        });
     let child_tool_requires_approval =
         tool_protocol::tool_requires_approval(request.tool_name.as_str());
     if proposal_approval_required || child_tool_requires_approval || decision.approval_required {
@@ -202,6 +205,7 @@ pub(crate) async fn execute_granted_tool_rpc_call(
         child_proposal_id.as_str(),
         request.tool_name.as_str(),
         input_bytes.as_slice(),
+        remaining_tool_budget.clone(),
     ));
     let outcome = match timeout {
         Some(timeout) => match tokio::time::timeout(timeout, execution).await {
@@ -243,6 +247,21 @@ pub(crate) async fn execute_granted_tool_rpc_call(
         redacted_preview,
         attestation: Some(ToolRpcAttestation::from(&outcome.attestation)),
     }
+}
+
+fn with_tool_rpc_budget<T>(
+    remaining_tool_budget: Option<&SharedToolBudget>,
+    fallback_budget: u32,
+    resolve: impl FnOnce(&mut u32) -> T,
+) -> T {
+    if let Some(remaining_tool_budget) = remaining_tool_budget {
+        let mut guard =
+            remaining_tool_budget.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        return resolve(&mut guard);
+    }
+
+    let mut local_budget = fallback_budget;
+    resolve(&mut local_budget)
 }
 
 pub(crate) fn python_tool_rpc_sdk_source() -> &'static str {

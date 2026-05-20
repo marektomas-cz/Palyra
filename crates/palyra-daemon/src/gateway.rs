@@ -541,6 +541,16 @@ pub(crate) struct ToolRuntimeExecutionContext<'a> {
     pub(crate) backend_reason_code: &'a str,
 }
 
+pub(crate) type SharedToolBudget = Arc<Mutex<u32>>;
+
+pub(crate) fn shared_tool_budget(remaining_tool_budget: u32) -> SharedToolBudget {
+    Arc::new(Mutex::new(remaining_tool_budget))
+}
+
+pub(crate) fn shared_tool_budget_remaining(budget: &SharedToolBudget) -> u32 {
+    *budget.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct ToolExecutionTraceContext<'a> {
     pub(crate) run_id: &'a str,
@@ -555,6 +565,7 @@ pub(crate) async fn execute_tool_with_runtime_dispatch(
     proposal_id: &str,
     tool_name: &str,
     input_json: &[u8],
+    remaining_tool_budget: Option<SharedToolBudget>,
 ) -> ToolExecutionOutcome {
     if context.execution_backend == ExecutionBackendPreference::NetworkedWorker {
         crate::application::tool_runtime::networked_worker::execute_networked_worker_tool(
@@ -566,11 +577,22 @@ pub(crate) async fn execute_tool_with_runtime_dispatch(
         )
         .await
     } else if tool_name == TOOL_PROGRAM_RUN_TOOL_NAME {
+        let fallback_budget;
+        let remaining_tool_budget = match remaining_tool_budget {
+            Some(budget) => budget,
+            None => {
+                fallback_budget = shared_tool_budget(
+                    runtime_state.config.tool_call.max_calls_per_run.saturating_sub(1),
+                );
+                fallback_budget
+            }
+        };
         crate::application::tool_runtime::tool_program::execute_tool_program_run_tool(
             runtime_state,
             context,
             proposal_id,
             input_json,
+            remaining_tool_budget,
         )
         .await
     } else if tool_name == MEMORY_SEARCH_TOOL_NAME {

@@ -436,6 +436,7 @@ async fn flush_pending_run_stream_tool_proposals(
                     run_id,
                     &mut prepared_tools,
                     tool_results,
+                    remaining_tool_budget,
                     tape_seq,
                 )
                 .await?
@@ -463,6 +464,7 @@ async fn flush_pending_run_stream_tool_proposals(
         run_id,
         &mut prepared_tools,
         tool_results,
+        remaining_tool_budget,
         tape_seq,
     )
     .await
@@ -478,6 +480,7 @@ async fn flush_prepared_run_stream_tool_batch(
     run_id: &str,
     prepared_tools: &mut Vec<RunStreamPreparedToolExecution>,
     tool_results: &mut Vec<RunStreamToolResultForModel>,
+    remaining_tool_budget: &mut u32,
     tape_seq: &mut i64,
 ) -> Result<RunStreamProviderEventOutcome, Status> {
     if prepared_tools.is_empty() {
@@ -491,6 +494,7 @@ async fn flush_prepared_run_stream_tool_batch(
         run_state,
         run_id,
         std::mem::take(prepared_tools),
+        remaining_tool_budget,
         tape_seq,
     )
     .await?
