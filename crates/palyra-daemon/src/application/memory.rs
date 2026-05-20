@@ -561,22 +561,36 @@ async fn find_lifecycle_conflict_by_scope_scan(
             None,
             Some(128),
             request.principal.clone(),
-            channel_scope,
-            session_scope,
+            channel_scope.clone(),
+            session_scope.clone(),
             Vec::new(),
             Vec::new(),
         )
         .await?;
+    Ok(lifecycle_conflict_from_scope_items(
+        items,
+        request.content_text.as_str(),
+        channel_scope.as_deref(),
+        session_scope.as_deref(),
+    ))
+}
+
+fn lifecycle_conflict_from_scope_items(
+    items: Vec<MemoryItemRecord>,
+    content_text: &str,
+    channel_scope: Option<&str>,
+    session_scope: Option<&str>,
+) -> Option<LifecycleDuplicate> {
     let mut best = None::<(MemoryItemRecord, usize)>;
     for item in items {
-        let exact = normalize_lifecycle_content(item.content_text.as_str()) == request.content_text;
-        if exact {
-            return Ok(Some(LifecycleDuplicate { item, exact: true }));
+        if !lifecycle_item_matches_scan_scope(&item, channel_scope, session_scope) {
+            continue;
         }
-        let overlap = lifecycle_conflict_overlap_count(
-            request.content_text.as_str(),
-            item.content_text.as_str(),
-        );
+        let exact = normalize_lifecycle_content(item.content_text.as_str()) == content_text;
+        if exact {
+            return Some(LifecycleDuplicate { item, exact: true });
+        }
+        let overlap = lifecycle_conflict_overlap_count(content_text, item.content_text.as_str());
         if overlap < LIFECYCLE_CONFLICT_MIN_OVERLAP {
             continue;
         }
@@ -585,7 +599,28 @@ async fn find_lifecycle_conflict_by_scope_scan(
         }
     }
 
-    Ok(best.map(|(item, _)| LifecycleDuplicate { item, exact: false }))
+    best.map(|(item, _)| LifecycleDuplicate { item, exact: false })
+}
+
+fn lifecycle_item_matches_scan_scope(
+    item: &MemoryItemRecord,
+    channel_scope: Option<&str>,
+    session_scope: Option<&str>,
+) -> bool {
+    match (channel_scope, session_scope) {
+        (Some(channel), Some(session)) => {
+            item.session_id.as_deref() == Some(session)
+                && matches!(item.channel.as_deref(), Some(item_channel) if item_channel == channel)
+        }
+        (Some(channel), None) => {
+            item.session_id.is_none()
+                && matches!(item.channel.as_deref(), Some(item_channel) if item_channel == channel)
+        }
+        (None, Some(session)) => {
+            item.channel.is_none() && item.session_id.as_deref() == Some(session)
+        }
+        (None, None) => item.channel.is_none() && item.session_id.is_none(),
+    }
 }
 
 fn lifecycle_duplicate_search_queries(content_text: &str) -> Vec<String> {
@@ -722,7 +757,7 @@ fn lifecycle_conflict_overlap_count(candidate_content: &str, existing_content: &
         lifecycle_significant_terms(candidate_content).into_iter().collect::<BTreeSet<_>>();
     let existing_terms =
         lifecycle_significant_terms(existing_content).into_iter().collect::<BTreeSet<_>>();
-    candidate_terms.intersection(&existing_terms).take(LIFECYCLE_CONFLICT_MIN_OVERLAP).count()
+    candidate_terms.intersection(&existing_terms).count()
 }
 
 fn lifecycle_duplicate_replacement_content(
@@ -1616,6 +1651,70 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_conflict_overlap_counts_all_shared_terms_for_ranking() {
+        let overlap = lifecycle_conflict_overlap_count(
+            "Prefer TypeScript Vitest Czech reports sandbox workspace boundaries",
+            "Existing TypeScript Vitest Czech reports sandbox workspace boundaries preference",
+        );
+
+        assert!(
+            overlap > LIFECYCLE_CONFLICT_MIN_OVERLAP,
+            "overlap count must not be capped at the minimum threshold"
+        );
+    }
+
+    #[test]
+    fn lifecycle_scope_scan_selects_strongest_scoped_conflict() {
+        let weak = lifecycle_test_memory_item(
+            "01ARZ3NDEKTSV4RRFFQ69G5W01",
+            None,
+            None,
+            "Existing unrelated TypeScript Vitest Czech note",
+        );
+        let strong = lifecycle_test_memory_item(
+            "01ARZ3NDEKTSV4RRFFQ69G5W02",
+            None,
+            None,
+            "Existing TypeScript Vitest Czech reports sandbox workspace boundaries preference",
+        );
+
+        let conflict = lifecycle_conflict_from_scope_items(
+            vec![weak, strong],
+            "Prefer TypeScript Vitest Czech reports sandbox workspace boundaries",
+            None,
+            None,
+        )
+        .expect("stronger conflict should be selected");
+
+        assert_eq!(conflict.item.memory_id, "01ARZ3NDEKTSV4RRFFQ69G5W02");
+    }
+
+    #[test]
+    fn lifecycle_scope_scan_rejects_items_outside_requested_scope() {
+        let channel_item = lifecycle_test_memory_item(
+            "01ARZ3NDEKTSV4RRFFQ69G5W03",
+            Some("slack"),
+            None,
+            "Existing TypeScript Vitest Czech reports sandbox workspace boundaries preference",
+        );
+        let session_item = lifecycle_test_memory_item(
+            "01ARZ3NDEKTSV4RRFFQ69G5W04",
+            None,
+            Some("01ARZ3NDEKTSV4RRFFQ69G5S01"),
+            "Existing TypeScript Vitest Czech reports sandbox workspace boundaries preference",
+        );
+
+        let conflict = lifecycle_conflict_from_scope_items(
+            vec![channel_item, session_item],
+            "Prefer TypeScript Vitest Czech reports sandbox workspace boundaries",
+            None,
+            None,
+        );
+
+        assert!(conflict.is_none(), "principal-scope scans must not reuse channel/session items");
+    }
+
+    #[test]
     fn replacement_content_removes_old_preference_markers() {
         let classification = classify_memory_write(classification_input(
             "Correction: for E2E tests use Playwright, not Vitest. Keep concise Czech reports.",
@@ -1689,5 +1788,27 @@ mod tests {
         .expect_err("requested channel must match authenticated channel context");
 
         assert_eq!(error.code(), tonic::Code::PermissionDenied);
+    }
+
+    fn lifecycle_test_memory_item(
+        memory_id: &str,
+        channel: Option<&str>,
+        session_id: Option<&str>,
+        content_text: &str,
+    ) -> MemoryItemRecord {
+        MemoryItemRecord {
+            memory_id: memory_id.to_owned(),
+            principal: "user:ops".to_owned(),
+            channel: channel.map(str::to_owned),
+            session_id: session_id.map(str::to_owned),
+            source: MemorySource::Manual,
+            content_text: content_text.to_owned(),
+            content_hash: format!("hash-{memory_id}"),
+            tags: Vec::new(),
+            confidence: Some(0.9),
+            ttl_unix_ms: None,
+            created_at_unix_ms: 1_700_000_000_000,
+            updated_at_unix_ms: 1_700_000_000_000,
+        }
     }
 }
