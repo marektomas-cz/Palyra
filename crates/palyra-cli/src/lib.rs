@@ -4216,8 +4216,6 @@ fn prompt_tool_approval_decision_with_mode_state(
 fn prompt_tool_approval_decision_from_terminal(
     approval: &common_v1::ToolApprovalRequest,
 ) -> Result<ToolApprovalDecision> {
-    let tool_name = approval.tool_name.trim();
-    let summary = approval.request_summary.trim();
     if !std::io::stdin().is_terminal() {
         eprintln!("agent.approval.non_interactive_hint {}", approval_required_cli_hint());
         return Ok(ToolApprovalDecision {
@@ -4226,12 +4224,7 @@ fn prompt_tool_approval_decision_from_terminal(
         });
     }
 
-    let tool_label = if tool_name.is_empty() { "unknown" } else { tool_name };
-    eprintln!(
-        "agent.approval.required tool={} summary={}",
-        redacted_presence_for_output(tool_label != "unknown"),
-        redacted_presence_for_output(!summary.is_empty())
-    );
+    eprintln!("{}", tool_approval_prompt_line(approval));
     eprint!("agent.approval.prompt allow_once [y/N]: ");
     std::io::stderr().flush().context("stderr flush failed")?;
     let mut input = String::new();
@@ -4248,6 +4241,14 @@ fn prompt_tool_approval_decision_from_terminal(
             "denied_by_cli_terminal".to_owned()
         },
     })
+}
+
+fn tool_approval_prompt_line(approval: &common_v1::ToolApprovalRequest) -> String {
+    format!(
+        "agent.approval.required tool={} summary={}",
+        safe_stream_label_for_output(approval.tool_name.as_str()),
+        sanitized_optional_text_field(approval.request_summary.as_str())
+    )
 }
 
 fn resolve_or_generate_canonical_id(value: Option<String>) -> Result<String> {
@@ -4879,6 +4880,26 @@ mod agent_stream_output_tests {
         assert!(!line.contains("browser-secret"), "{line}");
         assert!(!line.contains("raw-token"), "{line}");
         assert!(!line.contains("input_json"), "{line}");
+    }
+
+    #[test]
+    fn terminal_approval_prompt_renders_decision_details() {
+        let approval = common_v1::ToolApprovalRequest {
+            proposal_id: None,
+            approval_id: None,
+            tool_name: "palyra.process.run".to_owned(),
+            input_json: br#"{"cmd":"palyra doctor","token":"raw-token"}"#.to_vec(),
+            approval_required: true,
+            request_summary: "run a command with access_token=browser-secret".to_owned(),
+            prompt: None,
+        };
+
+        let line = tool_approval_prompt_line(&approval);
+
+        assert!(line.contains("tool=palyra.process.run"), "{line}");
+        assert!(line.contains("summary=\"run a command with access_token=<redacted>\""), "{line}");
+        assert!(!line.contains("browser-secret"), "{line}");
+        assert!(!line.contains("raw-token"), "{line}");
     }
 
     #[test]
