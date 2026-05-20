@@ -737,11 +737,7 @@ fn detect_sensitive_assignment(line: &str, _lowered: &str) -> Option<&'static st
     let separator_index = sensitive_assignment_separator_index(line)?;
     let key = assignment_key_identifier(line.get(..separator_index)?)?;
     let value = line.get(separator_index + 1..)?.trim();
-    if value.is_empty()
-        || key.ends_with("_ref")
-        || is_safe_secret_reference_value(value)
-        || is_safe_placeholder_secret_value(value)
-    {
+    if value.is_empty() || key.ends_with("_ref") || is_safe_secret_reference_value(value) {
         return None;
     }
     classify_sensitive_assignment_key(key.as_str())
@@ -815,51 +811,6 @@ fn is_safe_secret_reference_value(value: &str) -> bool {
         || is_env_getter_reference(normalized, "env::var")
         || is_env_getter_reference(normalized, "os.getenv")
         || is_os_environ_index_reference(normalized)
-}
-
-fn is_safe_placeholder_secret_value(value: &str) -> bool {
-    let normalized = value.trim().trim_end_matches(';').trim();
-    if normalized.is_empty() || contains_secret_like_marker(normalized) {
-        return false;
-    }
-    let normalized = if let Some(quote) =
-        normalized.chars().next().filter(|ch| matches!(ch, '"' | '\'' | '`'))
-    {
-        if let Some((closing_index, _quote_len)) = find_closing_quote(normalized, quote) {
-            &normalized[quote.len_utf8()..closing_index]
-        } else {
-            normalized
-        }
-    } else {
-        normalized
-    };
-    let normalized = normalized
-        .trim_matches(|ch| matches!(ch, '"' | '\'' | '`' | '<' | '>' | '(' | ')' | '[' | ']'))
-        .trim();
-    if normalized.is_empty() {
-        return false;
-    }
-    let normalized = normalized.to_ascii_lowercase();
-    if normalized.len() > 96 {
-        return false;
-    }
-    matches!(
-        normalized.as_str(),
-        "dummy"
-            | "fake"
-            | "placeholder"
-            | "sample"
-            | "test-placeholder"
-            | "todo"
-            | "changeme"
-            | "change-me"
-            | "replace-me"
-            | "not-a-secret"
-            | "not_a_secret"
-            | "example"
-            | "example-value"
-            | "example_value"
-    ) || normalized.contains("placeholder")
 }
 
 fn is_env_member_reference(value: &str) -> bool {
@@ -1364,8 +1315,10 @@ mod tests {
     }
 
     #[test]
-    fn safe_placeholder_secret_assignments_are_not_redacted() {
-        let source = "PALYRA_E2E_API_KEY='test-placeholder'\nconst config = { apiKey: '<dummy>' };";
+    fn placeholder_like_sensitive_assignments_are_redacted() {
+        let source = "PASSWORD=changeme\n\
+                      PALYRA_E2E_API_KEY='test-placeholder'\n\
+                      \"client_secret\": \"not-a-secret\"";
         let outcome = redact_text_for_export(
             source,
             SafetySourceKind::Workspace,
@@ -1373,13 +1326,28 @@ mod tests {
             TrustLabel::TrustedLocal,
         );
 
-        assert!(!outcome.redacted, "unexpected redaction: {}", outcome.redacted_text);
-        assert_eq!(outcome.redacted_text, source);
-        assert!(!outcome
+        assert!(outcome.redacted, "expected redaction: {}", outcome.redacted_text);
+        assert!(outcome.redacted_text.contains("PASSWORD=[REDACTED_SECRET]"));
+        assert!(outcome.redacted_text.contains("PALYRA_E2E_API_KEY='[REDACTED_SECRET]'"));
+        assert!(outcome.redacted_text.contains("\"client_secret\": \"[REDACTED_SECRET]\""));
+        assert!(!outcome.redacted_text.contains("changeme"));
+        assert!(!outcome.redacted_text.contains("test-placeholder"));
+        assert!(!outcome.redacted_text.contains("not-a-secret"));
+        assert!(outcome
             .scan
             .finding_codes()
             .iter()
             .any(|code| code.starts_with("secret_leak.assignment.")));
+        assert!(outcome
+            .scan
+            .finding_codes()
+            .iter()
+            .any(|code| code == "secret_leak.assignment.password"));
+        assert!(outcome
+            .scan
+            .finding_codes()
+            .iter()
+            .any(|code| code == "secret_leak.assignment.api_key"));
     }
 
     #[test]
