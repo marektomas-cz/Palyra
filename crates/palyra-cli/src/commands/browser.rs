@@ -3252,7 +3252,17 @@ fn quote_cli_argument(value: &str) -> String {
     }) {
         return value.to_owned();
     }
-    format!("\"{}\"", value.replace('"', "\\\""))
+    shell_single_quote(value)
+}
+
+#[cfg(windows)]
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+#[cfg(not(windows))]
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn current_config_path() -> Option<PathBuf> {
@@ -4360,6 +4370,36 @@ mod tests {
         assert_eq!(
             command,
             r"palyra config set --path C:\Palyra\palyra.toml --key tool_call.browser_service.enabled --value true"
+        );
+    }
+
+    #[test]
+    fn browser_enable_command_single_quotes_shell_substitutions() {
+        let command = browser_service_enable_command(Some("/tmp/palyra$(touch pwn).toml"));
+
+        assert_eq!(
+            command,
+            "palyra config set --path '/tmp/palyra$(touch pwn).toml' --key tool_call.browser_service.enabled --value true"
+        );
+        assert!(
+            !command.contains("\"/tmp/palyra$("),
+            "browser enable command must not use double quotes around shell-substitution paths: {command}"
+        );
+    }
+
+    #[test]
+    fn browser_enable_command_escapes_single_quotes_for_current_shell() {
+        let command = browser_service_enable_command(Some("/tmp/palyra'$(touch pwn).toml"));
+
+        #[cfg(windows)]
+        assert_eq!(
+            command,
+            "palyra config set --path '/tmp/palyra''$(touch pwn).toml' --key tool_call.browser_service.enabled --value true"
+        );
+        #[cfg(not(windows))]
+        assert_eq!(
+            command,
+            r"palyra config set --path '/tmp/palyra'\''$(touch pwn).toml' --key tool_call.browser_service.enabled --value true"
         );
     }
 
