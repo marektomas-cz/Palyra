@@ -532,6 +532,13 @@ async fn find_lifecycle_duplicate(
             })
             .await?;
         for hit in hits {
+            if !lifecycle_item_matches_scan_scope(
+                &hit.item,
+                channel_scope.as_deref(),
+                session_scope.as_deref(),
+            ) {
+                continue;
+            }
             let exact =
                 normalize_lifecycle_content(hit.item.content_text.as_str()) == request.content_text;
             if exact {

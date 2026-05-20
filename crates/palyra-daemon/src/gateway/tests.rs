@@ -4521,6 +4521,70 @@ async fn memory_retain_tool_replaces_near_duplicate_preference_content() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn memory_retain_tool_principal_scope_does_not_replace_channel_scoped_duplicate() {
+    let state = build_test_runtime_state(false);
+    let context = routines_tool_test_context();
+    state
+        .ingest_memory_item(MemoryItemCreateRequest {
+            memory_id: "01ARZ3NDEKTSV4RRFFQ69G5FC8".to_owned(),
+            principal: context.principal.to_owned(),
+            channel: Some("cli".to_owned()),
+            session_id: None,
+            source: MemorySource::Manual,
+            content_text: "Project UI smoke tests prefer Vitest, not Playwright".to_owned(),
+            tags: vec!["scope:channel".to_owned(), "memory_write:preference".to_owned()],
+            confidence: Some(0.9),
+            ttl_unix_ms: None,
+        })
+        .await
+        .expect("channel-scoped preference should ingest");
+
+    let correction = br#"{"content_text":"Correction: project UI smoke tests prefer Playwright, not Vitest","scope":"principal","confidence":0.9}"#;
+    let retained =
+        execute_memory_retain_tool(&state, context, "01ARZ3NDEKTSV4RRFFQ69G5FC9", correction).await;
+    assert!(retained.success, "principal correction retain should succeed: {}", retained.error);
+    let payload = parse_tool_output_json(&retained);
+    assert_eq!(payload.get("status").and_then(Value::as_str), Some("retained"));
+
+    let (channel_items, _) = state
+        .list_memory_items(
+            None,
+            Some(10),
+            context.principal.to_owned(),
+            Some("cli".to_owned()),
+            None,
+            Vec::new(),
+            Vec::new(),
+        )
+        .await
+        .expect("channel memories should list");
+    assert_eq!(channel_items.len(), 1, "principal retain must not create channel rows");
+    assert_eq!(
+        channel_items[0].content_text, "Project UI smoke tests prefer Vitest, not Playwright",
+        "principal retain must not replace channel-scoped memory content"
+    );
+
+    let (principal_items, _) = state
+        .list_memory_items(
+            None,
+            Some(10),
+            context.principal.to_owned(),
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+        )
+        .await
+        .expect("principal memories should list");
+    let principal_scope_items = principal_items
+        .iter()
+        .filter(|item| item.channel.is_none() && item.session_id.is_none())
+        .collect::<Vec<_>>();
+    assert_eq!(principal_scope_items.len(), 1, "correction should be retained in principal scope");
+    assert!(principal_scope_items[0].content_text.contains("Playwright"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn memory_retain_tool_replaces_conflicting_preference_when_search_terms_shift() {
     let state = build_test_runtime_state(false);
     let context = routines_tool_test_context();
