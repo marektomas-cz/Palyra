@@ -33,12 +33,12 @@ pub(crate) async fn realtime_ws_handler(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<Response, Response> {
-    validate_realtime_ws_origin(&headers)?;
+    validate_realtime_ws_origin(&headers).map_err(|response| *response)?;
     let session = authorize_console_session(&state, &headers, false)?;
     Ok(ws.on_upgrade(move |socket| realtime_socket(socket, state, session.context)).into_response())
 }
 
-fn validate_realtime_ws_origin(headers: &HeaderMap) -> Result<(), Response> {
+fn validate_realtime_ws_origin(headers: &HeaderMap) -> Result<(), Box<Response>> {
     let Some(origin_header) = headers.get(header::ORIGIN) else {
         return Ok(());
     };
@@ -90,8 +90,8 @@ fn normalized_host_port(host: &str, port: u16) -> Option<String> {
     Some(format!("{host}:{port}"))
 }
 
-fn realtime_origin_rejected_response(message: &'static str) -> Response {
-    runtime_status_response(tonic::Status::permission_denied(message))
+fn realtime_origin_rejected_response(message: &'static str) -> Box<Response> {
+    Box::new(runtime_status_response(tonic::Status::permission_denied(message)))
 }
 
 pub(crate) async fn realtime_methods_handler(
