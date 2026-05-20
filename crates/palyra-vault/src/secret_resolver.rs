@@ -8,6 +8,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+
 use palyra_common::secret_refs::{SecretRef, SecretRefRedactedView, SecretSource};
 use serde::Serialize;
 use ulid::Ulid;
@@ -311,27 +314,19 @@ impl<'a> SecretResolver<'a> {
             ));
         }
 
-        let stdout_path = temp_output_path("stdout");
-        let stderr_path = temp_output_path("stderr");
-        let stdout =
-            OpenOptions::new().create_new(true).write(true).open(stdout_path.as_path()).map_err(
-                |error| {
-                    self.io_error(
-                        secret_ref,
-                        format!("failed to create exec-backed secret stdout capture file: {error}"),
-                    )
-                },
-            )?;
-        let stderr =
-            OpenOptions::new().create_new(true).write(true).open(stderr_path.as_path()).map_err(
-                |error| {
-                    let _ = fs::remove_file(stdout_path.as_path());
-                    self.io_error(
-                        secret_ref,
-                        format!("failed to create exec-backed secret stderr capture file: {error}"),
-                    )
-                },
-            )?;
+        let (stdout_path, stdout) = create_temp_exec_output_file("stdout").map_err(|error| {
+            self.io_error(
+                secret_ref,
+                format!("failed to create exec-backed secret stdout capture file: {error}"),
+            )
+        })?;
+        let (stderr_path, stderr) = create_temp_exec_output_file("stderr").map_err(|error| {
+            let _ = fs::remove_file(stdout_path.as_path());
+            self.io_error(
+                secret_ref,
+                format!("failed to create exec-backed secret stderr capture file: {error}"),
+            )
+        })?;
 
         let mut process =
             Command::new(command.first().expect("validated exec command is non-empty"));
@@ -557,6 +552,18 @@ fn cleanup_temp_exec_outputs(stdout_path: &Path, stderr_path: &Path) {
     let _ = fs::remove_file(stderr_path);
 }
 
+fn create_temp_exec_output_file(label: &str) -> std::io::Result<(PathBuf, fs::File)> {
+    let path = temp_output_path(label);
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        options.mode(0o600);
+    }
+    let file = options.open(path.as_path())?;
+    Ok((path, file))
+}
+
 fn temp_output_path(label: &str) -> PathBuf {
     env::temp_dir().join(format!("palyra-secret-ref-{}-{label}.tmp", Ulid::new()))
 }
@@ -598,6 +605,8 @@ mod tests {
 
     #[cfg(unix)]
     use std::os::unix::fs as unix_fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     use palyra_common::secret_refs::{
         SecretRef, SecretRefreshPolicy, SecretSnapshotPolicy, SecretSource,
@@ -638,6 +647,23 @@ mod tests {
     fn oversized_exec_command() -> Vec<String> {
         vec!["sh".to_owned(), "-c".to_owned(), "printf 12345".to_owned()]
     }
+    #[cfg(unix)]
+    #[test]
+    fn exec_temp_output_files_are_owner_only() {
+        let (path, file) =
+            super::create_temp_exec_output_file("stdout").expect("temp output should create");
+        drop(file);
+
+        let mode = fs::metadata(path.as_path())
+            .expect("temp output metadata should be readable")
+            .permissions()
+            .mode()
+            & 0o777;
+        let _ = fs::remove_file(path.as_path());
+
+        assert_eq!(mode, 0o600, "exec secret capture files must be owner-only");
+    }
+
     #[test]
     fn resolves_env_source() {
         let key = format!("PALYRA_SECRET_REF_TEST_{}", Ulid::new());
