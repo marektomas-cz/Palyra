@@ -295,6 +295,7 @@ fn companion_voice_state_persists_audio_preferences_and_audit() {
     );
     assert_eq!(voice.draft_session_id.as_deref(), Some("session-voice"));
     assert_eq!(voice.draft_text.as_deref(), Some("Edited transcript"));
+    assert_eq!(voice.draft_summary.as_deref(), Some("Voice summary"));
     assert_eq!(voice.audit_log.len(), 1);
     assert_eq!(voice.audit_log[0].kind, "transcript_ready");
     assert_eq!(voice.audit_log[0].session_id.as_deref(), Some("session-voice"));
@@ -303,6 +304,26 @@ fn companion_voice_state_persists_audio_preferences_and_audit() {
         Some("Desk microphone")
     );
     assert!(!voice.audit_log[0].tts_playback);
+
+    let persisted_state =
+        std::fs::read_to_string(control_center.state_file_path.as_path())
+            .expect("desktop state should be written");
+    assert!(
+        !persisted_state.contains("Edited transcript"),
+        "pre-send voice draft text must not be persisted to state.json"
+    );
+    assert!(
+        !persisted_state.contains("Voice summary"),
+        "derived voice draft summaries must not be persisted to state.json"
+    );
+    let reloaded =
+        load_or_initialize_state_file(control_center.state_file_path.as_path())
+            .expect("desktop state should reload without voice draft content");
+    let reloaded_voice = &reloaded.active_companion().voice;
+    assert_eq!(reloaded_voice.microphone_device_id.as_deref(), Some("desk-mic"));
+    assert_eq!(reloaded_voice.draft_session_id.as_deref(), Some("session-voice"));
+    assert!(reloaded_voice.draft_text.is_none());
+    assert!(reloaded_voice.draft_summary.is_none());
 }
 
 #[test]

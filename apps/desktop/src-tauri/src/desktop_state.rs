@@ -152,7 +152,9 @@ pub(crate) struct DesktopCompanionVoiceState {
     pub(crate) silence_detection_enabled: bool,
     pub(crate) silence_timeout_ms: u64,
     pub(crate) draft_session_id: Option<String>,
+    #[serde(default, skip_serializing, skip_deserializing)]
     pub(crate) draft_text: Option<String>,
+    #[serde(default, skip_serializing, skip_deserializing)]
     pub(crate) draft_summary: Option<String>,
     pub(crate) draft_language: Option<String>,
     pub(crate) draft_duration_ms: Option<u64>,
