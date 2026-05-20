@@ -4089,7 +4089,11 @@ function buildDesktopApprovalNextStep(args: {
   riskLevel: string;
 }): string {
   const toolLabel = args.toolName ?? "this tool";
-  if (args.riskLevel === "high") {
+  const riskLevel = args.riskLevel.trim().toLowerCase();
+  if (riskLevel === "critical") {
+    return `Deny ${toolLabel} unless you can verify the request, target, and expected side effects from trusted context. Keep this action ask-each-time; do not move critical approvals to a broader posture from this prompt.`;
+  }
+  if (riskLevel === "high") {
     return `Review the request carefully before approving ${toolLabel}. If it repeats often, open the permissions center in the browser and decide whether a safer long-lived posture is justified.`;
   }
   return `Approve once if this request is expected, or open the permissions center in the browser to decide whether ${toolLabel} should stay ask-each-time or move to a broader posture.`;
