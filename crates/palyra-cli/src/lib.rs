@@ -3731,13 +3731,12 @@ impl BrowserOpenCommand {
 
 #[cfg(target_os = "windows")]
 fn browser_open_commands(url: &str) -> Vec<BrowserOpenCommand> {
-    vec![
-        BrowserOpenCommand {
-            program: "cmd",
-            args: vec!["/C".to_owned(), "start".to_owned(), "\"\"".to_owned(), url.to_owned()],
-        },
-        BrowserOpenCommand { program: "explorer.exe", args: vec![url.to_owned()] },
-    ]
+    build_windows_browser_open_commands(url)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn build_windows_browser_open_commands(url: &str) -> Vec<BrowserOpenCommand> {
+    vec![BrowserOpenCommand { program: "explorer.exe", args: vec![url.to_owned()] }]
 }
 
 #[cfg(target_os = "macos")]
@@ -9873,12 +9872,10 @@ struct SkillStatusResponse {
 
 #[cfg(test)]
 mod cli_v1_tests {
-    #[cfg(target_os = "windows")]
-    use super::browser_open_commands;
-
     use super::{
         build_journal_checkpoint_attestation, build_support_bundle_diagnostics_snapshot,
-        compare_semver_versions, ensure_remote_registry_same_origin, fetch_limited_bytes,
+        build_windows_browser_open_commands, compare_semver_versions,
+        ensure_remote_registry_same_origin, fetch_limited_bytes,
         fetch_remote_registry_entries_with_fetcher, is_retryable_grpc_error,
         memory_embeddings_model_configured, normalize_browser_open_url, normalize_client_socket,
         normalize_installed_skills_index, normalize_prompt_secret_value,
@@ -10291,15 +10288,17 @@ pinned_gateway_ca_fingerprint_sha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
         assert_eq!(normalized, "https://dashboard.example.com/palyra/");
     }
 
-    #[cfg(target_os = "windows")]
     #[test]
-    fn windows_browser_open_commands_try_cmd_start_before_explorer() {
-        let commands = browser_open_commands("http://127.0.0.1:7142/");
-        assert_eq!(commands.len(), 2);
-        assert_eq!(commands[0].program, "cmd");
-        assert_eq!(commands[0].args, vec!["/C", "start", "\"\"", "http://127.0.0.1:7142/"]);
-        assert_eq!(commands[1].program, "explorer.exe");
-        assert_eq!(commands[1].args, vec!["http://127.0.0.1:7142/"]);
+    fn windows_browser_open_commands_use_direct_explorer_without_cmd_shell() {
+        let url = "https://dashboard.example.com/&calc";
+        let commands = build_windows_browser_open_commands(url);
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].program, "explorer.exe");
+        assert_eq!(commands[0].args, vec![url]);
+        assert!(
+            commands.iter().all(|command| command.program != "cmd"),
+            "dashboard URLs must not be passed through cmd.exe"
+        );
     }
 
     #[test]
