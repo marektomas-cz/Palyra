@@ -1309,7 +1309,7 @@ pub(crate) async fn apply_patch_learning_candidate(
     ) {
         return Ok(None);
     }
-    if matches!(candidate.status.as_str(), "denied" | "suppressed" | "applied" | "conflicted") {
+    if patch_candidate_apply_blocked_status(candidate.status.as_str()) {
         return Err(Status::failed_precondition(
             "patch candidate cannot be applied from its current state",
         ));
@@ -1421,6 +1421,13 @@ pub(crate) async fn apply_patch_learning_candidate(
         "applied": applied,
         "skill_validation": skill_validation,
     })))
+}
+
+fn patch_candidate_apply_blocked_status(status: &str) -> bool {
+    matches!(
+        status,
+        "denied" | "rejected" | "suppressed" | "applied" | "conflicted" | "rolled-back"
+    )
 }
 
 fn collect_patch_base_conflicts(
@@ -1975,6 +1982,22 @@ mod tests {
         assert_eq!(candidates[0].candidate_kind, "preference");
         assert_eq!(candidates[0].status, "queued");
         assert!(candidates[0].content_json.contains("\"source_kind\":\"explicit\""));
+    }
+
+    #[test]
+    fn patch_candidate_apply_guard_blocks_terminal_review_states() {
+        for status in ["denied", "rejected", "suppressed", "applied", "conflicted", "rolled-back"] {
+            assert!(
+                patch_candidate_apply_blocked_status(status),
+                "{status} patch candidates must not remain applyable"
+            );
+        }
+        for status in ["queued", "proposed", "needs-review", "approved", "deployed"] {
+            assert!(
+                !patch_candidate_apply_blocked_status(status),
+                "{status} should remain eligible for downstream patch validation"
+            );
+        }
     }
 
     #[test]

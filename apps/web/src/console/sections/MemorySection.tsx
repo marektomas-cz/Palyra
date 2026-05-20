@@ -116,6 +116,15 @@ type GroupedResultsSectionProps = {
   renderItem: (item: JsonObject, index: number) => ReactNode;
 };
 
+const NON_APPLYABLE_LEARNING_PATCH_STATUSES = new Set([
+  "denied",
+  "rejected",
+  "suppressed",
+  "applied",
+  "conflicted",
+  "rolled-back",
+]);
+
 export function MemorySection({ app }: MemorySectionProps) {
   const navigate = useNavigate();
   const [confirmingPurge, setConfirmingPurge] = useState(false);
@@ -252,7 +261,7 @@ export function MemorySection({ app }: MemorySectionProps) {
   );
   const selectedLearningPatchApplyAllowed =
     selectedLearningPatchCandidate &&
-    !["denied", "suppressed", "applied", "conflicted"].includes(
+    !NON_APPLYABLE_LEARNING_PATCH_STATUSES.has(
       readString(selectedLearningCandidate ?? EMPTY_OBJECT, "status") ?? "",
     );
   const queuedLearningCount = learningCandidates.filter(
