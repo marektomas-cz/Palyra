@@ -1110,7 +1110,7 @@ pub(crate) fn render_memory_augmented_prompt(hits: &[MemorySearchHit], input_tex
 fn render_memory_recall_block(hits: &[MemorySearchHit]) -> String {
     let mut context_lines = Vec::with_capacity(hits.len());
     for (index, hit) in hits.iter().enumerate() {
-        let snippet = hit.snippet.replace(['\r', '\n'], " ").trim().to_owned();
+        let snippet = sanitize_prompt_inline_value(hit.snippet.as_str());
         context_lines.push(format!(
             "{}. id={} source={} scope={} trust_label={} score={:.4} created_at_unix_ms={} provenance=content_hash:{} snippet={}",
             index + 1,
@@ -1147,12 +1147,19 @@ fn memory_hit_scope_label(hit: &MemorySearchHit) -> &'static str {
 }
 
 pub(crate) fn sanitize_prompt_inline_value(value: &str) -> String {
-    value
-        .chars()
-        .map(|ch| if ch.is_control() { ' ' } else { ch })
-        .collect::<String>()
-        .trim()
-        .to_owned()
+    let mut sanitized = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => sanitized.push_str("&amp;"),
+            '<' => sanitized.push_str("&lt;"),
+            '>' => sanitized.push_str("&gt;"),
+            '"' => sanitized.push_str("&quot;"),
+            '\'' => sanitized.push_str("&#x27;"),
+            _ if ch.is_control() => sanitized.push(' '),
+            _ => sanitized.push(ch),
+        }
+    }
+    sanitized.trim().to_owned()
 }
 
 fn render_attachment_recall_prompt(
