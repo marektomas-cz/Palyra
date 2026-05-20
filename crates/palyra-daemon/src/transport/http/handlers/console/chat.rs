@@ -2629,7 +2629,11 @@ pub(crate) async fn console_chat_queue_handler(
             queued_input_id: queued_input_id.clone(),
             run_id: run_id.clone(),
             session_id: stream.session_id.clone(),
-            state: QueuedInputState::Pending.as_str().to_owned(),
+            state: if queue_decision.accepted {
+                QueuedInputState::Pending.as_str().to_owned()
+            } else {
+                QueuedInputState::Overflowed.as_str().to_owned()
+            },
             queue_mode: queue_decision.mode.as_str().to_owned(),
             priority_lane: queue_decision.policy.priority_lane.clone(),
             coalescing_group: Some(coalescing_group.clone()),
@@ -2638,7 +2642,7 @@ pub(crate) async fn console_chat_queue_handler(
                 .unwrap_or_else(|_| "{}".to_owned()),
             decision_reason: queue_decision.reason.clone(),
             text: text.clone(),
-            accepted_at_unix_ms: Some(timestamp_unix_ms),
+            accepted_at_unix_ms: queue_decision.accepted.then_some(timestamp_unix_ms),
             coalesced_at_unix_ms: None,
             forwarded_at_unix_ms: None,
             terminal_at_unix_ms: None,
@@ -2656,12 +2660,18 @@ pub(crate) async fn console_chat_queue_handler(
         effective_text = collect_summary.text;
         overflow_summary_ref = Some(collect_summary.summary_ref);
     }
+    let initial_queued_state = if queue_decision.accepted {
+        QueuedInputState::Pending
+    } else {
+        QueuedInputState::Overflowed
+    };
     let mut queued = state
         .runtime
         .create_orchestrator_queued_input(journal::OrchestratorQueuedInputCreateRequest {
             queued_input_id: queued_input_id.clone(),
             run_id: run_id.clone(),
             session_id: stream.session_id.clone(),
+            state: initial_queued_state.as_str().to_owned(),
             text: effective_text.clone(),
             origin_run_id: Some(run_id.clone()),
             queue_mode: queue_decision.mode.as_str().to_owned(),
@@ -2671,7 +2681,7 @@ pub(crate) async fn console_chat_queue_handler(
             safe_boundary_flags_json: serde_json::to_string(&queue_decision.safe_boundary)
                 .unwrap_or_else(|_| "{}".to_owned()),
             decision_reason: queue_decision.reason.clone(),
-            accepted_at_unix_ms: Some(timestamp_unix_ms),
+            accepted_at_unix_ms: queue_decision.accepted.then_some(timestamp_unix_ms),
             policy_snapshot_json: queue_decision.policy.snapshot_json().to_string(),
             explain_json: queue_decision.explain_json().to_string(),
         })
@@ -2714,11 +2724,11 @@ pub(crate) async fn console_chat_queue_handler(
     )
     .with_input(
         RuntimeEntityRef::new("queued_input", "queued_input", queued.queued_input_id.clone())
-            .with_state(QueuedInputState::Pending.as_str()),
+            .with_state(queued.state.as_str()),
     )
     .with_output(RuntimeEntityRef::new("run", "run", run_id.clone()).with_state("active"))
     .with_resource_budget(RuntimeResourceBudget {
-        queue_depth: Some((current_depth.saturating_add(1)) as u64),
+        queue_depth: Some(observed_queue_depth_after_decision(current_depth, &queue_decision)),
         token_budget: None,
         pruning_token_delta: None,
         retrieval_branch_latency_ms: None,
@@ -2744,7 +2754,10 @@ pub(crate) async fn console_chat_queue_handler(
         )
         .await
         .map_err(runtime_status_response)?;
-    state.observability.observe_runtime_queue_depth((current_depth.saturating_add(1)) as u64);
+    state.observability.observe_runtime_queue_depth(observed_queue_depth_after_decision(
+        current_depth,
+        &queue_decision,
+    ));
     crate::application::run_stream::tape::append_runtime_decision_tape_event(
         &state.runtime,
         run_id.as_str(),
@@ -2913,6 +2926,18 @@ pub(crate) async fn console_chat_queue_handler(
         "policy": queue_decision.policy.snapshot_json(),
         "contract": contract_descriptor(),
     })))
+}
+
+fn observed_queue_depth_after_decision(
+    current_depth: usize,
+    queue_decision: &crate::application::session_queue::SessionQueueDecision,
+) -> u64 {
+    match queue_decision.decision {
+        QueueDecision::Overflow => 0,
+        QueueDecision::Merge => 1,
+        _ if queue_decision.accepted => current_depth.saturating_add(1) as u64,
+        _ => current_depth as u64,
+    }
 }
 
 pub(crate) async fn console_chat_queue_policy_handler(
@@ -3412,6 +3437,7 @@ pub(crate) async fn console_chat_queue_collect_summary_handler(
             queued_input_id: queued_input_id.clone(),
             run_id: run_id.clone(),
             session_id: snapshot.session_record.session_id.clone(),
+            state: QueuedInputState::Pending.as_str().to_owned(),
             text: collect_summary.text,
             origin_run_id: Some(run_id),
             queue_mode: QueueMode::Collect.as_str().to_owned(),

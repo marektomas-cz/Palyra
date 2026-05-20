@@ -2734,6 +2734,7 @@ pub struct OrchestratorQueuedInputCreateRequest {
     pub queued_input_id: String,
     pub run_id: String,
     pub session_id: String,
+    pub state: String,
     pub text: String,
     pub origin_run_id: Option<String>,
     pub queue_mode: String,
@@ -8632,6 +8633,12 @@ impl JournalStore {
         request: &OrchestratorQueuedInputCreateRequest,
     ) -> Result<OrchestratorQueuedInputRecord, JournalError> {
         let now = current_unix_ms()?;
+        let coalesced_at_unix_ms = if matches!(request.state.as_str(), "merged" | "overflowed") {
+            Some(now)
+        } else {
+            None
+        };
+        let terminal_at_unix_ms = if request.state == "pending" { None } else { Some(now) };
         let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
         guard.execute(
             r#"
@@ -8649,19 +8656,22 @@ impl JournalStore {
                     text,
                     origin_run_ulid,
                     accepted_at_unix_ms,
+                    coalesced_at_unix_ms,
+                    terminal_at_unix_ms,
                     policy_snapshot_json,
                     explain_json,
                     created_at_unix_ms,
                     updated_at_unix_ms
                 ) VALUES (
-                    ?1, ?2, ?3, 'pending',
-                    ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15
+                    ?1, ?2, ?3, ?4,
+                    ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?18
                 )
             "#,
             params![
                 request.queued_input_id,
                 request.run_id,
                 request.session_id,
+                request.state,
                 request.queue_mode,
                 request.priority_lane,
                 request.coalescing_group,
@@ -8671,6 +8681,8 @@ impl JournalStore {
                 request.text,
                 request.origin_run_id,
                 request.accepted_at_unix_ms,
+                coalesced_at_unix_ms,
+                terminal_at_unix_ms,
                 request.policy_snapshot_json,
                 request.explain_json,
                 now,
@@ -8680,7 +8692,7 @@ impl JournalStore {
             queued_input_id: request.queued_input_id.clone(),
             run_id: request.run_id.clone(),
             session_id: request.session_id.clone(),
-            state: "pending".to_owned(),
+            state: request.state.clone(),
             queue_mode: request.queue_mode.clone(),
             priority_lane: request.priority_lane.clone(),
             coalescing_group: request.coalescing_group.clone(),
@@ -8689,9 +8701,9 @@ impl JournalStore {
             decision_reason: request.decision_reason.clone(),
             text: request.text.clone(),
             accepted_at_unix_ms: request.accepted_at_unix_ms,
-            coalesced_at_unix_ms: None,
+            coalesced_at_unix_ms,
             forwarded_at_unix_ms: None,
-            terminal_at_unix_ms: None,
+            terminal_at_unix_ms,
             policy_snapshot_json: request.policy_snapshot_json.clone(),
             explain_json: request.explain_json.clone(),
             created_at_unix_ms: now,
@@ -19722,7 +19734,8 @@ mod tests {
         JournalAppendRequest, JournalConfig, JournalError, JournalStore, MemoryEmbeddingProvider,
         MemoryItemCreateRequest, MemoryItemsListFilter, MemoryMaintenanceRequest,
         MemoryPurgeRequest, MemoryRetentionPolicy, MemorySearchRequest, MemorySource,
-        OrchestratorCancelRequest, OrchestratorRunStartRequest, OrchestratorSessionUpsertRequest,
+        OrchestratorCancelRequest, OrchestratorQueuedInputCreateRequest,
+        OrchestratorRunStartRequest, OrchestratorSessionUpsertRequest,
         OrchestratorTapeAppendRequest, OrchestratorUsageDelta, RecallArtifactCreateRequest,
         RecallArtifactListFilter, SessionSearchRequest, SkillExecutionStatus,
         SkillStatusUpsertRequest, ToolJobAttachRequest, ToolJobCreateRequest,
@@ -19858,6 +19871,52 @@ mod tests {
                 parameter_delta_json: None,
             })
             .expect("orchestrator run should be created");
+    }
+
+    #[test]
+    fn create_queued_input_can_start_as_terminal_overflow() {
+        let db_path = temp_db_path();
+        let store = JournalStore::open(test_journal_config(db_path, false))
+            .expect("journal store should open");
+        let session_id = "01ARZ3NDEKTSV4RRFFQ69G5QA1";
+        let run_id = "01ARZ3NDEKTSV4RRFFQ69G5QA2";
+        let queued_input_id = "01ARZ3NDEKTSV4RRFFQ69G5QA3";
+        upsert_orchestrator_session(&store, session_id);
+        start_orchestrator_run(&store, session_id, run_id);
+
+        let created = store
+            .create_orchestrator_queued_input(&OrchestratorQueuedInputCreateRequest {
+                queued_input_id: queued_input_id.to_owned(),
+                run_id: run_id.to_owned(),
+                session_id: session_id.to_owned(),
+                state: "overflowed".to_owned(),
+                text: "queue cap reached; input was not accepted".to_owned(),
+                origin_run_id: Some(run_id.to_owned()),
+                queue_mode: "collect".to_owned(),
+                priority_lane: "normal".to_owned(),
+                coalescing_group: Some("session:queue-test".to_owned()),
+                overflow_summary_ref: Some("queue-summary:test".to_owned()),
+                safe_boundary_flags_json: "{}".to_owned(),
+                decision_reason: "queue_cap_reached_overflow_summary_required".to_owned(),
+                accepted_at_unix_ms: None,
+                policy_snapshot_json: "{}".to_owned(),
+                explain_json: r#"{"accepted":false}"#.to_owned(),
+            })
+            .expect("overflowed queued input audit row should be created");
+
+        assert_eq!(created.state, "overflowed");
+        assert_eq!(created.accepted_at_unix_ms, None);
+        assert!(created.coalesced_at_unix_ms.is_some());
+        assert!(created.terminal_at_unix_ms.is_some());
+
+        let queued_inputs =
+            store.list_orchestrator_queued_inputs(session_id).expect("queued inputs should list");
+        assert_eq!(queued_inputs.len(), 1);
+        assert_eq!(
+            queued_inputs.iter().filter(|queued| queued.state == "pending").count(),
+            0,
+            "overflow audit rows must not increase pending depth"
+        );
     }
 
     #[test]

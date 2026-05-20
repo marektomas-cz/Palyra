@@ -264,7 +264,7 @@ pub(crate) fn decide_session_queue_mode(
         return SessionQueueDecision {
             decision: QueueDecision::Overflow,
             mode: QueueMode::Collect,
-            accepted: true,
+            accepted: false,
             reason: "queue_cap_reached_overflow_summary_required".to_owned(),
             safe_boundary,
             policy,
@@ -576,6 +576,7 @@ mod tests {
 
         assert_eq!(decision.decision, QueueDecision::Overflow);
         assert_eq!(decision.mode, QueueMode::Collect);
+        assert!(!decision.accepted, "overflow must not be accepted into the pending queue");
         assert_eq!(decision.reason, "queue_cap_reached_overflow_summary_required");
     }
 
