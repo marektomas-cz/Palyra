@@ -4885,6 +4885,13 @@ const MIGRATIONS: &[Migration] = &[
                 ADD COLUMN workdir TEXT;
         "#,
     },
+    Migration {
+        version: 33,
+        name: "allow_recall_artifact_retention_delete",
+        sql: r#"
+            DROP TRIGGER IF EXISTS trg_recall_artifacts_prevent_delete;
+        "#,
+    },
 ];
 
 fn serialize_json_field<T: Serialize>(
@@ -4892,6 +4899,31 @@ fn serialize_json_field<T: Serialize>(
     _field: &'static str,
 ) -> Result<String, JournalError> {
     serde_json::to_string(value).map_err(JournalError::from)
+}
+
+fn serialize_sanitized_json_field<T: Serialize>(
+    value: &T,
+    field: &'static str,
+    max_payload_bytes: usize,
+) -> Result<(String, Value), JournalError> {
+    let raw_json = serialize_json_field(value, field)?;
+    if raw_json.len() > max_payload_bytes {
+        return Err(JournalError::PayloadTooLarge {
+            payload_kind: field,
+            actual_bytes: raw_json.len(),
+            max_bytes: max_payload_bytes,
+        });
+    }
+    let (sanitized_json, _) = sanitize_payload(raw_json.as_bytes())?;
+    if sanitized_json.len() > max_payload_bytes {
+        return Err(JournalError::PayloadTooLarge {
+            payload_kind: field,
+            actual_bytes: sanitized_json.len(),
+            max_bytes: max_payload_bytes,
+        });
+    }
+    let sanitized_value = serde_json::from_str::<Value>(sanitized_json.as_str())?;
+    Ok((sanitized_json, sanitized_value))
 }
 
 fn parse_optional_json_column<T: DeserializeOwned>(
@@ -8442,9 +8474,21 @@ impl JournalStore {
             sanitize_object_text_field("artifact_kind", request.artifact_kind.as_str())?;
         let query = sanitize_object_text_field("query", request.query.as_str())?;
         let summary = sanitize_object_text_field("summary", request.summary.as_str())?;
-        let payload_json = serialize_json_field(&request.payload, "payload")?;
-        let diagnostics_json = serialize_json_field(&request.diagnostics, "diagnostics")?;
-        let provenance_json = serialize_json_field(&request.provenance, "provenance")?;
+        let (payload_json, payload) = serialize_sanitized_json_field(
+            &request.payload,
+            "recall_artifact_payload",
+            self.config.max_payload_bytes,
+        )?;
+        let (diagnostics_json, diagnostics) = serialize_sanitized_json_field(
+            &request.diagnostics,
+            "recall_artifact_diagnostics",
+            self.config.max_payload_bytes,
+        )?;
+        let (provenance_json, provenance) = serialize_sanitized_json_field(
+            &request.provenance,
+            "recall_artifact_provenance",
+            self.config.max_payload_bytes,
+        )?;
         let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
         match guard.execute(
             r#"
@@ -8505,9 +8549,9 @@ impl JournalStore {
             session_id: request.session_id.clone(),
             query,
             summary,
-            payload: request.payload.clone(),
-            diagnostics: request.diagnostics.clone(),
-            provenance: request.provenance.clone(),
+            payload,
+            diagnostics,
+            provenance,
             created_by_principal: request.created_by_principal.clone(),
             created_at_unix_ms: now,
         })
@@ -13006,9 +13050,10 @@ impl JournalStore {
     }
 
     pub fn purge_memory(&self, request: &MemoryPurgeRequest) -> Result<u64, JournalError> {
-        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
-        let deleted = if request.purge_all_principal {
-            guard.execute(
+        let mut guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        let transaction = guard.transaction()?;
+        let deleted_memory = if request.purge_all_principal {
+            transaction.execute(
                 r#"
                     DELETE FROM memory_items
                     WHERE principal = ?1
@@ -13022,7 +13067,7 @@ impl JournalStore {
                 ],
             )?
         } else if let Some(session_id) = request.session_id.as_deref() {
-            guard.execute(
+            transaction.execute(
                 r#"
                     DELETE FROM memory_items
                     WHERE principal = ?1
@@ -13032,14 +13077,16 @@ impl JournalStore {
                 params![request.principal.as_str(), session_id, request.channel.as_deref()],
             )?
         } else if let Some(channel) = request.channel.as_deref() {
-            guard.execute(
+            transaction.execute(
                 "DELETE FROM memory_items WHERE principal = ?1 AND channel = ?2",
                 params![request.principal.as_str(), channel],
             )?
         } else {
             0
         };
-        Ok(deleted as u64)
+        let deleted_artifacts = delete_recall_artifacts_for_memory_purge(&transaction, request)?;
+        transaction.commit()?;
+        Ok((deleted_memory as u64).saturating_add(deleted_artifacts))
     }
 
     pub fn purge_expired_memory_items(&self, now_unix_ms: i64) -> Result<u64, JournalError> {
@@ -13141,15 +13188,26 @@ impl JournalStore {
                     params![cutoff],
                 )?
                     as u64);
+                deleted_expired_count = deleted_expired_count.saturating_add(transaction.execute(
+                    "DELETE FROM recall_artifacts WHERE created_at_unix_ms <= ?1",
+                    params![cutoff],
+                )?
+                    as u64);
             }
             if let Some(max_entries) = request.retention.max_entries {
                 deleted_capacity_count = deleted_capacity_count.saturating_add(
                     evict_oldest_memory_items_by_entry_cap(&transaction, max_entries)?,
                 );
+                deleted_capacity_count = deleted_capacity_count.saturating_add(
+                    evict_oldest_recall_artifacts_by_entry_cap(&transaction, max_entries)?,
+                );
             }
             if let Some(max_bytes) = request.retention.max_bytes {
                 deleted_capacity_count = deleted_capacity_count.saturating_add(
                     evict_oldest_memory_items_by_byte_cap(&transaction, max_bytes)?,
+                );
+                deleted_capacity_count = deleted_capacity_count.saturating_add(
+                    evict_oldest_recall_artifacts_by_byte_cap(&transaction, max_bytes)?,
                 );
             }
             transaction.commit()?;
@@ -18785,6 +18843,132 @@ fn evict_oldest_memory_items_by_byte_cap(
     delete_memory_items_by_ids(transaction, ids_to_delete.as_slice())
 }
 
+fn delete_recall_artifacts_for_memory_purge(
+    transaction: &Transaction<'_>,
+    request: &MemoryPurgeRequest,
+) -> Result<u64, JournalError> {
+    let deleted = if request.purge_all_principal {
+        transaction.execute(
+            r#"
+                DELETE FROM recall_artifacts
+                WHERE principal = ?1
+                  AND (?2 IS NULL OR channel = ?2)
+                  AND (?3 IS NULL OR session_ulid = ?3)
+            "#,
+            params![
+                request.principal.as_str(),
+                request.channel.as_deref(),
+                request.session_id.as_deref()
+            ],
+        )?
+    } else if let Some(session_id) = request.session_id.as_deref() {
+        transaction.execute(
+            r#"
+                DELETE FROM recall_artifacts
+                WHERE principal = ?1
+                  AND session_ulid = ?2
+                  AND (?3 IS NULL OR channel = ?3)
+            "#,
+            params![request.principal.as_str(), session_id, request.channel.as_deref()],
+        )?
+    } else if let Some(channel) = request.channel.as_deref() {
+        transaction.execute(
+            "DELETE FROM recall_artifacts WHERE principal = ?1 AND channel = ?2",
+            params![request.principal.as_str(), channel],
+        )?
+    } else {
+        0
+    };
+    Ok(deleted as u64)
+}
+
+fn evict_oldest_recall_artifacts_by_entry_cap(
+    transaction: &Transaction<'_>,
+    max_entries: usize,
+) -> Result<u64, JournalError> {
+    let max_entries_i64 = i64::try_from(max_entries).unwrap_or(i64::MAX);
+    let current_entries: i64 =
+        transaction.query_row("SELECT COUNT(*) FROM recall_artifacts", [], |row| row.get(0))?;
+    if current_entries <= max_entries_i64 {
+        return Ok(0);
+    }
+    let overflow = current_entries.saturating_sub(max_entries_i64);
+    let mut statement = transaction.prepare(
+        r#"
+            SELECT artifact_ulid
+            FROM recall_artifacts
+            ORDER BY created_at_unix_ms ASC, artifact_ulid ASC
+            LIMIT ?1
+        "#,
+    )?;
+    let ids = statement
+        .query_map(params![overflow], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    delete_recall_artifacts_by_ids(transaction, ids.as_slice())
+}
+
+fn evict_oldest_recall_artifacts_by_byte_cap(
+    transaction: &Transaction<'_>,
+    max_bytes: u64,
+) -> Result<u64, JournalError> {
+    let mut statement = transaction.prepare(
+        r#"
+            SELECT
+                artifact_ulid,
+                (
+                    COALESCE(length(query), 0) +
+                    COALESCE(length(summary), 0) +
+                    COALESCE(length(payload_json), 0) +
+                    COALESCE(length(diagnostics_json), 0) +
+                    COALESCE(length(provenance_json), 0)
+                ) AS approx_bytes
+            FROM recall_artifacts
+            ORDER BY created_at_unix_ms ASC, artifact_ulid ASC
+        "#,
+    )?;
+    let mut rows = statement.query([])?;
+    let mut ordered = Vec::<(String, u64)>::new();
+    let mut total_bytes = 0_u64;
+    while let Some(row) = rows.next()? {
+        let artifact_id: String = row.get(0)?;
+        let row_bytes = row.get::<_, i64>(1)?.max(0) as u64;
+        total_bytes = total_bytes.saturating_add(row_bytes);
+        ordered.push((artifact_id, row_bytes));
+    }
+    if total_bytes <= max_bytes {
+        return Ok(0);
+    }
+    let mut bytes_to_remove = total_bytes.saturating_sub(max_bytes);
+    let mut ids_to_delete = Vec::<String>::new();
+    for (artifact_id, row_bytes) in ordered {
+        ids_to_delete.push(artifact_id);
+        bytes_to_remove = bytes_to_remove.saturating_sub(row_bytes.max(1));
+        if bytes_to_remove == 0 {
+            break;
+        }
+    }
+    delete_recall_artifacts_by_ids(transaction, ids_to_delete.as_slice())
+}
+
+fn delete_recall_artifacts_by_ids(
+    transaction: &Transaction<'_>,
+    ids: &[String],
+) -> Result<u64, JournalError> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let mut deleted = 0_u64;
+    for chunk in ids.chunks(250) {
+        let placeholders = std::iter::repeat_n("?", chunk.len()).collect::<Vec<_>>().join(",");
+        let sql = format!("DELETE FROM recall_artifacts WHERE artifact_ulid IN ({placeholders})");
+        deleted = deleted.saturating_add(
+            transaction.execute(sql.as_str(), params_from_iter(chunk.iter().map(String::as_str)))?
+                as u64,
+        );
+    }
+    Ok(deleted)
+}
+
 fn delete_memory_items_by_ids(
     transaction: &Transaction<'_>,
     ids: &[String],
@@ -21331,6 +21515,215 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM memory_items", [], |row| row.get(0))
             .expect("memory item count should be queryable");
         assert_eq!(memory_count, 0, "recall artifacts must not create durable memories");
+    }
+
+    #[test]
+    fn recall_artifacts_are_redacted_and_payload_limited() {
+        let db_path = temp_db_path();
+        let store = JournalStore::open(test_journal_config(db_path, false))
+            .expect("journal store should open");
+
+        let created = store
+            .create_recall_artifact(&RecallArtifactCreateRequest {
+                artifact_id: "01ARZ3NDEKTSV4RRFFQ69G5RB1".to_owned(),
+                artifact_kind: RECALL_ARTIFACT_KIND_PREVIEW.to_owned(),
+                principal: "user:ops".to_owned(),
+                device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+                channel: Some("cli".to_owned()),
+                session_id: Some("01ARZ3NDEKTSV4RRFFQ69G5SA1".to_owned()),
+                query: "runtime posture".to_owned(),
+                summary: "sensitive recall candidate".to_owned(),
+                payload: json!({
+                    "api_key": "sk-secret-value",
+                    "prompt_preview": "Authorization: Bearer topsecret123",
+                    "durable_memory_write": false,
+                }),
+                diagnostics: json!({"token": "diag-secret"}),
+                provenance: json!({"source": "recall_preview"}),
+                created_by_principal: "user:ops".to_owned(),
+            })
+            .expect("artifact should be created with redacted payload");
+
+        let payload_text = created.payload.to_string();
+        assert!(
+            !payload_text.contains("sk-secret-value") && !payload_text.contains("topsecret123"),
+            "recall artifact payload should redact secret material before storage"
+        );
+        assert!(
+            payload_text.contains("<redacted>"),
+            "recall artifact payload should include the redaction marker"
+        );
+
+        let mut limited_config = test_journal_config(temp_db_path(), false);
+        limited_config.max_payload_bytes = 64;
+        let limited_store =
+            JournalStore::open(limited_config).expect("limited journal store should open");
+        let error = limited_store
+            .create_recall_artifact(&RecallArtifactCreateRequest {
+                artifact_id: "01ARZ3NDEKTSV4RRFFQ69G5RB2".to_owned(),
+                artifact_kind: RECALL_ARTIFACT_KIND_PREVIEW.to_owned(),
+                principal: "user:ops".to_owned(),
+                device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+                channel: Some("cli".to_owned()),
+                session_id: None,
+                query: "runtime posture".to_owned(),
+                summary: "oversized recall candidate".to_owned(),
+                payload: json!({"blob": "x".repeat(256)}),
+                diagnostics: json!({}),
+                provenance: json!({}),
+                created_by_principal: "user:ops".to_owned(),
+            })
+            .expect_err("oversized recall artifact payload should fail");
+        assert!(matches!(
+            error,
+            JournalError::PayloadTooLarge { payload_kind: "recall_artifact_payload", .. }
+        ));
+    }
+
+    #[test]
+    fn memory_purge_removes_matching_recall_artifacts() {
+        let db_path = temp_db_path();
+        let store = JournalStore::open(test_journal_config(db_path, false))
+            .expect("journal store should open");
+        let session_id = "01ARZ3NDEKTSV4RRFFQ69G5SA1";
+        store
+            .create_recall_artifact(&RecallArtifactCreateRequest {
+                artifact_id: "01ARZ3NDEKTSV4RRFFQ69G5RC1".to_owned(),
+                artifact_kind: RECALL_ARTIFACT_KIND_PREVIEW.to_owned(),
+                principal: "user:ops".to_owned(),
+                device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+                channel: Some("cli".to_owned()),
+                session_id: Some(session_id.to_owned()),
+                query: "runtime posture".to_owned(),
+                summary: "matching artifact".to_owned(),
+                payload: json!({"memory_hits": [{"content": "sensitive"}]}),
+                diagnostics: json!({}),
+                provenance: json!({}),
+                created_by_principal: "user:ops".to_owned(),
+            })
+            .expect("matching artifact should be created");
+        store
+            .create_recall_artifact(&RecallArtifactCreateRequest {
+                artifact_id: "01ARZ3NDEKTSV4RRFFQ69G5RC2".to_owned(),
+                artifact_kind: RECALL_ARTIFACT_KIND_PREVIEW.to_owned(),
+                principal: "user:ops".to_owned(),
+                device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+                channel: Some("slack".to_owned()),
+                session_id: Some(session_id.to_owned()),
+                query: "runtime posture".to_owned(),
+                summary: "foreign channel artifact".to_owned(),
+                payload: json!({"memory_hits": [{"content": "preserved"}]}),
+                diagnostics: json!({}),
+                provenance: json!({}),
+                created_by_principal: "user:ops".to_owned(),
+            })
+            .expect("foreign channel artifact should be created");
+
+        let deleted = store
+            .purge_memory(&MemoryPurgeRequest {
+                principal: "user:ops".to_owned(),
+                channel: Some("cli".to_owned()),
+                session_id: Some(session_id.to_owned()),
+                purge_all_principal: false,
+            })
+            .expect("purge should remove matching recall artifacts");
+        assert_eq!(deleted, 1, "purge should report the removed recall artifact");
+
+        let purged_scope = store
+            .list_recall_artifacts(&RecallArtifactListFilter {
+                principal: "user:ops".to_owned(),
+                device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+                channel: Some("cli".to_owned()),
+                session_id: Some(session_id.to_owned()),
+                artifact_kind: None,
+                limit: 10,
+            })
+            .expect("purged artifact scope should be listable");
+        assert!(purged_scope.is_empty(), "purged recall artifacts must not remain listable");
+
+        let preserved_scope = store
+            .list_recall_artifacts(&RecallArtifactListFilter {
+                principal: "user:ops".to_owned(),
+                device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+                channel: Some("slack".to_owned()),
+                session_id: Some(session_id.to_owned()),
+                artifact_kind: None,
+                limit: 10,
+            })
+            .expect("preserved artifact scope should be listable");
+        assert_eq!(preserved_scope.len(), 1, "purge must preserve unrelated channels");
+    }
+
+    #[test]
+    fn memory_retention_removes_stale_recall_artifacts() {
+        let db_path = temp_db_path();
+        let store = JournalStore::open(test_journal_config(db_path.clone(), false))
+            .expect("journal store should open");
+        let old_created_at = 1_000_i64;
+        let connection = Connection::open(db_path).expect("journal db should open");
+        connection
+            .execute(
+                r#"
+                    INSERT INTO recall_artifacts (
+                        artifact_ulid,
+                        artifact_kind,
+                        principal,
+                        device_id,
+                        channel,
+                        session_ulid,
+                        query,
+                        summary,
+                        payload_json,
+                        diagnostics_json,
+                        provenance_json,
+                        created_by_principal,
+                        created_at_unix_ms
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                "#,
+                params![
+                    "01ARZ3NDEKTSV4RRFFQ69G5RD1",
+                    RECALL_ARTIFACT_KIND_PREVIEW,
+                    "user:ops",
+                    "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                    "cli",
+                    "01ARZ3NDEKTSV4RRFFQ69G5SA1",
+                    "runtime posture",
+                    "stale artifact",
+                    json!({"memory_hits": [{"content": "sensitive"}]}).to_string(),
+                    "{}",
+                    "{}",
+                    "user:ops",
+                    old_created_at,
+                ],
+            )
+            .expect("stale recall artifact should be inserted");
+        drop(connection);
+
+        let outcome = store
+            .run_memory_maintenance(&MemoryMaintenanceRequest {
+                now_unix_ms: old_created_at + (2 * MEMORY_RETENTION_DAY_MS),
+                retention: MemoryRetentionPolicy {
+                    max_entries: None,
+                    max_bytes: None,
+                    ttl_days: Some(1),
+                },
+                next_vacuum_due_at_unix_ms: None,
+                next_maintenance_run_at_unix_ms: None,
+            })
+            .expect("memory maintenance should purge stale recall artifacts");
+        assert_eq!(outcome.deleted_expired_count, 1);
+
+        let artifacts = store
+            .list_recall_artifacts(&RecallArtifactListFilter {
+                principal: "user:ops".to_owned(),
+                device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+                channel: Some("cli".to_owned()),
+                session_id: Some("01ARZ3NDEKTSV4RRFFQ69G5SA1".to_owned()),
+                artifact_kind: None,
+                limit: 10,
+            })
+            .expect("artifact list should succeed after maintenance");
+        assert!(artifacts.is_empty(), "retention must remove stale recall artifacts");
     }
 
     #[test]
