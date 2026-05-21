@@ -1718,7 +1718,7 @@ fn execute_rollback(
                 let bytes = fs::read(backup_path.as_path()).with_context(|| {
                     format!("failed to read rollback backup {}", backup_path.display())
                 })?;
-                write_bytes_atomic(target.as_path(), bytes.as_slice())?;
+                write_bytes_atomic(target.as_path(), bytes.as_slice(), entry.secret_aware)?;
             }
         }
         applied_steps.push(DoctorAppliedStep {
@@ -1808,8 +1808,8 @@ impl DoctorRecoveryRunWriter {
         secret_aware: bool,
     ) -> Result<()> {
         let before = snapshot_file(path)?;
-        let backup_path = self.persist_backup(step_id, path, before.as_ref())?;
-        write_bytes_atomic(path, content)?;
+        let backup_path = self.persist_backup(step_id, path, before.as_ref(), secret_aware)?;
+        write_bytes_atomic(path, content, secret_aware)?;
         self.record_entry(
             step_id,
             path,
@@ -1822,7 +1822,7 @@ impl DoctorRecoveryRunWriter {
 
     fn remove_file(&self, step_id: &str, path: &Path, secret_aware: bool) -> Result<()> {
         let before = snapshot_file(path)?;
-        let backup_path = self.persist_backup(step_id, path, before.as_ref())?;
+        let backup_path = self.persist_backup(step_id, path, before.as_ref(), secret_aware)?;
         if path.exists() {
             fs::remove_file(path)
                 .with_context(|| format!("failed to remove stale artifact {}", path.display()))?;
@@ -1841,10 +1841,10 @@ impl DoctorRecoveryRunWriter {
             return Ok(());
         }
         let before = snapshot_file(path)?;
-        let backup_path = self.persist_backup(step_id, path, before.as_ref())?;
+        let backup_path = self.persist_backup(step_id, path, before.as_ref(), secret_aware)?;
         let bytes = fs::read(path)
             .with_context(|| format!("failed to read quarantine source {}", path.display()))?;
-        write_bytes_atomic(destination, bytes.as_slice())?;
+        write_bytes_atomic(destination, bytes.as_slice(), secret_aware)?;
         fs::remove_file(path).with_context(|| {
             format!("failed to remove original quarantined file {}", path.display())
         })?;
@@ -1856,6 +1856,7 @@ impl DoctorRecoveryRunWriter {
         step_id: &str,
         path: &Path,
         snapshot: Option<&FileSnapshot>,
+        secret_aware: bool,
     ) -> Result<Option<PathBuf>> {
         let Some(snapshot) = snapshot else {
             return Ok(None);
@@ -1863,13 +1864,16 @@ impl DoctorRecoveryRunWriter {
         let backup_dir = self.manifest_path.parent().expect("manifest path parent").join("backups");
         fs::create_dir_all(backup_dir.as_path())
             .with_context(|| format!("failed to create backup dir {}", backup_dir.display()))?;
+        if secret_aware {
+            harden_secret_recovery_dir(backup_dir.as_path())?;
+        }
         let backup_path = backup_dir.join(format!(
             "{}-{}-{}",
             sanitize_file_component(step_id),
             Ulid::new(),
             path.file_name().and_then(|value| value.to_str()).unwrap_or("backup.bin")
         ));
-        write_bytes_atomic(backup_path.as_path(), snapshot.bytes.as_slice())?;
+        write_bytes_atomic(backup_path.as_path(), snapshot.bytes.as_slice(), secret_aware)?;
         Ok(Some(backup_path))
     }
 
@@ -1916,7 +1920,7 @@ impl DoctorRecoveryRunWriter {
             .clone();
         let encoded =
             serde_json::to_vec_pretty(&manifest).context("failed to encode recovery manifest")?;
-        write_bytes_atomic(self.manifest_path.as_path(), encoded.as_slice())
+        write_bytes_atomic(self.manifest_path.as_path(), encoded.as_slice(), false)
     }
 }
 
@@ -1941,14 +1945,13 @@ fn hash_file(path: &Path) -> Result<String> {
     Ok(sha256_hex(bytes.as_slice()))
 }
 
-fn write_bytes_atomic(path: &Path, content: &[u8]) -> Result<()> {
+fn write_bytes_atomic(path: &Path, content: &[u8], secret_aware: bool) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create parent dir {}", parent.display()))?;
     }
     let tmp_path = path.with_extension(format!("{}.tmp", Ulid::new()));
-    fs::write(tmp_path.as_path(), content)
-        .with_context(|| format!("failed to write tmp file {}", tmp_path.display()))?;
+    write_atomic_temp_file(tmp_path.as_path(), content, secret_aware)?;
     if path.exists() {
         let rollback_path = path.with_extension(format!("{}.rollback", Ulid::new()));
         fs::rename(path, rollback_path.as_path()).with_context(|| {
@@ -1964,7 +1967,43 @@ fn write_bytes_atomic(path: &Path, content: &[u8]) -> Result<()> {
         fs::rename(tmp_path.as_path(), path)
             .with_context(|| format!("failed to install atomic file {}", path.display()))?;
     }
+    if secret_aware {
+        harden_secret_recovery_file(path)?;
+    }
     Ok(())
+}
+
+fn write_atomic_temp_file(path: &Path, content: &[u8], secret_aware: bool) -> Result<()> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    if secret_aware {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("failed to create tmp file {}", path.display()))?;
+    file.write_all(content)
+        .with_context(|| format!("failed to write tmp file {}", path.display()))?;
+    file.sync_all().with_context(|| format!("failed to sync tmp file {}", path.display()))?;
+    drop(file);
+    if secret_aware {
+        harden_secret_recovery_file(path)?;
+    }
+    Ok(())
+}
+
+fn harden_secret_recovery_file(path: &Path) -> Result<()> {
+    palyra_vault::ensure_owner_only_file(path).with_context(|| {
+        format!("failed to enforce owner-only recovery file permissions on {}", path.display())
+    })
+}
+
+fn harden_secret_recovery_dir(path: &Path) -> Result<()> {
+    palyra_vault::ensure_owner_only_dir(path).with_context(|| {
+        format!("failed to enforce owner-only recovery directory permissions on {}", path.display())
+    })
 }
 
 fn empty_versioned_config_document() -> Result<TomlValue> {
@@ -2808,6 +2847,75 @@ remote_base_url = "https://dashboard.example.test/"
         let after_hash = sha256_hex(b"after");
         assert_eq!(manifest.entries[0].before_sha256.as_deref(), Some(before_hash.as_str()));
         assert_eq!(manifest.entries[0].after_sha256.as_deref(), Some(after_hash.as_str()));
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_run_writer_secret_aware_records_backup_manifest() -> Result<()> {
+        let temp = tempdir()?;
+        let state_root = temp.path().join("state");
+        let target = state_root.join("secret-config.toml");
+        fs::create_dir_all(&state_root)?;
+        fs::write(&target, b"before-secret")?;
+        let environment =
+            DoctorEnvironment { state_root, config_path: None, generated_at_unix_ms: 100 };
+        let writer = DoctorRecoveryRunWriter::new(&environment, "01SECRET")?;
+
+        writer.write_string("secret.step", target.as_path(), "after-secret", true)?;
+
+        let manifest = serde_json::from_str::<DoctorRecoveryManifest>(&fs::read_to_string(
+            writer.manifest_path(),
+        )?)?;
+        assert_eq!(manifest.entries.len(), 1);
+        assert!(manifest.entries[0].secret_aware);
+        let backup_path = manifest.entries[0]
+            .backup_path
+            .as_deref()
+            .map(PathBuf::from)
+            .expect("secret-aware rewrite should persist a backup");
+        assert_eq!(fs::read(&backup_path)?, b"before-secret");
+        assert_eq!(fs::read(&target)?, b"after-secret");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recovery_run_writer_secret_aware_writes_owner_only_files_and_backups() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempdir()?;
+        let state_root = temp.path().join("state");
+        let target = state_root.join("secret-config.toml");
+        fs::create_dir_all(&state_root)?;
+        fs::write(&target, b"before-secret")?;
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o644))?;
+        let environment =
+            DoctorEnvironment { state_root, config_path: None, generated_at_unix_ms: 100 };
+        let writer = DoctorRecoveryRunWriter::new(&environment, "01SECRET")?;
+
+        writer.write_string("secret.step", target.as_path(), "after-secret", true)?;
+        writer.complete(&[], &[])?;
+
+        let target_mode = fs::metadata(&target)?.permissions().mode() & 0o777;
+        assert_eq!(target_mode, 0o600, "secret-aware recovery target should be owner-only");
+
+        let manifest = serde_json::from_str::<DoctorRecoveryManifest>(&fs::read_to_string(
+            writer.manifest_path(),
+        )?)?;
+        assert_eq!(manifest.entries.len(), 1);
+        assert!(manifest.entries[0].secret_aware);
+        let backup_path = manifest.entries[0]
+            .backup_path
+            .as_deref()
+            .map(PathBuf::from)
+            .expect("secret-aware rewrite should persist a backup");
+        let backup_mode = fs::metadata(&backup_path)?.permissions().mode() & 0o777;
+        assert_eq!(backup_mode, 0o600, "secret-aware recovery backup should be owner-only");
+        let backup_dir_mode =
+            fs::metadata(backup_path.parent().expect("backup parent"))?.permissions().mode()
+                & 0o777;
+        assert_eq!(backup_dir_mode, 0o700, "secret-aware backup directory should be owner-only");
+        assert_eq!(fs::read(&backup_path)?, b"before-secret");
         Ok(())
     }
 }
