@@ -94,10 +94,7 @@ pub(crate) async fn console_onboarding_posture_handler(
         .iter()
         .find(|step| step.status != control_plane::OnboardingStepStatus::Done)
         .map(|step| step.step_id.clone());
-    let ready_for_first_success = steps
-        .iter()
-        .filter(|step| !step.optional)
-        .all(|step| matches!(step.status, control_plane::OnboardingStepStatus::Done));
+    let ready_for_first_success = onboarding_prerequisites_ready(&steps);
     let status = derive_posture_status(&steps, ready_for_first_success);
 
     Ok(Json(control_plane::OnboardingPostureEnvelope {
@@ -468,6 +465,13 @@ fn derive_posture_status(
     control_plane::OnboardingPostureState::InProgress
 }
 
+fn onboarding_prerequisites_ready(steps: &[control_plane::OnboardingStepView]) -> bool {
+    steps
+        .iter()
+        .filter(|step| !step.optional && step.step_id != "first_success")
+        .all(|step| matches!(step.status, control_plane::OnboardingStepStatus::Done))
+}
+
 fn done_step(
     step_id: &str,
     title: &str,
@@ -575,4 +579,44 @@ fn connector_enabled(entries: Option<&Vec<Value>>, kind: &str) -> bool {
         })
         .and_then(|entry| entry.get("enabled").and_then(Value::as_bool))
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ready_prerequisites_allow_ready_posture_before_first_success_done() {
+        let steps = build_onboarding_steps(OnboardingVariant::Quickstart, &ready_signals());
+        let first_success = steps
+            .iter()
+            .find(|step| step.step_id == "first_success")
+            .expect("first_success step should exist");
+
+        assert_eq!(first_success.status, control_plane::OnboardingStepStatus::InProgress);
+        assert!(onboarding_prerequisites_ready(&steps));
+        assert_eq!(
+            derive_posture_status(&steps, onboarding_prerequisites_ready(&steps)),
+            control_plane::OnboardingPostureState::Ready
+        );
+    }
+
+    fn ready_signals() -> OnboardingSignals {
+        OnboardingSignals {
+            config_exists: true,
+            config_path: "palyra.toml".to_owned(),
+            workspace_root_configured: true,
+            remote_base_url_configured: false,
+            remote_verification_mode: None,
+            remote_posture_safe: true,
+            deployment_warning: None,
+            provider_auth_configured: true,
+            provider_model_selected: true,
+            provider_health_state: "ok".to_owned(),
+            provider_health_message: "provider healthy".to_owned(),
+            model_discovery_ready: true,
+            model_discovery_message: "models discovered".to_owned(),
+            discord_enabled: false,
+        }
+    }
 }
