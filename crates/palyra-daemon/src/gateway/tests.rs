@@ -5418,7 +5418,7 @@ async fn model_token_tape_compaction_emits_real_lifecycle_event() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn session_compaction_apply_persists_durable_writes_and_quality_gates() {
+async fn session_compaction_manual_apply_persists_durable_writes_and_quality_gates() {
     let _test_guard = lock_session_compaction_test_guard().await;
     configure_test_write_failure_path(None);
     let state = build_test_runtime_state(false);
@@ -5445,7 +5445,7 @@ async fn session_compaction_apply_persists_durable_writes_and_quality_gates() {
         session: &session,
         actor_principal: "user:ops",
         run_id: Some(run_id),
-        mode: "automatic",
+        mode: "manual",
         trigger_reason: Some("test_quality_gate"),
         trigger_policy: Some("test_policy"),
         accept_candidate_ids: &[],
@@ -5520,7 +5520,113 @@ async fn session_compaction_apply_persists_durable_writes_and_quality_gates() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn session_compaction_apply_rolls_back_workspace_writes_on_partial_failure() {
+async fn session_compaction_automatic_apply_requires_review_before_durable_writes() {
+    let _test_guard = lock_session_compaction_test_guard().await;
+    configure_test_write_failure_path(None);
+    let state = build_test_runtime_state(false);
+    let session_id = "01ARZ3NDEKTSV4RRFFQ69G5FB3";
+    let run_id = "01ARZ3NDEKTSV4RRFFQ69G5FB4";
+    seed_session_compaction_fixture(&state, session_id, run_id);
+    let session = state
+        .journal_store
+        .resolve_orchestrator_session(&OrchestratorSessionResolveRequest {
+            session_id: Some(session_id.to_owned()),
+            session_key: None,
+            session_label: None,
+            principal: "user:ops".to_owned(),
+            device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+            channel: Some("cli".to_owned()),
+            require_existing: true,
+            reset_session: false,
+        })
+        .expect("session should resolve")
+        .session;
+
+    let execution = apply_session_compaction(SessionCompactionApplyRequest {
+        runtime_state: &state,
+        session: &session,
+        actor_principal: "user:ops",
+        run_id: Some(run_id),
+        mode: "automatic",
+        trigger_reason: Some("test_automatic_review_gate"),
+        trigger_policy: Some("test_policy"),
+        accept_candidate_ids: &[],
+        reject_candidate_ids: &[],
+    })
+    .await
+    .expect("automatic compaction should still create the compaction checkpoint");
+
+    assert!(
+        execution.writes.is_empty(),
+        "automatic compaction must not persist durable workspace writes without review"
+    );
+    assert!(
+        execution.plan.candidates.iter().any(|candidate| {
+            candidate.disposition == "review_required"
+                && candidate.target_path == "MEMORY.md"
+                && candidate.content.contains("Use GH CLI for GitHub operations in this repo.")
+        }),
+        "automatic compaction should keep durable candidates reviewable instead of auto-writing them"
+    );
+
+    let artifact_summary = serde_json::from_str::<Value>(&execution.artifact.summary_json)
+        .expect("artifact summary should be valid JSON");
+    assert_eq!(
+        artifact_summary.pointer("/lifecycle_state").and_then(Value::as_str),
+        Some("applied_with_pending_review"),
+        "artifact lifecycle should advertise that durable candidates still need review"
+    );
+    assert_eq!(
+        artifact_summary
+            .pointer("/quality_gates/applied_write_count")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+        0,
+        "quality gates should report no automatic durable writes"
+    );
+    assert!(
+        artifact_summary
+            .pointer("/quality_gates/review_required_count")
+            .and_then(Value::as_u64)
+            .unwrap_or_default()
+            >= 1,
+        "quality gates should report held-back review candidates"
+    );
+
+    let memory_doc = state
+        .workspace_document_by_path(
+            "user:ops".to_owned(),
+            Some("cli".to_owned()),
+            None,
+            "MEMORY.md".to_owned(),
+            false,
+        )
+        .await
+        .expect("memory doc lookup should succeed");
+    assert!(
+        memory_doc.is_none(),
+        "automatic compaction must not create prompt-bound MEMORY.md without review"
+    );
+
+    let artifacts = state
+        .list_orchestrator_compaction_artifacts(session_id.to_owned())
+        .await
+        .expect("artifact list should succeed");
+    assert_eq!(artifacts.len(), 1, "automatic compaction artifact should still be stored");
+
+    let checkpoints = state
+        .list_orchestrator_checkpoints(session_id.to_owned())
+        .await
+        .expect("checkpoint list should succeed");
+    assert_eq!(checkpoints.len(), 1, "automatic compaction checkpoint should still be stored");
+    assert_eq!(
+        checkpoints[0].workspace_paths_json, "[]",
+        "automatic checkpoint should not claim unreviewed workspace writes"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn session_compaction_manual_apply_rolls_back_workspace_writes_on_partial_failure() {
     let _test_guard = lock_session_compaction_test_guard().await;
     configure_test_write_failure_path(None);
     let state = build_test_runtime_state(false);
@@ -5548,7 +5654,7 @@ async fn session_compaction_apply_rolls_back_workspace_writes_on_partial_failure
         session: &session,
         actor_principal: "user:ops",
         run_id: Some(run_id),
-        mode: "automatic",
+        mode: "manual",
         trigger_reason: Some("test_rollback"),
         trigger_policy: Some("test_policy"),
         accept_candidate_ids: &[],

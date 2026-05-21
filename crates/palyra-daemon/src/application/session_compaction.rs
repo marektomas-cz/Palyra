@@ -686,6 +686,9 @@ fn build_session_compaction_plan_with_metadata(
     });
     let mut candidates =
         build_continuity_candidates(condensed_records.as_slice(), workspace_documents);
+    if compaction_mode_requires_review_for_durable_writes(input.mode) {
+        require_review_for_unreviewed_durable_write_candidates(candidates.as_mut_slice());
+    }
     let mut write_previews =
         build_initial_write_previews(candidates.as_mut_slice(), workspace_documents);
     write_previews.sort_by(|left, right| left.target_path.cmp(&right.target_path));
@@ -1267,6 +1270,23 @@ fn build_initial_write_previews(
         }
     }
     previews
+}
+
+fn compaction_mode_requires_review_for_durable_writes(mode: &str) -> bool {
+    mode.trim().eq_ignore_ascii_case("automatic")
+}
+
+fn require_review_for_unreviewed_durable_write_candidates(
+    candidates: &mut [SessionCompactionCandidate],
+) {
+    for candidate in candidates.iter_mut().filter(|candidate| candidate.disposition == "auto_write")
+    {
+        candidate.disposition = "review_required".to_owned();
+        candidate.rationale = format!(
+            "automatic compaction requires operator review before durable workspace writes; {}",
+            candidate.rationale
+        );
+    }
 }
 
 fn build_compaction_summary_json(input: CompactionSummaryJsonInput<'_>) -> String {
