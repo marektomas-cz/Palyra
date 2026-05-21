@@ -1,8 +1,12 @@
 use anyhow::{Context, Result};
 use reqwest::blocking::Client;
 use serde_json::Value;
+use std::io::Read;
 
 use crate::{app, env, DEFAULT_CHANNEL, DEFAULT_DAEMON_URL, DEFAULT_DEVICE_ID};
+
+const MAX_ERROR_BODY_BYTES: usize = 8 * 1024;
+const MAX_ERROR_MESSAGE_CHARS: usize = 512;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ChannelRequestContext {
@@ -94,10 +98,7 @@ pub(crate) fn send_request(
     let status = response.status();
     if !status.is_success() {
         let fallback = status.to_string();
-        let message = response
-            .text()
-            .map(|body| channel_error_message(body.as_str(), fallback.as_str()))
-            .unwrap_or(fallback);
+        let message = channel_error_message_from_response(response, fallback.as_str());
         anyhow::bail!(
             "channels endpoint returned non-success status: HTTP {}: {}",
             status.as_u16(),
@@ -107,40 +108,97 @@ pub(crate) fn send_request(
     response.json().context("failed to parse channels endpoint JSON payload")
 }
 
-fn channel_error_message(body: &str, fallback: &str) -> String {
+struct LimitedErrorBody {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+fn channel_error_message_from_response(
+    response: reqwest::blocking::Response,
+    fallback: &str,
+) -> String {
+    let Some(body) = read_limited_error_body(response) else {
+        return fallback.to_owned();
+    };
+    let message = String::from_utf8_lossy(body.bytes.as_slice());
+    channel_error_message(message.as_ref(), fallback, body.truncated)
+}
+
+fn read_limited_error_body<R: Read>(reader: R) -> Option<LimitedErrorBody> {
+    let mut limited = reader.take((MAX_ERROR_BODY_BYTES as u64).saturating_add(1));
+    let mut bytes = Vec::new();
+    limited.read_to_end(&mut bytes).ok()?;
+    let truncated = bytes.len() > MAX_ERROR_BODY_BYTES;
+    if truncated {
+        bytes.truncate(MAX_ERROR_BODY_BYTES);
+    }
+    Some(LimitedErrorBody { bytes, truncated })
+}
+
+fn channel_error_message(body: &str, fallback: &str, body_truncated: bool) -> String {
     let trimmed = body.trim();
     if trimmed.is_empty() {
         return fallback.to_owned();
     }
     if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
         if let Some(message) = value.get("error").and_then(Value::as_str) {
-            return message.to_owned();
+            return truncate_error_message(message, body_truncated);
         }
         if let Some(message) = value.get("message").and_then(Value::as_str) {
-            return message.to_owned();
+            return truncate_error_message(message, body_truncated);
         }
     }
-    const MAX_ERROR_BODY_CHARS: usize = 512;
-    if trimmed.chars().count() <= MAX_ERROR_BODY_CHARS {
-        return trimmed.to_owned();
+    truncate_error_message(trimmed, body_truncated)
+}
+
+fn truncate_error_message(message: &str, body_truncated: bool) -> String {
+    if !body_truncated && message.chars().count() <= MAX_ERROR_MESSAGE_CHARS {
+        return message.to_owned();
     }
-    let mut truncated = trimmed.chars().take(MAX_ERROR_BODY_CHARS).collect::<String>();
+    let mut truncated = message.chars().take(MAX_ERROR_MESSAGE_CHARS).collect::<String>();
     truncated.push_str("...");
     truncated
 }
 
 #[cfg(test)]
 mod tests {
-    use super::channel_error_message;
+    use super::{
+        channel_error_message, read_limited_error_body, MAX_ERROR_BODY_BYTES,
+        MAX_ERROR_MESSAGE_CHARS,
+    };
+    use std::io::Cursor;
 
     #[test]
     fn channel_error_message_prefers_control_plane_error_body() {
         let message = channel_error_message(
             r#"{"error":"connector 'echo:default' is internal_test_only; run `palyra message capabilities echo:default`"}"#,
             "412 Precondition Failed",
+            false,
         );
 
         assert!(message.contains("internal_test_only"));
         assert!(message.contains("message capabilities echo:default"));
+    }
+
+    #[test]
+    fn channel_error_message_caps_json_error_body_text() {
+        let oversized_error = "x".repeat(MAX_ERROR_MESSAGE_CHARS + 64);
+        let body = serde_json::json!({ "error": oversized_error }).to_string();
+
+        let message = channel_error_message(body.as_str(), "500 Internal Server Error", false);
+
+        assert_eq!(message.chars().count(), MAX_ERROR_MESSAGE_CHARS + 3);
+        assert!(message.ends_with("..."));
+    }
+
+    #[test]
+    fn channel_error_body_reader_caps_buffered_bytes() {
+        let body = vec![b'a'; MAX_ERROR_BODY_BYTES + 1024];
+
+        let limited = read_limited_error_body(Cursor::new(body))
+            .expect("bounded error body reader should succeed");
+
+        assert_eq!(limited.bytes.len(), MAX_ERROR_BODY_BYTES);
+        assert!(limited.truncated);
     }
 }
