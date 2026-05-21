@@ -2,10 +2,7 @@ use std::sync::RwLock;
 
 use serde::{Deserialize, Serialize};
 
-use crate::journal::{
-    JournalError, JournalStore, MemorySearchCandidateOutcome, MemorySearchRequest,
-    WorkspaceSearchCandidateOutcome, WorkspaceSearchRequest,
-};
+use crate::journal::{JournalError, JournalStore};
 
 use super::{ExternalRetrievalIndex, ExternalRetrievalIndexSnapshot, RetrievalBackendState};
 
@@ -303,60 +300,11 @@ impl ExternalRetrievalRuntime {
             success,
         })
     }
-
-    fn record_external_query(&self, latency_ms: u64) {
-        let mut guard = self.state.write().unwrap_or_else(|error| error.into_inner());
-        guard.search_attempts = guard.search_attempts.saturating_add(1);
-        guard.query_latency_samples_ms.push(latency_ms);
-        if guard.query_latency_samples_ms.len() > 128 {
-            guard.query_latency_samples_ms.remove(0);
-        }
-        recompute_external_slos(&mut guard);
-    }
-
-    fn record_degraded_fallback(&self) {
-        let mut guard = self.state.write().unwrap_or_else(|error| error.into_inner());
-        guard.search_attempts = guard.search_attempts.saturating_add(1);
-        guard.degraded_fallbacks = guard.degraded_fallbacks.saturating_add(1);
-        recompute_external_slos(&mut guard);
-    }
 }
 
 impl ExternalRetrievalIndex for ExternalRetrievalRuntime {
     fn snapshot(&self) -> ExternalRetrievalIndexSnapshot {
         self.snapshot()
-    }
-
-    fn search_memory_candidate_outcome(
-        &self,
-        store: &JournalStore,
-        request: &MemorySearchRequest,
-    ) -> Result<Option<MemorySearchCandidateOutcome>, JournalError> {
-        let snapshot = self.snapshot();
-        if snapshot.state != RetrievalBackendState::Ready {
-            self.record_degraded_fallback();
-            return Ok(None);
-        }
-        let started = std::time::Instant::now();
-        let outcome = store.search_memory_candidate_outcome(request)?;
-        self.record_external_query(elapsed_millis(started));
-        Ok(Some(outcome))
-    }
-
-    fn search_workspace_candidate_outcome(
-        &self,
-        store: &JournalStore,
-        request: &WorkspaceSearchRequest,
-    ) -> Result<Option<WorkspaceSearchCandidateOutcome>, JournalError> {
-        let snapshot = self.snapshot();
-        if snapshot.state != RetrievalBackendState::Ready {
-            self.record_degraded_fallback();
-            return Ok(None);
-        }
-        let started = std::time::Instant::now();
-        let outcome = store.search_workspace_candidate_outcome(request)?;
-        self.record_external_query(elapsed_millis(started));
-        Ok(Some(outcome))
     }
 }
 
@@ -483,13 +431,9 @@ fn reconciliation_success_rate_bps(
     u32::try_from(bps.min(10_000)).unwrap_or(10_000)
 }
 
-fn elapsed_millis(started_at: std::time::Instant) -> u64 {
-    u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::super::{ExternalRetrievalIndex, RetrievalBackendState};
+    use super::super::RetrievalBackendState;
     use super::*;
     use crate::journal::{JournalConfig, MemoryItemCreateRequest, MemorySource};
 
@@ -542,24 +486,11 @@ mod tests {
         assert!(snapshot.scale_slos.freshness_ok);
         assert!(snapshot.scale_slos.reconciliation_success_ok);
 
-        let request = MemorySearchRequest {
-            principal: "user:ops".to_owned(),
-            channel: Some("cli".to_owned()),
-            session_id: None,
-            query: "checkpoint release gate".to_owned(),
-            top_k: 4,
-            min_score: 0.0,
-            tags: Vec::new(),
-            sources: Vec::new(),
-        };
-        let external_outcome = external_index
-            .search_memory_candidate_outcome(&store, &request)
-            .expect("ready external runtime should serve candidates")
-            .expect("ready external runtime should not force journal fallback");
-        assert!(external_outcome
-            .candidates
-            .iter()
-            .any(|candidate| candidate.item.memory_id == "01ARZ3NDEKTSV4RRFFQ69G5M50"));
+        assert_eq!(
+            external_index.snapshot().indexed_memory_items,
+            1,
+            "ready external runtime should expose index freshness without serving raw candidates"
+        );
     }
 
     #[test]

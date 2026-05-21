@@ -540,18 +540,6 @@ impl RetrievalBackend for JournalRetrievalBackend {
 
 pub(crate) trait ExternalRetrievalIndex: Send + Sync {
     fn snapshot(&self) -> ExternalRetrievalIndexSnapshot;
-
-    fn search_memory_candidate_outcome(
-        &self,
-        store: &JournalStore,
-        request: &MemorySearchRequest,
-    ) -> Result<Option<MemorySearchCandidateOutcome>, JournalError>;
-
-    fn search_workspace_candidate_outcome(
-        &self,
-        store: &JournalStore,
-        request: &WorkspaceSearchRequest,
-    ) -> Result<Option<WorkspaceSearchCandidateOutcome>, JournalError>;
 }
 
 #[derive(Debug, Default)]
@@ -574,22 +562,6 @@ impl ExternalRetrievalIndex for UnavailableExternalRetrievalIndex {
             scale_slos: ExternalRetrievalScaleSloSnapshot::default(),
             last_error: None,
         }
-    }
-
-    fn search_memory_candidate_outcome(
-        &self,
-        _store: &JournalStore,
-        _request: &MemorySearchRequest,
-    ) -> Result<Option<MemorySearchCandidateOutcome>, JournalError> {
-        Ok(None)
-    }
-
-    fn search_workspace_candidate_outcome(
-        &self,
-        _store: &JournalStore,
-        _request: &WorkspaceSearchRequest,
-    ) -> Result<Option<WorkspaceSearchCandidateOutcome>, JournalError> {
-        Ok(None)
     }
 }
 
@@ -632,6 +604,14 @@ impl ExternalDerivedRetrievalBackend {
         outcome.diagnostics.degraded_reason = Some(reason.to_owned());
         Ok(outcome)
     }
+
+    fn journal_rehydration_fallback_reason(&self) -> &'static str {
+        if self.external_index.snapshot().state == RetrievalBackendState::Degraded {
+            "external_index_unavailable"
+        } else {
+            "external_index_candidate_rehydration_required"
+        }
+    }
 }
 
 impl RetrievalBackend for ExternalDerivedRetrievalBackend {
@@ -662,7 +642,8 @@ impl RetrievalBackend for ExternalDerivedRetrievalBackend {
                 "external retrieval index is available but embeddings are degraded".to_owned()
             })
         } else {
-            "external derived retrieval index is ready with journal fallback".to_owned()
+            "external derived retrieval index is ready; searches rehydrate through JournalStore source of truth"
+                .to_owned()
         };
 
         RetrievalBackendSnapshot {
@@ -712,12 +693,7 @@ impl RetrievalBackend for ExternalDerivedRetrievalBackend {
         if config.backend.kind == RetrievalBackendKind::JournalSqliteFts {
             return self.journal_fallback.search_memory_candidate_outcome(store, request, config);
         }
-        if let Some(outcome) =
-            self.external_index.search_memory_candidate_outcome(store, request)?
-        {
-            return Ok(outcome);
-        }
-        self.fallback_memory_outcome(store, request, "external_index_unavailable")
+        self.fallback_memory_outcome(store, request, self.journal_rehydration_fallback_reason())
     }
 
     fn search_workspace_candidate_outcome(
@@ -731,12 +707,7 @@ impl RetrievalBackend for ExternalDerivedRetrievalBackend {
                 .journal_fallback
                 .search_workspace_candidate_outcome(store, request, config);
         }
-        if let Some(outcome) =
-            self.external_index.search_workspace_candidate_outcome(store, request)?
-        {
-            return Ok(outcome);
-        }
-        self.fallback_workspace_outcome(store, request, "external_index_unavailable")
+        self.fallback_workspace_outcome(store, request, self.journal_rehydration_fallback_reason())
     }
 }
 
@@ -1441,7 +1412,10 @@ fn normalize_embedding_dimensions(mut vector: Vec<f32>, expected_dims: usize) ->
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        sync::Arc,
+    };
 
     use serde::{Deserialize, Serialize};
     use serde_json::Value;
@@ -1450,9 +1424,10 @@ mod tests {
         build_memory_embedding_runtime_selection, checkpoint_source_quality,
         compaction_source_quality, lexical_overlap_score, memory_source_quality,
         proxy_vector_score, recency_score, score_with_profile, transcript_source_quality,
-        workspace_source_quality, ExternalDerivedRetrievalBackend, JournalRetrievalBackend,
-        RetrievalBackend, RetrievalBackendKind, RetrievalBackendState,
-        RetrievalExternalizationClass, RetrievalRuntimeConfig, RetrievalSourceProfileKind,
+        workspace_source_quality, ExternalDerivedRetrievalBackend, ExternalRetrievalIndexSnapshot,
+        ExternalRetrievalScaleSloSnapshot, JournalRetrievalBackend, RetrievalBackend,
+        RetrievalBackendKind, RetrievalBackendState, RetrievalExternalizationClass,
+        RetrievalRuntimeConfig, RetrievalSourceProfileKind,
     };
     use crate::journal::{
         JournalConfig, JournalStore, MemoryEmbeddingsMode, MemoryEmbeddingsStatus,
@@ -1783,6 +1758,93 @@ mod tests {
         assert_eq!(
             external.diagnostics.degraded_reason.as_deref(),
             Some("external_index_unavailable")
+        );
+    }
+
+    struct ReadyExternalIndex;
+
+    impl super::ExternalRetrievalIndex for ReadyExternalIndex {
+        fn snapshot(&self) -> ExternalRetrievalIndexSnapshot {
+            ExternalRetrievalIndexSnapshot {
+                provider: "ready-preview".to_owned(),
+                state: RetrievalBackendState::Ready,
+                reason: "test external index is ready".to_owned(),
+                indexed_memory_items: 1,
+                indexed_workspace_chunks: 0,
+                last_indexed_at_unix_ms: Some(1_700_000_000_000),
+                journal_watermark_unix_ms: Some(1_700_000_000_000),
+                freshness_lag_ms: Some(0),
+                drift_count: 0,
+                pending_reconciliation_count: 0,
+                scale_slos: ExternalRetrievalScaleSloSnapshot::default(),
+                last_error: None,
+            }
+        }
+    }
+
+    #[test]
+    fn external_preview_backend_keeps_journal_source_of_truth_when_external_ready() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let store = JournalStore::open(JournalConfig {
+            db_path: temp.path().join("journal.sqlite3"),
+            hash_chain_enabled: false,
+            max_payload_bytes: 256 * 1024,
+            max_events: 10_000,
+        })
+        .expect("journal store should open");
+        store
+            .create_memory_item(&MemoryItemCreateRequest {
+                memory_id: "01ARZ3NDEKTSV4RRFFQ69G5M52".to_owned(),
+                principal: "user:ops".to_owned(),
+                channel: Some("cli".to_owned()),
+                session_id: None,
+                source: MemorySource::Manual,
+                content_text: "journal source of truth retrieval boundary".to_owned(),
+                tags: Vec::new(),
+                confidence: Some(0.9),
+                ttl_unix_ms: None,
+            })
+            .expect("memory item should be indexed in journal");
+        let request = MemorySearchRequest {
+            principal: "user:ops".to_owned(),
+            channel: Some("cli".to_owned()),
+            session_id: None,
+            query: "source of truth".to_owned(),
+            top_k: 4,
+            min_score: 0.0,
+            tags: Vec::new(),
+            sources: Vec::new(),
+        };
+        let journal_backend = JournalRetrievalBackend;
+        let journal_config = RetrievalRuntimeConfig::default();
+        let journal = journal_backend
+            .search_memory_candidate_outcome(&store, &request, &journal_config)
+            .expect("journal candidate generation should work");
+        let external_backend = ExternalDerivedRetrievalBackend::new(Arc::new(ReadyExternalIndex));
+        let external_config = RetrievalRuntimeConfig {
+            backend: super::RetrievalBackendConfig {
+                kind: RetrievalBackendKind::ExternalDerivedPreview,
+            },
+            ..RetrievalRuntimeConfig::default()
+        };
+        let external = external_backend
+            .search_memory_candidate_outcome(&store, &request, &external_config)
+            .expect("external preview should rehydrate through journal candidates");
+
+        let journal_ids = journal
+            .candidates
+            .iter()
+            .map(|candidate| candidate.item.memory_id.as_str())
+            .collect::<Vec<_>>();
+        let external_ids = external
+            .candidates
+            .iter()
+            .map(|candidate| candidate.item.memory_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(external_ids, journal_ids);
+        assert_eq!(
+            external.diagnostics.degraded_reason.as_deref(),
+            Some("external_index_candidate_rehydration_required")
         );
     }
 
