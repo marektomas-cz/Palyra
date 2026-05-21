@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
     fs,
+    io::Read,
     path::{Path, PathBuf},
 };
 
@@ -25,6 +26,7 @@ const BACKEND_MARKER_FILE: &str = "backend.kind";
 const OBJECTS_DIR: &str = "objects";
 const OBJECTS_STORE_FILE: &str = "objects.store.json";
 const MAX_OBJECTS_STORE_BYTES: u64 = 32 * 1024 * 1024;
+const JSON_U8_WORST_CASE_BYTES: u64 = 4;
 #[cfg(target_os = "macos")]
 const KEYCHAIN_SERVICE_NAME: &str = "palyra.vault.v1";
 #[cfg(target_os = "linux")]
@@ -329,6 +331,7 @@ impl EncryptedFileBackend {
 
     fn read_legacy_store(objects_root: &Path) -> Result<BTreeMap<String, Vec<u8>>, VaultError> {
         let mut legacy_store = BTreeMap::new();
+        let mut estimated_store_bytes = 2_u64;
         for entry in fs::read_dir(objects_root).map_err(|error| {
             VaultError::Io(format!(
                 "failed to enumerate encrypted-file objects directory {}: {error}",
@@ -368,16 +371,85 @@ impl EncryptedFileBackend {
                 object_path.as_path(),
                 "encrypted-file legacy object path",
             )?;
-            let payload = fs::read(&object_path).map_err(|error| {
+            let metadata = fs::metadata(&object_path).map_err(|error| {
                 VaultError::Io(format!(
-                    "failed to read encrypted-file legacy object {}: {error}",
+                    "failed to inspect encrypted-file legacy object {}: {error}",
                     object_path.display()
                 ))
             })?;
+            estimated_store_bytes = checked_legacy_store_budget(
+                estimated_store_bytes,
+                object_id.as_str(),
+                metadata.len(),
+                object_path.as_path(),
+            )?;
+            let payload = read_legacy_object_limited(object_path.as_path(), metadata.len())?;
             legacy_store.insert(object_id, payload);
         }
         Ok(legacy_store)
     }
+}
+
+fn checked_legacy_store_budget(
+    current_estimated_bytes: u64,
+    object_id: &str,
+    payload_len: u64,
+    object_path: &Path,
+) -> Result<u64, VaultError> {
+    let entry_budget =
+        estimate_legacy_object_json_bytes(object_id, payload_len).ok_or_else(|| {
+            VaultError::Io(format!(
+                "encrypted-file legacy object {} exceeds migration size accounting limits",
+                object_path.display()
+            ))
+        })?;
+    let next_estimated = current_estimated_bytes.checked_add(entry_budget).ok_or_else(|| {
+        VaultError::Io(format!(
+            "encrypted-file legacy object {} exceeds migration size accounting limits",
+            object_path.display()
+        ))
+    })?;
+    if next_estimated > MAX_OBJECTS_STORE_BYTES {
+        return Err(VaultError::Io(format!(
+            "encrypted-file legacy object {} exceeds max migration size estimate ({} > {})",
+            object_path.display(),
+            next_estimated,
+            MAX_OBJECTS_STORE_BYTES
+        )));
+    }
+    Ok(next_estimated)
+}
+
+fn estimate_legacy_object_json_bytes(object_id: &str, payload_len: u64) -> Option<u64> {
+    let key_budget = object_id.len() as u64 + 3;
+    let value_budget = payload_len.checked_mul(JSON_U8_WORST_CASE_BYTES)?.checked_add(2)?;
+    key_budget.checked_add(value_budget)?.checked_add(1)
+}
+
+fn read_legacy_object_limited(path: &Path, max_bytes: u64) -> Result<Vec<u8>, VaultError> {
+    let file = fs::File::open(path).map_err(|error| {
+        VaultError::Io(format!(
+            "failed to read encrypted-file legacy object {}: {error}",
+            path.display()
+        ))
+    })?;
+    let mut reader = file.take(max_bytes.saturating_add(1));
+    let mut payload = Vec::new();
+    reader.read_to_end(&mut payload).map_err(|error| {
+        VaultError::Io(format!(
+            "failed to read encrypted-file legacy object {}: {error}",
+            path.display()
+        ))
+    })?;
+    if payload.len() as u64 > max_bytes {
+        return Err(VaultError::Io(format!(
+            "encrypted-file legacy object {} changed while reading and exceeded its inspected size ({} > {})",
+            path.display(),
+            payload.len(),
+            max_bytes
+        )));
+    }
+    Ok(payload)
 }
 
 impl BlobBackend for EncryptedFileBackend {
@@ -790,13 +862,18 @@ fn dpapi_unprotect(protected: &[u8]) -> Result<Vec<u8>, VaultError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BlobBackend, EncryptedFileBackend, MAX_OBJECTS_STORE_BYTES, OBJECTS_STORE_FILE};
+    use super::{
+        BlobBackend, EncryptedFileBackend, JSON_U8_WORST_CASE_BYTES, MAX_OBJECTS_STORE_BYTES,
+        OBJECTS_STORE_FILE,
+    };
     use crate::VaultError;
-    use std::{collections::BTreeMap, fs};
+    use std::{collections::BTreeMap, fs, path::Path};
     use tempfile::tempdir;
 
     const TEST_OBJECT_ID: &str =
         "obj_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const SECOND_TEST_OBJECT_ID: &str =
+        "obj_abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd";
 
     #[test]
     fn encrypted_file_backend_rejects_oversized_store_reads() {
@@ -828,6 +905,40 @@ mod tests {
         let result = backend.write_store(&store);
         assert!(
             matches!(result, Err(VaultError::Io(ref message)) if message.contains("exceeds max size after update")),
+            "unexpected result: {result:?}"
+        );
+    }
+
+    #[test]
+    fn encrypted_file_backend_rejects_oversized_legacy_object_before_read() {
+        let temp = tempdir().expect("tempdir should be created");
+        let objects_root = temp.path().join("objects");
+        fs::create_dir_all(&objects_root).expect("objects root should be created");
+        write_sparse_legacy_object(
+            objects_root.as_path(),
+            TEST_OBJECT_ID,
+            (MAX_OBJECTS_STORE_BYTES / JSON_U8_WORST_CASE_BYTES) + 1024,
+        );
+
+        let result = EncryptedFileBackend::new(temp.path());
+        assert!(
+            matches!(result, Err(VaultError::Io(ref message)) if message.contains("exceeds max migration size estimate")),
+            "unexpected result: {result:?}"
+        );
+    }
+
+    #[test]
+    fn encrypted_file_backend_rejects_cumulative_legacy_object_budget() {
+        let temp = tempdir().expect("tempdir should be created");
+        let objects_root = temp.path().join("objects");
+        fs::create_dir_all(&objects_root).expect("objects root should be created");
+        let object_len = (MAX_OBJECTS_STORE_BYTES / (JSON_U8_WORST_CASE_BYTES * 2)) + 1024;
+        write_sparse_legacy_object(objects_root.as_path(), TEST_OBJECT_ID, object_len);
+        write_sparse_legacy_object(objects_root.as_path(), SECOND_TEST_OBJECT_ID, object_len);
+
+        let result = EncryptedFileBackend::new(temp.path());
+        assert!(
+            matches!(result, Err(VaultError::Io(ref message)) if message.contains("exceeds max migration size estimate")),
             "unexpected result: {result:?}"
         );
     }
@@ -871,24 +982,26 @@ mod tests {
             .expect("seed store should serialize"),
         )
         .expect("seed store should be written");
-        fs::write(
-            objects_root
-                .join("obj_abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"),
-            b"legacy-only-secret",
-        )
-        .expect("legacy-only object file should be written");
+        fs::write(objects_root.join(SECOND_TEST_OBJECT_ID), b"legacy-only-secret")
+            .expect("legacy-only object file should be written");
 
         let backend =
             EncryptedFileBackend::new(temp.path()).expect("backend should initialize cleanly");
 
         let legacy_only = backend
-            .get_blob("obj_abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd")
+            .get_blob(SECOND_TEST_OBJECT_ID)
             .expect("legacy-only object should be merged into the store");
         let preserved = backend
             .get_blob(TEST_OBJECT_ID)
             .expect("existing store object should remain accessible");
         assert_eq!(legacy_only, b"legacy-only-secret");
         assert_eq!(preserved, b"store-secret");
+    }
+
+    fn write_sparse_legacy_object(objects_root: &Path, object_id: &str, len: u64) {
+        let file = fs::File::create(objects_root.join(object_id))
+            .expect("legacy object file should be created");
+        file.set_len(len).expect("legacy object file length should be set");
     }
 
     #[cfg(windows)]
