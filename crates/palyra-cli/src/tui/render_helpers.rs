@@ -326,11 +326,7 @@ pub(super) fn render_help_popup(frame: &mut Frame<'_>, area: Rect, app: &App) {
 }
 
 pub(super) fn render_status_detail_popup(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let lines = app
-        .status_detail_summary()
-        .lines()
-        .map(|line| Line::from(line.to_owned()))
-        .collect::<Vec<_>>();
+    let lines = status_detail_popup_lines(app.status_detail_summary().as_str());
     let popup_height = area.height.saturating_sub(2).min(lines.len() as u16 + 2).max(10);
     let popup = centered_rect(92, popup_height, area);
     frame.render_widget(Clear, popup);
@@ -341,6 +337,10 @@ pub(super) fn render_status_detail_popup(frame: &mut Frame<'_>, area: Rect, app:
             .wrap(Wrap { trim: false }),
         popup,
     );
+}
+
+fn status_detail_popup_lines(summary: &str) -> Vec<Line<'static>> {
+    sanitize_terminal_text(summary).lines().map(|line| Line::from(line.to_owned())).collect()
 }
 
 pub(super) fn percent_encode_component(value: &str) -> String {
@@ -785,8 +785,8 @@ pub(super) fn format_shell_result(result: &ShellResult) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        slash_palette_preview_lines, slash_palette_suggestion_lines, truncate_text,
-        TuiSlashPreview, TuiSlashSuggestion,
+        slash_palette_preview_lines, slash_palette_suggestion_lines, status_detail_popup_lines,
+        truncate_text, TuiSlashPreview, TuiSlashSuggestion,
     };
     use ratatui::text::Line;
 
@@ -827,6 +827,20 @@ mod tests {
         assert_eq!(rendered[1], "browser<ESC>[31m");
         assert_eq!(rendered[2], "detail<U+0007>");
         assert_eq!(rendered[3], "Example: /browser profile<U+0009>open");
+        assert!(rendered.iter().all(|line| !line.contains('\u{1b}') && !line.contains('\u{7}')));
+    }
+
+    #[test]
+    fn status_detail_popup_lines_sanitize_terminal_control_sequences() {
+        let rendered = status_detail_popup_lines(
+            "workspace: artifact\x1b]52;c;secret\x07\r\nnext\tline\x1b[2J",
+        )
+        .iter()
+        .map(rendered_line_text)
+        .collect::<Vec<_>>();
+
+        assert_eq!(rendered[0], "workspace: artifact<ESC>]52;c;secret<U+0007>");
+        assert_eq!(rendered[1], "next<U+0009>line<ESC>[2J");
         assert!(rendered.iter().all(|line| !line.contains('\u{1b}') && !line.contains('\u{7}')));
     }
 
