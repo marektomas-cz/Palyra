@@ -35,7 +35,6 @@ struct DesktopCliProfilesDocument {
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
 struct DesktopCliConnectionProfile {
     config_path: Option<String>,
     state_root: Option<String>,

@@ -884,6 +884,55 @@ fn implicit_desktop_profile_inherits_bootstrapped_config_path() {
 }
 
 #[test]
+fn desktop_profile_catalog_accepts_cli_profile_fields_unused_by_desktop() {
+    let _env_guard = lock_env();
+    let fixture = TempFixtureDir::new();
+    let config_path = write_config_file(fixture.path(), "daemon.bind = \"127.0.0.1\"");
+    let state_root = fixture.path().join("runtime");
+    let _profiles_override = ScopedEnvVar::unset("PALYRA_CLI_PROFILES_PATH");
+    write_cli_profiles_file(
+        fixture.path(),
+        format!(
+            r#"
+version = 1
+default_profile = "ops"
+
+[profiles.ops]
+config_path = '{}'
+state_root = '{}'
+daemon_url = "http://127.0.0.1:7142"
+grpc_url = "http://127.0.0.1:7143"
+admin_token_env = "PALYRA_ADMIN_TOKEN"
+principal = "admin:web-console"
+device_id = "device-1"
+channel = "web"
+label = "Ops"
+environment = "local"
+color = "emerald"
+risk_level = "low"
+strict_mode = false
+mode = "local"
+created_at_unix_ms = 1
+updated_at_unix_ms = 2
+last_used_at_unix_ms = 3
+"#,
+            config_path.display(),
+            state_root.display()
+        )
+        .as_str(),
+    );
+
+    let catalog = DesktopProfileCatalog::load(fixture.path()).expect("profile catalog should load");
+    let profile = catalog.profiles.get("ops").expect("CLI-created profile should load");
+
+    assert_eq!(catalog.default_profile_name.as_deref(), Some("ops"));
+    assert_eq!(profile.config_path.as_deref(), Some(config_path.as_path()));
+    assert_eq!(profile.state_root.as_deref(), Some(state_root.as_path()));
+    assert_eq!(profile.context.label, "Ops");
+    assert_eq!(profile.last_used_at_unix_ms, Some(3));
+}
+
+#[test]
 fn portable_install_metadata_does_not_override_explicit_env_paths() {
     let _env_guard = lock_env();
     let fixture = TempFixtureDir::new();
