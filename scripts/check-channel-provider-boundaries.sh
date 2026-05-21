@@ -116,11 +116,16 @@ def is_allowed(path: str, allow_prefixes: list[str]) -> bool:
     return any(path.startswith(prefix) for prefix in allow_prefixes)
 
 
+def search_result_path(line: str) -> str:
+    raw_path = line.split(":", 1)[0]
+    return Path(raw_path).as_posix()
+
+
 violations: list[tuple[str, str]] = []
 for check in CHECKS:
     lines = run_rg(check["pattern"], check["paths"])
     for line in lines:
-        path = line.split(":", 1)[0].replace("\\", "/")
+        path = search_result_path(line)
         if not is_allowed(path, check["allow_prefixes"]):
             violations.append((check["name"], line))
 
