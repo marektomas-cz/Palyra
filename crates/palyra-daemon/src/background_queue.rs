@@ -2875,14 +2875,14 @@ fn inject_background_metadata(
             .parse()
             .map_err(|_| Status::invalid_argument("background device_id metadata is invalid"))?,
     );
-    let header_channel =
-        channel.filter(|value| !value.trim().is_empty()).unwrap_or(DEFAULT_BACKGROUND_CHANNEL);
-    metadata.insert(
-        HEADER_CHANNEL,
-        header_channel
-            .parse()
-            .map_err(|_| Status::invalid_argument("background channel metadata is invalid"))?,
-    );
+    if let Some(header_channel) = channel.filter(|value| !value.trim().is_empty()) {
+        metadata.insert(
+            HEADER_CHANNEL,
+            header_channel
+                .parse()
+                .map_err(|_| Status::invalid_argument("background channel metadata is invalid"))?,
+        );
+    }
     Ok(())
 }
 
@@ -2921,12 +2921,12 @@ mod tests {
         append_artifact_references, build_background_task_child_run_attach_update,
         build_background_task_running_update, categorize_child_failure,
         child_merge_lifecycle_details, delegated_child_timeout_message,
-        evaluate_delegation_scheduler_limits, parent_merge_event_payload,
-        replace_background_task_snapshot, running_delegated_children_for_parent,
-        running_task_should_wait_for_in_flight_work, should_emit_child_stream_progress,
-        task_has_in_flight_work_without_target, ChildLifecycleTapeBudget,
-        ChildLifecycleTapeDecision, ChildStreamProgress, DelegationSchedulerDecision,
-        MergeDeliveryPayloadContext,
+        evaluate_delegation_scheduler_limits, inject_background_metadata,
+        parent_merge_event_payload, replace_background_task_snapshot,
+        running_delegated_children_for_parent, running_task_should_wait_for_in_flight_work,
+        should_emit_child_stream_progress, task_has_in_flight_work_without_target,
+        ChildLifecycleTapeBudget, ChildLifecycleTapeDecision, ChildStreamProgress,
+        DelegationSchedulerDecision, MergeDeliveryPayloadContext,
     };
     use crate::{
         application::delivery_arbitration::{DeliveryDecision, DeliveryDecisionAction},
@@ -2936,10 +2936,86 @@ mod tests {
             DelegationMergeStrategy, DelegationMergeUsageSummary, DelegationRole,
             DelegationRuntimeLimits, DelegationSnapshot,
         },
+        gateway::{GatewayAuthConfig, HEADER_CHANNEL, HEADER_DEVICE_ID, HEADER_PRINCIPAL},
         journal::{OrchestratorBackgroundTaskRecord, OrchestratorRunStatusSnapshot},
     };
     use palyra_common::runtime_contracts::AuxiliaryTaskState;
     use serde_json::json;
+    use tonic::metadata::MetadataMap;
+
+    fn unauthenticated_gateway_auth() -> GatewayAuthConfig {
+        GatewayAuthConfig {
+            require_auth: false,
+            admin_token: None,
+            connector_token: None,
+            bound_principal: None,
+        }
+    }
+
+    #[test]
+    fn background_metadata_preserves_missing_channel_identity() {
+        let mut metadata = MetadataMap::new();
+
+        inject_background_metadata(
+            &mut metadata,
+            &unauthenticated_gateway_auth(),
+            "operator",
+            "01J8ZK6M36QK7V8E7C38QMDVZS",
+            None,
+        )
+        .expect("metadata should encode");
+
+        assert_eq!(
+            metadata.get(HEADER_PRINCIPAL).and_then(|value| value.to_str().ok()),
+            Some("operator")
+        );
+        assert_eq!(
+            metadata.get(HEADER_DEVICE_ID).and_then(|value| value.to_str().ok()),
+            Some("01J8ZK6M36QK7V8E7C38QMDVZS")
+        );
+        assert!(
+            !metadata.contains_key(HEADER_CHANNEL),
+            "background tasks created without a channel must resolve to RequestContext.channel=None"
+        );
+    }
+
+    #[test]
+    fn background_metadata_omits_blank_channel_identity() {
+        let mut metadata = MetadataMap::new();
+
+        inject_background_metadata(
+            &mut metadata,
+            &unauthenticated_gateway_auth(),
+            "operator",
+            "01J8ZK6M36QK7V8E7C38QMDVZS",
+            Some("   "),
+        )
+        .expect("metadata should encode");
+
+        assert!(
+            !metadata.contains_key(HEADER_CHANNEL),
+            "blank channel input should be treated like a missing channel"
+        );
+    }
+
+    #[test]
+    fn background_metadata_preserves_explicit_channel_identity() {
+        let mut metadata = MetadataMap::new();
+
+        inject_background_metadata(
+            &mut metadata,
+            &unauthenticated_gateway_auth(),
+            "operator",
+            "01J8ZK6M36QK7V8E7C38QMDVZS",
+            Some("discord:channel:engineering"),
+        )
+        .expect("metadata should encode");
+
+        assert_eq!(
+            metadata.get(HEADER_CHANNEL).and_then(|value| value.to_str().ok()),
+            Some("discord:channel:engineering")
+        );
+    }
 
     #[test]
     fn user_visible_child_progress_is_throttled_on_parent_tape() {
