@@ -374,7 +374,7 @@ pub fn tool_metadata(tool_name: &str) -> Option<ToolMetadata> {
         "palyra.browser.click" => {
             Some(ToolMetadata { capabilities: NETWORK_TOOL_CAPABILITIES, default_sensitive: true })
         }
-        "palyra.browser.type" => {
+        "palyra.browser.type" | "palyra.browser.fill" => {
             Some(ToolMetadata { capabilities: NETWORK_TOOL_CAPABILITIES, default_sensitive: true })
         }
         "palyra.browser.press" => {
@@ -780,6 +780,7 @@ async fn run_allowlisted_tool(
         | "palyra.browser.navigate"
         | "palyra.browser.click"
         | "palyra.browser.type"
+        | "palyra.browser.fill"
         | "palyra.browser.press"
         | "palyra.browser.select"
         | "palyra.browser.viewport"
@@ -846,6 +847,7 @@ fn is_runtime_supported_tool(tool_name: &str) -> bool {
             | "palyra.browser.navigate"
             | "palyra.browser.click"
             | "palyra.browser.type"
+            | "palyra.browser.fill"
             | "palyra.browser.press"
             | "palyra.browser.select"
             | "palyra.browser.viewport"
@@ -934,6 +936,7 @@ fn tool_input_limit_bytes(tool_name: &str) -> usize {
         | "palyra.browser.navigate"
         | "palyra.browser.click"
         | "palyra.browser.type"
+        | "palyra.browser.fill"
         | "palyra.browser.press"
         | "palyra.browser.select"
         | "palyra.browser.viewport"
@@ -1574,6 +1577,7 @@ mod tests {
         assert!(tool_requires_approval("palyra.browser.navigate"));
         assert!(tool_requires_approval("palyra.browser.click"));
         assert!(tool_requires_approval("palyra.browser.type"));
+        assert!(tool_requires_approval("palyra.browser.fill"));
         assert!(tool_requires_approval("palyra.browser.press"));
         assert!(tool_requires_approval("palyra.browser.select"));
         assert!(tool_requires_approval("palyra.browser.viewport"));
@@ -1614,6 +1618,38 @@ mod tests {
         assert_eq!(metadata.capabilities, &[ToolCapability::Network, ToolCapability::SecretsRead]);
         assert!(metadata.default_sensitive);
         assert!(tool_requires_approval("palyra.http.fetch"));
+    }
+
+    #[test]
+    fn browser_fill_tool_exposes_browser_policy_metadata_and_runtime_support() {
+        let metadata = tool_metadata("palyra.browser.fill").expect("browser fill metadata");
+        assert_eq!(metadata.capabilities, &[ToolCapability::Network]);
+        assert!(metadata.default_sensitive);
+        assert!(tool_requires_approval("palyra.browser.fill"));
+
+        let config = ToolCallConfig {
+            allowed_tools: vec!["palyra.browser.fill".to_owned()],
+            max_calls_per_run: 1,
+            execution_timeout_ms: 250,
+            process_runner: default_process_runner_policy(),
+            wasm_runtime: default_wasm_runtime_policy(),
+        };
+        let request_context = tool_request_context("user:ops");
+        let mut budget = 1;
+
+        let denied =
+            decide_tool_call(&config, &mut budget, &request_context, "palyra.browser.fill", false);
+
+        assert!(!denied.allowed, "browser fill should require explicit approval");
+        assert!(denied.approval_required);
+        assert_eq!(budget, 1, "denied approval must not consume budget");
+
+        let approved =
+            decide_tool_call(&config, &mut budget, &request_context, "palyra.browser.fill", true);
+
+        assert!(approved.allowed, "approved browser fill should pass the runtime support gate");
+        assert!(approved.approval_required, "sensitive browser metadata should remain visible");
+        assert_eq!(budget, 0, "approved tool should consume budget");
     }
 
     #[test]
