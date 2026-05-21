@@ -19,6 +19,7 @@ use palyra_cli::workflow_regression::{
 const DEFAULT_MANIFEST_PATH: &str = "infra/release/workflow-regression-matrix.json";
 const DEFAULT_CHECKLIST_PATH: &str = "infra/release/compat-hardening-readiness.json";
 const CARGO_BIN_ENV: &str = "PALYRA_WORKFLOW_REGRESSION_CARGO_BIN";
+const OUTPUT_EXCERPT_MAX_BYTES: usize = 4000;
 
 fn main() -> Result<()> {
     let options = RunnerOptions::parse()?;
@@ -409,11 +410,18 @@ fn build_output_excerpt(stdout: &str, stderr: &str) -> String {
     let lines = combined.lines().collect::<Vec<_>>();
     let start = lines.len().saturating_sub(40);
     let excerpt = lines[start..].join("\n");
-    if excerpt.len() <= 4000 {
-        excerpt
-    } else {
-        excerpt[excerpt.len().saturating_sub(4000)..].to_owned()
+    truncate_tail_at_char_boundary(excerpt.as_str(), OUTPUT_EXCERPT_MAX_BYTES).to_owned()
+}
+
+fn truncate_tail_at_char_boundary(value: &str, max_bytes: usize) -> &str {
+    if value.len() <= max_bytes {
+        return value;
     }
+    let mut start = value.len().saturating_sub(max_bytes);
+    while !value.is_char_boundary(start) {
+        start += 1;
+    }
+    &value[start..]
 }
 
 fn relative_display_path(repo_root: &Path, path: &Path) -> String {
@@ -427,6 +435,22 @@ fn unix_timestamp_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|value| u64::try_from(value.as_millis()).unwrap_or(u64::MAX))
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn output_excerpt_truncates_multibyte_output_on_char_boundary() {
+        let stdout = "é".repeat(2500);
+
+        let excerpt = build_output_excerpt(stdout.as_str(), "");
+
+        assert!(excerpt.len() <= OUTPUT_EXCERPT_MAX_BYTES);
+        assert!(excerpt.starts_with('é'));
+        assert!(excerpt.is_char_boundary(0));
+    }
 }
 
 fn build_compat_checklist_status_placeholder(
