@@ -1,6 +1,7 @@
 use super::*;
 use palyra_common::runtime_contracts::{AcpCapability, AcpScope, AcpTransportKind};
 use serde_json::{json, Value};
+use std::{collections::BTreeMap, sync::Mutex};
 
 fn context() -> AcpClientContext {
     AcpClientContext {
@@ -204,6 +205,41 @@ fn conversation_binding_repair_marks_principal_mismatch_without_widening() {
     assert!(plan.actions.iter().all(|action| action.action == "mark_stale"));
     assert!(plan.actions.iter().all(|action| !action.automatic_apply));
     assert!(plan.actions.iter().all(|action| action.conflict_kind == "principal_mismatch"));
+}
+
+#[test]
+fn conversation_binding_repair_apply_skips_principal_mismatch_manual_actions() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let root = tempdir.path().join("acp");
+    let runtime = AcpRuntime {
+        root: root.clone(),
+        index_path: root.join(ACP_BINDINGS_INDEX_FILE_NAME),
+        index: Mutex::new(AcpBindingsIndex {
+            schema_version: 1,
+            updated_at_unix_ms: 10_000,
+            session_bindings: Vec::new(),
+            conversation_bindings: vec![
+                conversation_record("convbind_a", "operator:a", "01ARZ3NDEKTSV4RRFFQ69G5FAV", 1),
+                conversation_record("convbind_b", "operator:b", "01BX5ZZKBKACTAV9WEVGEMMVRZ", 2),
+            ],
+            pending_prompts: Vec::new(),
+        }),
+        rate_limits: Mutex::new(BTreeMap::new()),
+    };
+
+    let applied = runtime.apply_conversation_binding_repair().expect("repair should apply");
+    let snapshot = runtime.snapshot().expect("snapshot should load");
+
+    assert_eq!(applied.actions.len(), 2);
+    assert!(applied.actions.iter().all(|action| !action.automatic_apply));
+    assert!(snapshot
+        .conversation_bindings
+        .iter()
+        .any(|entry| { entry.binding_id == "convbind_a" && entry.updated_at_unix_ms == 1 }));
+    assert!(snapshot
+        .conversation_bindings
+        .iter()
+        .any(|entry| { entry.binding_id == "convbind_b" && entry.updated_at_unix_ms == 2 }));
 }
 
 #[test]

@@ -713,7 +713,7 @@ impl AcpRuntime {
         })?;
         let mut index = self.lock_index()?;
         let plan = build_repair_plan(&index, false);
-        for action in &plan.actions {
+        for action in plan.actions.iter().filter(|action| action.automatic_apply) {
             match action.action.as_str() {
                 "detach" => {
                     if let Some(record) = index
