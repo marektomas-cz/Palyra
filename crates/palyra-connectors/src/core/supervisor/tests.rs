@@ -56,6 +56,7 @@ impl ConnectorRouter for RouterStub {
 struct FlakyAdapter {
     attempts: Mutex<HashMap<String, usize>>,
     inbound_events: Mutex<VecDeque<crate::protocol::InboundMessageEvent>>,
+    stopped_connectors: Mutex<Vec<String>>,
 }
 
 impl FlakyAdapter {
@@ -64,6 +65,13 @@ impl FlakyAdapter {
             .lock()
             .expect("inbound queue lock should not be poisoned")
             .push_back(event);
+    }
+
+    fn stopped_connectors(&self) -> Vec<String> {
+        self.stopped_connectors
+            .lock()
+            .expect("stopped connector lock should not be poisoned")
+            .clone()
     }
 }
 
@@ -75,6 +83,18 @@ impl ConnectorAdapter for FlakyAdapter {
 
     fn availability(&self) -> ConnectorAvailability {
         ConnectorAvailability::InternalTestOnly
+    }
+
+    fn stop_runtime(&self, connector_id: &str) -> Result<(), ConnectorAdapterError> {
+        self.stopped_connectors
+            .lock()
+            .map_err(|_| {
+                ConnectorAdapterError::Backend(
+                    "flaky adapter stopped connector lock poisoned".to_owned(),
+                )
+            })?
+            .push(connector_id.to_owned());
+        Ok(())
     }
 
     async fn poll_inbound(
@@ -301,6 +321,31 @@ fn sample_outbound_request(envelope_id: &str, text: &str) -> OutboundMessageRequ
         timeout_ms: 30_000,
         max_payload_bytes: 16_384,
     }
+}
+
+#[test]
+fn disabling_connector_stops_adapter_runtime() {
+    let (_tempdir, supervisor, adapter) = open_supervisor();
+    supervisor.register_connector(&sample_spec()).expect("register should succeed");
+
+    let status = supervisor.set_enabled("echo:default", false).expect("disable should succeed");
+
+    assert!(!status.enabled);
+    assert_eq!(adapter.stopped_connectors(), vec!["echo:default".to_owned()]);
+}
+
+#[test]
+fn removing_connector_stops_adapter_runtime_before_storage_delete() {
+    let (_tempdir, supervisor, adapter) = open_supervisor();
+    supervisor.register_connector(&sample_spec()).expect("register should succeed");
+
+    supervisor.remove_connector("echo:default").expect("remove should succeed");
+
+    assert_eq!(adapter.stopped_connectors(), vec!["echo:default".to_owned()]);
+    assert!(
+        supervisor.status("echo:default").is_err(),
+        "removed connector should no longer be visible in storage"
+    );
 }
 
 #[tokio::test]

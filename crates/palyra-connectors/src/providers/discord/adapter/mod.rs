@@ -239,6 +239,11 @@ impl ConnectorAdapter for DiscordConnectorAdapter {
         }))
     }
 
+    fn stop_runtime(&self, connector_id: &str) -> Result<(), ConnectorAdapterError> {
+        let _stopped = self.stop_inbound_monitor(connector_id)?;
+        Ok(())
+    }
+
     async fn poll_inbound(
         &self,
         instance: &ConnectorInstanceRecord,

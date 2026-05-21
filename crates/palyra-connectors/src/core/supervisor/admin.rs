@@ -47,6 +47,12 @@ impl ConnectorSupervisor {
         enabled: bool,
     ) -> Result<ConnectorStatusSnapshot, ConnectorSupervisorError> {
         let now = unix_ms_now()?;
+        if !enabled {
+            let Some(instance) = self.store.get_instance(connector_id)? else {
+                return Err(ConnectorSupervisorError::NotFound(connector_id.to_owned()));
+            };
+            self.stop_adapter_runtime(&instance)?;
+        }
         self.store.set_instance_enabled(connector_id, enabled, now)?;
         self.store.record_event(
             connector_id,
@@ -60,9 +66,10 @@ impl ConnectorSupervisor {
     }
 
     pub fn remove_connector(&self, connector_id: &str) -> Result<(), ConnectorSupervisorError> {
-        let Some(_instance) = self.store.get_instance(connector_id)? else {
+        let Some(instance) = self.store.get_instance(connector_id)? else {
             return Err(ConnectorSupervisorError::NotFound(connector_id.to_owned()));
         };
+        self.stop_adapter_runtime(&instance)?;
         self.store.delete_instance(connector_id)?;
         Ok(())
     }
@@ -426,6 +433,18 @@ impl ConnectorSupervisor {
             return Err(ConnectorSupervisorError::MissingAdapter(instance.kind));
         };
         Ok((instance, adapter))
+    }
+
+    fn stop_adapter_runtime(
+        &self,
+        instance: &ConnectorInstanceRecord,
+    ) -> Result<(), ConnectorSupervisorError> {
+        if let Some(adapter) = self.adapters.get(&instance.kind) {
+            adapter
+                .stop_runtime(instance.connector_id.as_str())
+                .map_err(|error| ConnectorSupervisorError::Adapter(error.to_string()))?;
+        }
+        Ok(())
     }
 
     fn validate_and_record_mutation_result(

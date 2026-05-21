@@ -177,6 +177,10 @@ pub trait ConnectorAdapter: Send + Sync {
         None
     }
 
+    fn stop_runtime(&self, _connector_id: &str) -> Result<(), ConnectorAdapterError> {
+        Ok(())
+    }
+
     async fn poll_inbound(
         &self,
         _instance: &ConnectorInstanceRecord,

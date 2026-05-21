@@ -110,6 +110,7 @@ impl Default for DiscordGatewayInflater {
 
 pub(super) struct DiscordInboundMonitorHandle {
     pub(super) receiver: mpsc::Receiver<InboundMessageEvent>,
+    pub(super) task: tokio::task::JoinHandle<()>,
 }
 
 impl DiscordConnectorAdapter {
@@ -139,7 +140,7 @@ impl DiscordConnectorAdapter {
             runtime_state: Arc::clone(&self.state),
             sender,
         };
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             run_discord_gateway_monitor(context).await;
         });
 
@@ -148,8 +149,24 @@ impl DiscordConnectorAdapter {
                 "discord inbound monitor registry lock poisoned".to_owned(),
             )
         })?;
-        monitors.insert(connector_id, DiscordInboundMonitorHandle { receiver });
+        monitors.insert(connector_id, DiscordInboundMonitorHandle { receiver, task });
         Ok(())
+    }
+
+    pub(super) fn stop_inbound_monitor(
+        &self,
+        connector_id: &str,
+    ) -> Result<bool, ConnectorAdapterError> {
+        let mut monitors = self.inbound_monitors.lock().map_err(|_| {
+            ConnectorAdapterError::Backend(
+                "discord inbound monitor registry lock poisoned".to_owned(),
+            )
+        })?;
+        let Some(handle) = monitors.remove(connector_id) else {
+            return Ok(false);
+        };
+        handle.task.abort();
+        Ok(true)
     }
 
     pub(super) fn drain_inbound_events(

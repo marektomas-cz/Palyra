@@ -418,6 +418,29 @@ fn adapter_with_fake_transport(transport: Arc<FakeTransport>) -> DiscordConnecto
     )
 }
 
+fn inbound_monitor_count(adapter: &DiscordConnectorAdapter) -> usize {
+    adapter.inbound_monitors.lock().expect("inbound monitor registry should not be poisoned").len()
+}
+
+#[tokio::test]
+async fn stop_runtime_tears_down_inbound_monitor_for_reonboarding() {
+    let adapter = adapter_with_fake_transport(Arc::new(FakeTransport::default()));
+
+    adapter.ensure_inbound_monitor(&sample_instance()).await.expect("initial monitor should start");
+    assert_eq!(inbound_monitor_count(&adapter), 1);
+
+    adapter.stop_runtime("discord:default").expect("monitor stop should succeed");
+    assert_eq!(inbound_monitor_count(&adapter), 0);
+
+    adapter
+        .ensure_inbound_monitor(&sample_instance())
+        .await
+        .expect("fresh monitor should start after teardown");
+    assert_eq!(inbound_monitor_count(&adapter), 1);
+
+    adapter.stop_runtime("discord:default").expect("fresh monitor stop should succeed");
+}
+
 fn ok_identity_response() -> DiscordTransportResponse {
     DiscordTransportResponse {
         status: 200,
