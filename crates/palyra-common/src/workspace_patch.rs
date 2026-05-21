@@ -1059,6 +1059,7 @@ fn build_patch_plan(
         match operation {
             PatchOperation::Add { path, lines } => {
                 let relative = parse_relative_patch_path(path)?;
+                let output_path = normalize_relative_path_display(&relative);
                 let (target, target_root_index) =
                     resolve_new_path(canonical_roots, &relative, None, path)?;
                 if target.exists() {
@@ -1066,7 +1067,7 @@ fn build_patch_plan(
                 }
                 let after_bytes = render_add_file_bytes(lines.as_slice());
                 ensure_file_size(path, after_bytes.len(), limits.max_file_bytes)?;
-                ensure_planned_file_content(path, after_bytes.as_slice())?;
+                ensure_planned_file_content(output_path.as_str(), after_bytes.as_slice())?;
 
                 touched_paths.insert(target.clone());
                 actions.push(PlannedAction::Write {
@@ -1075,7 +1076,7 @@ fn build_patch_plan(
                     bytes: after_bytes.clone(),
                 });
                 file_attestations.push(WorkspacePatchFileAttestation {
-                    path: normalize_relative_path_display(&relative),
+                    path: output_path,
                     workspace_root_index: target_root_index,
                     operation: "create".to_owned(),
                     moved_from: None,
@@ -1108,6 +1109,7 @@ fn build_patch_plan(
             }
             PatchOperation::Replace { path, lines } => {
                 let relative = parse_relative_patch_path(path)?;
+                let output_path = normalize_relative_path_display(&relative);
                 let (target, target_root_index) =
                     resolve_existing_path(canonical_roots, &relative, path)?;
                 let before_bytes = read_file_capped(target.as_path(), path, limits.max_file_bytes)?;
@@ -1119,7 +1121,7 @@ fn build_patch_plan(
                     after_bytes.as_slice(),
                     lines.as_slice(),
                 )?;
-                ensure_planned_file_content(path, after_bytes.as_slice())?;
+                ensure_planned_file_content(output_path.as_str(), after_bytes.as_slice())?;
 
                 touched_paths.insert(target.clone());
                 actions.push(PlannedAction::Write {
@@ -1128,7 +1130,7 @@ fn build_patch_plan(
                     bytes: after_bytes.clone(),
                 });
                 file_attestations.push(WorkspacePatchFileAttestation {
-                    path: normalize_relative_path_display(&relative),
+                    path: output_path,
                     workspace_root_index: target_root_index,
                     operation: "replace".to_owned(),
                     moved_from: None,
@@ -1172,11 +1174,13 @@ fn build_patch_plan(
                     destination_root = canonical_roots[destination_root_index].clone();
                     output_root_index = destination_root_index;
                     moved_from = Some(normalize_relative_path_display(&relative));
-                    ensure_planned_file_content(move_target, after_bytes.as_slice())?;
-                    normalize_relative_path_display(&move_relative)
+                    let output_path = normalize_relative_path_display(&move_relative);
+                    ensure_planned_file_content(output_path.as_str(), after_bytes.as_slice())?;
+                    output_path
                 } else {
-                    ensure_planned_file_content(path, after_bytes.as_slice())?;
-                    normalize_relative_path_display(&relative)
+                    let output_path = normalize_relative_path_display(&relative);
+                    ensure_planned_file_content(output_path.as_str(), after_bytes.as_slice())?;
+                    output_path
                 };
 
                 touched_paths.insert(destination.clone());
@@ -2649,6 +2653,57 @@ mod tests {
         assert!(
             !workspace.join("reports").join("seen.json").exists(),
             "invalid JSON state must not be written"
+        );
+    }
+
+    #[test]
+    fn apply_workspace_patch_rejects_invalid_json_with_unicode_padded_add_path() {
+        let temp = tempdir().expect("tempdir should be created");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(workspace.join("reports")).expect("workspace reports dir should exist");
+        let patch = format!(
+            "*** Begin Patch\n*** Add File: reports/seen.json{}\n+***\n+{{\"seen_ids\":[\"s032-alpha\"]}}\n*** End Patch\n",
+            '\u{00a0}'
+        );
+
+        let error = apply_workspace_patch(
+            std::slice::from_ref(&workspace),
+            &default_request(patch.as_str(), false),
+            &default_limits(),
+        )
+        .expect_err("invalid JSON state should be rejected despite padded header path");
+
+        assert!(matches!(error, WorkspacePatchError::InvalidJsonFile { .. }));
+        assert!(
+            !workspace.join("reports").join("seen.json").exists(),
+            "invalid JSON state must not be written to the normalized target"
+        );
+    }
+
+    #[test]
+    fn apply_workspace_patch_rejects_invalid_json_with_unicode_padded_replace_path() {
+        let temp = tempdir().expect("tempdir should be created");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(workspace.join("reports")).expect("workspace reports dir should exist");
+        let target = workspace.join("reports").join("seen.json");
+        fs::write(&target, "{\"seen_ids\":[]}\n").expect("initial JSON should be written");
+        let patch = format!(
+            "*** Begin Patch\n*** Replace File: reports/seen.json{}\n+***\n+{{\"seen_ids\":[\"s032-alpha\"]}}\n*** End Patch\n",
+            '\u{00a0}'
+        );
+
+        let error = apply_workspace_patch(
+            std::slice::from_ref(&workspace),
+            &default_request(patch.as_str(), false),
+            &default_limits(),
+        )
+        .expect_err("invalid replacement JSON should be rejected despite padded header path");
+
+        assert!(matches!(error, WorkspacePatchError::InvalidJsonFile { .. }));
+        assert_eq!(
+            fs::read_to_string(&target).expect("original JSON should still be readable"),
+            "{\"seen_ids\":[]}\n",
+            "failed replacement must leave the existing JSON intact"
         );
     }
 
