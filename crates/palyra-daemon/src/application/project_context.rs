@@ -634,7 +634,8 @@ fn extract_absolute_prompt_paths(input_text: &str) -> Vec<String> {
         if !candidate.is_empty() {
             paths.push(candidate.to_owned());
         }
-        cursor = end.saturating_add(1);
+        let terminator_len = input_text[end..].chars().next().map(char::len_utf8).unwrap_or(0);
+        cursor = end.saturating_add(terminator_len);
     }
     paths
 }
@@ -1063,9 +1064,10 @@ async fn resolve_workspace_roots(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_project_context_preview, derive_focus_paths_from_prompt, normalize_focus_path,
-        render_project_context_prompt, ProjectContextEntryStatus, ProjectContextFocusPath,
-        ProjectContextPreviewEnvelope, ProjectContextStackEntry,
+        build_project_context_preview, derive_focus_paths_from_prompt,
+        extract_absolute_prompt_paths, normalize_focus_path, render_project_context_prompt,
+        ProjectContextEntryStatus, ProjectContextFocusPath, ProjectContextPreviewEnvelope,
+        ProjectContextStackEntry,
     };
     use palyra_common::project_context::ProjectContextRiskScan;
     use std::{fs, path::PathBuf};
@@ -1098,6 +1100,13 @@ mod tests {
         assert_eq!(focus.len(), 1);
         assert_eq!(focus[0].path, "scenario-s002-notes-api");
         assert_eq!(focus[0].reason, "prompt_workspace_path");
+    }
+
+    #[test]
+    fn extracts_unix_prompt_paths_followed_by_multibyte_whitespace() {
+        let paths = extract_absolute_prompt_paths("/tmp\u{00a0}/var/log");
+
+        assert_eq!(paths, vec!["/tmp".to_owned(), "/var/log".to_owned()]);
     }
 
     #[test]
