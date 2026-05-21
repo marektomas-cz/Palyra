@@ -295,6 +295,22 @@ impl RootCommandContext {
         })
     }
 
+    pub(crate) fn resolve_admin_console_principal(
+        &self,
+        candidate_principal: Option<&str>,
+    ) -> String {
+        let connection_env = ConnectionEnvironment::read(self.profile.as_ref());
+        admin_principal_candidate(candidate_principal.map(ToOwned::to_owned))
+            .or_else(|| {
+                self.profile
+                    .as_ref()
+                    .and_then(|profile| admin_principal_candidate(profile.principal.clone()))
+            })
+            .or_else(|| admin_principal_candidate(self.config_defaults.principal.clone()))
+            .or_else(|| admin_principal_candidate(connection_env.admin_bound_principal))
+            .unwrap_or_else(|| ConnectionDefaults::ADMIN.principal.to_owned())
+    }
+
     fn resolve_daemon_endpoint(
         &self,
         override_url: Option<String>,
@@ -1082,6 +1098,10 @@ impl ConnectionEnvironment {
     }
 }
 
+fn admin_principal_candidate(value: Option<String>) -> Option<String> {
+    normalize_owned_text(value).filter(|principal| principal.starts_with("admin:"))
+}
+
 fn read_normalized_env_var(name: &str) -> Option<String> {
     env::var(name).ok().and_then(|value| normalize_owned_text(Some(value)))
 }
@@ -1217,6 +1237,42 @@ channel = "staging"
         assert_eq!(http.principal, "admin:staging");
         assert_eq!(grpc.device_id, "01ARZ3NDEKTSV4RRFFQ69G5FB2");
         assert_eq!(grpc.channel, "staging");
+        Ok(())
+    }
+
+    #[test]
+    fn admin_console_principal_ignores_user_owner_candidate() -> Result<()> {
+        let _guard = super::test_env_lock_for_tests().lock().expect("env lock");
+        clear_env();
+        let context =
+            build_root_context(RootOptions::default(), ExplicitConfigPathPolicy::RequireExisting)?;
+
+        assert_eq!(
+            context.resolve_admin_console_principal(Some("user:local")),
+            "admin:local",
+            "admin console login must not inherit a user run-owner principal"
+        );
+        assert_eq!(
+            context.resolve_admin_console_principal(Some(" admin:ops ")),
+            "admin:ops",
+            "explicit admin principals should remain available for admin console login"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn admin_console_principal_uses_bound_admin_before_default() -> Result<()> {
+        let _guard = super::test_env_lock_for_tests().lock().expect("env lock");
+        clear_env();
+        env::set_var("PALYRA_ADMIN_BOUND_PRINCIPAL", "admin:bound");
+        let context =
+            build_root_context(RootOptions::default(), ExplicitConfigPathPolicy::RequireExisting)?;
+
+        assert_eq!(
+            context.resolve_admin_console_principal(Some("user:local")),
+            "admin:bound",
+            "ACP control-plane login should honor the daemon admin bound principal"
+        );
         Ok(())
     }
 

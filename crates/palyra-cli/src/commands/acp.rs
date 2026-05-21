@@ -31,11 +31,13 @@ fn run_acp_bridge(command: AcpBridgeArgs) -> Result<()> {
     };
     let connection = root_context
         .resolve_grpc_connection(grpc_overrides.clone(), app::ConnectionDefaults::USER)?;
+    let admin_principal =
+        root_context.resolve_admin_console_principal(Some(connection.principal.as_str()));
     let control_plane_overrides = app::ConnectionOverrides {
         daemon_url: None,
         grpc_url: None,
         token: connection.token.clone(),
-        principal: Some(connection.principal.clone()),
+        principal: Some(admin_principal),
         device_id: Some(connection.device_id.clone()),
         channel: Some(connection.channel.clone()),
     };
