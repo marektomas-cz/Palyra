@@ -8774,6 +8774,7 @@ fn validate_daemon_compatible_document(document: &toml::Value) -> Result<()> {
         toml::from_str(&content).context("invalid daemon config schema")?;
     validate_model_provider_secret_sources(&parsed)?;
     validate_browser_service_secret_sources(&parsed)?;
+    validate_admin_secret_sources(&parsed)?;
     let bind_addr = parsed
         .daemon
         .as_ref()
@@ -8856,6 +8857,25 @@ fn validate_browser_service_secret_sources(parsed: &RootFileConfig) -> Result<()
         false,
         browser_service.state_key_secret_ref.is_some(),
         config_string_present(browser_service.state_key_vault_ref.as_deref()),
+    )
+}
+
+fn validate_admin_secret_sources(parsed: &RootFileConfig) -> Result<()> {
+    let Some(admin) = parsed.admin.as_ref() else {
+        return Ok(());
+    };
+
+    validate_secret_source_exclusivity(
+        "admin.auth_token",
+        config_string_present(admin.auth_token.as_deref()),
+        admin.auth_token_secret_ref.is_some(),
+        false,
+    )?;
+    validate_secret_source_exclusivity(
+        "admin.connector_token",
+        config_string_present(admin.connector_token.as_deref()),
+        admin.connector_token_secret_ref.is_some(),
+        false,
     )
 }
 
@@ -9979,12 +9999,13 @@ mod cli_v1_tests {
         process_runner_tier_c_strict_offline_allowlists_empty,
         process_runner_tier_c_windows_backend_supported, registry_key_id_for,
         resolve_dashboard_access_target, sha256_hex, trust_store_integrity_vault_key,
-        validate_registry_index, verify_or_initialize_trust_store_integrity, write_file_atomically,
-        BrowserOpenCommand, DashboardAccessMode, DashboardAccessSource, InstalledSkillRecord,
-        InstalledSkillSource, InstalledSkillsIndex, JournalCheckpointAttestationRequest,
-        JournalCheckpointModeArg, RegistrySignature, RootFileConfig, SignedSkillRegistryIndex,
-        SkillRegistryEntry, SkillRegistryIndex, REGISTRY_INDEX_SCHEMA_VERSION,
-        REGISTRY_SIGNATURE_ALGORITHM, REGISTRY_SIGNED_INDEX_SCHEMA_VERSION,
+        validate_daemon_compatible_document, validate_registry_index,
+        verify_or_initialize_trust_store_integrity, write_file_atomically, BrowserOpenCommand,
+        DashboardAccessMode, DashboardAccessSource, InstalledSkillRecord, InstalledSkillSource,
+        InstalledSkillsIndex, JournalCheckpointAttestationRequest, JournalCheckpointModeArg,
+        RegistrySignature, RootFileConfig, SignedSkillRegistryIndex, SkillRegistryEntry,
+        SkillRegistryIndex, REGISTRY_INDEX_SCHEMA_VERSION, REGISTRY_SIGNATURE_ALGORITHM,
+        REGISTRY_SIGNED_INDEX_SCHEMA_VERSION,
     };
     use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
     use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
@@ -10978,6 +10999,29 @@ enabled = true
         assert!(
             memory_embeddings_model_configured(&parsed),
             "doctor check should pass when registry points embeddings at an OpenAI-compatible provider"
+        );
+    }
+
+    #[test]
+    fn daemon_document_validation_rejects_admin_token_source_conflicts() {
+        let document: toml::Value = toml::from_str(
+            r#"
+[admin]
+auth_token = "inline-admin-token"
+
+[admin.auth_token_secret_ref]
+kind = "env"
+variable = "PALYRA_ADMIN_TOKEN"
+"#,
+        )
+        .expect("fixture config should parse");
+
+        let error = validate_daemon_compatible_document(&document)
+            .expect_err("admin inline token and secret ref must conflict");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("admin.auth_token cannot set both inline value and *_secret_ref"),
+            "unexpected validation error: {message}"
         );
     }
 

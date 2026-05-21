@@ -1950,7 +1950,7 @@ fn ensure_admin_auth_defaults_with_token(
     if get_bool_value_at_path(document, "admin.require_auth")?.is_none() {
         set_value_at_path(document, "admin.require_auth", toml::Value::Boolean(true))?;
     }
-    if get_string_value_at_path(document, "admin.auth_token")?.is_none() {
+    if !admin_auth_token_source_configured(document)? {
         let admin_token = admin_token.map(str::to_owned).unwrap_or_else(generate_admin_token);
         set_value_at_path(document, "admin.auth_token", toml::Value::String(admin_token))?;
     }
@@ -1962,6 +1962,11 @@ fn ensure_admin_auth_defaults_with_token(
         )?;
     }
     Ok(document != &before)
+}
+
+fn admin_auth_token_source_configured(document: &toml::Value) -> Result<bool> {
+    Ok(get_string_value_at_path(document, "admin.auth_token")?.is_some()
+        || get_value_at_path(document, "admin.auth_token_secret_ref")?.is_some())
 }
 
 fn ensure_runtime_defaults(document: &mut toml::Value, context: &ApplyContext) -> Result<bool> {
@@ -3947,6 +3952,38 @@ mod tests {
         assert!(
             document_contains_inline_secret(&document).expect("secret scan should succeed"),
             "inline admin tokens must force owner-only config persistence"
+        );
+    }
+
+    #[test]
+    fn admin_defaults_preserve_existing_auth_token_secret_ref() {
+        let mut document: toml::Value = toml::from_str(
+            r#"
+[admin.auth_token_secret_ref]
+kind = "env"
+variable = "PALYRA_ADMIN_TOKEN"
+"#,
+        )
+        .expect("secret-ref config should parse");
+
+        ensure_admin_auth_defaults_with_token(&mut document, Some("generated-inline-token"))
+            .expect("admin defaults should apply around secret refs");
+
+        assert_eq!(
+            get_string_value_at_path(&document, "admin.auth_token")
+                .expect("auth token lookup should succeed"),
+            None
+        );
+        assert!(
+            get_value_at_path(&document, "admin.auth_token_secret_ref")
+                .expect("secret ref lookup should succeed")
+                .is_some(),
+            "existing admin auth_token_secret_ref should remain configured"
+        );
+        assert_eq!(
+            get_bool_value_at_path(&document, "admin.require_auth")
+                .expect("require_auth lookup should succeed"),
+            Some(true)
         );
     }
 
