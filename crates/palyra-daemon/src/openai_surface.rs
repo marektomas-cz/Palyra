@@ -100,7 +100,8 @@ pub(crate) async fn connect_anthropic_api_key(
         .unwrap_or_else(|| generate_provider_profile_id("anthropic", profile_name.as_str()));
     let scope = normalize_openai_profile_scope(Some(payload.scope))?;
     let api_key = normalize_required_openai_text(payload.api_key.as_str(), "api_key")?;
-    let validation_base_url = load_anthropic_validation_base_url(None);
+    let (document, _, _) = load_openai_console_config_snapshot()?;
+    let validation_base_url = load_anthropic_validation_base_url(Some(&document));
     validate_anthropic_api_key(
         validation_base_url.as_str(),
         api_key.as_str(),
@@ -1977,16 +1978,16 @@ fn load_openai_validation_base_url(document: Option<&toml::Value>) -> String {
 }
 
 fn load_anthropic_validation_base_url(document: Option<&toml::Value>) -> String {
-    env::var("PALYRA_MODEL_PROVIDER_ANTHROPIC_BASE_URL")
-        .ok()
-        .and_then(|value| {
-            let trimmed = value.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_owned())
-            }
-        })
+    let env_override = env::var("PALYRA_MODEL_PROVIDER_ANTHROPIC_BASE_URL").ok();
+    load_anthropic_validation_base_url_with_env(env_override.as_deref(), document)
+}
+
+fn load_anthropic_validation_base_url_with_env(
+    env_override: Option<&str>,
+    document: Option<&toml::Value>,
+) -> String {
+    env_override
+        .and_then(|value| normalize_optional_text(value).map(ToOwned::to_owned))
         .or_else(|| document.and_then(anthropic_validation_base_url_from_document))
         .unwrap_or_else(|| ANTHROPIC_DEFAULT_BASE_URL.to_owned())
 }
@@ -3004,6 +3005,29 @@ mod tests {
         let response = build_openai_oauth_callback_url(None, &headers)
             .expect_err("forwarded host should require configured remote base URL");
         assert_eq!(response.status(), StatusCode::PRECONDITION_FAILED);
+    }
+
+    #[test]
+    fn anthropic_validation_base_url_prefers_configured_document_without_env() {
+        let document = toml::from_str::<toml::Value>(
+            r#"
+            [model_provider]
+            anthropic_base_url = "https://enterprise-anthropic.example.test/anthropic"
+            "#,
+        )
+        .expect("model provider config should parse");
+
+        assert_eq!(
+            load_anthropic_validation_base_url_with_env(None, Some(&document)),
+            "https://enterprise-anthropic.example.test/anthropic"
+        );
+        assert_eq!(
+            load_anthropic_validation_base_url_with_env(
+                Some("https://env-anthropic.example.test"),
+                Some(&document),
+            ),
+            "https://env-anthropic.example.test"
+        );
     }
 
     #[test]
