@@ -140,13 +140,8 @@ impl LiveMcpBackend {
 
     fn session_transcript_read(&mut self, arguments: &Value) -> Result<Value> {
         let args = expect_arguments_object(arguments, TOOL_SESSION_TRANSCRIPT_READ)?;
-        let resolved = self.resolve_session_from_args(args)?;
-        let session_id = resolved
-            .session
-            .as_ref()
-            .and_then(|value| value.session_id.as_ref())
-            .map(|value| value.ulid.clone())
-            .context("resolved session is missing session_id")?;
+        let session_id =
+            self.resolve_read_session_id_from_args(TOOL_SESSION_TRANSCRIPT_READ, args)?;
         let path = format!(
             "console/v1/chat/sessions/{}/transcript",
             percent_encode_component(session_id.as_str())
@@ -165,13 +160,7 @@ impl LiveMcpBackend {
         if !format.eq_ignore_ascii_case("json") && !format.eq_ignore_ascii_case("markdown") {
             anyhow::bail!("session_export format must be one of: json, markdown");
         }
-        let resolved = self.resolve_session_from_args(args)?;
-        let session_id = resolved
-            .session
-            .as_ref()
-            .and_then(|value| value.session_id.as_ref())
-            .map(|value| value.ulid.clone())
-            .context("resolved session is missing session_id")?;
+        let session_id = self.resolve_read_session_id_from_args(TOOL_SESSION_EXPORT, args)?;
         let path = format!(
             "console/v1/chat/sessions/{}/export?format={}",
             percent_encode_component(session_id.as_str()),
@@ -370,13 +359,6 @@ impl LiveMcpBackend {
         }))
     }
 
-    fn resolve_session_from_args(
-        &mut self,
-        args: &Map<String, Value>,
-    ) -> Result<gateway_v1::ResolveSessionResponse> {
-        self.resolve_session_with_defaults(args, true)
-    }
-
     fn resolve_session_with_defaults(
         &mut self,
         args: &Map<String, Value>,
@@ -401,6 +383,77 @@ impl LiveMcpBackend {
             reset_session,
         };
         self.runtime.block_on(async { self.operator_runtime().resolve_session(request).await })
+    }
+
+    fn resolve_read_session_id_from_args(
+        &mut self,
+        tool_name: &str,
+        args: &Map<String, Value>,
+    ) -> Result<String> {
+        reject_read_session_mutation_args(tool_name, args)?;
+        let session_id = opt_string_arg(args, "session_id")?;
+        if let Some(session_id) = resolve_optional_canonical_id(session_id)? {
+            return Ok(session_id.ulid);
+        }
+        let session_key = opt_string_arg(args, "session_key")?
+            .or_else(|| self.session_defaults.session_key.clone());
+        if let Some(session_key) = session_key {
+            return self.lookup_read_session_id(SessionReadSelector::Key(session_key));
+        }
+        let session_label = opt_string_arg(args, "session_label")?
+            .or_else(|| self.session_defaults.session_label.clone());
+        if let Some(session_label) = session_label {
+            return self.lookup_read_session_id(SessionReadSelector::Label(session_label));
+        }
+        anyhow::bail!("{tool_name} requires session_id, session_key, or session_label")
+    }
+
+    fn lookup_read_session_id(&mut self, selector: SessionReadSelector) -> Result<String> {
+        let mut after_session_key = None::<String>;
+        loop {
+            let response = self.runtime.block_on(async {
+                self.operator_runtime()
+                    .list_sessions(after_session_key.clone(), true, Some(200), None)
+                    .await
+            })?;
+            if let Some(session_id) = response
+                .sessions
+                .iter()
+                .find(|session| selector.matches(session))
+                .and_then(|session| session.session_id.as_ref())
+                .map(|session_id| session_id.ulid.clone())
+            {
+                return Ok(session_id);
+            }
+            after_session_key = normalize_optional_text(response.next_after_session_key.as_str());
+            if after_session_key.is_none() {
+                break;
+            }
+        }
+        anyhow::bail!("session not found for {}", selector.description())
+    }
+}
+
+enum SessionReadSelector {
+    Key(String),
+    Label(String),
+}
+
+impl SessionReadSelector {
+    fn matches(&self, session: &gateway_v1::SessionSummary) -> bool {
+        match self {
+            Self::Key(expected) => session.session_key == *expected,
+            Self::Label(expected) => {
+                session.session_label == *expected && session.archived_at_unix_ms == 0
+            }
+        }
+    }
+
+    fn description(&self) -> String {
+        match self {
+            Self::Key(value) => format!("session_key `{value}`"),
+            Self::Label(value) => format!("session_label `{value}`"),
+        }
     }
 }
 
@@ -636,7 +689,7 @@ fn tool_definition(name: &str) -> Value {
             "name": TOOL_SESSION_TRANSCRIPT_READ,
             "title": "Read session transcript",
             "description": "Read the transcript payload for a resolved session.",
-            "inputSchema": session_locator_schema(),
+            "inputSchema": read_session_locator_schema(),
         }),
         TOOL_SESSION_EXPORT => json!({
             "name": TOOL_SESSION_EXPORT,
@@ -648,8 +701,6 @@ fn tool_definition(name: &str) -> Value {
                     "session_id": { "type": "string" },
                     "session_key": { "type": "string" },
                     "session_label": { "type": "string" },
-                    "require_existing": { "type": "boolean" },
-                    "reset_session": { "type": "boolean" },
                     "format": {
                         "type": "string",
                         "enum": ["json", "markdown"],
@@ -791,6 +842,18 @@ fn session_locator_schema() -> Value {
     })
 }
 
+fn read_session_locator_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "session_id": { "type": "string" },
+            "session_key": { "type": "string" },
+            "session_label": { "type": "string" },
+        },
+        "additionalProperties": false,
+    })
+}
+
 fn rpc_error(id: Value, code: i64, kind: &str, message: impl Into<String>) -> Value {
     let message = message.into();
     json!({
@@ -838,6 +901,17 @@ fn expect_arguments_object<'a>(
     tool_name: &str,
 ) -> Result<&'a Map<String, Value>> {
     value.as_object().ok_or_else(|| anyhow!("tool `{tool_name}` requires an arguments object"))
+}
+
+fn reject_read_session_mutation_args(tool_name: &str, args: &Map<String, Value>) -> Result<()> {
+    for key in ["require_existing", "reset_session"] {
+        if args.contains_key(key) {
+            anyhow::bail!(
+                "{tool_name} does not accept `{key}` because read tools must not mutate session state"
+            );
+        }
+    }
+    Ok(())
 }
 
 fn required_string_arg(args: &Map<String, Value>, key: &str) -> Result<String> {
@@ -1240,6 +1314,39 @@ mod tests {
         assert!(names.contains(&TOOL_SESSIONS_LIST));
         assert!(!names.contains(&TOOL_SESSION_PROMPT));
         assert!(!names.contains(&TOOL_APPROVAL_DECIDE));
+    }
+
+    #[test]
+    fn read_session_tool_schemas_exclude_mutating_resolution_controls() {
+        for tool_name in [TOOL_SESSION_TRANSCRIPT_READ, TOOL_SESSION_EXPORT] {
+            let tool = tool_definition(tool_name);
+            let properties = tool
+                .pointer("/inputSchema/properties")
+                .and_then(Value::as_object)
+                .expect("tool should expose object schema properties");
+            assert!(properties.contains_key("session_id"));
+            assert!(properties.contains_key("session_key"));
+            assert!(properties.contains_key("session_label"));
+            assert!(!properties.contains_key("require_existing"));
+            assert!(!properties.contains_key("reset_session"));
+        }
+    }
+
+    #[test]
+    fn read_session_tools_reject_mutating_resolution_arguments() {
+        let mut args = Map::new();
+        args.insert("session_key".to_owned(), json!("ops:triage"));
+        args.insert("require_existing".to_owned(), json!(false));
+        let error = reject_read_session_mutation_args(TOOL_SESSION_EXPORT, &args)
+            .expect_err("read tool should reject require_existing");
+        assert!(error.to_string().contains("require_existing"));
+
+        let mut args = Map::new();
+        args.insert("session_key".to_owned(), json!("ops:triage"));
+        args.insert("reset_session".to_owned(), json!(true));
+        let error = reject_read_session_mutation_args(TOOL_SESSION_TRANSCRIPT_READ, &args)
+            .expect_err("read tool should reject reset_session");
+        assert!(error.to_string().contains("reset_session"));
     }
 
     #[test]

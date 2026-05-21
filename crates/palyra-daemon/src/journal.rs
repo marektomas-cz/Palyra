@@ -6198,6 +6198,16 @@ impl JournalStore {
             .transpose()
     }
 
+    pub fn orchestrator_session_by_id_snapshot(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<OrchestratorSessionRecord>, JournalError> {
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        load_orchestrator_session_by_id(&guard, session_id)?
+            .map(|session| hydrate_orchestrator_session_snapshot(&guard, session, None))
+            .transpose()
+    }
+
     pub fn session_project_context_state(
         &self,
         session_id: &str,
@@ -6360,7 +6370,7 @@ impl JournalStore {
         )?;
         sessions
             .into_iter()
-            .map(|session| hydrate_orchestrator_session(&guard, session, None))
+            .map(|session| hydrate_orchestrator_session_snapshot(&guard, session, None))
             .collect()
     }
 
@@ -6382,7 +6392,7 @@ impl JournalStore {
         )?;
         sessions
             .into_iter()
-            .map(|session| hydrate_orchestrator_session(&guard, session, None))
+            .map(|session| hydrate_orchestrator_session_snapshot(&guard, session, None))
             .collect()
     }
 
@@ -15396,6 +15406,12 @@ const ORCHESTRATOR_TITLE_GENERATION_STATE_PENDING: &str = "pending";
 const ORCHESTRATOR_TITLE_GENERATION_STATE_READY: &str = "ready";
 const ORCHESTRATOR_TITLE_GENERATION_STATE_MANUAL_LOCKED: &str = "manual_locked";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionHydrationMode {
+    PersistDerivedFields,
+    SnapshotOnly,
+}
+
 #[derive(Debug, Default)]
 struct OrchestratorSessionTranscriptSummary {
     first_user_message: Option<String>,
@@ -15411,8 +15427,35 @@ struct OrchestratorAutoTitleCandidate {
 
 fn hydrate_orchestrator_session(
     connection: &Connection,
+    session: OrchestratorSessionRecord,
+    search_query: Option<&str>,
+) -> Result<OrchestratorSessionRecord, JournalError> {
+    hydrate_orchestrator_session_with_mode(
+        connection,
+        session,
+        search_query,
+        SessionHydrationMode::PersistDerivedFields,
+    )
+}
+
+fn hydrate_orchestrator_session_snapshot(
+    connection: &Connection,
+    session: OrchestratorSessionRecord,
+    search_query: Option<&str>,
+) -> Result<OrchestratorSessionRecord, JournalError> {
+    hydrate_orchestrator_session_with_mode(
+        connection,
+        session,
+        search_query,
+        SessionHydrationMode::SnapshotOnly,
+    )
+}
+
+fn hydrate_orchestrator_session_with_mode(
+    connection: &Connection,
     mut session: OrchestratorSessionRecord,
     search_query: Option<&str>,
+    mode: SessionHydrationMode,
 ) -> Result<OrchestratorSessionRecord, JournalError> {
     let transcript = if let Some(last_run_id) = session.last_run_id.as_deref() {
         load_orchestrator_session_transcript_summary(connection, last_run_id)?
@@ -15432,27 +15475,29 @@ fn hydrate_orchestrator_session(
     let can_refresh_auto_title = session.auto_title.is_none()
         || session.title_generation_state == ORCHESTRATOR_TITLE_GENERATION_STATE_PENDING;
     if let Some(candidate) = auto_title_candidate.as_ref().filter(|_| can_refresh_auto_title) {
-        connection.execute(
-            r#"
-                UPDATE orchestrator_sessions
-                SET
-                    auto_title = ?2,
-                    auto_title_source = ?3,
-                    auto_title_generator_version = ?4,
-                    auto_title_updated_at_unix_ms = ?5,
-                    title_generation_state = ?6
-                WHERE session_ulid = ?1
-                  AND manual_title_locked = 0
-            "#,
-            params![
-                session.session_id.as_str(),
-                candidate.title.as_str(),
-                candidate.source,
-                ORCHESTRATOR_AUTO_TITLE_GENERATOR_VERSION,
-                now,
-                ORCHESTRATOR_TITLE_GENERATION_STATE_READY,
-            ],
-        )?;
+        if mode == SessionHydrationMode::PersistDerivedFields {
+            connection.execute(
+                r#"
+                    UPDATE orchestrator_sessions
+                    SET
+                        auto_title = ?2,
+                        auto_title_source = ?3,
+                        auto_title_generator_version = ?4,
+                        auto_title_updated_at_unix_ms = ?5,
+                        title_generation_state = ?6
+                    WHERE session_ulid = ?1
+                      AND manual_title_locked = 0
+                "#,
+                params![
+                    session.session_id.as_str(),
+                    candidate.title.as_str(),
+                    candidate.source,
+                    ORCHESTRATOR_AUTO_TITLE_GENERATOR_VERSION,
+                    now,
+                    ORCHESTRATOR_TITLE_GENERATION_STATE_READY,
+                ],
+            )?;
+        }
         session.auto_title = Some(candidate.title.clone());
         session.auto_title_source = Some(candidate.source.to_owned());
         session.auto_title_generator_version =
@@ -15470,14 +15515,16 @@ fn hydrate_orchestrator_session(
             ORCHESTRATOR_TITLE_GENERATION_STATE_IDLE
         };
         if session.title_generation_state != next_generation_state {
-            connection.execute(
-                r#"
-                    UPDATE orchestrator_sessions
-                    SET title_generation_state = ?2
-                    WHERE session_ulid = ?1
-                "#,
-                params![session.session_id.as_str(), next_generation_state],
-            )?;
+            if mode == SessionHydrationMode::PersistDerivedFields {
+                connection.execute(
+                    r#"
+                        UPDATE orchestrator_sessions
+                        SET title_generation_state = ?2
+                        WHERE session_ulid = ?1
+                    "#,
+                    params![session.session_id.as_str(), next_generation_state],
+                )?;
+            }
             session.title_generation_state = next_generation_state.to_owned();
         }
     }
@@ -21984,6 +22031,18 @@ mod tests {
         assert_eq!(
             session.last_summary.as_deref(),
             Some("Daemon health posture looks stable after the latest restart.")
+        );
+        let guard = store.connection.lock().expect("connection lock should not be poisoned");
+        let persisted_auto_title = guard
+            .query_row(
+                "SELECT auto_title FROM orchestrator_sessions WHERE session_ulid = ?1",
+                params!["01ARZ3NDEKTSV4RRFFQ69G5FAW"],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .expect("persisted session row should be readable");
+        assert_eq!(
+            persisted_auto_title, None,
+            "session list hydration must not persist derived titles from a read-only path"
         );
     }
 

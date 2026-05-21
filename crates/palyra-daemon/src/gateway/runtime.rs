@@ -3333,6 +3333,16 @@ impl GatewayRuntimeState {
     }
 
     #[allow(clippy::result_large_err)]
+    fn orchestrator_session_by_id_snapshot_blocking(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<OrchestratorSessionRecord>, Status> {
+        self.journal_store.orchestrator_session_by_id_snapshot(session_id).map_err(|error| {
+            map_orchestrator_store_error("load orchestrator session snapshot by id", error)
+        })
+    }
+
+    #[allow(clippy::result_large_err)]
     pub async fn orchestrator_session_by_id(
         self: &Arc<Self>,
         session_id: String,
@@ -3341,6 +3351,19 @@ impl GatewayRuntimeState {
         tokio::task::spawn_blocking(move || state.orchestrator_session_by_id_blocking(&session_id))
             .await
             .map_err(|_| Status::internal("orchestrator session lookup worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn orchestrator_session_by_id_snapshot(
+        self: &Arc<Self>,
+        session_id: String,
+    ) -> Result<Option<OrchestratorSessionRecord>, Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            state.orchestrator_session_by_id_snapshot_blocking(&session_id)
+        })
+        .await
+        .map_err(|_| Status::internal("orchestrator session snapshot worker panicked"))?
     }
 
     #[allow(clippy::result_large_err)]

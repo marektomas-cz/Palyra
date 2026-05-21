@@ -701,7 +701,7 @@ pub(crate) async fn console_chat_derived_artifacts_handler(
 ) -> Result<Json<Value>, Response> {
     let session = authorize_console_session(&state, &headers, false)?;
     let session_record =
-        load_console_chat_session(&state, &session.context, session_id.as_str(), true).await?;
+        load_console_chat_session(&state, &session.context, session_id.as_str(), false).await?;
     let kind_filter = query.kind.and_then(trim_to_option).map(|value| value.to_ascii_lowercase());
     let state_filter = query.state.and_then(trim_to_option).map(|value| value.to_ascii_lowercase());
     let derived_artifacts = state
@@ -1397,7 +1397,7 @@ pub(crate) async fn console_chat_compaction_preview_handler(
 ) -> Result<Json<Value>, Response> {
     let session = authorize_console_session(&state, &headers, false)?;
     let session_record =
-        load_console_chat_session(&state, &session.context, session_id.as_str(), true).await?;
+        load_console_chat_session(&state, &session.context, session_id.as_str(), false).await?;
     let plan = preview_session_compaction(
         &state.runtime,
         &session_record,
@@ -3503,7 +3503,7 @@ pub(crate) async fn console_chat_transcript_handler(
 ) -> Result<Json<Value>, Response> {
     let session = authorize_console_session(&state, &headers, false)?;
     let session_record =
-        load_console_chat_session(&state, &session.context, session_id.as_str(), true).await?;
+        load_console_chat_session(&state, &session.context, session_id.as_str(), false).await?;
     let transcript = state
         .runtime
         .list_orchestrator_session_transcript(session_record.session_id.clone())
@@ -3785,7 +3785,7 @@ pub(crate) async fn console_chat_export_handler(
 ) -> Result<Json<Value>, Response> {
     let session = authorize_console_session(&state, &headers, false)?;
     let session_record =
-        load_console_chat_session(&state, &session.context, session_id.as_str(), true).await?;
+        load_console_chat_session(&state, &session.context, session_id.as_str(), false).await?;
     let transcript = state
         .runtime
         .list_orchestrator_session_transcript(session_record.session_id.clone())
@@ -4240,12 +4240,33 @@ async fn load_console_chat_session(
     session_id: &str,
     require_write: bool,
 ) -> Result<journal::OrchestratorSessionRecord, Response> {
-    let _ = require_write;
     validate_canonical_id(session_id).map_err(|_| {
         runtime_status_response(tonic::Status::invalid_argument(
             "session_id must be a canonical ULID",
         ))
     })?;
+    if !require_write {
+        let session_record = state
+            .runtime
+            .orchestrator_session_by_id_snapshot(session_id.to_owned())
+            .await
+            .map_err(runtime_status_response)?
+            .ok_or_else(|| {
+                runtime_status_response(tonic::Status::not_found(format!(
+                    "session not found: {session_id}"
+                )))
+            })?;
+        if session_record.principal != context.principal
+            || session_record.device_id != context.device_id
+            || session_record.channel != context.channel
+        {
+            return Err(runtime_status_response(tonic::Status::permission_denied(
+                "session belongs to a different principal, device, or channel",
+            )));
+        }
+        return Ok(session_record);
+    }
+
     let response = state
         .runtime
         .resolve_orchestrator_session(journal::OrchestratorSessionResolveRequest {
