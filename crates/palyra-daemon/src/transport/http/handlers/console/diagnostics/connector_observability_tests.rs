@@ -38,7 +38,7 @@ fn idle_disabled_supported_or_internal_test_connectors_are_not_actionable_degrad
         ConnectorAvailability::Supported,
         false,
         ConnectorReadiness::Ready,
-        ConnectorLiveness::Stopped,
+        ConnectorLiveness::Crashed,
         None,
     );
     assert!(
@@ -51,13 +51,44 @@ fn idle_disabled_supported_or_internal_test_connectors_are_not_actionable_degrad
         ConnectorAvailability::InternalTestOnly,
         true,
         ConnectorReadiness::Ready,
-        ConnectorLiveness::Stopped,
+        ConnectorLiveness::Restarting,
         None,
     );
     assert!(
         !connector_has_actionable_degradation(&internal_echo, None),
         "internal-test-only idle connectors should not affect operator health"
     );
+}
+
+#[test]
+fn enabled_supported_non_running_connectors_are_actionable_degradations() {
+    for liveness in
+        [ConnectorLiveness::Stopped, ConnectorLiveness::Restarting, ConnectorLiveness::Crashed]
+    {
+        let status = connector(
+            ConnectorKind::Discord,
+            ConnectorAvailability::Supported,
+            true,
+            ConnectorReadiness::Ready,
+            liveness,
+            None,
+        );
+
+        assert!(
+            connector_has_actionable_degradation(&status, None),
+            "enabled supported connector with {liveness:?} liveness should be degraded"
+        );
+    }
+
+    let running = connector(
+        ConnectorKind::Discord,
+        ConnectorAvailability::Supported,
+        true,
+        ConnectorReadiness::Ready,
+        ConnectorLiveness::Running,
+        None,
+    );
+    assert!(!connector_has_actionable_degradation(&running, None));
 }
 
 #[test]

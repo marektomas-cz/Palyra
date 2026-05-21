@@ -1939,7 +1939,14 @@ fn connector_has_actionable_degradation(
     connector: &palyra_connectors::ConnectorStatusSnapshot,
     runtime: Option<&Value>,
 ) -> bool {
+    if !connector.enabled
+        || connector.availability != palyra_connectors::ConnectorAvailability::Supported
+    {
+        return false;
+    }
+
     connector.readiness.as_str() != "ready"
+        || connector.liveness.as_str() != "running"
         || connector.last_error.as_deref().is_some_and(|error| !error.trim().is_empty())
         || runtime
             .and_then(|payload| payload.get("last_error"))
