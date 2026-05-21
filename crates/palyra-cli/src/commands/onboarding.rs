@@ -967,16 +967,17 @@ fn browser_prerequisites_status(document: &toml::Value) -> (bool, String) {
 fn browser_runtime_status(document: &toml::Value) -> (bool, String) {
     let endpoint = get_string_at_path(document, "tool_call.browser_service.endpoint")
         .unwrap_or_else(|| DEFAULT_BROWSER_SERVICE_ENDPOINT.to_owned());
+    let display_endpoint = diagnostic_endpoint_url(endpoint.as_str());
     match tcp_url_reachable(
         endpoint.as_str(),
         Duration::from_millis(BROWSER_RUNTIME_CONNECT_TIMEOUT_MS),
         "browser service gRPC",
     ) {
-        Ok(()) => (true, format!("browserd gRPC endpoint {endpoint} is reachable.")),
+        Ok(()) => (true, format!("browserd gRPC endpoint {display_endpoint} is reachable.")),
         Err(error) => (
             false,
             format!(
-                "browserd gRPC endpoint {endpoint} is not reachable: {}",
+                "browserd gRPC endpoint {display_endpoint} is not reachable: {}",
                 sanitize_diagnostic_error(error.to_string().as_str())
             ),
         ),
@@ -1020,21 +1021,25 @@ fn gateway_runtime_status() -> (bool, String) {
             );
         }
     };
+    let display_grpc_url = diagnostic_endpoint_url(connection.grpc_url.as_str());
     match tcp_url_reachable(
         connection.grpc_url.as_str(),
         Duration::from_millis(GATEWAY_RUNTIME_CONNECT_TIMEOUT_MS),
         "gateway gRPC",
     ) {
-        Ok(()) => (true, format!("gateway gRPC endpoint {} is reachable", connection.grpc_url)),
+        Ok(()) => (true, format!("gateway gRPC endpoint {display_grpc_url} is reachable")),
         Err(error) => (
             false,
             format!(
-                "gateway gRPC endpoint {} is not reachable: {}",
-                connection.grpc_url,
+                "gateway gRPC endpoint {display_grpc_url} is not reachable: {}",
                 sanitize_diagnostic_error(error.to_string().as_str())
             ),
         ),
     }
+}
+
+fn diagnostic_endpoint_url(raw_url: &str) -> String {
+    redact_url(raw_url)
 }
 
 fn tcp_url_reachable(raw_url: &str, timeout: Duration, endpoint_label: &str) -> Result<()> {
@@ -1254,9 +1259,9 @@ mod tests {
 
     use super::{
         build_onboarding_counts, build_onboarding_steps, collect_onboarding_signals,
-        default_agent_create_command, derive_posture_status, load_onboarding_document,
-        onboarding_prerequisites_ready, recommended_onboarding_step_id, record_cli_first_success,
-        OnboardingSignals, OnboardingVariant,
+        default_agent_create_command, derive_posture_status, diagnostic_endpoint_url,
+        load_onboarding_document, onboarding_prerequisites_ready, recommended_onboarding_step_id,
+        record_cli_first_success, OnboardingSignals, OnboardingVariant,
     };
     use crate::{app, args::RootOptions};
 
@@ -1289,6 +1294,18 @@ kind = "anthropic"
 
         app::clear_root_context_for_tests();
         Ok(())
+    }
+
+    #[test]
+    fn onboarding_diagnostic_endpoint_url_redacts_credentials() {
+        let redacted = diagnostic_endpoint_url(
+            "http://user:supersecret@127.0.0.1:7443?token=LEAKED_TOKEN&mode=ok",
+        );
+
+        assert!(redacted.contains("127.0.0.1:7443"));
+        assert!(redacted.contains("mode=ok"));
+        assert!(!redacted.contains("user:supersecret"));
+        assert!(!redacted.contains("LEAKED_TOKEN"));
     }
 
     #[test]
