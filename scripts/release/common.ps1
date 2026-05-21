@@ -741,7 +741,8 @@ function Get-PalyraCliProfileBlock {
         [string]$CommandRoot
     )
 
-    $escapedCommandRoot = ConvertTo-PosixSingleQuotedLiteral -Value $CommandRoot
+    $safeCommandRoot = Assert-CliShimLiteralSafe -Value $CommandRoot -Label "CLI command root"
+    $escapedCommandRoot = ConvertTo-PosixSingleQuotedLiteral -Value $safeCommandRoot
 
     return @"
 $script:PalyraCliProfileStartMarker
@@ -881,7 +882,9 @@ function Install-PalyraCliExposure {
     $resolvedTargetBinary = Assert-CliShimLiteralSafe `
         -Value (Assert-FileExists -Path $TargetBinaryPath -Label "CLI binary") `
         -Label "CLI binary path"
-    $resolvedCommandRoot = Get-PalyraCliCommandRoot -CommandRootOverride $CommandRoot
+    $resolvedCommandRoot = Assert-CliShimLiteralSafe `
+        -Value (Get-PalyraCliCommandRoot -CommandRootOverride $CommandRoot) `
+        -Label "CLI command root"
     $legacyPathCleanup = Remove-LegacyPalyraCliPathEntries -CommandRoot $resolvedCommandRoot
     New-Item -ItemType Directory -Path $resolvedCommandRoot -Force | Out-Null
     $resolvedStateRoot = $null
