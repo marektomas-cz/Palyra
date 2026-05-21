@@ -14,6 +14,7 @@ use crate::desktop_state::IMPLICIT_DESKTOP_PROFILE_NAME;
 const CLI_PROFILES_PATH_ENV: &str = "PALYRA_CLI_PROFILES_PATH";
 const CLI_PROFILES_RELATIVE_PATH: &str = "cli/profiles.toml";
 const CLI_PROFILE_SCHEMA_VERSION: u32 = 1;
+const PALYRA_CONFIG_ENV: &str = "PALYRA_CONFIG";
 
 #[derive(Debug, Clone)]
 pub(crate) struct DesktopResolvedProfile {
@@ -63,9 +64,12 @@ impl DesktopProfileCatalog {
         for (name, profile) in document.profiles {
             profiles.insert(name.clone(), resolve_profile(name.as_str(), profile)?);
         }
-        profiles
-            .entry(IMPLICIT_DESKTOP_PROFILE_NAME.to_owned())
-            .or_insert_with(|| implicit_profile(IMPLICIT_DESKTOP_PROFILE_NAME));
+        if !profiles.contains_key(IMPLICIT_DESKTOP_PROFILE_NAME) {
+            profiles.insert(
+                IMPLICIT_DESKTOP_PROFILE_NAME.to_owned(),
+                implicit_profile_from_environment(IMPLICIT_DESKTOP_PROFILE_NAME)?,
+            );
+        }
         Ok(Self {
             default_profile_name: normalize_optional_text(document.default_profile.as_deref()),
             profiles,
@@ -188,6 +192,24 @@ pub(crate) fn implicit_profile(name: &str) -> DesktopResolvedProfile {
         last_used_at_unix_ms: None,
         implicit: true,
     }
+}
+
+fn implicit_profile_from_environment(name: &str) -> Result<DesktopResolvedProfile> {
+    let mut profile = implicit_profile(name);
+    profile.config_path = parse_env_config_path()?;
+    Ok(profile)
+}
+
+fn parse_env_config_path() -> Result<Option<PathBuf>> {
+    let Ok(raw) = env::var(PALYRA_CONFIG_ENV) else {
+        return Ok(None);
+    };
+    let Some(value) = normalize_optional_text(Some(raw.as_str())) else {
+        return Ok(None);
+    };
+    parse_config_path(value.as_str())
+        .with_context(|| format!("{PALYRA_CONFIG_ENV} contains an invalid path"))
+        .map(Some)
 }
 
 fn parse_optional_path(raw: Option<&str>) -> Result<Option<PathBuf>> {

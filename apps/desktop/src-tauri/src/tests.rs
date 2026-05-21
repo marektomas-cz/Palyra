@@ -30,6 +30,7 @@ use super::commands::{
     desktop_cli_command_for_error, initialize_control_center,
     select_desktop_node_pairing_request_id,
 };
+use super::desktop_state::IMPLICIT_DESKTOP_PROFILE_NAME;
 use super::features::onboarding::connectors::discord::{
     apply_discord_onboarding, run_discord_onboarding_preflight, verify_discord_connector,
     DiscordOnboardingRequest, DiscordVerificationRequest,
@@ -41,6 +42,7 @@ use super::openai_auth::{
     OpenAiOAuthBootstrapRequest, OpenAiOAuthCallbackStateRequest, OpenAiProfileActionRequest,
     OpenAiScopeInput,
 };
+use super::profile_registry::DesktopProfileCatalog;
 use super::snapshot::resolve_dashboard_access_target;
 use super::{
     bootstrap_portable_install_environment_for_executable, build_desktop_refresh_payload,
@@ -861,6 +863,24 @@ fn portable_install_metadata_bootstraps_missing_env_paths() {
 
     assert_eq!(std::env::var_os("PALYRA_STATE_ROOT").map(PathBuf::from), Some(state_root.clone()));
     assert_eq!(std::env::var_os("PALYRA_CONFIG").map(PathBuf::from), Some(config_path));
+}
+
+#[test]
+fn implicit_desktop_profile_inherits_bootstrapped_config_path() {
+    let _env_guard = lock_env();
+    let fixture = TempFixtureDir::new();
+    let config_path = write_config_file(fixture.path(), "daemon.bind = \"127.0.0.1\"");
+    let _profiles_override = ScopedEnvVar::unset("PALYRA_CLI_PROFILES_PATH");
+    let _config_override =
+        ScopedEnvVar::set("PALYRA_CONFIG", config_path.to_string_lossy().as_ref());
+
+    let catalog = DesktopProfileCatalog::load(fixture.path()).expect("profile catalog should load");
+    let implicit_profile = catalog
+        .profiles
+        .get(IMPLICIT_DESKTOP_PROFILE_NAME)
+        .expect("implicit desktop profile should exist");
+
+    assert_eq!(implicit_profile.config_path.as_deref(), Some(config_path.as_path()));
 }
 
 #[test]
