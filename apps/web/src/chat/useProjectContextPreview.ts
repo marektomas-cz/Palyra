@@ -38,6 +38,7 @@ export function useProjectContextPreview({
   setError,
 }: UseProjectContextPreviewArgs): UseProjectContextPreviewResult {
   const projectContextPreviewRequestSeqRef = useRef(0);
+  const activeSessionKeyRef = useRef("");
   const [projectContextPreviewBusy, setProjectContextPreviewBusy] = useState(false);
   const [projectContextPreview, setProjectContextPreview] =
     useState<ProjectContextPreviewEnvelope | null>(null);
@@ -45,14 +46,24 @@ export function useProjectContextPreview({
     null,
   );
   const [projectContextPreviewQuery, setProjectContextPreviewQuery] = useState("");
+  const [projectContextPreviewSessionId, setProjectContextPreviewSessionId] = useState("");
   const deferredComposerText = useDeferredValue(composerText);
+  const activeSessionKey = activeSessionId.trim();
+  const projectContextPreviewSessionMatches =
+    activeSessionKey.length > 0 && projectContextPreviewSessionId === activeSessionKey;
+  const activeProjectContextPreview = projectContextPreviewSessionMatches
+    ? projectContextPreview
+    : null;
+  const activeProjectContextPromptPreview = projectContextPreviewSessionMatches
+    ? projectContextPromptPreview
+    : null;
 
   const projectContextPreviewStale = useMemo(() => {
-    if (activeSessionId.trim().length === 0 || projectContextPreview === null) {
+    if (activeSessionKey.length === 0 || activeProjectContextPreview === null) {
       return false;
     }
     return projectContextPreviewQuery !== buildProjectContextDraftKey(composerText);
-  }, [activeSessionId, composerText, projectContextPreview, projectContextPreviewQuery]);
+  }, [activeProjectContextPreview, activeSessionKey, composerText, projectContextPreviewQuery]);
 
   const resetProjectContextPreview = useCallback(() => {
     projectContextPreviewRequestSeqRef.current += 1;
@@ -60,6 +71,7 @@ export function useProjectContextPreview({
     setProjectContextPreview(null);
     setProjectContextPromptPreview(null);
     setProjectContextPreviewQuery("");
+    setProjectContextPreviewSessionId("");
   }, []);
 
   const loadProjectContextPreview = useCallback(
@@ -87,13 +99,17 @@ export function useProjectContextPreview({
         setProjectContextPreview(response.preview);
         setProjectContextPromptPreview(response.prompt_preview ?? null);
         setProjectContextPreviewQuery(query);
+        setProjectContextPreviewSessionId(sessionId);
         return response.preview;
       } catch (error) {
-        if (
-          requestSeq === projectContextPreviewRequestSeqRef.current &&
-          options.reportError !== false
-        ) {
-          setError(toErrorMessage(error));
+        if (requestSeq === projectContextPreviewRequestSeqRef.current) {
+          setProjectContextPreview(null);
+          setProjectContextPromptPreview(null);
+          setProjectContextPreviewQuery("");
+          setProjectContextPreviewSessionId("");
+          if (options.reportError !== false) {
+            setError(toErrorMessage(error));
+          }
         }
         return null;
       } finally {
@@ -108,25 +124,30 @@ export function useProjectContextPreview({
   const ensureProjectContextPreviewForCurrentDraft = useCallback(async () => {
     const query = buildProjectContextDraftKey(composerText);
     if (
-      projectContextPreview !== null &&
+      activeProjectContextPreview !== null &&
       projectContextPreviewQuery === query &&
-      activeSessionId.trim().length > 0
+      activeSessionKey.length > 0
     ) {
-      return projectContextPreview;
+      return activeProjectContextPreview;
     }
     return loadProjectContextPreview(composerText, { reportError: true });
   }, [
-    activeSessionId,
+    activeProjectContextPreview,
+    activeSessionKey,
     composerText,
     loadProjectContextPreview,
-    projectContextPreview,
     projectContextPreviewQuery,
   ]);
 
   useEffect(() => {
-    if (activeSessionId.trim().length === 0) {
+    if (activeSessionKey.length === 0) {
+      activeSessionKeyRef.current = "";
       resetProjectContextPreview();
       return;
+    }
+    if (activeSessionKeyRef.current !== activeSessionKey) {
+      activeSessionKeyRef.current = activeSessionKey;
+      resetProjectContextPreview();
     }
     const timeoutHandle = window.setTimeout(() => {
       void loadProjectContextPreview(deferredComposerText, { reportError: false });
@@ -135,17 +156,17 @@ export function useProjectContextPreview({
       window.clearTimeout(timeoutHandle);
     };
   }, [
-    activeSessionId,
+    activeSessionKey,
     deferredComposerText,
     loadProjectContextPreview,
     resetProjectContextPreview,
   ]);
 
   return {
-    projectContextPreview,
+    projectContextPreview: activeProjectContextPreview,
     projectContextPreviewBusy,
     projectContextPreviewStale,
-    projectContextPromptPreview,
+    projectContextPromptPreview: activeProjectContextPromptPreview,
     loadProjectContextPreview,
     ensureProjectContextPreviewForCurrentDraft,
     resetProjectContextPreview,
