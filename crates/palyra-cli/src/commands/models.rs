@@ -124,6 +124,7 @@ pub(crate) struct ProviderConnectionCheckPayload {
     pub(crate) message: String,
     pub(crate) checked_at_unix_ms: i64,
     pub(crate) cache_status: String,
+    #[serde(default)]
     pub(crate) live_discovery_verified: bool,
     pub(crate) discovery_source: String,
     pub(crate) discovered_model_ids: Vec<String>,
@@ -2261,6 +2262,44 @@ mod tests {
         assert!(
             auth_registry.is_none() && vault.is_none(),
             "unsafe endpoints must be rejected before opening auth registry or vault"
+        );
+    }
+
+    #[test]
+    fn provider_checks_cache_accepts_legacy_payload_without_live_discovery_flag() {
+        let raw = serde_json::json!({
+            "entries": {
+                "test-connection:legacy": {
+                    "expires_at_unix_ms": 4_102_444_800_000_i64,
+                    "payload": {
+                        "provider_id": "openai-primary",
+                        "kind": "openai_compatible",
+                        "enabled": true,
+                        "endpoint_base_url": "https://api.openai.com/v1",
+                        "credential_source": "vault",
+                        "state": "ok",
+                        "message": "connection ok",
+                        "checked_at_unix_ms": 1_700_000_000_000_i64,
+                        "cache_status": "fresh",
+                        "discovery_source": "configured",
+                        "discovered_model_ids": [],
+                        "configured_model_ids": ["gpt-4o-mini"],
+                        "latency_ms": 42
+                    }
+                }
+            }
+        });
+
+        let cache: ProviderChecksCacheDocument =
+            serde_json::from_value(raw).expect("legacy provider check cache should deserialize");
+        let entry = cache
+            .entries
+            .get("test-connection:legacy")
+            .expect("legacy cache entry should be retained");
+
+        assert!(
+            !entry.payload.live_discovery_verified,
+            "legacy cache entries should default missing live discovery verification to false"
         );
     }
 }
