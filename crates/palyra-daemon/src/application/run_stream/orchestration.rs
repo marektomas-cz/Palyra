@@ -1501,12 +1501,22 @@ fn user_requested_exact_minimal_answer(answer: &str, messages: &[ProviderMessage
         return false;
     }
 
-    messages.iter().filter(|message| message.role == ProviderMessageRole::User).any(|message| {
+    current_user_message_for_exact_answer(messages).is_some_and(|message| {
         user_message_requests_exact_answer(
             message.text_content().as_str(),
             normalized_answer.as_str(),
         )
     })
+}
+
+fn current_user_message_for_exact_answer(messages: &[ProviderMessage]) -> Option<&ProviderMessage> {
+    messages
+        .iter()
+        .take_while(|message| {
+            !matches!(message.role, ProviderMessageRole::Assistant | ProviderMessageRole::Tool)
+        })
+        .filter(|message| message.role == ProviderMessageRole::User)
+        .last()
 }
 
 fn user_message_requests_exact_answer(text: &str, normalized_answer: &str) -> bool {
@@ -2205,6 +2215,42 @@ mod tests {
         );
 
         assert!(incomplete_terminal_final_answer(Some("OK"), &state).is_none());
+    }
+
+    #[test]
+    fn incomplete_terminal_final_answer_ignores_stale_exact_ack_context_after_tool() {
+        let mut state = AgentRunLoopState::new(
+            vec![
+                ProviderMessage::user_text("Previous context says respond exactly OK.".to_owned()),
+                ProviderMessage::user_text(
+                    "Create fixtures/landing-page and verify it.".to_owned(),
+                ),
+            ],
+            4,
+            8,
+            10_000,
+        );
+        state.append_assistant_turn(&ProviderTurnOutput {
+            full_text: String::new(),
+            content_parts: vec![ProviderOutputContentPart::ToolCall {
+                proposal_id: "toolu_test_01".to_owned(),
+                tool_name: "palyra.fs.apply_patch".to_owned(),
+                input_json: json!({}),
+            }],
+            finish_reason: ProviderFinishReason::ToolCalls,
+            usage: ProviderUsage::new(0, 0, "test"),
+            raw_provider_refs: ProviderRawProviderRefs::default(),
+            redaction_state: Default::default(),
+        });
+        state.append_tool_result_messages(vec![ProviderMessage::tool_result(
+            "toolu_test_01",
+            r#"{"success":true}"#,
+        )]);
+
+        let message = incomplete_terminal_final_answer(Some("OK"), &state)
+            .expect("stale user-role context must not authorize a bare acknowledgement");
+
+        assert!(message.contains("bare acknowledgement"));
     }
 
     #[test]
