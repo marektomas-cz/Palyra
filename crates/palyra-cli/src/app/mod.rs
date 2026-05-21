@@ -405,10 +405,7 @@ impl RootCommandContext {
             return Some(token);
         }
 
-        let connection_env = ConnectionEnvironment::read(self.profile.as_ref());
         let profile_token_matches = self.profile_token_matches_endpoint(endpoint, endpoint_kind);
-        let environment_token_matches =
-            self.environment_token_matches_endpoint(endpoint, endpoint_kind, &connection_env);
         if let Some(token) = self
             .profile
             .as_ref()
@@ -417,6 +414,9 @@ impl RootCommandContext {
         {
             return Some(token);
         }
+        let connection_env = ConnectionEnvironment::read(self.profile.as_ref());
+        let environment_token_matches =
+            self.environment_token_matches_endpoint(endpoint, endpoint_kind, &connection_env);
         if profile_token_matches {
             if let Some(token) = connection_env.profile_admin_token {
                 return Some(token);
@@ -1216,12 +1216,14 @@ default_profile = "staging"
 daemon_url = "http://127.0.0.1:8200"
 grpc_url = "http://127.0.0.1:8201"
 admin_token = "profile-token"
+admin_token_env = "PALYRA_PROFILE_ADMIN_TOKEN"
 principal = "admin:staging"
 device_id = "01ARZ3NDEKTSV4RRFFQ69G5FB2"
 channel = "staging"
 "#,
         )?;
         env::set_var(CLI_PROFILES_PATH_ENV, &profile_path);
+        env::set_var("PALYRA_PROFILE_ADMIN_TOKEN", "profile-env-token");
 
         let context =
             build_root_context(RootOptions::default(), ExplicitConfigPathPolicy::RequireExisting)?;
