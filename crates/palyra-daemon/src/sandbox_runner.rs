@@ -38,6 +38,7 @@ const BACKGROUND_STARTUP_OUTPUT_DRAIN_MS: u64 = 4_000;
 #[cfg(not(windows))]
 const BACKGROUND_STARTUP_OUTPUT_DRAIN_MS: u64 = 1_000;
 const BACKGROUND_POST_OUTPUT_EXIT_CHECK_MS: u64 = 250;
+const BACKGROUND_METADATA_RETURN_RESERVE_MS: u64 = 100;
 const DEFAULT_BACKGROUND_PROCESS_LIFETIME_MS: u64 = 10 * 60_000;
 const MAX_BACKGROUND_PROCESS_LIFETIME_MS: u64 = 30 * 60_000;
 const SENSITIVE_URL_PATH_MARKERS: &[&str] =
@@ -1991,12 +1992,14 @@ fn spawn_background_process(
         attach_resource_limits_unix(&mut command, policy);
     }
 
+    let lifetime_ms = lifetime.as_millis() as u64;
+    let startup_budget = background_process_startup_metadata_budget(lifetime)
+        .ok_or_else(|| background_process_startup_budget_expired_error(input, lifetime_ms))?;
     let mut child = command.spawn().map_err(|error| SandboxProcessRunError {
         kind: SandboxProcessRunErrorKind::SpawnFailed,
         message: format!("sandbox process spawn failed for command '{}': {error}", input.command),
     })?;
     let started_at = Instant::now();
-    let lifetime_ms = lifetime.as_millis() as u64;
     let output_monitor =
         match start_background_output_monitor(&mut child, policy.max_output_bytes as usize) {
             Ok(output_monitor) => output_monitor,
@@ -2006,17 +2009,17 @@ fn spawn_background_process(
             }
         };
     let Some(startup_check_wait) = bounded_background_process_wait(
-        lifetime,
+        startup_budget,
         started_at.elapsed(),
         Duration::from_millis(BACKGROUND_STARTUP_CHECK_MS),
     ) else {
         terminate_background_child(child);
-        return Err(background_process_lifetime_expired_error(input, lifetime_ms));
+        return Err(background_process_startup_budget_expired_error(input, lifetime_ms));
     };
     thread::sleep(startup_check_wait);
-    if remaining_background_process_lifetime(lifetime, started_at.elapsed()).is_none() {
+    if remaining_background_process_lifetime(startup_budget, started_at.elapsed()).is_none() {
         terminate_background_child(child);
-        return Err(background_process_lifetime_expired_error(input, lifetime_ms));
+        return Err(background_process_startup_budget_expired_error(input, lifetime_ms));
     }
     if let Some(status) = child.try_wait().map_err(|error| SandboxProcessRunError {
         kind: SandboxProcessRunErrorKind::RuntimeFailure,
@@ -2026,7 +2029,7 @@ fn spawn_background_process(
         ),
     })? {
         let startup_output_drain = bounded_background_process_wait(
-            lifetime,
+            startup_budget,
             started_at.elapsed(),
             Duration::from_millis(BACKGROUND_STARTUP_OUTPUT_DRAIN_MS),
         )
@@ -2037,14 +2040,14 @@ fn spawn_background_process(
     let pid = child.id();
     let cleanup = background_cleanup_metadata(pid, lifetime_ms);
     let startup_output_drain = bounded_background_process_wait(
-        lifetime,
+        startup_budget,
         started_at.elapsed(),
         Duration::from_millis(BACKGROUND_STARTUP_OUTPUT_DRAIN_MS),
     )
     .unwrap_or(Duration::ZERO);
     let (stdout, stderr) = output_monitor.snapshot_after_startup_drain(startup_output_drain);
     let post_output_exit_check = bounded_background_process_wait(
-        lifetime,
+        startup_budget,
         started_at.elapsed(),
         Duration::from_millis(BACKGROUND_POST_OUTPUT_EXIT_CHECK_MS),
     )
@@ -2370,6 +2373,12 @@ fn background_process_lifetime_limit(execution_timeout: Duration) -> Duration {
     execution_timeout.min(Duration::from_millis(MAX_BACKGROUND_PROCESS_LIFETIME_MS))
 }
 
+fn background_process_startup_metadata_budget(lifetime: Duration) -> Option<Duration> {
+    lifetime
+        .checked_sub(Duration::from_millis(BACKGROUND_METADATA_RETURN_RESERVE_MS))
+        .filter(|budget| !budget.is_zero())
+}
+
 fn remaining_background_process_lifetime(
     lifetime: Duration,
     elapsed: Duration,
@@ -2400,6 +2409,19 @@ fn background_process_lifetime_expired_error(
         kind: SandboxProcessRunErrorKind::TimedOut,
         message: format!(
             "sandbox background process exceeded its {lifetime_ms}ms lifetime during startup checks and was terminated; increase the operator-configured tool execution timeout before requesting a longer background process lifetime for command '{}'",
+            input.command
+        ),
+    }
+}
+
+fn background_process_startup_budget_expired_error(
+    input: &ProcessRunnerInput,
+    lifetime_ms: u64,
+) -> SandboxProcessRunError {
+    SandboxProcessRunError {
+        kind: SandboxProcessRunErrorKind::TimedOut,
+        message: format!(
+            "sandbox background process startup checks could not complete within the {lifetime_ms}ms lifetime while preserving time to return process metadata before the tool timeout; increase the operator-configured tool execution timeout before requesting a longer background process lifetime for command '{}'",
             input.command
         ),
     }
@@ -4082,6 +4104,29 @@ mod tests {
         let lifetime = super::background_process_lifetime(None, Duration::from_millis(750));
 
         assert_eq!(lifetime, Duration::from_millis(750));
+    }
+
+    #[test]
+    fn background_process_startup_budget_reserves_metadata_return_time() {
+        let lifetime = super::background_process_lifetime(None, Duration::from_millis(750));
+        let startup_budget = super::background_process_startup_metadata_budget(lifetime)
+            .expect("default background lifetime should leave a metadata return budget");
+
+        assert_eq!(startup_budget, Duration::from_millis(650));
+        assert_eq!(
+            super::bounded_background_process_wait(
+                startup_budget,
+                Duration::from_millis(super::BACKGROUND_STARTUP_CHECK_MS),
+                Duration::from_millis(super::BACKGROUND_STARTUP_OUTPUT_DRAIN_MS)
+            ),
+            Some(Duration::from_millis(400))
+        );
+        assert_eq!(
+            super::background_process_startup_metadata_budget(Duration::from_millis(
+                super::BACKGROUND_METADATA_RETURN_RESERVE_MS
+            )),
+            None
+        );
     }
 
     #[test]
