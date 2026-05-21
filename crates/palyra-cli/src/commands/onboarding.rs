@@ -1157,14 +1157,29 @@ fn looks_absolute_path(value: &str) -> bool {
 }
 
 fn quote_cli_arg(value: &str) -> String {
-    let safe = value
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | '\\' | ':'));
+    let safe = !value.is_empty()
+        && value.chars().all(|ch| {
+            ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | '\\' | ':')
+        });
     if safe {
         value.to_owned()
     } else {
-        format!("\"{}\"", value.replace('"', "\\\""))
+        quote_single_quoted_cli_arg(value)
     }
+}
+
+fn quote_single_quoted_cli_arg(value: &str) -> String {
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('\'');
+    for ch in value.chars() {
+        if ch == '\'' {
+            quoted.push_str("'\\''");
+        } else {
+            quoted.push(ch);
+        }
+    }
+    quoted.push('\'');
+    quoted
 }
 
 fn get_string_at_path(document: &toml::Value, key: &str) -> Option<String> {
@@ -1260,8 +1275,9 @@ mod tests {
     use super::{
         build_onboarding_counts, build_onboarding_steps, collect_onboarding_signals,
         default_agent_create_command, derive_posture_status, diagnostic_endpoint_url,
-        load_onboarding_document, onboarding_prerequisites_ready, recommended_onboarding_step_id,
-        record_cli_first_success, OnboardingSignals, OnboardingVariant,
+        load_onboarding_document, onboarding_prerequisites_ready, quote_cli_arg,
+        recommended_onboarding_step_id, record_cli_first_success, OnboardingSignals,
+        OnboardingVariant,
     };
     use crate::{app, args::RootOptions};
 
@@ -1381,6 +1397,52 @@ kind = "anthropic"
 
         assert!(command.contains("--display-name LocalDefaultAgent"), "{command}");
         assert!(!command.contains("\"Local Default Agent\""), "{command}");
+    }
+
+    #[test]
+    fn default_agent_create_command_quotes_config_values_without_substitution() {
+        let command = default_agent_create_command(&OnboardingSignals {
+            config_exists: true,
+            config_path: "C:/portable/palyra.toml".to_owned(),
+            workspace_root_configured: true,
+            remote_base_url_configured: false,
+            remote_verification_mode: None,
+            remote_posture_safe: true,
+            deployment_warning: None,
+            provider_auth_configured: true,
+            provider_model_selected: true,
+            provider_health_state: "configured".to_owned(),
+            provider_health_message: "configured".to_owned(),
+            model_discovery_ready: true,
+            model_discovery_message: "ready".to_owned(),
+            gateway_runtime_reachable: true,
+            gateway_runtime_message: "reachable".to_owned(),
+            default_agent_configured: false,
+            default_agent_message: "agent registry does not define a default agent".to_owned(),
+            workspace_root: Some("/tmp/ws$(touch /tmp/palyra-pwn-workspace)".to_owned()),
+            chat_model: Some("x`touch /tmp/palyra-pwn-model`".to_owned()),
+            memory_embeddings_configured: false,
+            memory_embeddings_message: "memory fallback".to_owned(),
+            browser_prerequisites_configured: true,
+            browser_prerequisites_message: "browser ready".to_owned(),
+            browser_runtime_reachable: true,
+            browser_runtime_message: "browserd reachable".to_owned(),
+            first_success_completed: false,
+        });
+
+        assert!(
+            command.contains("--workspace-root '/tmp/ws$(touch /tmp/palyra-pwn-workspace)'"),
+            "{command}"
+        );
+        assert!(command.contains("--model-profile 'x`touch /tmp/palyra-pwn-model`'"), "{command}");
+    }
+
+    #[test]
+    fn quote_cli_arg_escapes_single_quotes_without_double_quote_substitution() {
+        assert_eq!(quote_cli_arg(""), "''");
+        assert_eq!(quote_cli_arg("safe/path-1"), "safe/path-1");
+        assert_eq!(quote_cli_arg("x$(touch /tmp/pwn)"), "'x$(touch /tmp/pwn)'");
+        assert_eq!(quote_cli_arg("x'$(touch /tmp/pwn)"), "'x'\\''$(touch /tmp/pwn)'");
     }
 
     #[test]
