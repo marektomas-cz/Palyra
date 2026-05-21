@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { editablePluginConfig } from "./SkillsSection";
+import { editablePluginConfig, procedureCandidateStatusIsPromotable } from "./SkillsSection";
 import type { JsonObject } from "../shared";
 
 function pluginDetail(configured: JsonObject, redactedFields: string[] = []): JsonObject {
@@ -52,5 +52,14 @@ describe("editablePluginConfig", () => {
 
     expect(draft).toContain('"api_base_url": "https://api.example.com"');
     expect(draft).toContain('"retries": 2');
+  });
+});
+
+describe("procedureCandidateStatusIsPromotable", () => {
+  it("blocks denied procedure candidates from promotion", () => {
+    expect(procedureCandidateStatusIsPromotable("denied")).toBe(false);
+    expect(procedureCandidateStatusIsPromotable(" rejected ")).toBe(false);
+    expect(procedureCandidateStatusIsPromotable("suppressed")).toBe(false);
+    expect(procedureCandidateStatusIsPromotable("proposed")).toBe(true);
   });
 });

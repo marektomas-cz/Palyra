@@ -595,7 +595,7 @@ pub(crate) async fn console_procedure_skill_promote_handler(
             "only procedure learning candidates can be promoted to skill scaffolds",
         )));
     }
-    if matches!(candidate.status.as_str(), "rejected" | "suppressed") {
+    if !procedure_candidate_status_is_promotable(candidate.status.as_str()) {
         return Err(runtime_status_response(tonic::Status::failed_precondition(
             "candidate is not promotable in its current review state",
         )));
@@ -804,6 +804,10 @@ async fn load_console_procedure_candidate(
 
 fn default_generated_skill_id(candidate_id: &str) -> String {
     format!("palyra.generated.procedure.{}", candidate_id.to_ascii_lowercase())
+}
+
+fn procedure_candidate_status_is_promotable(status: &str) -> bool {
+    !matches!(status.trim(), "denied" | "rejected" | "suppressed")
 }
 
 fn dynamic_tool_builder_rollout(state: &AppState) -> FeatureRolloutSetting {
@@ -1306,7 +1310,10 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{load_skill_builder_candidate_index, skill_builder_candidates_index_path};
+    use super::{
+        load_skill_builder_candidate_index, procedure_candidate_status_is_promotable,
+        skill_builder_candidates_index_path,
+    };
     use crate::SKILL_BUILDER_CANDIDATE_LAYOUT_VERSION;
 
     #[test]
@@ -1322,5 +1329,14 @@ mod tests {
         assert_eq!(index.schema_version, SKILL_BUILDER_CANDIDATE_LAYOUT_VERSION);
         assert_eq!(index.updated_at_unix_ms, 0);
         assert!(index.entries.is_empty());
+    }
+
+    #[test]
+    fn denied_learning_procedure_status_is_not_promotable() {
+        assert!(!procedure_candidate_status_is_promotable("denied"));
+        assert!(!procedure_candidate_status_is_promotable(" rejected "));
+        assert!(!procedure_candidate_status_is_promotable("suppressed"));
+        assert!(procedure_candidate_status_is_promotable("proposed"));
+        assert!(procedure_candidate_status_is_promotable("accepted"));
     }
 }

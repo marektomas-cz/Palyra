@@ -830,7 +830,7 @@ export function SkillsSection({ app }: SkillsSectionProps) {
                           variant="primary"
                           onPress={() => void app.promoteProcedureCandidate(candidateId)}
                           isDisabled={
-                            app.skillsBusy || ["rejected", "suppressed"].includes(candidateStatus)
+                            app.skillsBusy || !procedureCandidateStatusIsPromotable(candidateStatus)
                           }
                         >
                           Build candidate
@@ -1060,6 +1060,10 @@ function pluginConfigRequiresFullPaste(detail: JsonObject): boolean {
     return false;
   }
   return toPrettyJson(configured, false) !== JSON.stringify(configured, null, 2);
+}
+
+export function procedureCandidateStatusIsPromotable(status: string): boolean {
+  return !["denied", "rejected", "suppressed"].includes(status.trim());
 }
 
 function humanizeState(value: string | null): string {
