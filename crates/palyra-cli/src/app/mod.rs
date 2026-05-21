@@ -11,6 +11,7 @@ use palyra_common::{
     config_system::get_value_at_path, default_config_search_paths, default_state_root,
     parse_config_path, parse_daemon_bind_socket, IdentityStorePathError,
 };
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use ulid::Ulid;
 
@@ -143,6 +144,27 @@ struct ConnectionEnvironment {
     profile_admin_token: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnectionEndpointKind {
+    DaemonHttp,
+    GatewayGrpc,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnectionEndpointSource {
+    Explicit,
+    Profile,
+    Config,
+    Environment,
+    Default,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedConnectionEndpoint {
+    url: String,
+    source: ConnectionEndpointSource,
+}
+
 static ROOT_CONTEXT: OnceLock<Mutex<Option<RootCommandContext>>> = OnceLock::new();
 fn context_cell() -> &'static Mutex<Option<RootCommandContext>> {
     ROOT_CONTEXT.get_or_init(|| Mutex::new(None))
@@ -238,9 +260,14 @@ impl RootCommandContext {
         overrides: ConnectionOverrides,
         defaults: ConnectionDefaults,
     ) -> Result<AgentConnection> {
+        let endpoint = self.resolve_grpc_endpoint(overrides.grpc_url)?;
         Ok(AgentConnection {
-            grpc_url: self.resolve_grpc_url(overrides.grpc_url)?,
-            token: self.resolve_token(overrides.token),
+            grpc_url: endpoint.url.clone(),
+            token: self.resolve_token(
+                overrides.token,
+                &endpoint,
+                ConnectionEndpointKind::GatewayGrpc,
+            ),
             principal: self.resolve_principal(overrides.principal, defaults),
             device_id: self.resolve_device_id(overrides.device_id, defaults),
             channel: self.resolve_channel(overrides.channel, defaults),
@@ -253,9 +280,14 @@ impl RootCommandContext {
         overrides: ConnectionOverrides,
         defaults: ConnectionDefaults,
     ) -> Result<HttpConnection> {
+        let endpoint = self.resolve_daemon_endpoint(overrides.daemon_url)?;
         Ok(HttpConnection {
-            base_url: self.resolve_daemon_url(overrides.daemon_url)?,
-            token: self.resolve_token(overrides.token),
+            base_url: endpoint.url.clone(),
+            token: self.resolve_token(
+                overrides.token,
+                &endpoint,
+                ConnectionEndpointKind::DaemonHttp,
+            ),
             principal: self.resolve_principal(overrides.principal, defaults),
             device_id: self.resolve_device_id(overrides.device_id, defaults),
             channel: self.resolve_channel(overrides.channel, defaults),
@@ -263,44 +295,77 @@ impl RootCommandContext {
         })
     }
 
-    fn resolve_daemon_url(&self, override_url: Option<String>) -> Result<String> {
+    fn resolve_daemon_endpoint(
+        &self,
+        override_url: Option<String>,
+    ) -> Result<ResolvedConnectionEndpoint> {
         if let Some(url) = normalize_optional_text(override_url.as_deref()) {
-            return Ok(url.to_owned());
+            return Ok(ResolvedConnectionEndpoint {
+                url: url.to_owned(),
+                source: ConnectionEndpointSource::Explicit,
+            });
         }
         if let Some(url) = self
             .profile
             .as_ref()
             .and_then(|profile| normalize_optional_text(profile.daemon_url.as_deref()))
         {
-            return Ok(url.to_owned());
+            return Ok(ResolvedConnectionEndpoint {
+                url: url.to_owned(),
+                source: ConnectionEndpointSource::Profile,
+            });
         }
         if let Some(url) = self.config_defaults.daemon_url.as_deref() {
-            return Ok(url.to_owned());
+            return Ok(ResolvedConnectionEndpoint {
+                url: url.to_owned(),
+                source: ConnectionEndpointSource::Config,
+            });
         }
         let connection_env = ConnectionEnvironment::read(self.profile.as_ref());
         if let Some(url) = connection_env.daemon_url.as_deref() {
-            return Ok(url.to_owned());
+            return Ok(ResolvedConnectionEndpoint {
+                url: url.to_owned(),
+                source: ConnectionEndpointSource::Environment,
+            });
         }
-        Ok(DEFAULT_DAEMON_URL.to_owned())
+        Ok(ResolvedConnectionEndpoint {
+            url: DEFAULT_DAEMON_URL.to_owned(),
+            source: ConnectionEndpointSource::Default,
+        })
     }
 
-    fn resolve_grpc_url(&self, override_url: Option<String>) -> Result<String> {
+    fn resolve_grpc_endpoint(
+        &self,
+        override_url: Option<String>,
+    ) -> Result<ResolvedConnectionEndpoint> {
         if let Some(url) = normalize_optional_text(override_url.as_deref()) {
-            return Ok(url.to_owned());
+            return Ok(ResolvedConnectionEndpoint {
+                url: url.to_owned(),
+                source: ConnectionEndpointSource::Explicit,
+            });
         }
         if let Some(url) = self
             .profile
             .as_ref()
             .and_then(|profile| normalize_optional_text(profile.grpc_url.as_deref()))
         {
-            return Ok(url.to_owned());
+            return Ok(ResolvedConnectionEndpoint {
+                url: url.to_owned(),
+                source: ConnectionEndpointSource::Profile,
+            });
         }
         if let Some(url) = self.config_defaults.grpc_url.as_deref() {
-            return Ok(url.to_owned());
+            return Ok(ResolvedConnectionEndpoint {
+                url: url.to_owned(),
+                source: ConnectionEndpointSource::Config,
+            });
         }
         let connection_env = ConnectionEnvironment::read(self.profile.as_ref());
         if let Some(url) = connection_env.grpc_url.as_deref() {
-            return Ok(url.to_owned());
+            return Ok(ResolvedConnectionEndpoint {
+                url: url.to_owned(),
+                source: ConnectionEndpointSource::Environment,
+            });
         }
         let socket = parse_daemon_bind_socket(
             connection_env.grpc_bind_addr.as_str(),
@@ -308,20 +373,126 @@ impl RootCommandContext {
         )
         .context("invalid gateway gRPC bind config")?;
         let socket = normalize_client_socket(socket);
-        Ok(format!("http://{socket}"))
+        Ok(ResolvedConnectionEndpoint {
+            url: format!("http://{socket}"),
+            source: ConnectionEndpointSource::Default,
+        })
     }
 
-    fn resolve_token(&self, override_token: Option<String>) -> Option<String> {
+    fn resolve_token(
+        &self,
+        override_token: Option<String>,
+        endpoint: &ResolvedConnectionEndpoint,
+        endpoint_kind: ConnectionEndpointKind,
+    ) -> Option<String> {
+        if let Some(token) = normalize_owned_text(override_token) {
+            return Some(token);
+        }
+
         let connection_env = ConnectionEnvironment::read(self.profile.as_ref());
-        normalize_owned_text(override_token)
-            .or_else(|| {
-                self.profile
-                    .as_ref()
-                    .and_then(|profile| normalize_owned_text(profile.admin_token.clone()))
-            })
-            .or(connection_env.profile_admin_token)
-            .or_else(|| normalize_owned_text(self.config_defaults.admin_token.clone()))
-            .or(connection_env.admin_token)
+        let profile_token_matches = self.profile_token_matches_endpoint(endpoint, endpoint_kind);
+        let environment_token_matches =
+            self.environment_token_matches_endpoint(endpoint, endpoint_kind, &connection_env);
+        if let Some(token) = self
+            .profile
+            .as_ref()
+            .and_then(|profile| normalize_owned_text(profile.admin_token.clone()))
+            .filter(|_| profile_token_matches)
+        {
+            return Some(token);
+        }
+        if profile_token_matches {
+            if let Some(token) = connection_env.profile_admin_token {
+                return Some(token);
+            }
+        }
+        if let Some(token) = normalize_owned_text(self.config_defaults.admin_token.clone())
+            .filter(|_| self.config_token_matches_endpoint(endpoint, endpoint_kind))
+        {
+            return Some(token);
+        }
+        if environment_token_matches {
+            connection_env.admin_token
+        } else {
+            None
+        }
+    }
+
+    fn profile_token_matches_endpoint(
+        &self,
+        endpoint: &ResolvedConnectionEndpoint,
+        endpoint_kind: ConnectionEndpointKind,
+    ) -> bool {
+        let Some(profile) = self.profile.as_ref() else {
+            return false;
+        };
+        if self
+            .profile_endpoint_url(profile, endpoint_kind)
+            .is_some_and(|profile_url| same_connection_origin(endpoint.url.as_str(), profile_url))
+        {
+            return true;
+        }
+        if self.config_token_matches_endpoint(endpoint, endpoint_kind) {
+            return true;
+        }
+        endpoint.source == ConnectionEndpointSource::Default
+    }
+
+    fn config_token_matches_endpoint(
+        &self,
+        endpoint: &ResolvedConnectionEndpoint,
+        endpoint_kind: ConnectionEndpointKind,
+    ) -> bool {
+        self.config_endpoint_url(endpoint_kind)
+            .is_some_and(|config_url| same_connection_origin(endpoint.url.as_str(), config_url))
+    }
+
+    fn environment_token_matches_endpoint(
+        &self,
+        endpoint: &ResolvedConnectionEndpoint,
+        endpoint_kind: ConnectionEndpointKind,
+        connection_env: &ConnectionEnvironment,
+    ) -> bool {
+        if self
+            .environment_endpoint_url(connection_env, endpoint_kind)
+            .is_some_and(|env_url| same_connection_origin(endpoint.url.as_str(), env_url))
+        {
+            return true;
+        }
+        matches!(
+            endpoint.source,
+            ConnectionEndpointSource::Config | ConnectionEndpointSource::Default
+        )
+    }
+
+    fn profile_endpoint_url<'a>(
+        &self,
+        profile: &'a CliConnectionProfile,
+        endpoint_kind: ConnectionEndpointKind,
+    ) -> Option<&'a str> {
+        match endpoint_kind {
+            ConnectionEndpointKind::DaemonHttp => profile.daemon_url.as_deref(),
+            ConnectionEndpointKind::GatewayGrpc => profile.grpc_url.as_deref(),
+        }
+        .and_then(|url| normalize_optional_text(Some(url)))
+    }
+
+    fn config_endpoint_url(&self, endpoint_kind: ConnectionEndpointKind) -> Option<&str> {
+        match endpoint_kind {
+            ConnectionEndpointKind::DaemonHttp => self.config_defaults.daemon_url.as_deref(),
+            ConnectionEndpointKind::GatewayGrpc => self.config_defaults.grpc_url.as_deref(),
+        }
+    }
+
+    fn environment_endpoint_url<'a>(
+        &self,
+        connection_env: &'a ConnectionEnvironment,
+        endpoint_kind: ConnectionEndpointKind,
+    ) -> Option<&'a str> {
+        match endpoint_kind {
+            ConnectionEndpointKind::DaemonHttp => connection_env.daemon_url.as_deref(),
+            ConnectionEndpointKind::GatewayGrpc => connection_env.grpc_url.as_deref(),
+        }
     }
 
     fn resolve_principal(
@@ -868,6 +1039,22 @@ fn normalize_owned_text(value: Option<String>) -> Option<String> {
     value.map(|value| value.trim().to_owned()).filter(|value| !value.is_empty())
 }
 
+fn same_connection_origin(left: &str, right: &str) -> bool {
+    let Ok(left_url) = Url::parse(left.trim()) else {
+        return false;
+    };
+    let Ok(right_url) = Url::parse(right.trim()) else {
+        return false;
+    };
+
+    left_url.scheme().eq_ignore_ascii_case(right_url.scheme())
+        && left_url
+            .host_str()
+            .zip(right_url.host_str())
+            .is_some_and(|(left_host, right_host)| left_host.eq_ignore_ascii_case(right_host))
+        && left_url.port_or_known_default() == right_url.port_or_known_default()
+}
+
 fn current_unix_timestamp_ms() -> Result<i64> {
     let duration = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1117,6 +1304,121 @@ admin_token_env = "PALYRA_PROFILE_ADMIN_TOKEN"
             .resolve_http_connection(ConnectionOverrides::default(), ConnectionDefaults::ADMIN)?;
 
         assert_eq!(http.token.as_deref(), Some("profile-env-token"));
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_http_endpoint_does_not_reuse_config_or_global_admin_token() -> Result<()> {
+        let _guard = super::test_env_lock_for_tests().lock().expect("env lock");
+        clear_env();
+        let temp = tempdir()?;
+        let state_root = temp.path().join("state");
+        let config_path = temp.path().join("palyra.toml");
+        fs::write(
+            &config_path,
+            r#"
+[daemon]
+bind_addr = "127.0.0.1"
+port = 7142
+
+[admin]
+auth_token = "config-token"
+"#,
+        )?;
+        env::set_var("PALYRA_ADMIN_TOKEN", "global-env-token");
+
+        let context = build_root_context(
+            RootOptions {
+                config_path: Some(config_path.display().to_string()),
+                state_root: Some(state_root.display().to_string()),
+                ..RootOptions::default()
+            },
+            ExplicitConfigPathPolicy::RequireExisting,
+        )?;
+
+        let untrusted = context.resolve_http_connection(
+            ConnectionOverrides {
+                daemon_url: Some("http://127.0.0.1:9999".to_owned()),
+                ..ConnectionOverrides::default()
+            },
+            ConnectionDefaults::ADMIN,
+        )?;
+        assert_eq!(untrusted.base_url, "http://127.0.0.1:9999");
+        assert_eq!(untrusted.token, None);
+
+        let same_origin = context.resolve_http_connection(
+            ConnectionOverrides {
+                daemon_url: Some("http://127.0.0.1:7142/console".to_owned()),
+                ..ConnectionOverrides::default()
+            },
+            ConnectionDefaults::ADMIN,
+        )?;
+        assert_eq!(same_origin.token.as_deref(), Some("config-token"));
+
+        let explicit_token = context.resolve_http_connection(
+            ConnectionOverrides {
+                daemon_url: Some("http://127.0.0.1:9999".to_owned()),
+                token: Some("explicit-token".to_owned()),
+                ..ConnectionOverrides::default()
+            },
+            ConnectionDefaults::ADMIN,
+        )?;
+        assert_eq!(explicit_token.token.as_deref(), Some("explicit-token"));
+        Ok(())
+    }
+
+    #[test]
+    fn profile_endpoints_do_not_reuse_config_or_global_admin_token() -> Result<()> {
+        let _guard = super::test_env_lock_for_tests().lock().expect("env lock");
+        clear_env();
+        let temp = tempdir()?;
+        let profile_path = temp.path().join("profiles.toml");
+        let config_path = temp.path().join("profile-config").join("palyra.toml");
+        let config_path_literal = config_path.display().to_string().replace('\\', "\\\\");
+        fs::create_dir_all(config_path.parent().expect("profile config parent"))?;
+        fs::write(
+            &config_path,
+            r#"
+[daemon]
+bind_addr = "127.0.0.1"
+port = 7142
+
+[gateway]
+grpc_bind_addr = "127.0.0.1"
+grpc_port = 50051
+
+[admin]
+auth_token = "config-token"
+"#,
+        )?;
+        fs::write(
+            &profile_path,
+            format!(
+                r#"
+version = 1
+default_profile = "ops"
+[profiles.ops]
+config_path = "{}"
+daemon_url = "http://127.0.0.1:9999"
+grpc_url = "http://127.0.0.1:59999"
+"#,
+                config_path_literal
+            ),
+        )?;
+        env::set_var(CLI_PROFILES_PATH_ENV, &profile_path);
+        env::set_var("PALYRA_ADMIN_TOKEN", "global-env-token");
+
+        let context =
+            build_root_context(RootOptions::default(), ExplicitConfigPathPolicy::RequireExisting)?;
+        let http = context
+            .resolve_http_connection(ConnectionOverrides::default(), ConnectionDefaults::ADMIN)?;
+        let grpc = context
+            .resolve_grpc_connection(ConnectionOverrides::default(), ConnectionDefaults::ADMIN)?;
+
+        assert_eq!(http.base_url, "http://127.0.0.1:9999");
+        assert_eq!(grpc.grpc_url, "http://127.0.0.1:59999");
+        assert_eq!(http.token, None);
+        assert_eq!(grpc.token, None);
         Ok(())
     }
 
