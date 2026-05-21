@@ -429,9 +429,7 @@ export function ChatComposer({
           </div>
 
           {recallPreview === null ? (
-            <p className="chat-muted">
-              Recall preview will appear once the current draft is evaluated.
-            </p>
+            <p className="chat-muted">No recall preview loaded for the current draft.</p>
           ) : (
             <>
               <div className="chat-ops-list">

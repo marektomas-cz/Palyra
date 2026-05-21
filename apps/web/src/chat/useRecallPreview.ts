@@ -1,4 +1,4 @@
-import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { ConsoleApiClient, RecallPreviewEnvelope } from "../consoleApi";
 
@@ -35,7 +35,6 @@ export function useRecallPreview({
   const [recallPreviewBusy, setRecallPreviewBusy] = useState(false);
   const [recallPreview, setRecallPreview] = useState<RecallPreviewEnvelope | null>(null);
   const [recallPreviewQuery, setRecallPreviewQuery] = useState("");
-  const deferredComposerText = useDeferredValue(composerText);
 
   const recallPreviewStale = useMemo(() => {
     const trimmed = composerText.trim();
@@ -109,20 +108,11 @@ export function useRecallPreview({
 
   useEffect(() => {
     const sessionId = activeSessionId.trim();
-    const trimmed = deferredComposerText.trim();
+    const trimmed = composerText.trim();
     if (sessionId.length === 0 || trimmed.length === 0 || trimmed.startsWith("/")) {
       resetRecallPreview();
-      return;
     }
-
-    const timeoutHandle = window.setTimeout(() => {
-      void loadRecallPreview(trimmed, { reportError: false });
-    }, 350);
-
-    return () => {
-      window.clearTimeout(timeoutHandle);
-    };
-  }, [activeSessionId, deferredComposerText, loadRecallPreview, resetRecallPreview]);
+  }, [activeSessionId, composerText, resetRecallPreview]);
 
   return {
     recallPreview,
