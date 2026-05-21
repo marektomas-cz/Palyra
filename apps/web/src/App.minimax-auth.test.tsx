@@ -5,6 +5,7 @@ import { App } from "./App";
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -105,7 +106,7 @@ describe("MiniMax web auth surface", () => {
     expect(apiKeyBody).toContain('"profile_name":"default-minimax"');
     expect(apiKeyBody).toContain('"api_key":"minimax-api-key"');
 
-    await selectProvider(screen.getByRole("button", { name: /^Start .* OAuth$/ }), "MiniMax");
+    await selectProvider(await screen.findByRole("button", { name: "Start OpenAI OAuth" }), "MiniMax");
     fireEvent.change(screen.getAllByLabelText("Profile name")[1], {
       target: { value: "minimax-oauth" },
     });
@@ -126,6 +127,124 @@ describe("MiniMax web auth surface", () => {
         "MiniMax OAuth window opened. Finish the authorization to complete the profile.",
       ),
     ).toBeInTheDocument();
+  }, 20_000);
+
+  it("polls MiniMax callback state for MiniMax OAuth attempts", async () => {
+    vi.spyOn(window, "open").mockReturnValue({
+      close: vi.fn(),
+      focus: vi.fn(),
+      closed: false,
+    } as unknown as Window);
+
+    const state = {
+      profiles: [] as unknown[],
+      healthProfiles: [] as unknown[],
+      defaultProfileId: undefined as string | undefined,
+    };
+    const callbackRequests: string[] = [];
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const request = requestDescriptor(input, init);
+        if (request.path === "/console/v1/auth/session" && request.method === "GET") {
+          return Promise.resolve(jsonResponse(sessionEnvelope()));
+        }
+        if (request.path === "/console/v1/approvals" && request.method === "GET") {
+          return Promise.resolve(jsonResponse({ approvals: [] }));
+        }
+        if (request.path === "/console/v1/diagnostics" && request.method === "GET") {
+          return Promise.resolve(jsonResponse(diagnosticsEnvelope()));
+        }
+        if (request.path === "/console/v1/auth/profiles" && request.method === "GET") {
+          return Promise.resolve(jsonResponse(profileListEnvelope(state.profiles)));
+        }
+        if (request.path === "/console/v1/auth/health" && request.method === "GET") {
+          return Promise.resolve(jsonResponse(healthEnvelope(state.healthProfiles)));
+        }
+        if (
+          request.path === "/console/v1/auth/providers/minimax/bootstrap" &&
+          request.method === "POST"
+        ) {
+          return Promise.resolve(
+            jsonResponse({
+              contract: contract(),
+              provider: "minimax",
+              attempt_id: "minimax-attempt-1",
+              authorization_url: "https://api.minimax.io/oauth/authorize?user_code=ABC123",
+              expires_at_unix_ms: 300_000,
+              profile_id: "minimax-oauth",
+              message: "MiniMax OAuth user code issued.",
+            }),
+          );
+        }
+        if (request.path.endsWith("/callback-state") && request.method === "GET") {
+          callbackRequests.push(`${request.path}${request.search}`);
+          if (request.path === "/console/v1/auth/providers/minimax/callback-state") {
+            state.defaultProfileId = "minimax-oauth";
+            state.profiles = [minimaxOauthProfile()];
+            state.healthProfiles = [minimaxHealthProfile("oauth", "ok")];
+            return Promise.resolve(
+              jsonResponse({
+                contract: contract(),
+                provider: "minimax",
+                attempt_id: "minimax-attempt-1",
+                state: "succeeded",
+                message: "MiniMax OAuth profile connected.",
+                profile_id: "minimax-oauth",
+                completed_at_unix_ms: 200_000,
+              }),
+            );
+          }
+          return Promise.resolve(
+            jsonResponse(
+              {
+                contract: contract(),
+                provider: "openai",
+                attempt_id: "minimax-attempt-1",
+                state: "failed",
+                message: "wrong provider",
+              },
+              404,
+            ),
+          );
+        }
+        if (request.path.startsWith("/console/v1/auth/providers/") && request.method === "GET") {
+          return Promise.resolve(
+            jsonResponse(providerStateEnvelope(request.path.split("/").at(-1) ?? "openai", state)),
+          );
+        }
+        throw new Error(`Unhandled mocked request: ${request.method} ${request.path}`);
+      }),
+    );
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Profiles" }));
+
+    await selectProvider(await screen.findByRole("button", { name: "Start OpenAI OAuth" }), "MiniMax");
+    fireEvent.change(screen.getAllByLabelText("Profile name")[1], {
+      target: { value: "minimax-oauth" },
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "Start MiniMax OAuth" }));
+
+    await waitFor(() => {
+      expect(window.open).toHaveBeenCalledWith(
+        "https://api.minimax.io/oauth/authorize?user_code=ABC123",
+        "palyra-openai-auth",
+        "popup=yes,width=720,height=860,resizable=yes,scrollbars=yes",
+      );
+    });
+    await waitFor(
+      () => {
+        expect(callbackRequests).toContain(
+          "/console/v1/auth/providers/minimax/callback-state?attempt_id=minimax-attempt-1",
+        );
+      },
+      { timeout: 4_000 },
+    );
+    expect(callbackRequests).not.toContain(
+      "/console/v1/auth/providers/openai/callback-state?attempt_id=minimax-attempt-1",
+    );
   }, 20_000);
 });
 
@@ -207,6 +326,25 @@ function minimaxApiProfile() {
   };
 }
 
+function minimaxOauthProfile() {
+  return {
+    profile_id: "minimax-oauth",
+    provider: { kind: "custom", custom_name: "minimax" },
+    profile_name: "minimax-oauth",
+    scope: { kind: "global" },
+    credential: {
+      type: "oauth",
+      access_token_vault_ref: "vault://minimax/oauth/access",
+      refresh_token_vault_ref: "vault://minimax/oauth/refresh",
+      token_endpoint: "https://api.minimax.io/oauth/token",
+      scopes: ["group_id", "profile", "model.completion"],
+      refresh_state: {},
+    },
+    created_at_unix_ms: 200_000,
+    updated_at_unix_ms: 200_500,
+  };
+}
+
 function minimaxHealthProfile(credentialType: string, state: string) {
   return {
     profile_id: "minimax-api",
@@ -239,6 +377,7 @@ function requestDescriptor(input: RequestInfo | URL, init?: RequestInit) {
   const url = new URL(raw, "http://localhost");
   return {
     path: url.pathname,
+    search: url.search,
     method: (init?.method ?? "GET").toUpperCase(),
     body: typeof init?.body === "string" ? init.body : "",
   };

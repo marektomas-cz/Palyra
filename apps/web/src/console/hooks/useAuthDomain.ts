@@ -106,6 +106,7 @@ export function useAuthDomain({ api, setError, setNotice }: UseAuthDomainArgs) {
     useState<OpenAiOAuthCallbackStateEnvelope | null>(null);
 
   const oauthAttemptIdRef = useRef<string | null>(null);
+  const oauthAttemptProviderRef = useRef<AuthProviderKind | null>(null);
   const oauthPopupRef = useRef<Window | null>(null);
   const oauthPollTimerRef = useRef<number | null>(null);
 
@@ -387,14 +388,14 @@ export function useAuthDomain({ api, setError, setNotice }: UseAuthDomainArgs) {
       setError("No active provider OAuth attempt is waiting for completion.");
       return;
     }
-    const provider = authActiveOauthAttempt?.provider ?? "openai";
+    const provider = providerForOauthAttempt(activeAttemptId);
 
     setAuthPolling(true);
     try {
       const response = await api.getProviderCallbackState(provider, activeAttemptId);
       setAuthOauthCallbackState(response);
       if (response.state === "pending") {
-        scheduleOauthPolling(activeAttemptId);
+        scheduleOauthPolling(activeAttemptId, authProviderKindFromString(response.provider));
         return;
       }
 
@@ -477,6 +478,7 @@ export function useAuthDomain({ api, setError, setNotice }: UseAuthDomainArgs) {
   }
 
   function beginOauthAttempt(response: OpenAiOAuthBootstrapEnvelope): void {
+    const provider = authProviderKindFromString(response.provider);
     clearOauthPolling();
     setAuthActiveOauthAttempt(response);
     setAuthOauthCallbackState({
@@ -489,20 +491,24 @@ export function useAuthDomain({ api, setError, setNotice }: UseAuthDomainArgs) {
       expires_at_unix_ms: response.expires_at_unix_ms,
     });
     oauthPopupRef.current = openOauthWindow(response.authorization_url);
-    scheduleOauthPolling(response.attempt_id);
+    scheduleOauthPolling(response.attempt_id, provider);
     if (oauthPopupRef.current === null) {
       setNotice("Provider OAuth URL issued. The pop-up was blocked.");
       return;
     }
-    const providerLabel = providerConfig(authProviderKindFromString(response.provider)).label;
+    const providerLabel = providerConfig(provider).label;
     setNotice(
       `${providerLabel} OAuth window opened. Finish the authorization to complete the profile.`,
     );
   }
 
-  function scheduleOauthPolling(attemptId: string): void {
+  function scheduleOauthPolling(
+    attemptId: string,
+    provider: AuthProviderKind = providerForOauthAttempt(attemptId),
+  ): void {
     clearOauthPolling();
     oauthAttemptIdRef.current = attemptId;
+    oauthAttemptProviderRef.current = provider;
     if (typeof window === "undefined") {
       return;
     }
@@ -513,6 +519,7 @@ export function useAuthDomain({ api, setError, setNotice }: UseAuthDomainArgs) {
 
   function clearOauthPolling(): void {
     oauthAttemptIdRef.current = null;
+    oauthAttemptProviderRef.current = null;
     if (oauthPollTimerRef.current !== null && typeof window !== "undefined") {
       window.clearTimeout(oauthPollTimerRef.current);
     }
@@ -529,6 +536,13 @@ export function useAuthDomain({ api, setError, setNotice }: UseAuthDomainArgs) {
       // Browser may block close on a window/tab not opened by this call site.
     }
     oauthPopupRef.current = null;
+  }
+
+  function providerForOauthAttempt(attemptId: string): AuthProviderKind {
+    if (authActiveOauthAttempt?.attempt_id === attemptId) {
+      return authProviderKindFromString(authActiveOauthAttempt.provider);
+    }
+    return oauthAttemptProviderRef.current ?? "openai";
   }
 
   return {
