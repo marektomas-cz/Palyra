@@ -1,4 +1,5 @@
 use crate::*;
+use palyra_common::secret_refs::SecretRef;
 use palyra_control_plane as control_plane;
 
 use super::{
@@ -63,8 +64,10 @@ struct LocalSecurityConfigSnapshot {
     provider_kind: String,
     auth_profile_id: Option<String>,
     openai_api_key_vault_ref: Option<String>,
+    openai_api_key_secret_ref_configured: bool,
     openai_inline_api_key: bool,
     anthropic_api_key_vault_ref: Option<String>,
+    anthropic_api_key_secret_ref_configured: bool,
     anthropic_inline_api_key: bool,
     browser_service_enabled: bool,
     browser_service_auth_token_configured: bool,
@@ -459,10 +462,13 @@ fn model_provider_auth_configured(
     }
     match provider_kind {
         "openai_compatible" => {
-            local_config.openai_api_key_vault_ref.is_some() || local_config.openai_inline_api_key
+            local_config.openai_api_key_vault_ref.is_some()
+                || local_config.openai_api_key_secret_ref_configured
+                || local_config.openai_inline_api_key
         }
         "anthropic" => {
             local_config.anthropic_api_key_vault_ref.is_some()
+                || local_config.anthropic_api_key_secret_ref_configured
                 || local_config.anthropic_inline_api_key
         }
         _ => true,
@@ -603,8 +609,10 @@ fn load_local_security_config_snapshot(
                     provider_kind: "deterministic".to_owned(),
                     auth_profile_id: None,
                     openai_api_key_vault_ref: None,
+                    openai_api_key_secret_ref_configured: false,
                     openai_inline_api_key: false,
                     anthropic_api_key_vault_ref: None,
+                    anthropic_api_key_secret_ref_configured: false,
                     anthropic_inline_api_key: false,
                     browser_service_enabled: false,
                     browser_service_auth_token_configured: false,
@@ -643,6 +651,8 @@ fn load_local_security_config_snapshot(
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned);
+    let openai_api_key_secret_ref_configured =
+        structured_secret_ref_configured(&document, "model_provider.openai_api_key_secret_ref")?;
     let openai_inline_api_key = get_value_at_path(&document, "model_provider.openai_api_key")?
         .and_then(toml::Value::as_str)
         .map(str::trim)
@@ -653,6 +663,8 @@ fn load_local_security_config_snapshot(
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned);
+    let anthropic_api_key_secret_ref_configured =
+        structured_secret_ref_configured(&document, "model_provider.anthropic_api_key_secret_ref")?;
     let anthropic_inline_api_key =
         get_value_at_path(&document, "model_provider.anthropic_api_key")?
             .and_then(toml::Value::as_str)
@@ -676,14 +688,26 @@ fn load_local_security_config_snapshot(
         provider_kind,
         auth_profile_id,
         openai_api_key_vault_ref,
+        openai_api_key_secret_ref_configured,
         openai_inline_api_key,
         anthropic_api_key_vault_ref,
+        anthropic_api_key_secret_ref_configured,
         anthropic_inline_api_key,
         browser_service_enabled,
         browser_service_auth_token_configured,
         effective_provider_kind,
         process_runner,
     })
+}
+
+fn structured_secret_ref_configured(document: &toml::Value, path: &str) -> Result<bool> {
+    let Some(value) = get_value_at_path(document, path)? else {
+        return Ok(false);
+    };
+    let Ok(secret_ref) = value.clone().try_into::<SecretRef>() else {
+        return Ok(false);
+    };
+    Ok(secret_ref.validate().is_ok())
 }
 
 fn load_local_process_runner_config_snapshot(
@@ -862,8 +886,10 @@ mod tests {
             provider_kind: "openai_compatible".to_owned(),
             auth_profile_id: None,
             openai_api_key_vault_ref: None,
+            openai_api_key_secret_ref_configured: false,
             openai_inline_api_key: false,
             anthropic_api_key_vault_ref: None,
+            anthropic_api_key_secret_ref_configured: false,
             anthropic_inline_api_key: false,
             browser_service_enabled: false,
             browser_service_auth_token_configured: false,
@@ -892,8 +918,10 @@ mod tests {
             provider_kind: "openai_compatible".to_owned(),
             auth_profile_id: None,
             openai_api_key_vault_ref: None,
+            openai_api_key_secret_ref_configured: false,
             openai_inline_api_key: false,
             anthropic_api_key_vault_ref: None,
+            anthropic_api_key_secret_ref_configured: false,
             anthropic_inline_api_key: false,
             browser_service_enabled: false,
             browser_service_auth_token_configured: false,
@@ -922,8 +950,10 @@ mod tests {
             provider_kind: "openai_compatible".to_owned(),
             auth_profile_id: None,
             openai_api_key_vault_ref: None,
+            openai_api_key_secret_ref_configured: false,
             openai_inline_api_key: false,
             anthropic_api_key_vault_ref: None,
+            anthropic_api_key_secret_ref_configured: false,
             anthropic_inline_api_key: false,
             browser_service_enabled: false,
             browser_service_auth_token_configured: false,
@@ -952,8 +982,10 @@ mod tests {
             provider_kind: "anthropic".to_owned(),
             auth_profile_id: None,
             openai_api_key_vault_ref: None,
+            openai_api_key_secret_ref_configured: false,
             openai_inline_api_key: false,
             anthropic_api_key_vault_ref: Some("global/minimax_api_key".to_owned()),
+            anthropic_api_key_secret_ref_configured: false,
             anthropic_inline_api_key: false,
             browser_service_enabled: false,
             browser_service_auth_token_configured: false,
@@ -982,8 +1014,10 @@ mod tests {
             provider_kind: "deterministic".to_owned(),
             auth_profile_id: None,
             openai_api_key_vault_ref: None,
+            openai_api_key_secret_ref_configured: false,
             openai_inline_api_key: false,
             anthropic_api_key_vault_ref: None,
+            anthropic_api_key_secret_ref_configured: false,
             anthropic_inline_api_key: false,
             browser_service_enabled: false,
             browser_service_auth_token_configured: false,
@@ -1054,6 +1088,45 @@ anthropic_api_key_vault_ref = "global/minimax_api_key"
     }
 
     #[test]
+    fn local_security_snapshot_accepts_anthropic_structured_secret_ref_auth() -> Result<()> {
+        let _guard = app::test_env_lock_for_tests().lock().expect("env lock");
+        app::clear_root_context_for_tests();
+
+        let temp = tempfile::tempdir()?;
+        let config_path = temp.path().join("harness").join("palyra.toml");
+        std::fs::create_dir_all(config_path.parent().expect("config parent"))?;
+        std::fs::write(
+            config_path.as_path(),
+            r#"
+version = 1
+[model_provider]
+kind = "anthropic"
+auth_provider_kind = "minimax"
+anthropic_base_url = "https://api.minimax.io/anthropic"
+anthropic_model = "MiniMax-M2.7"
+[model_provider.anthropic_api_key_secret_ref]
+kind = "env"
+variable = "PALYRA_MODEL_PROVIDER_ANTHROPIC_API_KEY"
+"#,
+        )?;
+        let state_root = temp.path().join("state");
+        let _context = app::install_root_context(RootOptions {
+            config_path: Some(config_path.display().to_string()),
+            state_root: Some(state_root.display().to_string()),
+            ..RootOptions::default()
+        })?;
+
+        let snapshot = load_local_security_config_snapshot(None)?;
+
+        assert_eq!(snapshot.provider_kind, "anthropic");
+        assert!(snapshot.anthropic_api_key_secret_ref_configured);
+        assert_eq!(missing_model_auth_kind(&snapshot), None);
+
+        app::clear_root_context_for_tests();
+        Ok(())
+    }
+
+    #[test]
     fn security_audit_flags_remote_bind_without_tls() {
         let doctor = minimal_doctor();
         let local = LocalSecurityConfigSnapshot {
@@ -1061,8 +1134,10 @@ anthropic_api_key_vault_ref = "global/minimax_api_key"
             provider_kind: "deterministic".to_owned(),
             auth_profile_id: None,
             openai_api_key_vault_ref: None,
+            openai_api_key_secret_ref_configured: false,
             openai_inline_api_key: false,
             anthropic_api_key_vault_ref: None,
+            anthropic_api_key_secret_ref_configured: false,
             anthropic_inline_api_key: false,
             browser_service_enabled: false,
             browser_service_auth_token_configured: false,
@@ -1117,8 +1192,10 @@ anthropic_api_key_vault_ref = "global/minimax_api_key"
             provider_kind: "deterministic".to_owned(),
             auth_profile_id: None,
             openai_api_key_vault_ref: None,
+            openai_api_key_secret_ref_configured: false,
             openai_inline_api_key: false,
             anthropic_api_key_vault_ref: None,
+            anthropic_api_key_secret_ref_configured: false,
             anthropic_inline_api_key: false,
             browser_service_enabled: true,
             browser_service_auth_token_configured: true,
