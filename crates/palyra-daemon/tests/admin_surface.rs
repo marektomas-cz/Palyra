@@ -2635,6 +2635,16 @@ fn console_memory_status_and_index_surface_return_operator_payloads() -> Result<
         index_response.get("embeddings").is_some(),
         "memory index response should include embeddings payload"
     );
+    assert_eq!(
+        index_response.pointer("/index/max_batches_per_request").and_then(Value::as_u64),
+        Some(8),
+        "memory index until-complete requests should have a default batch budget"
+    );
+    assert_eq!(
+        index_response.pointer("/index/batch_limit_reached").and_then(Value::as_bool),
+        Some(false),
+        "small memory index run should not hit the batch budget"
+    );
 
     Ok(())
 }

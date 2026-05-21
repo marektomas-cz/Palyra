@@ -1,3 +1,8 @@
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+
 use crate::gateway::ListOrchestratorSessionsRequest;
 use crate::gateway::{current_unix_ms, MEMORY_AUTO_INJECT_MIN_SCORE};
 use crate::journal::{
@@ -25,6 +30,11 @@ use palyra_common::runtime_preview::{
 };
 use sha2::{Digest, Sha256};
 use ulid::Ulid;
+
+const MEMORY_INDEX_DEFAULT_MAX_BATCHES_PER_REQUEST: u64 = 8;
+const MEMORY_INDEX_HARD_MAX_BATCHES_PER_REQUEST: u64 = 32;
+const MEMORY_INDEX_BATCH_LIMIT_REASON: &str = "batch_limit_reached";
+const MEMORY_INDEX_CONCURRENT_RUN_MESSAGE: &str = "memory index run already in progress";
 
 pub(crate) async fn console_memory_status_handler(
     State(state): State<AppState>,
@@ -239,10 +249,12 @@ pub(crate) async fn console_memory_index_handler(
     Json(payload): Json<ConsoleMemoryIndexRequest>,
 ) -> Result<Json<Value>, Response> {
     let session = authorize_console_session(&state, &headers, true)?;
+    let _index_guard = try_acquire_console_memory_index_guard(&state.console_memory_index_active)
+        .map_err(runtime_status_response)?;
     let batch_size = payload.batch_size.unwrap_or(64).clamp(1, 256);
     let until_complete = payload.until_complete.unwrap_or(false);
     let run_maintenance = payload.run_maintenance.unwrap_or(false);
-    let cancel_after_batches = payload.cancel_after_batches.filter(|value| *value > 0);
+    let batch_budget = memory_index_batch_budget(payload.cancel_after_batches);
 
     let maintenance =
         if run_maintenance { Some(run_memory_maintenance_now(&state).await?) } else { None };
@@ -251,16 +263,16 @@ pub(crate) async fn console_memory_index_handler(
         .await
         .map_err(runtime_status_response)?;
     let mut batches_executed = 1_u64;
+    let mut provider_batch_limit_reached = false;
     let mut scanned_count = provider_reindex.progress.scanned_count;
     let mut updated_count = provider_reindex.progress.updated_count;
     while until_complete && !provider_reindex.progress.complete {
-        if cancel_after_batches.is_some_and(|limit| batches_executed >= limit) {
-            provider_reindex.state = "cancelled".to_owned();
-            provider_reindex.cancelled = true;
-            provider_reindex.cancel_reason = Some("operator_requested_batch_limit".to_owned());
-            provider_reindex
-                .artifact_log
-                .push("memory provider reindex cancelled by operator batch limit".to_owned());
+        if batches_executed >= batch_budget.max_batches_per_request {
+            provider_batch_limit_reached = true;
+            mark_provider_reindex_batch_limited(
+                &mut provider_reindex,
+                batch_budget.max_batches_per_request,
+            );
             break;
         }
         provider_reindex = run_memory_provider_reindex(state.runtime.clone(), batch_size)
@@ -275,13 +287,26 @@ pub(crate) async fn console_memory_index_handler(
         .run_external_retrieval_indexer(batch_size)
         .await
         .map_err(runtime_status_response)?;
+    let mut external_indexer_batches_executed = 1_u64;
+    let mut external_indexer_batch_limit_reached = false;
     while until_complete && !provider_reindex.cancelled && !external_indexer.complete {
+        if external_indexer_batches_executed >= batch_budget.max_batches_per_request {
+            external_indexer_batch_limit_reached = true;
+            break;
+        }
         external_indexer = state
             .runtime
             .run_external_retrieval_indexer(batch_size)
             .await
             .map_err(runtime_status_response)?;
+        external_indexer_batches_executed = external_indexer_batches_executed.saturating_add(1);
     }
+    let external_indexer_payload = external_indexer_payload(
+        &external_indexer,
+        external_indexer_batches_executed,
+        batch_budget.max_batches_per_request,
+        external_indexer_batch_limit_reached,
+    );
     let drift =
         state.runtime.external_retrieval_drift_report().await.map_err(runtime_status_response)?;
     let retrieval_backend =
@@ -316,15 +341,18 @@ pub(crate) async fn console_memory_index_handler(
         "target_dims": provider_reindex.progress.target_dims,
         "target_version": provider_reindex.progress.target_version,
         "until_complete": until_complete,
-        "cancel_after_batches": cancel_after_batches,
+        "cancel_after_batches": batch_budget.requested_cancel_after_batches,
+        "max_batches_per_request": batch_budget.max_batches_per_request,
+        "batch_limit_reached": provider_batch_limit_reached,
         "cancelled": provider_reindex.cancelled,
+        "cancel_reason": provider_reindex.cancel_reason.clone(),
     });
     let event_details = json!({
         "batch_size": batch_size,
         "until_complete": until_complete,
         "run_maintenance": run_maintenance,
         "index": index_payload.clone(),
-        "external_indexer": external_indexer.clone(),
+        "external_indexer": external_indexer_payload.clone(),
         "provider_reindex": provider_reindex.clone(),
         "drift": drift.clone(),
         "maintenance": maintenance_payload.clone(),
@@ -340,7 +368,7 @@ pub(crate) async fn console_memory_index_handler(
     Ok(Json(json!({
         "maintenance": maintenance_payload,
         "index": index_payload,
-        "external_indexer": external_indexer,
+        "external_indexer": external_indexer_payload,
         "provider_reindex": provider_reindex,
         "drift": drift,
         "external_index": retrieval_backend.external_index.clone(),
@@ -349,6 +377,70 @@ pub(crate) async fn console_memory_index_handler(
         },
         "embeddings": embeddings_status,
     })))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MemoryIndexBatchBudget {
+    requested_cancel_after_batches: Option<u64>,
+    max_batches_per_request: u64,
+}
+
+fn memory_index_batch_budget(cancel_after_batches: Option<u64>) -> MemoryIndexBatchBudget {
+    let requested_cancel_after_batches = cancel_after_batches.filter(|value| *value > 0);
+    let max_batches_per_request = requested_cancel_after_batches
+        .unwrap_or(MEMORY_INDEX_DEFAULT_MAX_BATCHES_PER_REQUEST)
+        .clamp(1, MEMORY_INDEX_HARD_MAX_BATCHES_PER_REQUEST);
+    MemoryIndexBatchBudget { requested_cancel_after_batches, max_batches_per_request }
+}
+
+fn mark_provider_reindex_batch_limited(
+    provider_reindex: &mut crate::application::memory_provider::MemoryProviderReindexOutcome,
+    max_batches_per_request: u64,
+) {
+    provider_reindex.state = "cancelled".to_owned();
+    provider_reindex.cancelled = true;
+    provider_reindex.cancel_reason = Some(MEMORY_INDEX_BATCH_LIMIT_REASON.to_owned());
+    provider_reindex.artifact_log.push(format!(
+        "memory provider reindex stopped after {max_batches_per_request} batches; rerun to continue"
+    ));
+}
+
+fn external_indexer_payload(
+    external_indexer: &crate::retrieval::ExternalRetrievalIndexerOutcome,
+    batches_executed: u64,
+    max_batches_per_request: u64,
+    batch_limit_reached: bool,
+) -> Value {
+    let mut payload = serde_json::to_value(external_indexer).unwrap_or_else(|_| json!({}));
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("batches_executed".to_owned(), json!(batches_executed));
+        object.insert("max_batches_per_request".to_owned(), json!(max_batches_per_request));
+        object.insert("batch_limit_reached".to_owned(), json!(batch_limit_reached));
+        object.insert("cancelled".to_owned(), json!(batch_limit_reached));
+        if batch_limit_reached {
+            object.insert("cancel_reason".to_owned(), json!(MEMORY_INDEX_BATCH_LIMIT_REASON));
+        }
+    }
+    payload
+}
+
+struct ConsoleMemoryIndexRunGuard {
+    active: Arc<AtomicBool>,
+}
+
+impl Drop for ConsoleMemoryIndexRunGuard {
+    fn drop(&mut self) {
+        self.active.store(false, Ordering::Release);
+    }
+}
+
+fn try_acquire_console_memory_index_guard(
+    active: &Arc<AtomicBool>,
+) -> Result<ConsoleMemoryIndexRunGuard, tonic::Status> {
+    active
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .map_err(|_| tonic::Status::resource_exhausted(MEMORY_INDEX_CONCURRENT_RUN_MESSAGE))?;
+    Ok(ConsoleMemoryIndexRunGuard { active: Arc::clone(active) })
 }
 
 pub(crate) async fn console_memory_search_handler(
@@ -1957,5 +2049,83 @@ mod tests {
         assert!(inventory.get("payload").is_none());
         assert!(inventory.get("diagnostics").is_none());
         assert!(inventory.get("provenance").is_none());
+    }
+
+    #[test]
+    fn memory_index_batch_budget_defaults_and_clamps() {
+        assert_eq!(
+            memory_index_batch_budget(None),
+            MemoryIndexBatchBudget {
+                requested_cancel_after_batches: None,
+                max_batches_per_request: MEMORY_INDEX_DEFAULT_MAX_BATCHES_PER_REQUEST,
+            }
+        );
+        assert_eq!(
+            memory_index_batch_budget(Some(2)),
+            MemoryIndexBatchBudget {
+                requested_cancel_after_batches: Some(2),
+                max_batches_per_request: 2,
+            }
+        );
+        assert_eq!(
+            memory_index_batch_budget(Some(u64::MAX)),
+            MemoryIndexBatchBudget {
+                requested_cancel_after_batches: Some(u64::MAX),
+                max_batches_per_request: MEMORY_INDEX_HARD_MAX_BATCHES_PER_REQUEST,
+            }
+        );
+        assert_eq!(
+            memory_index_batch_budget(Some(0)),
+            MemoryIndexBatchBudget {
+                requested_cancel_after_batches: None,
+                max_batches_per_request: MEMORY_INDEX_DEFAULT_MAX_BATCHES_PER_REQUEST,
+            }
+        );
+    }
+
+    #[test]
+    fn console_memory_index_guard_is_single_flight() {
+        let active = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let guard = match try_acquire_console_memory_index_guard(&active) {
+            Ok(guard) => guard,
+            Err(_) => panic!("first memory index guard acquisition should succeed"),
+        };
+
+        assert!(
+            try_acquire_console_memory_index_guard(&active).is_err(),
+            "second memory index guard acquisition must fail while first guard is held"
+        );
+
+        drop(guard);
+        assert!(
+            try_acquire_console_memory_index_guard(&active).is_ok(),
+            "memory index guard should be released on drop"
+        );
+    }
+
+    #[test]
+    fn external_indexer_payload_reports_batch_limit() {
+        let outcome = crate::retrieval::ExternalRetrievalIndexerOutcome {
+            ran_at_unix_ms: 1,
+            batch_size: 64,
+            attempt_count: 1,
+            indexed_memory_items: 2,
+            indexed_workspace_chunks: 3,
+            pending_memory_items: 4,
+            pending_workspace_chunks: 5,
+            journal_watermark_unix_ms: 6,
+            checkpoint_committed: true,
+            complete: false,
+            retry_policy: "none".to_owned(),
+        };
+
+        let payload = external_indexer_payload(&outcome, 8, 8, true);
+
+        assert_eq!(payload["indexed_memory_items"], 2);
+        assert_eq!(payload["batches_executed"], 8);
+        assert_eq!(payload["max_batches_per_request"], 8);
+        assert_eq!(payload["batch_limit_reached"], true);
+        assert_eq!(payload["cancelled"], true);
+        assert_eq!(payload["cancel_reason"], MEMORY_INDEX_BATCH_LIMIT_REASON);
     }
 }

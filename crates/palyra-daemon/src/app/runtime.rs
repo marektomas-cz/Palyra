@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
-    sync::{Arc, Mutex},
+    sync::{atomic::AtomicBool, Arc, Mutex},
     time::Instant,
 };
 
@@ -86,6 +86,7 @@ pub(crate) fn build_app_state(
         console_chat_streams: Arc::new(Mutex::new(HashMap::<String, ConsoleChatRunStream>::new())),
         support_bundle_jobs: Arc::new(Mutex::new(HashMap::new())),
         doctor_jobs: Arc::new(Mutex::new(HashMap::new())),
+        console_memory_index_active: Arc::new(AtomicBool::new(false)),
         maintenance_registry: Arc::new(MaintenanceRegistry::default()),
         observability,
         configured_secrets: Arc::new(Mutex::new(configured_secrets)),

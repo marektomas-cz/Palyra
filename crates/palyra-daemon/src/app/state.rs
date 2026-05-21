@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, VecDeque},
     net::IpAddr,
-    sync::{Arc, Mutex},
+    sync::{atomic::AtomicBool, Arc, Mutex},
     time::Instant,
 };
 
@@ -61,6 +61,7 @@ pub(crate) struct AppState {
     pub(crate) console_chat_streams: Arc<Mutex<HashMap<String, ConsoleChatRunStream>>>,
     pub(crate) support_bundle_jobs: Arc<Mutex<HashMap<String, control_plane::SupportBundleJob>>>,
     pub(crate) doctor_jobs: Arc<Mutex<HashMap<String, control_plane::DoctorRecoveryJob>>>,
+    pub(crate) console_memory_index_active: Arc<AtomicBool>,
     pub(crate) maintenance_registry: Arc<MaintenanceRegistry>,
     pub(crate) observability: Arc<ObservabilityState>,
     pub(crate) configured_secrets: Arc<Mutex<ConfiguredSecretsState>>,
