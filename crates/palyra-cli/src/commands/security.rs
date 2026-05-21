@@ -77,7 +77,6 @@ struct LocalProcessRunnerConfigSnapshot {
     enabled: bool,
     tier: String,
     allowed_executables_wildcard: bool,
-    allow_interpreters: bool,
     egress_enforcement_mode: String,
 }
 
@@ -86,7 +85,6 @@ impl LocalProcessRunnerConfigSnapshot {
         self.enabled
             && matches!(self.tier.as_str(), "b" | "tier_b")
             && self.allowed_executables_wildcard
-            && self.allow_interpreters
             && self.egress_enforcement_mode == "none"
     }
 }
@@ -391,8 +389,8 @@ fn build_security_findings(
             severity: "warning".to_owned(),
             code: "process_runner_permissive_host_process_profile".to_owned(),
             component: "sandbox".to_owned(),
-            message: "Process runner is enabled as Tier B with wildcard executable selection, interpreter execution, and egress enforcement disabled.".to_owned(),
-            remediation: "Use this only for trusted local desktop automation. For tighter posture, replace `allowed_executables = [\"*\"]` with an explicit allowlist, set `allow_interpreters = false`, and use `egress_enforcement_mode = \"preflight\"` or `\"strict\"`; path-like inputs remain workspace-confined, but Tier B is not an OS-level filesystem sandbox.".to_owned(),
+            message: "Process runner is enabled as Tier B with wildcard executable selection and egress enforcement disabled.".to_owned(),
+            remediation: "Use this only for trusted local desktop automation. For tighter posture, replace `allowed_executables = [\"*\"]` with an explicit allowlist and use `egress_enforcement_mode = \"preflight\"` or `\"strict\"`; `allow_interpreters = false` still permits wildcard non-interpreter host executables, and Tier B is not an OS-level filesystem sandbox.".to_owned(),
         });
     }
 
@@ -706,10 +704,6 @@ fn load_local_process_runner_config_snapshot(
                 values.iter().filter_map(toml::Value::as_str).any(|value| value.trim() == "*")
             })
             .unwrap_or(false);
-    let allow_interpreters =
-        get_value_at_path(document, "tool_call.process_runner.allow_interpreters")?
-            .and_then(toml::Value::as_bool)
-            .unwrap_or(false);
     let egress_enforcement_mode = normalize_process_runner_token(
         get_value_at_path(document, "tool_call.process_runner.egress_enforcement_mode")?
             .and_then(toml::Value::as_str)
@@ -720,7 +714,6 @@ fn load_local_process_runner_config_snapshot(
         enabled,
         tier,
         allowed_executables_wildcard,
-        allow_interpreters,
         egress_enforcement_mode,
     })
 }
@@ -999,7 +992,6 @@ mod tests {
                 enabled: true,
                 tier: "tier_b".to_owned(),
                 allowed_executables_wildcard: true,
-                allow_interpreters: true,
                 egress_enforcement_mode: "none".to_owned(),
             },
         };
@@ -1018,6 +1010,7 @@ mod tests {
                 finding.code == "process_runner_permissive_host_process_profile"
                     && finding.severity == "warning"
                     && finding.remediation.contains("explicit allowlist")
+                    && finding.remediation.contains("non-interpreter host executables")
             }),
             "security audit should flag permissive local process-runner posture"
         );
