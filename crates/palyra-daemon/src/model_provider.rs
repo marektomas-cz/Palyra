@@ -4497,12 +4497,12 @@ impl AnthropicProvider {
                     let Some(tool_name) = block.name else {
                         continue;
                     };
-                    let input_json = serde_json::to_vec(
+                    let input_json = normalize_tool_input_value(
                         &block.input.unwrap_or(Value::Object(serde_json::Map::new())),
                     )
                     .map_err(|error| {
                         AttemptError::invalid_response(
-                            format!("anthropic tool payload serialization failed: {error}"),
+                            format!("anthropic tool payload is invalid: {error}"),
                             "anthropic_chat_tool_payload",
                         )
                     })?;
@@ -5278,6 +5278,17 @@ fn normalize_tool_arguments(raw: &str) -> Result<Vec<u8>, String> {
     Ok(normalized)
 }
 
+fn normalize_tool_input_value(value: &Value) -> Result<Vec<u8>, String> {
+    let normalized = serde_json::to_vec(value)
+        .map_err(|error| format!("tool arguments could not be serialized: {error}"))?;
+    if normalized.len() > MAX_TOOL_ARGUMENT_BYTES {
+        return Err(format!(
+            "tool arguments exceed {MAX_TOOL_ARGUMENT_BYTES} bytes after serialization"
+        ));
+    }
+    Ok(normalized)
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -5600,6 +5611,22 @@ mod tests {
             openai_api_key_vault_ref: None,
             request_timeout_ms: 5_000,
             max_retries: 2,
+            retry_backoff_ms: 1,
+            circuit_breaker_failure_threshold: 2,
+            circuit_breaker_cooldown_ms: 120_000,
+            ..ModelProviderConfig::default()
+        }
+    }
+
+    fn anthropic_test_config(base_url: String) -> ModelProviderConfig {
+        ModelProviderConfig {
+            kind: ModelProviderKind::Anthropic,
+            anthropic_base_url: base_url,
+            allow_private_base_url: true,
+            anthropic_model: "claude-3-5-sonnet-latest".to_owned(),
+            anthropic_api_key: Some("sk-anthropic-test".to_owned()),
+            request_timeout_ms: 5_000,
+            max_retries: 0,
             retry_backoff_ms: 1,
             circuit_breaker_failure_threshold: 2,
             circuit_breaker_cooldown_ms: 120_000,
@@ -6606,6 +6633,53 @@ Then I will continue."#;
                 assert!(
                     message.contains("tool arguments exceed"),
                     "invalid response should explain tool argument size limit"
+                );
+            }
+            other => panic!("expected invalid-response error, got {other:?}"),
+        }
+        assert_eq!(
+            request_count.load(Ordering::Relaxed),
+            1,
+            "provider should issue one upstream request before rejecting response"
+        );
+        handle.join().expect("scripted server thread should exit");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn anthropic_provider_rejects_oversized_tool_input() {
+        let body = serde_json::json!({
+            "id": "msg_oversized",
+            "model": "claude-3-5-sonnet-latest",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_oversized",
+                    "name": "palyra.echo",
+                    "input": {
+                        "text": "a".repeat(super::MAX_TOOL_ARGUMENT_BYTES + 1)
+                    }
+                }
+            ],
+            "stop_reason": "tool_use",
+            "usage": {
+                "input_tokens": 1,
+                "output_tokens": 1
+            }
+        })
+        .to_string();
+        let (base_url, request_count, handle) = spawn_scripted_server(vec![(200_u16, body)]);
+        let provider = build_model_provider(&anthropic_test_config(base_url))
+            .expect("anthropic provider should build");
+
+        let response = provider
+            .complete(ProviderRequest::from_input_text("hello".to_owned(), false, Vec::new(), None))
+            .await;
+
+        match response {
+            Err(ProviderError::InvalidResponse { message, .. }) => {
+                assert!(
+                    message.contains("tool arguments exceed"),
+                    "invalid response should explain Anthropic tool input size limit"
                 );
             }
             other => panic!("expected invalid-response error, got {other:?}"),
