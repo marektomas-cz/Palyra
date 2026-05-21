@@ -35,6 +35,157 @@ pub(crate) fn run_memory(command: MemoryCommand) -> Result<()> {
     }
 }
 
+#[async_trait::async_trait]
+trait MemoryReplaceRpc {
+    async fn get_memory_item(
+        &mut self,
+        request: Request<memory_v1::GetMemoryItemRequest>,
+    ) -> Result<tonic::Response<memory_v1::GetMemoryItemResponse>, tonic::Status>;
+
+    async fn ingest_memory(
+        &mut self,
+        request: Request<memory_v1::IngestMemoryRequest>,
+    ) -> Result<tonic::Response<memory_v1::IngestMemoryResponse>, tonic::Status>;
+
+    async fn delete_memory_item(
+        &mut self,
+        request: Request<memory_v1::DeleteMemoryItemRequest>,
+    ) -> Result<tonic::Response<memory_v1::DeleteMemoryItemResponse>, tonic::Status>;
+}
+
+struct GrpcMemoryReplaceRpc<'a> {
+    client:
+        &'a mut memory_v1::memory_service_client::MemoryServiceClient<tonic::transport::Channel>,
+}
+
+#[async_trait::async_trait]
+impl MemoryReplaceRpc for GrpcMemoryReplaceRpc<'_> {
+    async fn get_memory_item(
+        &mut self,
+        request: Request<memory_v1::GetMemoryItemRequest>,
+    ) -> Result<tonic::Response<memory_v1::GetMemoryItemResponse>, tonic::Status> {
+        self.client.get_memory_item(request).await
+    }
+
+    async fn ingest_memory(
+        &mut self,
+        request: Request<memory_v1::IngestMemoryRequest>,
+    ) -> Result<tonic::Response<memory_v1::IngestMemoryResponse>, tonic::Status> {
+        self.client.ingest_memory(request).await
+    }
+
+    async fn delete_memory_item(
+        &mut self,
+        request: Request<memory_v1::DeleteMemoryItemRequest>,
+    ) -> Result<tonic::Response<memory_v1::DeleteMemoryItemResponse>, tonic::Status> {
+        self.client.delete_memory_item(request).await
+    }
+}
+
+#[derive(Debug)]
+struct MemoryReplaceOptions {
+    memory_id: String,
+    content: String,
+    source: Option<MemorySourceArg>,
+    tags: Vec<String>,
+    confidence: Option<String>,
+    ttl_unix_ms: Option<i64>,
+}
+
+#[derive(Debug)]
+struct MemoryReplaceOutcome {
+    replaced_memory_ulid: String,
+    replacement: memory_v1::MemoryItem,
+    deleted_original: bool,
+}
+
+async fn replace_memory_item(
+    client: &mut dyn MemoryReplaceRpc,
+    connection: &AgentConnection,
+    options: MemoryReplaceOptions,
+) -> Result<MemoryReplaceOutcome> {
+    if options.content.trim().is_empty() {
+        return Err(anyhow!("memory replace content cannot be empty"));
+    }
+    let replacement_confidence = options
+        .confidence
+        .map(|raw| parse_float_arg(Some(raw), "memory replace --confidence", 0.0, 1.0, None))
+        .transpose()?;
+    let memory_id = resolve_required_canonical_id(options.memory_id)
+        .context("memory replace memory_id must be a canonical ULID")?;
+    let replaced_memory_ulid = memory_id.ulid.clone();
+
+    let mut get_request = Request::new(memory_v1::GetMemoryItemRequest {
+        v: CANONICAL_PROTOCOL_MAJOR,
+        memory_id: Some(memory_id.clone()),
+    });
+    inject_run_stream_metadata(get_request.metadata_mut(), connection)?;
+    let existing = client
+        .get_memory_item(get_request)
+        .await
+        .context("failed to call memory GetMemoryItem before replace")?
+        .into_inner()
+        .item
+        .context("memory GetMemoryItem returned empty item payload before replace")?;
+
+    let replacement_tags =
+        if options.tags.is_empty() { existing.tags.clone() } else { options.tags };
+    let replacement_source = options.source.map(memory_source_to_proto).unwrap_or(existing.source);
+    let replacement_channel = existing.channel.clone();
+    let replacement_session_id = existing.session_id.clone();
+    let replacement_confidence = replacement_confidence.unwrap_or(existing.confidence);
+    let replacement_ttl_unix_ms = options.ttl_unix_ms.unwrap_or(existing.ttl_unix_ms);
+
+    let mut ingest_request = Request::new(memory_v1::IngestMemoryRequest {
+        v: CANONICAL_PROTOCOL_MAJOR,
+        source: replacement_source,
+        content_text: options.content,
+        channel: replacement_channel,
+        session_id: replacement_session_id,
+        tags: replacement_tags,
+        confidence: replacement_confidence,
+        ttl_unix_ms: replacement_ttl_unix_ms,
+    });
+    inject_run_stream_metadata(ingest_request.metadata_mut(), connection)?;
+    let replacement = client
+        .ingest_memory(ingest_request)
+        .await
+        .context("failed to call memory IngestMemory for replacement")?
+        .into_inner()
+        .item
+        .context("memory IngestMemory returned empty replacement item payload")?;
+    let replacement_id =
+        replacement.memory_id.as_ref().map(|value| value.ulid.clone()).unwrap_or_default();
+
+    let mut delete_request = Request::new(memory_v1::DeleteMemoryItemRequest {
+        v: CANONICAL_PROTOCOL_MAJOR,
+        memory_id: Some(memory_id),
+    });
+    inject_run_stream_metadata(delete_request.metadata_mut(), connection)?;
+    let delete_response = client
+        .delete_memory_item(delete_request)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to call memory DeleteMemoryItem after replacement ingest; replacement_id={replacement_id}"
+            )
+        })?
+        .into_inner();
+    if !delete_response.deleted {
+        return Err(anyhow!(
+            "memory replace ingested replacement_id={} but did not delete original_id={}",
+            replacement_id,
+            replaced_memory_ulid
+        ));
+    }
+
+    Ok(MemoryReplaceOutcome {
+        replaced_memory_ulid,
+        replacement,
+        deleted_original: delete_response.deleted,
+    })
+}
+
 pub(crate) async fn run_memory_async(
     command: MemoryCommand,
     connection: AgentConnection,
@@ -242,76 +393,29 @@ pub(crate) async fn run_memory_async(
             ttl_unix_ms,
             json,
         } => {
-            if content.trim().is_empty() {
-                return Err(anyhow!("memory replace content cannot be empty"));
-            }
-            let replacement_confidence = confidence
-                .map(|raw| {
-                    parse_float_arg(Some(raw), "memory replace --confidence", 0.0, 1.0, None)
-                })
-                .transpose()?;
-            let memory_id = resolve_required_canonical_id(memory_id)
-                .context("memory replace memory_id must be a canonical ULID")?;
-            let replaced_memory_ulid = memory_id.ulid.clone();
-
-            let mut get_request = Request::new(memory_v1::GetMemoryItemRequest {
-                v: CANONICAL_PROTOCOL_MAJOR,
-                memory_id: Some(memory_id.clone()),
-            });
-            inject_run_stream_metadata(get_request.metadata_mut(), &connection)?;
-            let existing = client
-                .get_memory_item(get_request)
-                .await
-                .context("failed to call memory GetMemoryItem before replace")?
-                .into_inner()
-                .item
-                .context("memory GetMemoryItem returned empty item payload before replace")?;
-
-            let replacement_tags = if tag.is_empty() { existing.tags.clone() } else { tag };
-            let replacement_source = source.map(memory_source_to_proto).unwrap_or(existing.source);
-            let replacement_channel = existing.channel.clone();
-            let replacement_session_id = existing.session_id.clone();
-            let replacement_confidence = replacement_confidence.unwrap_or(existing.confidence);
-            let replacement_ttl_unix_ms = ttl_unix_ms.unwrap_or(existing.ttl_unix_ms);
-            let mut delete_request = Request::new(memory_v1::DeleteMemoryItemRequest {
-                v: CANONICAL_PROTOCOL_MAJOR,
-                memory_id: Some(memory_id),
-            });
-            inject_run_stream_metadata(delete_request.metadata_mut(), &connection)?;
-            let delete_response = client
-                .delete_memory_item(delete_request)
-                .await
-                .context("failed to call memory DeleteMemoryItem before replacement ingest")?
-                .into_inner();
-            if !delete_response.deleted {
-                return Err(anyhow!(
-                    "memory replace did not delete the original item; replacement ingest was not attempted"
-                ));
-            }
-
-            let mut ingest_request = Request::new(memory_v1::IngestMemoryRequest {
-                v: CANONICAL_PROTOCOL_MAJOR,
-                source: replacement_source,
-                content_text: content,
-                channel: replacement_channel,
-                session_id: replacement_session_id,
-                tags: replacement_tags,
-                confidence: replacement_confidence,
-                ttl_unix_ms: replacement_ttl_unix_ms,
-            });
-            inject_run_stream_metadata(ingest_request.metadata_mut(), &connection)?;
-            let replacement = client
-                .ingest_memory(ingest_request)
-                .await
-                .context("failed to call memory IngestMemory for replacement")?
-                .into_inner()
-                .item
-                .context("memory IngestMemory returned empty replacement item payload")?;
+            let mut replace_client = GrpcMemoryReplaceRpc { client: &mut client };
+            let outcome = replace_memory_item(
+                &mut replace_client,
+                &connection,
+                MemoryReplaceOptions {
+                    memory_id,
+                    content,
+                    source,
+                    tags: tag,
+                    confidence,
+                    ttl_unix_ms,
+                },
+            )
+            .await?;
+            let replaced_memory_ulid = outcome.replaced_memory_ulid;
+            let replacement = outcome.replacement;
+            let replacement_id =
+                replacement.memory_id.as_ref().map(|value| value.ulid.clone()).unwrap_or_default();
 
             let payload = json!({
                 "replaced_memory_id": replaced_memory_ulid,
                 "replacement": memory_item_to_json(&replacement),
-                "deleted_original": delete_response.deleted,
+                "deleted_original": outcome.deleted_original,
             });
             if output::preferred_json(json) {
                 output::print_json_pretty(
@@ -324,14 +428,9 @@ pub(crate) async fn run_memory_async(
                     "failed to encode memory replace output as NDJSON",
                 )?;
             } else {
-                let replacement_id = replacement
-                    .memory_id
-                    .as_ref()
-                    .map(|value| value.ulid.as_str())
-                    .unwrap_or_default();
                 println!(
                     "memory.replace replaced_id={} replacement_id={} deleted_original={}",
-                    replaced_memory_ulid, replacement_id, delete_response.deleted
+                    replaced_memory_ulid, replacement_id, outcome.deleted_original
                 );
             }
         }
@@ -1346,9 +1445,168 @@ mod tests {
     use super::{
         attach_manual_ingest_visibility, memory_embeddings_degraded_line,
         memory_search_claim_boundary, memory_search_output_payload, memory_session_scope_label,
-        resolve_optional_query_arg,
+        replace_memory_item, resolve_optional_query_arg, MemoryReplaceOptions, MemoryReplaceRpc,
     };
+    use crate::{common_v1, memory_v1, AgentConnection, CANONICAL_PROTOCOL_MAJOR};
     use serde_json::{json, Value};
+    use std::sync::{Arc, Mutex};
+    use tonic::{Request, Response, Status};
+
+    const ORIGINAL_MEMORY_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    const REPLACEMENT_MEMORY_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAW";
+
+    #[derive(Debug, Default)]
+    struct MockMemoryState {
+        calls: Mutex<Vec<String>>,
+        original_present: Mutex<bool>,
+        replacement_present: Mutex<bool>,
+        reject_ingest: bool,
+    }
+
+    impl MockMemoryState {
+        fn new(reject_ingest: bool) -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+                original_present: Mutex::new(true),
+                replacement_present: Mutex::new(false),
+                reject_ingest,
+            }
+        }
+
+        fn record_call(&self, call: impl Into<String>) {
+            self.calls.lock().expect("mock calls lock should not be poisoned").push(call.into());
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().expect("mock calls lock should not be poisoned").clone()
+        }
+
+        fn original_present(&self) -> bool {
+            *self
+                .original_present
+                .lock()
+                .expect("mock original_present lock should not be poisoned")
+        }
+
+        fn set_original_present(&self, present: bool) {
+            *self
+                .original_present
+                .lock()
+                .expect("mock original_present lock should not be poisoned") = present;
+        }
+
+        fn set_replacement_present(&self, present: bool) {
+            *self
+                .replacement_present
+                .lock()
+                .expect("mock replacement_present lock should not be poisoned") = present;
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct MockMemoryRpc {
+        state: Arc<MockMemoryState>,
+    }
+
+    #[async_trait::async_trait]
+    impl MemoryReplaceRpc for MockMemoryRpc {
+        async fn ingest_memory(
+            &mut self,
+            request: Request<memory_v1::IngestMemoryRequest>,
+        ) -> Result<Response<memory_v1::IngestMemoryResponse>, Status> {
+            let payload = request.into_inner();
+            self.state.record_call(format!("ingest:{}", payload.content_text));
+            if self.state.reject_ingest {
+                return Err(Status::invalid_argument("memory content exceeds byte limit (42 > 8)"));
+            }
+            self.state.set_replacement_present(true);
+            Ok(Response::new(memory_v1::IngestMemoryResponse {
+                v: CANONICAL_PROTOCOL_MAJOR,
+                item: Some(mock_memory_item(REPLACEMENT_MEMORY_ID, payload.content_text.as_str())),
+            }))
+        }
+
+        async fn get_memory_item(
+            &mut self,
+            request: Request<memory_v1::GetMemoryItemRequest>,
+        ) -> Result<Response<memory_v1::GetMemoryItemResponse>, Status> {
+            let memory_id =
+                request.into_inner().memory_id.map(|value| value.ulid).unwrap_or_default();
+            self.state.record_call(format!("get:{memory_id}"));
+            if memory_id == ORIGINAL_MEMORY_ID && self.state.original_present() {
+                Ok(Response::new(memory_v1::GetMemoryItemResponse {
+                    v: CANONICAL_PROTOCOL_MAJOR,
+                    item: Some(mock_memory_item(ORIGINAL_MEMORY_ID, "original memory")),
+                }))
+            } else {
+                Err(Status::not_found(format!("memory item not found: {memory_id}")))
+            }
+        }
+
+        async fn delete_memory_item(
+            &mut self,
+            request: Request<memory_v1::DeleteMemoryItemRequest>,
+        ) -> Result<Response<memory_v1::DeleteMemoryItemResponse>, Status> {
+            let memory_id =
+                request.into_inner().memory_id.map(|value| value.ulid).unwrap_or_default();
+            self.state.record_call(format!("delete:{memory_id}"));
+            let deleted = if memory_id == ORIGINAL_MEMORY_ID && self.state.original_present() {
+                self.state.set_original_present(false);
+                true
+            } else if memory_id == REPLACEMENT_MEMORY_ID {
+                self.state.set_replacement_present(false);
+                true
+            } else {
+                false
+            };
+            Ok(Response::new(memory_v1::DeleteMemoryItemResponse {
+                v: CANONICAL_PROTOCOL_MAJOR,
+                deleted,
+            }))
+        }
+    }
+
+    fn test_connection() -> AgentConnection {
+        AgentConnection {
+            grpc_url: "memory://mock".to_owned(),
+            token: None,
+            principal: "user:test".to_owned(),
+            device_id: "device:test".to_owned(),
+            channel: "cli".to_owned(),
+            trace_id: "trace:test".to_owned(),
+        }
+    }
+
+    fn mock_memory_item(memory_id: &str, content_text: &str) -> memory_v1::MemoryItem {
+        memory_v1::MemoryItem {
+            v: CANONICAL_PROTOCOL_MAJOR,
+            memory_id: Some(common_v1::CanonicalId { ulid: memory_id.to_owned() }),
+            principal: "user:test".to_owned(),
+            channel: "cli".to_owned(),
+            session_id: Some(common_v1::CanonicalId {
+                ulid: "01ARZ3NDEKTSV4RRFFQ69G5FAX".to_owned(),
+            }),
+            source: memory_v1::MemorySource::Manual as i32,
+            content_text: content_text.to_owned(),
+            content_hash: "sha256:test".to_owned(),
+            tags: vec!["existing".to_owned()],
+            confidence: 0.75,
+            ttl_unix_ms: 9_999,
+            created_at_unix_ms: 1_000,
+            updated_at_unix_ms: 1_000,
+        }
+    }
+
+    fn memory_replace_options(content: &str) -> MemoryReplaceOptions {
+        MemoryReplaceOptions {
+            memory_id: ORIGINAL_MEMORY_ID.to_owned(),
+            content: content.to_owned(),
+            source: None,
+            tags: Vec::new(),
+            confidence: None,
+            ttl_unix_ms: None,
+        }
+    }
 
     #[test]
     fn memory_session_scope_label_redacts_identifier_value() {
@@ -1457,5 +1715,34 @@ mod tests {
         });
 
         assert_eq!(memory_embeddings_degraded_line(&payload), None);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn memory_replace_failed_ingest_preserves_original_item() -> anyhow::Result<()> {
+        let state = Arc::new(MockMemoryState::new(true));
+        let mut client = MockMemoryRpc { state: Arc::clone(&state) };
+
+        let result = replace_memory_item(
+            &mut client,
+            &test_connection(),
+            memory_replace_options("oversized replacement"),
+        )
+        .await;
+
+        let error = result.expect_err("replacement ingest failure should be reported");
+        assert!(
+            error.to_string().contains("failed to call memory IngestMemory for replacement"),
+            "{error:?}"
+        );
+        assert_eq!(
+            state.calls(),
+            [format!("get:{ORIGINAL_MEMORY_ID}"), "ingest:oversized replacement".to_owned(),],
+            "replace must not delete the original until replacement ingest succeeds"
+        );
+        assert!(
+            state.original_present(),
+            "failed replacement must leave the original item present"
+        );
+        Ok(())
     }
 }
