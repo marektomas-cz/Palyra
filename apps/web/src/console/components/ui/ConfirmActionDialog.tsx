@@ -1,4 +1,5 @@
 import { AlertDialog, Button } from "@heroui/react";
+import type { ReactNode } from "react";
 
 import type { UiTone } from "./utils";
 
@@ -6,7 +7,7 @@ type ConfirmActionDialogProps = {
   isOpen: boolean;
   onOpenChange: (isOpen: boolean) => void;
   title: string;
-  description: string;
+  description: ReactNode;
   confirmLabel: string;
   confirmTone?: UiTone;
   isBusy?: boolean;

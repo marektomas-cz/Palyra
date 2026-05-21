@@ -412,6 +412,20 @@ describe("M56 config, access, and support surfaces", () => {
     const approveDialog = await screen.findByRole("alertdialog", {
       name: "Approve pairing request",
     });
+    expect(approveDialog).toHaveTextContent("Device ID");
+    expect(approveDialog).toHaveTextContent("01ARZ3NDEKTSV4RRFFQ69G5FAZ");
+    expect(approveDialog).toHaveTextContent("Client kind");
+    expect(approveDialog).toHaveTextContent("node");
+    expect(approveDialog).toHaveTextContent("Request ID");
+    expect(approveDialog).toHaveTextContent("pair-req-pending");
+    expect(approveDialog).toHaveTextContent("Session ID");
+    expect(approveDialog).toHaveTextContent("session-pending");
+    expect(approveDialog).toHaveTextContent("Identity fingerprint");
+    expect(approveDialog).toHaveTextContent("sha256:pending-node-fingerprint");
+    expect(approveDialog).toHaveTextContent("Transcript hash");
+    expect(approveDialog).toHaveTextContent("pending-transcript-hash");
+    expect(approveDialog).toHaveTextContent("Request expires");
+    expect(approveDialog).toHaveTextContent("Certificate expires");
     fireEvent.click(within(approveDialog).getByRole("button", { name: "Approve pairing request" }));
     await waitFor(() => {
       expect(screen.getByText("Pairing request pair-req-pending approved.")).toBeInTheDocument();

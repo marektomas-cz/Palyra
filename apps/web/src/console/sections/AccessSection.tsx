@@ -24,6 +24,7 @@ import {
   WorkspaceConfirmDialog,
   WorkspaceEmptyState,
   WorkspaceInlineNotice,
+  WorkspaceKeyValueList,
   WorkspaceTable,
   workspaceToneForState,
 } from "../components/workspace/WorkspacePatterns";
@@ -273,13 +274,7 @@ export function AccessSection({ app }: AccessSectionProps) {
             : "Approve pairing request"
         }
         confirmTone={pendingDecision?.action === "reject" ? "danger" : "accent"}
-        description={
-          pendingDecision === null
-            ? ""
-            : pendingDecision.action === "reject"
-              ? `Reject ${pendingDecision.request.device_id} and keep the request out of the trusted inventory path.`
-              : `Approve ${pendingDecision.request.device_id} and publish its trust material into the paired inventory surface.`
-        }
+        description={renderPairingDecisionDescription(pendingDecision, inventory.devices)}
         isBusy={accessBusy}
         isOpen={pendingDecision !== null}
         onConfirm={() => void confirmDecision()}
@@ -308,6 +303,51 @@ function readCapabilityCatalog(value: JsonObject | null): CapabilityCatalog | nu
   return value !== null && Array.isArray(value.capabilities)
     ? (value as unknown as CapabilityCatalog)
     : null;
+}
+
+function renderPairingDecisionDescription(
+  pendingDecision: PendingDecision | null,
+  devices: InventoryDeviceRecord[],
+) {
+  if (pendingDecision === null) {
+    return "";
+  }
+
+  const { action, request } = pendingDecision;
+  const consequence =
+    action === "reject"
+      ? `Reject ${request.device_id} and keep the request out of the trusted inventory path.`
+      : describeApprovalConsequence(request, devices);
+
+  return (
+    <div className="workspace-stack">
+      <p>{consequence}</p>
+      <WorkspaceKeyValueList
+        items={[
+          { label: "Device ID", value: <code>{request.device_id}</code> },
+          { label: "Client kind", value: request.client_kind },
+          { label: "Request ID", value: <code>{request.request_id}</code> },
+          { label: "Session ID", value: <code>{request.session_id}</code> },
+          {
+            label: "Identity fingerprint",
+            value: <code>{request.identity_fingerprint}</code>,
+          },
+          {
+            label: "Transcript hash",
+            value: <code>{request.transcript_hash_hex}</code>,
+          },
+          { label: "Request expires", value: formatUnixMs(request.expires_at_unix_ms) },
+          {
+            label: "Certificate expires",
+            value:
+              request.cert_expires_at_unix_ms === undefined
+                ? "n/a"
+                : formatUnixMs(request.cert_expires_at_unix_ms),
+          },
+        ]}
+      />
+    </div>
+  );
 }
 
 function PairingWizardCard({
