@@ -1107,15 +1107,36 @@ async fn set_objective_job_enabled(
     Ok(())
 }
 
-async fn delete_objective_job(
+async fn disable_objective_job_for_archive(
     state: &AppState,
     objective: &ObjectiveRecord,
 ) -> Result<(), Response> {
     let Some(routine_id) = objective.automation.routine_id.as_ref() else {
         return Ok(());
     };
-    state.runtime.delete_cron_job(routine_id.clone()).await.map_err(runtime_status_response)?;
-    state.routines.delete_routine(routine_id.as_str()).map_err(routine_registry_error_response)?;
+    let Some(job) =
+        state.runtime.cron_job(routine_id.clone()).await.map_err(runtime_status_response)?
+    else {
+        return Ok(());
+    };
+    let next_run_at_unix_ms = cron::next_run_at_for_enabled_state(
+        &job,
+        false,
+        crate::gateway::current_unix_ms_status().map_err(runtime_status_response)?,
+    )
+    .map_err(runtime_status_response)?;
+    state
+        .runtime
+        .update_cron_job(
+            routine_id.clone(),
+            CronJobUpdatePatch {
+                enabled: Some(false),
+                next_run_at_unix_ms: Some(next_run_at_unix_ms),
+                ..CronJobUpdatePatch::default()
+            },
+        )
+        .await
+        .map_err(runtime_status_response)?;
     Ok(())
 }
 
@@ -1317,7 +1338,7 @@ async fn apply_archive_action(
     objective.state = ObjectiveState::Archived;
     objective.automation.enabled = false;
     objective.archived_at_unix_ms = Some(now_unix_ms);
-    delete_objective_job(state, objective).await?;
+    disable_objective_job_for_archive(state, objective).await?;
     objective.lifecycle_history.push(ObjectiveLifecycleRecord {
         event_id: Ulid::new().to_string(),
         action: "archive".to_owned(),
@@ -2510,16 +2531,19 @@ mod tests {
     fn archive_projection_disables_automation_without_losing_routine_history_link() {
         let mut objective = sample_objective();
         let routine_id = objective.automation.routine_id.clone();
+        let run_id = Ulid::new().to_string();
+        objective.linked_run_ids.push(run_id.clone());
         apply_lifecycle_workspace_projection("archive", &mut objective)
             .expect("archive projection should succeed");
         assert_eq!(objective.state, ObjectiveState::Archived);
         assert!(!objective.automation.enabled);
         assert_eq!(objective.automation.routine_id, routine_id);
+        assert_eq!(objective.linked_run_ids, vec![run_id]);
         assert!(objective.lifecycle_history.is_empty());
     }
 
     #[test]
-    fn archived_objective_routine_snapshot_surfaces_deleted_job_binding() {
+    fn archived_objective_routine_snapshot_surfaces_retained_binding_when_job_missing() {
         let mut objective = sample_objective();
         objective.state = ObjectiveState::Archived;
         objective.automation.enabled = false;
