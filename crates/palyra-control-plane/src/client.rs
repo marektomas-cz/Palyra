@@ -1309,6 +1309,19 @@ impl ControlPlaneClient {
         .await
     }
 
+    pub async fn reconnect_openai_oauth(
+        &self,
+        request: &ProviderAuthActionRequest,
+    ) -> Result<OpenAiOAuthBootstrapEnvelope, ControlPlaneClientError> {
+        self.request_json(
+            Method::POST,
+            "console/v1/auth/providers/openai/reconnect",
+            Some(request),
+            true,
+        )
+        .await
+    }
+
     pub async fn run_openai_provider_action(
         &self,
         action: &str,

@@ -150,3 +150,28 @@ fn mobile_bootstrap_envelope_round_trips() {
     assert_eq!(decoded.default_locale, "en");
     assert!(decoded.release_scope.voice_note);
 }
+
+#[test]
+fn openai_reconnect_response_shape_is_oauth_bootstrap() {
+    let value = serde_json::json!({
+        "contract": {
+            "contract_version": CONTROL_PLANE_CONTRACT_VERSION
+        },
+        "provider": "openai",
+        "attempt_id": "attempt-1",
+        "authorization_url": "https://auth.openai.example/authorize",
+        "expires_at_unix_ms": 1_772_000_000_000i64,
+        "profile_id": "openai-default",
+        "message": "Open the authorization URL to reconnect OpenAI."
+    });
+
+    let decoded = serde_json::from_value::<OpenAiOAuthBootstrapEnvelope>(value.clone())
+        .expect("reconnect success response should decode as OAuth bootstrap");
+
+    assert_eq!(decoded.attempt_id, "attempt-1");
+    assert_eq!(decoded.profile_id.as_deref(), Some("openai-default"));
+    assert!(
+        serde_json::from_value::<ProviderAuthActionEnvelope>(value).is_err(),
+        "reconnect responses intentionally omit provider action state fields"
+    );
+}

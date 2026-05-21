@@ -813,14 +813,7 @@ async fn run_auth_openai_async(command: AuthOpenAiCommand) -> Result<()> {
                 })
                 .await
                 .context("failed to start OpenAI OAuth bootstrap")?;
-            let mut payload = OpenAiOAuthLaunchPayload {
-                attempt_id: response.attempt_id,
-                authorization_url: response.authorization_url,
-                expires_at_unix_ms: response.expires_at_unix_ms,
-                profile_id: response.profile_id,
-                opened: false,
-                message: response.message,
-            };
+            let mut payload = build_openai_oauth_launch_payload(response);
             if open {
                 open_url_in_default_browser(payload.authorization_url.as_str()).with_context(
                     || {
@@ -883,19 +876,13 @@ async fn run_auth_openai_async(command: AuthOpenAiCommand) -> Result<()> {
                     .await?;
             let response = context
                 .client
-                .run_openai_provider_action(
-                    "reconnect",
-                    &control_plane::ProviderAuthActionRequest { profile_id: Some(profile_id) },
-                )
+                .reconnect_openai_oauth(&control_plane::ProviderAuthActionRequest {
+                    profile_id: Some(profile_id),
+                })
                 .await
                 .context("failed to reconnect OpenAI auth profile")?;
-            emit_openai_action(
-                OpenAiActionPayload {
-                    action: response.action,
-                    state: response.state,
-                    message: response.message,
-                    profile_id: response.profile_id,
-                },
+            emit_openai_oauth_launch(
+                build_openai_oauth_launch_payload(response),
                 output::preferred_json(json),
             )
         }
@@ -1013,6 +1000,19 @@ fn build_openai_status_payload(
         refresh,
         profiles,
     })
+}
+
+fn build_openai_oauth_launch_payload(
+    response: control_plane::OpenAiOAuthBootstrapEnvelope,
+) -> OpenAiOAuthLaunchPayload {
+    OpenAiOAuthLaunchPayload {
+        attempt_id: response.attempt_id,
+        authorization_url: response.authorization_url,
+        expires_at_unix_ms: response.expires_at_unix_ms,
+        profile_id: response.profile_id,
+        opened: false,
+        message: response.message,
+    }
 }
 
 fn emit_openai_status(payload: OpenAiAuthStatusPayload, json_output: bool) -> Result<()> {
@@ -1320,9 +1320,10 @@ fn load_secret_input(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_auth_profiles_list_json_payload, AUTH_PROFILES_EMPTY_REGISTRY_NOTE,
-        AUTH_PROFILES_MODEL_PROVIDER_SOURCES,
+        build_auth_profiles_list_json_payload, build_openai_oauth_launch_payload,
+        AUTH_PROFILES_EMPTY_REGISTRY_NOTE, AUTH_PROFILES_MODEL_PROVIDER_SOURCES,
     };
+    use palyra_control_plane as control_plane;
     use serde_json::json;
 
     #[test]
@@ -1362,5 +1363,28 @@ mod tests {
             AUTH_PROFILES_EMPTY_REGISTRY_NOTE.contains("auth-profile registry"),
             "empty-registry note should keep the command boundary explicit"
         );
+    }
+
+    #[test]
+    fn openai_oauth_bootstrap_response_builds_launch_payload() {
+        let payload =
+            build_openai_oauth_launch_payload(control_plane::OpenAiOAuthBootstrapEnvelope {
+                contract: control_plane::ContractDescriptor {
+                    contract_version: control_plane::CONTROL_PLANE_CONTRACT_VERSION.to_owned(),
+                },
+                provider: "openai".to_owned(),
+                attempt_id: "attempt-1".to_owned(),
+                authorization_url: "https://auth.openai.example/authorize".to_owned(),
+                expires_at_unix_ms: 1_772_000_000_000,
+                profile_id: Some("openai-default".to_owned()),
+                message: "Open the authorization URL to reconnect OpenAI.".to_owned(),
+            });
+
+        assert_eq!(payload.attempt_id, "attempt-1");
+        assert_eq!(payload.authorization_url, "https://auth.openai.example/authorize");
+        assert_eq!(payload.expires_at_unix_ms, 1_772_000_000_000);
+        assert_eq!(payload.profile_id.as_deref(), Some("openai-default"));
+        assert!(!payload.opened);
+        assert_eq!(payload.message, "Open the authorization URL to reconnect OpenAI.");
     }
 }
