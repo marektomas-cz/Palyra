@@ -138,6 +138,7 @@ async fn run_node_async(command: NodeCommand) -> Result<()> {
             method,
             pairing_code,
             pairing_code_stdin,
+            allow_insecure_pairing_code_arg,
             poll_interval_ms,
             json,
         } => {
@@ -147,6 +148,7 @@ async fn run_node_async(command: NodeCommand) -> Result<()> {
                 method,
                 pairing_code,
                 pairing_code_stdin,
+                allow_insecure_pairing_code_arg,
                 gateway_ca_file,
             )
             .await?;
@@ -164,6 +166,7 @@ async fn run_node_async(command: NodeCommand) -> Result<()> {
             method,
             pairing_code,
             pairing_code_stdin,
+            allow_insecure_pairing_code_arg,
             start,
             json,
         } => {
@@ -174,6 +177,7 @@ async fn run_node_async(command: NodeCommand) -> Result<()> {
                 method,
                 pairing_code,
                 pairing_code_stdin,
+                allow_insecure_pairing_code_arg,
                 gateway_ca_file,
             )
             .await?;
@@ -470,6 +474,7 @@ async fn ensure_node_pairing_material(
     method: Option<PairingMethodArg>,
     pairing_code: Option<String>,
     pairing_code_stdin: bool,
+    allow_insecure_pairing_code_arg: bool,
     gateway_ca_file: Option<String>,
 ) -> Result<()> {
     if load_node_client_material(config).is_ok() {
@@ -479,13 +484,16 @@ async fn ensure_node_pairing_material(
     let method = method.ok_or_else(|| {
         anyhow!("node pairing bootstrap requires --method when local pairing material is absent")
     })?;
-    let pairing_code = resolve_pairing_code_input(pairing_code, pairing_code_stdin)?.ok_or_else(
-        || {
-            anyhow!(
-                "node pairing bootstrap requires --pairing-code or --pairing-code-stdin when local pairing material is absent"
-            )
-        },
-    )?;
+    let pairing_code = resolve_pairing_code_input(
+        pairing_code,
+        pairing_code_stdin,
+        allow_insecure_pairing_code_arg,
+    )?
+    .ok_or_else(|| {
+        anyhow!(
+            "node pairing bootstrap requires --pairing-code-stdin, or --pairing-code with --allow-insecure-pairing-code-arg, when local pairing material is absent"
+        )
+    })?;
     let gateway_ca_certificate_pem = match gateway_ca_file.map(PathBuf::from) {
         Some(gateway_ca_file) => {
             fs::read_to_string(gateway_ca_file.as_path()).with_context(|| {
@@ -629,6 +637,7 @@ async fn ensure_node_pairing_material(
 fn resolve_pairing_code_input(
     pairing_code: Option<String>,
     pairing_code_stdin: bool,
+    allow_insecure_pairing_code_arg: bool,
 ) -> Result<Option<String>> {
     if pairing_code.is_some() && pairing_code_stdin {
         anyhow::bail!("use either --pairing-code or --pairing-code-stdin, not both");
@@ -640,7 +649,15 @@ fn resolve_pairing_code_input(
             .context("failed to read node pairing code from stdin")?;
         return Ok(normalize_pairing_code_input(raw));
     }
-    Ok(pairing_code.and_then(normalize_pairing_code_input))
+    if let Some(pairing_code) = pairing_code {
+        if !allow_insecure_pairing_code_arg {
+            anyhow::bail!(
+                "refusing --pairing-code without --allow-insecure-pairing-code-arg because command-line arguments can be exposed through process lists; use --pairing-code-stdin instead"
+            );
+        }
+        return Ok(normalize_pairing_code_input(pairing_code));
+    }
+    Ok(None)
 }
 
 fn normalize_pairing_code_input(value: String) -> Option<String> {
@@ -1286,7 +1303,7 @@ mod tests {
     use super::{
         build_capability_lifecycle_payload, capability_requires_local_mediation,
         open_path_capability, open_url_capability, render_node_lifecycle_text,
-        NodeLifecyclePayload,
+        resolve_pairing_code_input, NodeLifecyclePayload,
     };
     use crate::proto::palyra::{common::v1 as common_v1, node::v1 as node_v1};
 
@@ -1345,6 +1362,25 @@ mod tests {
         assert!(capability_requires_local_mediation("desktop.open_path"));
         assert!(!capability_requires_local_mediation("system.health"));
         assert!(!capability_requires_local_mediation("echo"));
+    }
+
+    #[test]
+    fn node_pairing_code_arg_requires_explicit_insecure_acknowledgement() {
+        let error = resolve_pairing_code_input(Some("123456".to_owned()), false, false)
+            .expect_err("argv pairing code must require explicit acknowledgement");
+
+        assert!(
+            error.to_string().contains("--allow-insecure-pairing-code-arg"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn node_pairing_code_arg_with_acknowledgement_is_normalized() {
+        let code = resolve_pairing_code_input(Some(" 123456 \n".to_owned()), false, true)
+            .expect("acknowledged argv pairing code should resolve");
+
+        assert_eq!(code.as_deref(), Some("123456"));
     }
 
     #[test]

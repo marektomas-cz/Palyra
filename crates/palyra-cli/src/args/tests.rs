@@ -6312,6 +6312,7 @@ fn parse_node_install_with_bootstrap_material() {
         "pin",
         "--pairing-code",
         "123456",
+        "--allow-insecure-pairing-code-arg",
         "--start",
         "--json",
     ]);
@@ -6325,6 +6326,7 @@ fn parse_node_install_with_bootstrap_material() {
                 method: Some(PairingMethodArg::Pin),
                 pairing_code: Some("123456".to_owned()),
                 pairing_code_stdin: false,
+                allow_insecure_pairing_code_arg: true,
                 start: true,
                 json: true,
             }
@@ -6346,10 +6348,51 @@ fn parse_node_install_with_pairing_code_stdin() {
                 method: Some(PairingMethodArg::Pin),
                 pairing_code: None,
                 pairing_code_stdin: true,
+                allow_insecure_pairing_code_arg: false,
                 start: false,
                 json: false,
             }
         }
+    );
+}
+
+#[test]
+fn parse_node_install_rejects_pairing_code_without_insecure_acknowledgement() {
+    let error = Cli::try_parse_from([
+        "palyra",
+        "node",
+        "install",
+        "--method",
+        "pin",
+        "--pairing-code",
+        "123456",
+    ])
+    .expect_err("argv pairing code must require explicit acknowledgement");
+
+    assert_eq!(error.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    assert!(
+        error.to_string().contains("--allow-insecure-pairing-code-arg"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn parse_node_run_rejects_pairing_code_without_insecure_acknowledgement() {
+    let error = Cli::try_parse_from([
+        "palyra",
+        "node",
+        "run",
+        "--method",
+        "pin",
+        "--pairing-code",
+        "123456",
+    ])
+    .expect_err("argv pairing code must require explicit acknowledgement");
+
+    assert_eq!(error.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    assert!(
+        error.to_string().contains("--allow-insecure-pairing-code-arg"),
+        "unexpected error: {error}"
     );
 }
 

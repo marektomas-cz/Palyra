@@ -2,14 +2,25 @@ Usage: palyra node install [OPTIONS]
 
 Options:
       --grpc-url <GRPC_URL>
+
       --gateway-ca-file <GATEWAY_CA_FILE>
+
       --device-id <DEVICE_ID>
-      --method <METHOD>                    [possible values: pin, qr]
+
+      --method <METHOD>
+          [possible values: pin, qr]
       --pairing-code <PAIRING_CODE>
+          Read the node pairing code from argv after acknowledging process-list exposure
       --pairing-code-stdin
+
+      --allow-insecure-pairing-code-arg
+          Allow --pairing-code despite process-list exposure; prefer --pairing-code-stdin
       --start
+
       --json
-  -h, --help                               Print help
+
+  -h, --help
+          Print help
 
 Global Options:
       --profile <PROFILE>

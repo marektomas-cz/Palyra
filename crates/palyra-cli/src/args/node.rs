@@ -13,10 +13,21 @@ pub enum NodeCommand {
         device_id: Option<String>,
         #[arg(long, value_enum)]
         method: Option<PairingMethodArg>,
-        #[arg(long)]
+        #[arg(
+            long,
+            conflicts_with = "pairing_code_stdin",
+            requires = "allow_insecure_pairing_code_arg",
+            help = "Read the node pairing code from argv after acknowledging process-list exposure"
+        )]
         pairing_code: Option<String>,
-        #[arg(long, default_value_t = false)]
+        #[arg(long, default_value_t = false, conflicts_with = "pairing_code")]
         pairing_code_stdin: bool,
+        #[arg(
+            long,
+            default_value_t = false,
+            help = "Allow --pairing-code despite process-list exposure; prefer --pairing-code-stdin"
+        )]
+        allow_insecure_pairing_code_arg: bool,
         #[arg(long)]
         poll_interval_ms: Option<u64>,
         #[arg(long, default_value_t = false)]
@@ -35,10 +46,21 @@ pub enum NodeCommand {
         device_id: Option<String>,
         #[arg(long, value_enum)]
         method: Option<PairingMethodArg>,
-        #[arg(long)]
+        #[arg(
+            long,
+            conflicts_with = "pairing_code_stdin",
+            requires = "allow_insecure_pairing_code_arg",
+            help = "Read the node pairing code from argv after acknowledging process-list exposure"
+        )]
         pairing_code: Option<String>,
-        #[arg(long, default_value_t = false)]
+        #[arg(long, default_value_t = false, conflicts_with = "pairing_code")]
         pairing_code_stdin: bool,
+        #[arg(
+            long,
+            default_value_t = false,
+            help = "Allow --pairing-code despite process-list exposure; prefer --pairing-code-stdin"
+        )]
+        allow_insecure_pairing_code_arg: bool,
         #[arg(long, default_value_t = false)]
         start: bool,
         #[arg(long, default_value_t = false)]
