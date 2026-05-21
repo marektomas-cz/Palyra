@@ -1997,19 +1997,20 @@ async fn run_browser_screenshot(
         .as_deref()
         .map(sanitize_screenshot_format)
         .unwrap_or_else(|| mime_extension(envelope.mime_type.as_deref()).to_owned());
-    let output_path = write_optional_binary_output(
+    let mode = if json { BrowserOutputMode::Json } else { browser_output_mode() };
+    let output_path = write_optional_binary_output_for_mode(
         output.as_deref(),
         session_id.as_str(),
         "screenshot",
         suggested_ext.as_str(),
         envelope.decode_image().as_deref(),
+        mode,
     )?;
     let mut value =
         serde_json::to_value(&envelope).context("failed to encode browser screenshot output")?;
     strip_large_binary_fields(&mut value, output_path.is_some(), &["image_base64"]);
     maybe_attach_output_path(&mut value, output_path.as_ref());
     normalize_session_scoped_output(&mut value, session_id.as_str());
-    let mode = if json { BrowserOutputMode::Json } else { browser_output_mode() };
     if browser_command_payload_should_emit(mode, success) {
         emit_browser_value_for_mode(
             &value,
@@ -3733,10 +3734,27 @@ fn write_optional_binary_output(
     extension: &str,
     payload: Option<&[u8]>,
 ) -> Result<Option<String>> {
+    write_optional_binary_output_for_mode(
+        output,
+        session_id,
+        stem,
+        extension,
+        payload,
+        browser_output_mode(),
+    )
+}
+
+fn write_optional_binary_output_for_mode(
+    output: Option<&str>,
+    session_id: &str,
+    stem: &str,
+    extension: &str,
+    payload: Option<&[u8]>,
+    mode: BrowserOutputMode,
+) -> Result<Option<String>> {
     let Some(payload) = payload else {
         return Ok(None);
     };
-    let mode = browser_output_mode();
     let Some(path) = resolve_output_path(
         output,
         session_id,
@@ -4731,6 +4749,34 @@ mod tests {
         assert!(!browser_snapshot_emits_json_to_stdout(BrowserOutputMode::Text, true));
         assert!(!browser_snapshot_emits_json_to_stdout(BrowserOutputMode::Json, false));
         assert!(!browser_snapshot_emits_json_to_stdout(BrowserOutputMode::Ndjson, false));
+    }
+
+    #[test]
+    fn local_json_binary_output_skips_default_artifact() -> anyhow::Result<()> {
+        let skipped = super::write_optional_binary_output_for_mode(
+            None,
+            "session-01",
+            "screenshot",
+            "png",
+            Some(b"sensitive image bytes"),
+            BrowserOutputMode::Json,
+        )?;
+        assert_eq!(skipped, None);
+
+        let temp = tempfile::tempdir()?;
+        let explicit_path = temp.path().join("screenshot.png");
+        let written = super::write_optional_binary_output_for_mode(
+            Some(explicit_path.to_string_lossy().as_ref()),
+            "session-01",
+            "screenshot",
+            "png",
+            Some(b"sensitive image bytes"),
+            BrowserOutputMode::Json,
+        )?;
+
+        assert_eq!(written.as_deref(), Some(explicit_path.to_string_lossy().as_ref()));
+        assert_eq!(std::fs::read(explicit_path)?, b"sensitive image bytes");
+        Ok(())
     }
 
     #[test]
