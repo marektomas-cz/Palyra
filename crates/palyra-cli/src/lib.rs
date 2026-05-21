@@ -1060,12 +1060,32 @@ fn doctor_repo_scaffold_check(repo_scaffold_ok: bool, repo_scaffold_required: bo
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DoctorConnectivityMode {
+    Online,
+    Offline,
+}
+
 fn build_doctor_report(checks: &[DoctorCheck]) -> Result<DoctorReport> {
+    build_doctor_report_with_connectivity(checks, DoctorConnectivityMode::Online)
+}
+
+fn build_doctor_report_offline(checks: &[DoctorCheck]) -> Result<DoctorReport> {
+    build_doctor_report_with_connectivity(checks, DoctorConnectivityMode::Offline)
+}
+
+fn build_doctor_report_with_connectivity(
+    checks: &[DoctorCheck],
+    connectivity_mode: DoctorConnectivityMode,
+) -> Result<DoctorReport> {
     let generated_at_unix_ms = now_unix_ms_i64()?;
     let profile = app::current_root_context().and_then(|context| context.active_profile_context());
     let config = collect_doctor_config_snapshot();
     let identity = collect_doctor_identity_snapshot();
-    let (connectivity, admin_payload, admin_error) = collect_doctor_connectivity_snapshot();
+    let (connectivity, admin_payload, admin_error) = match connectivity_mode {
+        DoctorConnectivityMode::Online => collect_doctor_connectivity_snapshot(),
+        DoctorConnectivityMode::Offline => collect_doctor_offline_connectivity_snapshot(),
+    };
     let provider_auth =
         collect_doctor_provider_auth_snapshot(admin_payload.as_ref(), admin_error.as_deref());
     let browser = collect_doctor_browser_snapshot(admin_payload.as_ref(), admin_error.as_deref());
@@ -1074,8 +1094,10 @@ fn build_doctor_report(checks: &[DoctorCheck]) -> Result<DoctorReport> {
     let skills = build_default_skills_inventory_snapshot();
     let config_ref_health = collect_doctor_config_ref_health_snapshot(admin_payload.as_ref());
     let mut checks = checks.to_vec();
-    if let Some(connectivity_check) = build_doctor_connectivity_check(&connectivity) {
-        checks.push(connectivity_check);
+    if connectivity_mode == DoctorConnectivityMode::Online {
+        if let Some(connectivity_check) = build_doctor_connectivity_check(&connectivity) {
+            checks.push(connectivity_check);
+        }
     }
     if let Some(config_ref_check) = build_doctor_config_ref_health_check(config_ref_health.as_ref())
     {
@@ -1118,6 +1140,22 @@ fn build_doctor_report(checks: &[DoctorCheck]) -> Result<DoctorReport> {
         deployment,
         config_ref_health,
     })
+}
+
+fn collect_doctor_offline_connectivity_snapshot(
+) -> (DoctorConnectivitySnapshot, Option<Value>, Option<String>) {
+    let skipped = Some("skipped (--offline)".to_owned());
+    (
+        DoctorConnectivitySnapshot {
+            daemon_url: "offline".to_owned(),
+            grpc_url: "offline".to_owned(),
+            http: DoctorConnectivityProbe { ok: false, message: skipped.clone() },
+            grpc: DoctorConnectivityProbe { ok: false, message: skipped.clone() },
+            admin: DoctorConnectivityProbe { ok: false, message: skipped.clone() },
+        },
+        None,
+        skipped,
+    )
 }
 
 fn build_doctor_connectivity_check(
@@ -9873,9 +9911,9 @@ struct SkillStatusResponse {
 #[cfg(test)]
 mod cli_v1_tests {
     use super::{
-        build_journal_checkpoint_attestation, build_support_bundle_diagnostics_snapshot,
-        build_windows_browser_open_commands, compare_semver_versions,
-        ensure_remote_registry_same_origin, fetch_limited_bytes,
+        build_doctor_checks, build_doctor_report_offline, build_journal_checkpoint_attestation,
+        build_support_bundle_diagnostics_snapshot, build_windows_browser_open_commands,
+        compare_semver_versions, ensure_remote_registry_same_origin, fetch_limited_bytes,
         fetch_remote_registry_entries_with_fetcher, is_retryable_grpc_error,
         memory_embeddings_model_configured, normalize_browser_open_url, normalize_client_socket,
         normalize_installed_skills_index, normalize_prompt_secret_value,
@@ -10193,6 +10231,30 @@ mod cli_v1_tests {
         assert!(
             error.contains("must target a loopback host for support-bundle diagnostics"),
             "diagnostic error should mention loopback requirement: {error}"
+        );
+    }
+
+    #[test]
+    fn offline_doctor_report_skips_connectivity_and_admin_token_use() {
+        let _lock = env_lock().lock().expect("env lock should be available");
+        let _daemon_url = ScopedEnvVar::set("PALYRA_DAEMON_URL", "https://example.com:7142");
+        let _admin_token = ScopedEnvVar::set("PALYRA_ADMIN_TOKEN", "test-admin-token");
+        crate::app::clear_root_context_for_tests();
+
+        let checks = build_doctor_checks();
+        let report = build_doctor_report_offline(checks.as_slice())
+            .expect("offline doctor report should build");
+
+        assert_eq!(report.connectivity.daemon_url, "offline");
+        assert_eq!(report.connectivity.grpc_url, "offline");
+        assert_eq!(report.connectivity.http.message.as_deref(), Some("skipped (--offline)"));
+        assert_eq!(report.connectivity.grpc.message.as_deref(), Some("skipped (--offline)"));
+        assert_eq!(report.connectivity.admin.message.as_deref(), Some("skipped (--offline)"));
+        assert!(!report.provider_auth.fetched);
+        assert_eq!(report.provider_auth.error.as_deref(), Some("skipped (--offline)"));
+        assert!(
+            !report.checks.iter().any(|check| check.key == "gateway_runtime_reachable"),
+            "offline doctor report must not add live gateway reachability checks"
         );
     }
 

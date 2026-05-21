@@ -95,7 +95,11 @@ pub(crate) fn run_security(command: SecurityCommand) -> Result<()> {
     match command {
         SecurityCommand::Audit { path, offline, strict, json } => {
             let checks = build_doctor_checks();
-            let doctor = build_doctor_report(checks.as_slice())?;
+            let doctor = if offline {
+                build_doctor_report_offline(checks.as_slice())?
+            } else {
+                build_doctor_report(checks.as_slice())?
+            };
             let secrets = build_secrets_audit_payload(path.clone(), offline)?;
             let local_config = load_local_security_config_snapshot(path)?;
             let runtime = load_runtime_security_snapshot(offline)?;
