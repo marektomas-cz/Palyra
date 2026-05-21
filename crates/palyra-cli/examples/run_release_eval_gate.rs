@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use palyra_common::{
     release_evals::{
         ensure_release_eval_report_passed, evaluate_release_eval_manifest,
-        parse_release_eval_manifest,
+        parse_release_eval_manifest, release_eval_replay_bundle_filename,
     },
     replay_bundle::canonical_replay_bundle_bytes,
 };
@@ -40,7 +40,11 @@ fn main() -> Result<()> {
     .with_context(|| format!("failed to write {}", report_path.display()))?;
 
     for generated in &output.replay_bundles {
-        let bundle_path = replay_dir.join(format!("{}.json", generated.case_id));
+        let bundle_filename = release_eval_replay_bundle_filename(generated.case_id.as_str())
+            .with_context(|| {
+                format!("invalid generated replay bundle case_id {:?}", generated.case_id)
+            })?;
+        let bundle_path = replay_dir.join(bundle_filename);
         fs::write(
             bundle_path.as_path(),
             canonical_replay_bundle_bytes(&generated.bundle)

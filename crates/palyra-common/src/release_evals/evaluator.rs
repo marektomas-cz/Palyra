@@ -129,6 +129,31 @@ pub fn ensure_release_eval_report_passed(report: &ReleaseEvalReport) -> Result<(
     Err(anyhow!("release eval gate failed: {first_issue}"))
 }
 
+/// Return a safe replay-bundle filename for a release-eval case identifier.
+///
+/// Case identifiers are manifest-controlled and are later used for artifact
+/// filenames. Keeping them to one explicit ASCII segment avoids path traversal,
+/// absolute paths, Windows drive prefixes, and alternate stream syntax.
+pub fn release_eval_replay_bundle_filename(case_id: &str) -> Result<String> {
+    validate_release_eval_case_id_segment(case_id)?;
+    Ok(format!("{case_id}.json"))
+}
+
+fn validate_release_eval_case_id_segment(case_id: &str) -> Result<()> {
+    if is_release_eval_case_id_segment(case_id) {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "release eval case_id must be a non-empty ASCII slug using only letters, numbers, '_' or '-'"
+    ))
+}
+
+fn is_release_eval_case_id_segment(case_id: &str) -> bool {
+    !case_id.is_empty()
+        && case_id.trim() == case_id
+        && case_id.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
 fn validate_manifest_header_and_inventory(manifest: &ReleaseEvalManifest) -> Vec<ReleaseEvalIssue> {
     let mut issues = Vec::new();
     if manifest.schema_version != RELEASE_EVAL_SCHEMA_VERSION {
@@ -311,12 +336,20 @@ fn evaluate_case(
     let mut issues = Vec::new();
     let case_path = format!("$.suites[{suite_index}].cases[{case_index}]");
 
+    let case_id_is_file_safe = is_release_eval_case_id_segment(case.case_id.as_str());
     if case.case_id.trim().is_empty() {
         issues.push(error_issue(
             "case_id_required",
             format!("{case_path}.case_id"),
             "case_id must not be empty",
             "Give each case a stable identifier for report and replay bundle paths.",
+        ));
+    } else if !case_id_is_file_safe {
+        issues.push(error_issue(
+            "case_id_path_segment_required",
+            format!("{case_path}.case_id"),
+            "case_id must be a safe replay-bundle filename segment",
+            "Use only ASCII letters, numbers, '_' or '-' so replay artifacts stay under the report directory.",
         ));
     }
     if !case.deterministic && case.flaky.is_none() {
@@ -382,7 +415,9 @@ fn evaluate_case(
         &mut issues,
     );
 
-    let (bundle_metadata, generated_bundle, replay_status) =
+    let (bundle_metadata, generated_bundle, replay_status) = if !case_id_is_file_safe {
+        ((None, None), None, ReleaseEvalStatus::Failed)
+    } else {
         match build_release_eval_replay_bundle(case) {
             Ok(bundle) => {
                 let report = replay_bundle_offline(&bundle);
@@ -430,7 +465,8 @@ fn evaluate_case(
                 ));
                 ((None, None), None, ReleaseEvalStatus::Failed)
             }
-        };
+        }
+    };
 
     let status = if issues.is_empty() && replay_status == ReleaseEvalStatus::Passed {
         ReleaseEvalStatus::Passed

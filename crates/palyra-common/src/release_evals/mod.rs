@@ -10,7 +10,7 @@ pub use catalog::{
 };
 pub use evaluator::{
     ensure_release_eval_report_passed, evaluate_release_eval_manifest, parse_release_eval_manifest,
-    release_eval_issue_counts_by_code,
+    release_eval_issue_counts_by_code, release_eval_replay_bundle_filename,
 };
 pub use schema::*;
 

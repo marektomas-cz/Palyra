@@ -217,6 +217,7 @@ pub struct ReleaseEvalSuite {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReleaseEvalCase {
+    /// Stable ASCII slug used as the replay-bundle file stem.
     pub case_id: String,
     pub title: String,
     pub deterministic: bool,
