@@ -66,7 +66,7 @@ fn enabled_supported_non_running_connectors_are_actionable_degradations() {
         [ConnectorLiveness::Stopped, ConnectorLiveness::Restarting, ConnectorLiveness::Crashed]
     {
         let status = connector(
-            ConnectorKind::Discord,
+            ConnectorKind::Slack,
             ConnectorAvailability::Supported,
             true,
             ConnectorReadiness::Ready,
@@ -81,7 +81,7 @@ fn enabled_supported_non_running_connectors_are_actionable_degradations() {
     }
 
     let running = connector(
-        ConnectorKind::Discord,
+        ConnectorKind::Slack,
         ConnectorAvailability::Supported,
         true,
         ConnectorReadiness::Ready,
