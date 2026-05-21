@@ -73,15 +73,13 @@ export function readChannelMessages(
   request: RequestFn,
   connectorId: string,
   payload: {
-    request: {
-      conversation_id: string;
-      thread_id?: string;
-      message_id?: string;
-      before_message_id?: string;
-      after_message_id?: string;
-      around_message_id?: string;
-      limit: number;
-    };
+    conversation_id: string;
+    thread_id?: string;
+    message_id?: string;
+    before_message_id?: string;
+    after_message_id?: string;
+    around_message_id?: string;
+    limit: number;
   },
 ): Promise<{ result: JsonValue }> {
   return request(
@@ -98,15 +96,13 @@ export function searchChannelMessages(
   request: RequestFn,
   connectorId: string,
   payload: {
-    request: {
-      conversation_id: string;
-      thread_id?: string;
-      query?: string;
-      author_id?: string;
-      has_attachments?: boolean;
-      before_message_id?: string;
-      limit: number;
-    };
+    conversation_id: string;
+    thread_id?: string;
+    query?: string;
+    author_id?: string;
+    has_attachments?: boolean;
+    before_message_id?: string;
+    limit: number;
   },
 ): Promise<{ result: JsonValue }> {
   return request(
@@ -123,14 +119,12 @@ export function editChannelMessage(
   request: RequestFn,
   connectorId: string,
   payload: {
-    request: {
-      locator: {
-        conversation_id: string;
-        thread_id?: string;
-        message_id: string;
-      };
-      body: string;
+    locator: {
+      conversation_id: string;
+      thread_id?: string;
+      message_id: string;
     };
+    body: string;
     approval_id?: string;
   },
 ): Promise<{ result?: JsonValue; approval_required?: boolean; approval?: JsonValue }> {
@@ -148,14 +142,12 @@ export function deleteChannelMessage(
   request: RequestFn,
   connectorId: string,
   payload: {
-    request: {
-      locator: {
-        conversation_id: string;
-        thread_id?: string;
-        message_id: string;
-      };
-      reason?: string;
+    locator: {
+      conversation_id: string;
+      thread_id?: string;
+      message_id: string;
     };
+    reason?: string;
     approval_id?: string;
   },
 ): Promise<{ result?: JsonValue; approval_required?: boolean; approval?: JsonValue }> {
@@ -173,14 +165,12 @@ export function addChannelMessageReaction(
   request: RequestFn,
   connectorId: string,
   payload: {
-    request: {
-      locator: {
-        conversation_id: string;
-        thread_id?: string;
-        message_id: string;
-      };
-      emoji: string;
+    locator: {
+      conversation_id: string;
+      thread_id?: string;
+      message_id: string;
     };
+    emoji: string;
     approval_id?: string;
   },
 ): Promise<{ result?: JsonValue; approval_required?: boolean; approval?: JsonValue }> {
@@ -198,14 +188,12 @@ export function removeChannelMessageReaction(
   request: RequestFn,
   connectorId: string,
   payload: {
-    request: {
-      locator: {
-        conversation_id: string;
-        thread_id?: string;
-        message_id: string;
-      };
-      emoji: string;
+    locator: {
+      conversation_id: string;
+      thread_id?: string;
+      message_id: string;
     };
+    emoji: string;
     approval_id?: string;
   },
 ): Promise<{ result?: JsonValue; approval_required?: boolean; approval?: JsonValue }> {

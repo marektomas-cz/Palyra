@@ -422,46 +422,41 @@ describe("ConsoleApiClient", () => {
       channel: "web",
     });
     await client.readChannelMessages("discord:default", {
-      request: { conversation_id: "discord:channel:1", limit: 10 },
+      conversation_id: "discord:channel:1",
+      limit: 10,
     });
     await client.searchChannelMessages("discord:default", {
-      request: { conversation_id: "discord:channel:1", query: "error", limit: 10 },
+      conversation_id: "discord:channel:1",
+      query: "error",
+      limit: 10,
     });
     await client.editChannelMessage("discord:default", {
-      request: {
-        locator: {
-          conversation_id: "discord:channel:1",
-          message_id: "m1",
-        },
-        body: "updated",
+      locator: {
+        conversation_id: "discord:channel:1",
+        message_id: "m1",
       },
+      body: "updated",
     });
     await client.deleteChannelMessage("discord:default", {
-      request: {
-        locator: {
-          conversation_id: "discord:channel:1",
-          message_id: "m1",
-        },
+      locator: {
+        conversation_id: "discord:channel:1",
+        message_id: "m1",
       },
       approval_id: "A1",
     });
     await client.addChannelMessageReaction("discord:default", {
-      request: {
-        locator: {
-          conversation_id: "discord:channel:1",
-          message_id: "m1",
-        },
-        emoji: "✅",
+      locator: {
+        conversation_id: "discord:channel:1",
+        message_id: "m1",
       },
+      emoji: "✅",
     });
     await client.removeChannelMessageReaction("discord:default", {
-      request: {
-        locator: {
-          conversation_id: "discord:channel:1",
-          message_id: "m1",
-        },
-        emoji: "✅",
+      locator: {
+        conversation_id: "discord:channel:1",
+        message_id: "m1",
       },
+      emoji: "✅",
     });
 
     for (const index of [1, 2, 3, 4, 5, 6]) {
@@ -488,6 +483,31 @@ describe("ConsoleApiClient", () => {
     expect(requestUrl(calls[6]?.input)).toBe(
       "/console/v1/channels/discord%3Adefault/messages/react-remove",
     );
+    expect(JSON.parse(requestBody(calls[1]?.init?.body))).toEqual({
+      conversation_id: "discord:channel:1",
+      limit: 10,
+    });
+    expect(JSON.parse(requestBody(calls[3]?.init?.body))).toEqual({
+      locator: {
+        conversation_id: "discord:channel:1",
+        message_id: "m1",
+      },
+      body: "updated",
+    });
+    expect(JSON.parse(requestBody(calls[4]?.init?.body))).toEqual({
+      locator: {
+        conversation_id: "discord:channel:1",
+        message_id: "m1",
+      },
+      approval_id: "A1",
+    });
+    expect(JSON.parse(requestBody(calls[5]?.init?.body))).toEqual({
+      locator: {
+        conversation_id: "discord:channel:1",
+        message_id: "m1",
+      },
+      emoji: "✅",
+    });
   });
 
   it("propagates richer backend error envelopes", async () => {

@@ -31,27 +31,23 @@ export type ChannelRouterPairingCodePayload = {
 };
 
 export type ChannelMessageReadPayload = {
-  request: {
-    conversation_id: string;
-    thread_id?: string;
-    message_id?: string;
-    before_message_id?: string;
-    after_message_id?: string;
-    around_message_id?: string;
-    limit: number;
-  };
+  conversation_id: string;
+  thread_id?: string;
+  message_id?: string;
+  before_message_id?: string;
+  after_message_id?: string;
+  around_message_id?: string;
+  limit: number;
 };
 
 export type ChannelMessageSearchPayload = {
-  request: {
-    conversation_id: string;
-    thread_id?: string;
-    query?: string;
-    author_id?: string;
-    has_attachments?: boolean;
-    before_message_id?: string;
-    limit: number;
-  };
+  conversation_id: string;
+  thread_id?: string;
+  query?: string;
+  author_id?: string;
+  has_attachments?: boolean;
+  before_message_id?: string;
+  limit: number;
 };
 
 export type ChannelMessageLocatorPayload = {
@@ -61,26 +57,20 @@ export type ChannelMessageLocatorPayload = {
 };
 
 export type ChannelMessageEditPayload = {
-  request: {
-    locator: ChannelMessageLocatorPayload;
-    body: string;
-  };
+  locator: ChannelMessageLocatorPayload;
+  body: string;
   approval_id?: string;
 };
 
 export type ChannelMessageDeletePayload = {
-  request: {
-    locator: ChannelMessageLocatorPayload;
-    reason?: string;
-  };
+  locator: ChannelMessageLocatorPayload;
+  reason?: string;
   approval_id?: string;
 };
 
 export type ChannelMessageReactionPayload = {
-  request: {
-    locator: ChannelMessageLocatorPayload;
-    emoji: string;
-  };
+  locator: ChannelMessageLocatorPayload;
+  emoji: string;
   approval_id?: string;
 };
 

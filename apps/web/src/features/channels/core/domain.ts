@@ -655,15 +655,13 @@ export function createChannelCoreDomain(deps: ChannelCoreDomainDeps) {
     setError(null);
     try {
       const response = await readChannelMessagesRequest(api, connectorId, {
-        request: {
-          conversation_id: conversationId,
-          thread_id: emptyToUndefined(channelMessageThreadId),
-          message_id: emptyToUndefined(channelMessageReadMessageId),
-          before_message_id: emptyToUndefined(channelMessageReadBeforeMessageId),
-          after_message_id: emptyToUndefined(channelMessageReadAfterMessageId),
-          around_message_id: emptyToUndefined(channelMessageReadAroundMessageId),
-          limit,
-        },
+        conversation_id: conversationId,
+        thread_id: emptyToUndefined(channelMessageThreadId),
+        message_id: emptyToUndefined(channelMessageReadMessageId),
+        before_message_id: emptyToUndefined(channelMessageReadBeforeMessageId),
+        after_message_id: emptyToUndefined(channelMessageReadAfterMessageId),
+        around_message_id: emptyToUndefined(channelMessageReadAroundMessageId),
+        limit,
       });
       setChannelMessageReadResultPayload(response as JsonValue);
       const result = isJsonObject(response.result) ? response.result : null;
@@ -702,15 +700,13 @@ export function createChannelCoreDomain(deps: ChannelCoreDomainDeps) {
     setError(null);
     try {
       const response = await searchChannelMessagesRequest(api, connectorId, {
-        request: {
-          conversation_id: conversationId,
-          thread_id: emptyToUndefined(channelMessageThreadId),
-          query: emptyToUndefined(channelMessageSearchQuery),
-          author_id: emptyToUndefined(channelMessageSearchAuthorId),
-          has_attachments: parseHasAttachmentsFilter(),
-          before_message_id: emptyToUndefined(channelMessageSearchBeforeMessageId),
-          limit,
-        },
+        conversation_id: conversationId,
+        thread_id: emptyToUndefined(channelMessageThreadId),
+        query: emptyToUndefined(channelMessageSearchQuery),
+        author_id: emptyToUndefined(channelMessageSearchAuthorId),
+        has_attachments: parseHasAttachmentsFilter(),
+        before_message_id: emptyToUndefined(channelMessageSearchBeforeMessageId),
+        limit,
       });
       setChannelMessageSearchResultPayload(response as JsonValue);
       const result = isJsonObject(response.result) ? response.result : null;
@@ -767,33 +763,25 @@ export function createChannelCoreDomain(deps: ChannelCoreDomainDeps) {
       const response =
         action === "edit"
           ? await editChannelMessageRequest(api, locator.connectorId, {
-              request: {
-                locator: payloadLocator,
-                body: channelMessageMutationBody.trim(),
-              },
+              locator: payloadLocator,
+              body: channelMessageMutationBody.trim(),
               approval_id: approvalId,
             })
           : action === "delete"
             ? await deleteChannelMessageRequest(api, locator.connectorId, {
-                request: {
-                  locator: payloadLocator,
-                  reason: emptyToUndefined(channelMessageMutationDeleteReason),
-                },
+                locator: payloadLocator,
+                reason: emptyToUndefined(channelMessageMutationDeleteReason),
                 approval_id: approvalId,
               })
             : action === "react-add"
               ? await addChannelMessageReactionRequest(api, locator.connectorId, {
-                  request: {
-                    locator: payloadLocator,
-                    emoji: channelMessageMutationEmoji.trim(),
-                  },
+                  locator: payloadLocator,
+                  emoji: channelMessageMutationEmoji.trim(),
                   approval_id: approvalId,
                 })
               : await removeChannelMessageReactionRequest(api, locator.connectorId, {
-                  request: {
-                    locator: payloadLocator,
-                    emoji: channelMessageMutationEmoji.trim(),
-                  },
+                  locator: payloadLocator,
+                  emoji: channelMessageMutationEmoji.trim(),
                   approval_id: approvalId,
                 });
 
