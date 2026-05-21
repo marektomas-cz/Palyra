@@ -86,7 +86,11 @@ import {
   nextDesktopLocale,
   translateDesktopMessage,
 } from "./i18n";
-import { readStoredDesktopLocale, type DesktopLocale } from "./preferences";
+import {
+  readStoredDesktopLocale,
+  writeStoredDesktopLocale,
+  type DesktopLocale,
+} from "./preferences";
 
 const SECTION_ORDER: DesktopCompanionSection[] = [
   "home",
@@ -405,7 +409,7 @@ export function App() {
   }, [notificationPermission, snapshot.rollout.desktop_notifications_enabled, unreadNotifications]);
 
   useEffect(() => {
-    window.localStorage.setItem("palyra.desktop.locale", locale);
+    writeStoredDesktopLocale(locale);
     document.documentElement.lang = locale === "qps-ploc" ? "en-XA" : locale;
   }, [locale]);
 
