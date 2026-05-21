@@ -40,6 +40,32 @@ const OBJECTIVE_HEARTBEAT_BLOCK_ID: &str = "objective-heartbeats";
 const OBJECTIVE_INBOX_BLOCK_ID: &str = "objective-inbox";
 const OBJECTIVE_WORKSPACE_PROJECTION_WARNING: &str = "Objective lifecycle action was applied, but workspace projection did not update. Repair malformed Palyra managed blocks or retry after workspace storage recovers.";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConsoleObjectiveRequestKind {
+    List,
+    Get,
+    Upsert,
+    Lifecycle,
+    Attempt,
+    Approach,
+    Summary,
+}
+
+impl ConsoleObjectiveRequestKind {
+    fn requires_csrf(self) -> bool {
+        matches!(self, Self::Upsert | Self::Lifecycle | Self::Attempt | Self::Approach)
+    }
+}
+
+#[allow(clippy::result_large_err)]
+fn authorize_objective_console_session(
+    state: &AppState,
+    headers: &HeaderMap,
+    request_kind: ConsoleObjectiveRequestKind,
+) -> Result<ConsoleSession, Response> {
+    authorize_console_session(state, headers, request_kind.requires_csrf())
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct ConsoleObjectiveListQuery {
     #[serde(default)]
@@ -174,7 +200,8 @@ pub(crate) async fn console_objectives_list_handler(
     headers: HeaderMap,
     Query(query): Query<ConsoleObjectiveListQuery>,
 ) -> Result<Json<Value>, Response> {
-    let session = authorize_console_session(&state, &headers, false)?;
+    let session =
+        authorize_objective_console_session(&state, &headers, ConsoleObjectiveRequestKind::List)?;
     let limit =
         query.limit.unwrap_or(DEFAULT_OBJECTIVE_PAGE_LIMIT).clamp(1, MAX_OBJECTIVE_PAGE_LIMIT);
     let kind_filter = query
@@ -231,7 +258,8 @@ pub(crate) async fn console_objective_get_handler(
     headers: HeaderMap,
     Path(objective_id): Path<String>,
 ) -> Result<Json<Value>, Response> {
-    let session = authorize_console_session(&state, &headers, false)?;
+    let session =
+        authorize_objective_console_session(&state, &headers, ConsoleObjectiveRequestKind::Get)?;
     let objective =
         load_objective_for_owner(&state, objective_id.as_str(), session.context.principal.as_str())
             .await?;
@@ -243,7 +271,8 @@ pub(crate) async fn console_objective_upsert_handler(
     headers: HeaderMap,
     Json(payload): Json<ConsoleObjectiveUpsertRequest>,
 ) -> Result<Json<Value>, Response> {
-    let session = authorize_console_session(&state, &headers, false)?;
+    let session =
+        authorize_objective_console_session(&state, &headers, ConsoleObjectiveRequestKind::Upsert)?;
     let owner_principal =
         normalize_owner_principal(&payload.owner_principal, session.context.principal.as_str())?;
     let kind = parse_objective_kind(payload.kind.as_str())?;
@@ -456,7 +485,11 @@ pub(crate) async fn console_objective_lifecycle_handler(
     Path(objective_id): Path<String>,
     Json(payload): Json<ConsoleObjectiveLifecycleRequest>,
 ) -> Result<Json<Value>, Response> {
-    let session = authorize_console_session(&state, &headers, false)?;
+    let session = authorize_objective_console_session(
+        &state,
+        &headers,
+        ConsoleObjectiveRequestKind::Lifecycle,
+    )?;
     let mut objective =
         load_objective_record(&state, objective_id.as_str(), session.context.principal.as_str())?;
     let action = payload.action.trim().to_ascii_lowercase();
@@ -512,7 +545,11 @@ pub(crate) async fn console_objective_attempt_handler(
     Path(objective_id): Path<String>,
     Json(payload): Json<ConsoleObjectiveAttemptRequest>,
 ) -> Result<Json<Value>, Response> {
-    let session = authorize_console_session(&state, &headers, false)?;
+    let session = authorize_objective_console_session(
+        &state,
+        &headers,
+        ConsoleObjectiveRequestKind::Attempt,
+    )?;
     let mut objective =
         load_objective_record(&state, objective_id.as_str(), session.context.principal.as_str())?;
     let now_unix_ms = unix_ms_now().map_err(internal_console_error)?;
@@ -559,7 +596,11 @@ pub(crate) async fn console_objective_approach_handler(
     Path(objective_id): Path<String>,
     Json(payload): Json<ConsoleObjectiveApproachRequest>,
 ) -> Result<Json<Value>, Response> {
-    let session = authorize_console_session(&state, &headers, false)?;
+    let session = authorize_objective_console_session(
+        &state,
+        &headers,
+        ConsoleObjectiveRequestKind::Approach,
+    )?;
     let mut objective =
         load_objective_record(&state, objective_id.as_str(), session.context.principal.as_str())?;
     objective.approach_history.push(ObjectiveApproachRecord {
@@ -589,7 +630,11 @@ pub(crate) async fn console_objective_summary_handler(
     headers: HeaderMap,
     Path(objective_id): Path<String>,
 ) -> Result<Json<Value>, Response> {
-    let session = authorize_console_session(&state, &headers, false)?;
+    let session = authorize_objective_console_session(
+        &state,
+        &headers,
+        ConsoleObjectiveRequestKind::Summary,
+    )?;
     let objective =
         load_objective_record(&state, objective_id.as_str(), session.context.principal.as_str())?;
     let view = build_objective_view(&state, objective.clone()).await?;
@@ -2106,7 +2151,7 @@ mod tests {
         parse_objective_execution_config, parse_objective_kind, parse_objective_priority,
         preserved_run_from_objective_attempt, reconcile_objective_attempts_with_latest_run,
         render_objective_summary_markdown, ConsoleObjectiveBudgetPayload,
-        OBJECTIVE_WORKSPACE_PROJECTION_WARNING,
+        ConsoleObjectiveRequestKind, OBJECTIVE_WORKSPACE_PROJECTION_WARNING,
     };
     use crate::domain::workspace::{
         sync_workspace_managed_block, WorkspaceManagedBlockError, WorkspaceManagedBlockUpdate,
@@ -2185,6 +2230,26 @@ mod tests {
             parse_objective_priority(None).expect("priority should default"),
             ObjectivePriority::Normal
         );
+    }
+
+    #[test]
+    fn objective_console_mutation_requests_require_csrf() {
+        for request_kind in [
+            ConsoleObjectiveRequestKind::Upsert,
+            ConsoleObjectiveRequestKind::Lifecycle,
+            ConsoleObjectiveRequestKind::Attempt,
+            ConsoleObjectiveRequestKind::Approach,
+        ] {
+            assert!(request_kind.requires_csrf());
+        }
+
+        for request_kind in [
+            ConsoleObjectiveRequestKind::List,
+            ConsoleObjectiveRequestKind::Get,
+            ConsoleObjectiveRequestKind::Summary,
+        ] {
+            assert!(!request_kind.requires_csrf());
+        }
     }
 
     #[test]
