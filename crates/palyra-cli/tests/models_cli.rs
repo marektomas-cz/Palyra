@@ -312,6 +312,7 @@ version = 1
 [model_provider]
 kind = "anthropic"
 auth_provider_kind = "minimax"
+allow_private_base_url = true
 anthropic_base_url = "{base_url}"
 anthropic_model = "MiniMax-M2.7"
 anthropic_api_key = "sk-minimax-test"
@@ -793,6 +794,7 @@ fn models_test_connection_discovers_live_models_with_cache() -> Result<()> {
 version = 1
 [model_provider]
 kind = "openai_compatible"
+allow_private_base_url = true
 health_ttl_ms = 600000
 discovery_ttl_ms = 600000
 
@@ -896,6 +898,7 @@ fn models_test_connection_redacts_provider_auth_failures() -> Result<()> {
 version = 1
 [model_provider]
 kind = "openai_compatible"
+allow_private_base_url = true
 
 [[model_provider.providers]]
 provider_id = "openai-primary"
@@ -961,6 +964,7 @@ version = 1
 [model_provider]
 kind = "anthropic"
 auth_provider_kind = "minimax"
+allow_private_base_url = true
 
 [[model_provider.providers]]
 provider_id = "minimax-primary"
@@ -1059,6 +1063,7 @@ version = 1
 [model_provider]
 kind = "anthropic"
 auth_provider_kind = "minimax"
+allow_private_base_url = true
 
 [[model_provider.providers]]
 provider_id = "minimax-primary"
@@ -1153,6 +1158,7 @@ version = 1
 [model_provider]
 kind = "anthropic"
 auth_provider_kind = "minimax"
+allow_private_base_url = true
 anthropic_base_url = "{base_url}"
 anthropic_model = "MiniMax-M2.7"
 anthropic_api_key = "sk-minimax-test"

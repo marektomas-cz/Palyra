@@ -9,6 +9,7 @@ use std::{
     collections::BTreeMap,
     fs,
     hash::{DefaultHasher, Hash, Hasher},
+    net::{IpAddr, ToSocketAddrs},
     path::{Path, PathBuf},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -189,6 +190,7 @@ struct ProbeableProvider {
     kind: String,
     enabled: bool,
     endpoint_base_url: Option<String>,
+    allow_private_base_url: bool,
     auth_profile_id: Option<String>,
     auth_provider_kind: Option<String>,
     inline_api_key: Option<String>,
@@ -1154,6 +1156,9 @@ fn build_probeable_providers(overview: &ModelsOverview) -> Result<Vec<ProbeableP
     let model_provider = root_config.model_provider.unwrap_or_default();
     let provider_kind =
         model_provider.kind.clone().unwrap_or_else(|| DETERMINISTIC_PROVIDER_KIND.to_owned());
+    let allow_private_env = std::env::var("PALYRA_MODEL_PROVIDER_ALLOW_PRIVATE_BASE_URL").ok();
+    let global_allow_private_base_url =
+        effective_global_allow_private_base_url(&model_provider, allow_private_env.as_deref());
     let default_provider_id =
         default_provider_id(overview.models.as_slice(), &model_provider).map(str::to_owned);
     let models_by_provider =
@@ -1183,6 +1188,9 @@ fn build_probeable_providers(overview: &ModelsOverview) -> Result<Vec<ProbeableP
                             None
                         }
                     }),
+                    allow_private_base_url: entry
+                        .allow_private_base_url
+                        .unwrap_or(global_allow_private_base_url),
                     auth_profile_id: entry.auth_profile_id.clone().or_else(|| {
                         inherit_globals.then(|| model_provider.auth_profile_id.clone()).flatten()
                     }),
@@ -1217,12 +1225,23 @@ fn build_probeable_providers(overview: &ModelsOverview) -> Result<Vec<ProbeableP
         kind: provider_kind.clone(),
         enabled: true,
         endpoint_base_url: default_base_url_for_kind(provider_kind.as_str(), &model_provider),
+        allow_private_base_url: global_allow_private_base_url,
         auth_profile_id: model_provider.auth_profile_id.clone(),
         auth_provider_kind: model_provider.auth_provider_kind.clone(),
         inline_api_key: inline_api_key_for_kind(provider_kind.as_str(), &model_provider),
         vault_ref: vault_ref_for_kind(provider_kind.as_str(), &model_provider),
         configured_model_ids: models_by_provider.get(provider_id).cloned().unwrap_or_default(),
     }])
+}
+
+fn effective_global_allow_private_base_url(
+    config: &FileModelProviderConfig,
+    env_override: Option<&str>,
+) -> bool {
+    if let Some(value) = env_override {
+        return value.trim().parse::<bool>().unwrap_or(false);
+    }
+    config.allow_private_base_url.unwrap_or(false)
 }
 
 fn default_base_url_for_kind(kind: &str, config: &FileModelProviderConfig) -> Option<String> {
@@ -1653,6 +1672,7 @@ fn provider_check_cache_key(mode: &str, provider: &ProbeableProvider) -> String 
     provider.provider_id.hash(&mut hasher);
     provider.kind.hash(&mut hasher);
     provider.endpoint_base_url.hash(&mut hasher);
+    provider.allow_private_base_url.hash(&mut hasher);
     provider.auth_profile_id.hash(&mut hasher);
     provider.auth_provider_kind.hash(&mut hasher);
     provider.vault_ref.hash(&mut hasher);
@@ -1764,6 +1784,11 @@ fn probe_provider(
         payload.message = "provider base_url is not configured".to_owned();
         return payload;
     };
+    if let Err(error) = validate_cli_probe_endpoint_policy(target, base_url) {
+        payload.state = "endpoint_failed".to_owned();
+        payload.message = sanitize_diagnostic_error(error.to_string().as_str());
+        return payload;
+    }
     let credential = match resolve_provider_credential(target, auth_registry, vault) {
         Ok(Some(credential)) => credential,
         Ok(None) => {
@@ -1912,6 +1937,101 @@ fn probe_provider(
     }
 
     payload
+}
+
+fn validate_cli_probe_endpoint_policy(target: &ProbeableProvider, base_url: &str) -> Result<()> {
+    validate_provider_probe_base_url(base_url, target.allow_private_base_url)
+}
+
+fn validate_provider_probe_base_url(base_url: &str, allow_private_base_url: bool) -> Result<()> {
+    let parsed = parse_provider_probe_base_url(base_url)?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("provider base_url must include a host"))?;
+
+    if allow_private_base_url {
+        return Ok(());
+    }
+
+    if palyra_common::netguard::is_localhost_hostname(host) {
+        anyhow::bail!(
+            "provider base_url host '{}' targets localhost/private network; set model_provider.allow_private_base_url=true or PALYRA_MODEL_PROVIDER_ALLOW_PRIVATE_BASE_URL=true to override for trusted local testing",
+            host
+        );
+    }
+    if let Some(address) =
+        palyra_common::netguard::parse_host_ip_literal(host).map_err(anyhow::Error::msg)?
+    {
+        if palyra_common::netguard::is_private_or_local_ip(address) {
+            anyhow::bail!(
+                "provider base_url host '{}' targets localhost/private network; set model_provider.allow_private_base_url=true or PALYRA_MODEL_PROVIDER_ALLOW_PRIVATE_BASE_URL=true to override for trusted local testing",
+                host
+            );
+        }
+        return Ok(());
+    }
+
+    let port = parsed.port_or_known_default().ok_or_else(|| {
+        anyhow::anyhow!("provider base_url must include an explicit port for unknown URL schemes")
+    })?;
+    let resolved_addresses = resolve_hostname_ip_addrs(host, port).map_err(|error| {
+        anyhow::anyhow!(
+            "provider base_url host '{}' could not be resolved to enforce private-network guard: {}; set model_provider.allow_private_base_url=true or PALYRA_MODEL_PROVIDER_ALLOW_PRIVATE_BASE_URL=true to override for trusted local testing",
+            host,
+            error
+        )
+    })?;
+    if resolved_addresses.is_empty() {
+        anyhow::bail!(
+            "provider base_url host '{}' resolved with no addresses; set model_provider.allow_private_base_url=true or PALYRA_MODEL_PROVIDER_ALLOW_PRIVATE_BASE_URL=true to override for trusted local testing",
+            host
+        );
+    }
+    if let Some(address) = resolved_addresses
+        .into_iter()
+        .find(|address| palyra_common::netguard::is_private_or_local_ip(*address))
+    {
+        anyhow::bail!(
+            "provider base_url host '{}' resolves to private/local address '{}'; set model_provider.allow_private_base_url=true or PALYRA_MODEL_PROVIDER_ALLOW_PRIVATE_BASE_URL=true to override for trusted local testing",
+            host,
+            address
+        );
+    }
+    Ok(())
+}
+
+fn parse_provider_probe_base_url(base_url: &str) -> Result<reqwest::Url> {
+    let normalized = base_url.trim();
+    if normalized.is_empty() {
+        anyhow::bail!("provider base_url cannot be empty");
+    }
+    let parsed = reqwest::Url::parse(normalized)
+        .with_context(|| format!("invalid provider base_url: {base_url}"))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("provider base_url must include a host"))?;
+    let host_ip_literal =
+        palyra_common::netguard::parse_host_ip_literal(host).map_err(anyhow::Error::msg)?;
+    let loopback_http_allowed = palyra_common::netguard::is_localhost_hostname(host)
+        || host_ip_literal.is_some_and(|address| address.is_loopback());
+    if parsed.scheme() != "https" && !(parsed.scheme() == "http" && loopback_http_allowed) {
+        anyhow::bail!(
+            "provider base_url must use https (http is only allowed for loopback hosts with allow_private_base_url)"
+        );
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        anyhow::bail!("provider base_url must not embed credentials");
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        anyhow::bail!("provider base_url must not include query or fragment");
+    }
+    Ok(parsed)
+}
+
+fn resolve_hostname_ip_addrs(host: &str, port: u16) -> std::io::Result<Vec<IpAddr>> {
+    (host, port)
+        .to_socket_addrs()
+        .map(|socket_addrs| socket_addrs.map(|socket_addr| socket_addr.ip()).collect())
 }
 
 fn resolve_provider_credential(
@@ -2063,4 +2183,84 @@ fn get_string_value_at_path(document: &toml::Value, key: &str) -> Result<Option<
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_probe_target(base_url: &str, allow_private_base_url: bool) -> ProbeableProvider {
+        ProbeableProvider {
+            provider_id: "openai-primary".to_owned(),
+            kind: OPENAI_COMPATIBLE_PROVIDER_KIND.to_owned(),
+            enabled: true,
+            endpoint_base_url: Some(base_url.to_owned()),
+            allow_private_base_url,
+            auth_profile_id: Some("missing-auth-profile".to_owned()),
+            auth_provider_kind: None,
+            inline_api_key: None,
+            vault_ref: None,
+            configured_model_ids: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn cli_probe_endpoint_policy_blocks_private_base_url_without_opt_in() {
+        let error = validate_provider_probe_base_url("http://127.0.0.1:11434/v1", false)
+            .expect_err("private provider targets require explicit opt-in");
+
+        assert!(
+            error.to_string().contains("allow_private_base_url"),
+            "error should point operators at the explicit private-target opt-in: {error}"
+        );
+    }
+
+    #[test]
+    fn cli_probe_endpoint_policy_allows_private_base_url_with_opt_in() {
+        validate_provider_probe_base_url("http://127.0.0.1:11434/v1", true)
+            .expect("trusted local provider targets should be allowed with explicit opt-in");
+    }
+
+    #[test]
+    fn cli_probe_endpoint_policy_rejects_public_http_even_with_opt_in() {
+        let error = validate_provider_probe_base_url("http://example.com/v1", true)
+            .expect_err("public provider targets must use HTTPS");
+
+        assert!(
+            error.to_string().contains("must use https"),
+            "error should explain the HTTPS requirement: {error}"
+        );
+    }
+
+    #[test]
+    fn cli_probe_endpoint_policy_rejects_credentials_query_and_fragment() {
+        for base_url in [
+            "https://user:pass@example.com/v1",
+            "https://example.com/v1?api_key=secret",
+            "https://example.com/v1#fragment",
+        ] {
+            validate_provider_probe_base_url(base_url, true)
+                .expect_err("provider base_url must not carry credential-bearing URL parts");
+        }
+    }
+
+    #[test]
+    fn probe_rejects_unsafe_endpoint_before_resolving_credentials() {
+        let target = sample_probe_target("http://127.0.0.1:11434/v1", false);
+        let mut auth_registry = None;
+        let mut vault = None;
+
+        let payload = probe_provider(&target, 100, 1, false, &mut auth_registry, &mut vault);
+
+        assert_eq!(payload.state, "endpoint_failed");
+        assert_eq!(payload.credential_source, "none");
+        assert!(
+            payload.message.contains("allow_private_base_url"),
+            "policy failure should be reported before auth profile lookup: {payload:?}"
+        );
+        assert!(
+            auth_registry.is_none() && vault.is_none(),
+            "unsafe endpoints must be rejected before opening auth registry or vault"
+        );
+    }
 }
