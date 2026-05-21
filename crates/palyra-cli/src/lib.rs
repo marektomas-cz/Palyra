@@ -3140,6 +3140,7 @@ fn collect_error_strings(value: &Value, key_context: Option<&str>, output: &mut 
 
 fn encode_support_bundle_with_cap(bundle: &mut SupportBundle, max_bytes: usize) -> Result<Vec<u8>> {
     let mut value = serde_json::to_value(&*bundle).context("failed to serialize support bundle")?;
+    redact_support_bundle_config_ref_health(&mut value, false);
     let mut encoded =
         serde_json::to_vec_pretty(&value).context("failed to encode support bundle")?;
     if encoded.len() <= max_bytes {
@@ -3206,6 +3207,61 @@ fn encode_support_bundle_with_cap(bundle: &mut SupportBundle, max_bytes: usize) 
         );
     }
     Ok(minimal_encoded)
+}
+
+fn redact_support_bundle_config_ref_health(value: &mut Value, in_config_ref_health: bool) {
+    match value {
+        Value::Object(map) => {
+            for (key, entry) in map {
+                let child_in_config_ref_health =
+                    in_config_ref_health || key.as_str() == "config_ref_health";
+                if child_in_config_ref_health {
+                    redact_support_bundle_config_ref_health_field(key.as_str(), entry);
+                } else {
+                    redact_support_bundle_config_ref_health(entry, false);
+                }
+            }
+        }
+        Value::Array(items) => {
+            for entry in items {
+                redact_support_bundle_config_ref_health(entry, in_config_ref_health);
+            }
+        }
+        Value::String(raw) if in_config_ref_health => {
+            *raw = sanitize_diagnostic_error(raw.as_str());
+        }
+        _ => {}
+    }
+}
+
+fn redact_support_bundle_config_ref_health_field(key: &str, value: &mut Value) {
+    if support_bundle_config_ref_health_key_requires_redaction(key) {
+        if !value.is_null() {
+            *value = Value::String(REDACTED.to_owned());
+        }
+        return;
+    }
+    if support_bundle_config_ref_health_key_requires_detail_redaction(key) {
+        if let Value::String(raw) = value {
+            if !raw.trim().is_empty() {
+                *raw = REDACTED.to_owned();
+            }
+            return;
+        }
+    }
+    redact_support_bundle_config_ref_health(value, true);
+}
+
+fn support_bundle_config_ref_health_key_requires_redaction(key: &str) -> bool {
+    let normalized = key.to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "ref_id" | "reference" | "reference_id" | "scope" | "key" | "vault_ref" | "secret_ref"
+    )
+}
+
+fn support_bundle_config_ref_health_key_requires_detail_redaction(key: &str) -> bool {
+    key_contains_any(key, &["error", "detail"])
 }
 
 fn trim_support_bundle_journal_for_cap(bundle: &mut Value, max_bytes: usize) -> Result<()> {
@@ -11725,6 +11781,79 @@ mod diagnostics_bundle_tests {
                 && !extracted.contains("abc123")
                 && !extracted.contains("qwerty"),
             "extracted error message must not leak raw secret values: {extracted}"
+        );
+    }
+
+    #[test]
+    fn support_bundle_encoding_redacts_config_ref_health_identifiers() {
+        let config_ref_health = json!({
+            "state": "blocking",
+            "severity": "blocking",
+            "summary": {
+                "total_refs": 1,
+                "blocking_refs": 1
+            },
+            "items": [
+                {
+                    "ref_id": "model_provider:global/acme_prod_openai_api_key",
+                    "component": "model_provider",
+                    "config_path": "model_provider_api_key",
+                    "state": "missing",
+                    "severity": "blocking",
+                    "scope": "global",
+                    "key": "acme_prod_openai_api_key",
+                    "last_error": "vault reference global/acme_prod_openai_api_key is missing"
+                },
+                {
+                    "ref_id": "model_provider:sk-live-ACCIDENTALLY-PASTED-RAW-SECRET",
+                    "component": "model_provider",
+                    "config_path": "model_provider_api_key",
+                    "state": "invalid",
+                    "severity": "blocking",
+                    "scope": "invalid",
+                    "last_error": "vault reference format is invalid"
+                }
+            ]
+        });
+        let mut bundle = oversized_bundle();
+        bundle.doctor.config_ref_health = Some(config_ref_health.clone());
+        bundle.recovery = Some(json!({
+            "preview": {
+                "diagnostics": {
+                    "config_ref_health": config_ref_health.clone()
+                }
+            }
+        }));
+        bundle.diagnostics.config_ref_health = Some(config_ref_health.clone());
+        bundle.diagnostics.admin_status = Some(json!({
+            "observability": {
+                "config_ref_health": config_ref_health
+            }
+        }));
+
+        let encoded =
+            encode_support_bundle_with_cap(&mut bundle, 512 * 1024).expect("bundle should encode");
+        let text = String::from_utf8(encoded).expect("encoded bundle should be UTF-8");
+        assert!(!text.contains("global/acme_prod_openai_api_key"), "{text}");
+        assert!(!text.contains("acme_prod_openai_api_key"), "{text}");
+        assert!(!text.contains("sk-live-ACCIDENTALLY-PASTED-RAW-SECRET"), "{text}");
+
+        let payload: Value = serde_json::from_str(text.as_str()).expect("bundle should be JSON");
+        assert_eq!(
+            payload.pointer("/doctor/config_ref_health/items/0/ref_id").and_then(Value::as_str),
+            Some("<redacted>")
+        );
+        assert_eq!(
+            payload
+                .pointer("/recovery/preview/diagnostics/config_ref_health/items/0/scope")
+                .and_then(Value::as_str),
+            Some("<redacted>")
+        );
+        assert_eq!(
+            payload
+                .pointer("/diagnostics/admin_status/observability/config_ref_health/items/0/key")
+                .and_then(Value::as_str),
+            Some("<redacted>")
         );
     }
 
