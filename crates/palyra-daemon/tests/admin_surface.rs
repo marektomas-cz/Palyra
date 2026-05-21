@@ -16,6 +16,7 @@ use palyra_vault::{BackendPreference, Vault, VaultConfig as VaultConfigOptions, 
 use reqwest::blocking::Client;
 use reqwest::Url;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 const ADMIN_TOKEN: &str = "test-admin-token";
 const DEVICE_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
@@ -4111,7 +4112,7 @@ fn console_webhooks_support_secret_aware_lifecycle_and_diagnostics() -> Result<(
             "payload_base64": BASE64_STANDARD.encode(build_test_webhook_payload(
                 "github.repo_a",
                 "push",
-                Some("sig:test"),
+                Some(b"test-signing-secret"),
             )),
         }))
         .send()
@@ -5583,7 +5584,7 @@ fn write_test_config(config_path: &PathBuf, contents: &str) -> Result<()> {
     Ok(())
 }
 
-fn build_test_webhook_payload(source: &str, event: &str, signature: Option<&str>) -> Vec<u8> {
+fn build_test_webhook_payload(source: &str, event: &str, signing_secret: Option<&[u8]>) -> Vec<u8> {
     let timestamp_unix_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system time should be after unix epoch")
@@ -5592,23 +5593,52 @@ fn build_test_webhook_payload(source: &str, event: &str, signature: Option<&str>
         "{timestamp_unix_ms:016x}{:016x}",
         TEMP_IDENTITY_COUNTER.fetch_add(1, Ordering::Relaxed)
     );
-    let signature_field =
-        signature.map(|value| format!(r#","signature":"{value}""#)).unwrap_or_default();
-    format!(
-        r#"{{
-            "v": 1,
-            "id": "{DEVICE_ID}",
-            "event": "{event}",
-            "source": "{source}",
-            "payload": {{"channel": "C123", "text": "hello"}},
-            "replay_protection": {{
-                "nonce": "{nonce}",
-                "timestamp_unix_ms": {timestamp_unix_ms}
-                {signature_field}
-            }}
-        }}"#
-    )
-    .into_bytes()
+    let mut payload = json!({
+        "v": 1,
+        "id": DEVICE_ID,
+        "event": event,
+        "source": source,
+        "payload": {"channel": "C123", "text": "hello"},
+        "replay_protection": {
+            "nonce": nonce,
+            "timestamp_unix_ms": timestamp_unix_ms
+        }
+    });
+    if let Some(secret) = signing_secret {
+        let unsigned_payload =
+            serde_json::to_vec(&payload).expect("test webhook payload should serialize");
+        let signature = hex::encode(hmac_sha256(secret, unsigned_payload.as_slice()));
+        payload["replay_protection"]["signature"] = json!(format!("sha256={signature}"));
+    }
+    serde_json::to_vec(&payload).expect("test webhook payload should serialize")
+}
+
+fn hmac_sha256(secret: &[u8], payload: &[u8]) -> Vec<u8> {
+    const BLOCK_BYTES: usize = 64;
+    let mut key_block = [0_u8; BLOCK_BYTES];
+    if secret.len() > BLOCK_BYTES {
+        let digest = Sha256::digest(secret);
+        key_block[..digest.len()].copy_from_slice(digest.as_slice());
+    } else {
+        key_block[..secret.len()].copy_from_slice(secret);
+    }
+
+    let mut inner_key = [0x36_u8; BLOCK_BYTES];
+    let mut outer_key = [0x5c_u8; BLOCK_BYTES];
+    for index in 0..BLOCK_BYTES {
+        inner_key[index] ^= key_block[index];
+        outer_key[index] ^= key_block[index];
+    }
+
+    let mut inner = Sha256::new();
+    inner.update(inner_key);
+    inner.update(payload);
+    let inner_digest = inner.finalize();
+
+    let mut outer = Sha256::new();
+    outer.update(outer_key);
+    outer.update(inner_digest);
+    outer.finalize().to_vec()
 }
 
 fn read_child_stderr(stderr: Option<ChildStderr>) -> String {

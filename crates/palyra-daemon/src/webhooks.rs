@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs,
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
@@ -6,13 +7,18 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use palyra_common::parse_webhook_payload;
+use palyra_common::{
+    parse_webhook_payload, verify_webhook_payload, ReplayNonceStore, WebhookPayloadError,
+    WebhookSignatureVerifier,
+};
 use palyra_control_plane as control_plane;
 use palyra_safety::{
     inspect_text, SafetyAction, SafetyContentKind, SafetyPhase, SafetySourceKind, TrustLabel,
 };
 use palyra_vault::{ensure_owner_only_dir, ensure_owner_only_file, Vault, VaultError, VaultRef};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 const REGISTRY_VERSION: u32 = 1;
@@ -25,6 +31,8 @@ const MAX_ALLOWED_FILTERS: usize = 64;
 const MAX_FILTER_VALUE_BYTES: usize = 128;
 const DEFAULT_MAX_PAYLOAD_BYTES: u64 = 64 * 1024;
 const MAX_WEBHOOK_PAYLOAD_BYTES: u64 = 1_048_576;
+const MAX_REPLAY_NONCES: usize = 8_192;
+const HMAC_SHA256_BLOCK_BYTES: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebhookIntegrationListFilter {
@@ -95,6 +103,52 @@ enum WebhookSecretStatus {
     Present,
 }
 
+#[derive(Debug, Default)]
+struct WebhookReplayNonceStore {
+    consumed: Mutex<BTreeMap<String, u64>>,
+}
+
+impl ReplayNonceStore for WebhookReplayNonceStore {
+    fn consume_once(&self, nonce: &str, timestamp_unix_ms: u64) -> Result<(), WebhookPayloadError> {
+        let mut consumed = self
+            .consumed
+            .lock()
+            .map_err(|_| WebhookPayloadError::InvalidValue("replay_protection.nonce"))?;
+        if consumed.contains_key(nonce) {
+            return Err(WebhookPayloadError::InvalidValue("replay_protection.nonce"));
+        }
+        consumed.insert(nonce.to_owned(), timestamp_unix_ms);
+        if consumed.len() > MAX_REPLAY_NONCES {
+            let oldest_nonce = consumed
+                .iter()
+                .min_by_key(|(_, timestamp)| *timestamp)
+                .map(|(nonce, _)| nonce.clone());
+            if let Some(oldest_nonce) = oldest_nonce {
+                consumed.remove(oldest_nonce.as_str());
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+struct VaultHmacSha256WebhookVerifier {
+    secret: Vec<u8>,
+}
+
+impl WebhookSignatureVerifier for VaultHmacSha256WebhookVerifier {
+    fn verify(&self, payload_bytes: &[u8], signature: &str) -> Result<(), WebhookPayloadError> {
+        let signed_payload = webhook_signature_payload(payload_bytes)?;
+        let expected_signature = hmac_sha256(self.secret.as_slice(), signed_payload.as_slice());
+        let supplied_signature = decode_webhook_signature(signature)?;
+        if constant_time_eq(expected_signature.as_slice(), supplied_signature.as_slice()) {
+            Ok(())
+        } else {
+            Err(WebhookPayloadError::InvalidValue("replay_protection.signature"))
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WebhookDiagnosticsSnapshot {
     pub total: usize,
@@ -111,6 +165,7 @@ pub struct WebhookRegistry {
     registry_path: RegistryPath,
     registry_file: Mutex<fs::File>,
     state: Mutex<RegistryDocument>,
+    replay_nonces: WebhookReplayNonceStore,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -186,6 +241,7 @@ impl WebhookRegistry {
             registry_path,
             registry_file: Mutex::new(registry_file),
             state: Mutex::new(document),
+            replay_nonces: WebhookReplayNonceStore::default(),
         })
     }
 
@@ -415,8 +471,34 @@ impl WebhookRegistry {
                         record.max_payload_bytes
                     ));
                 }
-                if record.signature_required && !signature_present {
-                    issues.push("payload signature is required but missing".to_owned());
+                let mut signature_verified = !record.signature_required;
+                if record.signature_required {
+                    if !signature_present {
+                        issues.push("payload signature is required but missing".to_owned());
+                    } else if record.enabled
+                        && readiness.is_ready()
+                        && source_allowed
+                        && event_allowed
+                        && max_payload_ok
+                        && !safety_blocked
+                        && !safety_requires_review
+                    {
+                        match verify_webhook_test_payload(
+                            record,
+                            payload_bytes,
+                            vault,
+                            &self.replay_nonces,
+                        ) {
+                            Ok(()) => {
+                                signature_verified = true;
+                            }
+                            Err(error) => {
+                                issues.push(format!(
+                                    "payload signature verification failed: {error}"
+                                ));
+                            }
+                        }
+                    }
                 }
                 issues.extend(readiness.issues.clone());
                 let valid = record.enabled
@@ -424,7 +506,7 @@ impl WebhookRegistry {
                     && source_allowed
                     && event_allowed
                     && max_payload_ok
-                    && (!record.signature_required || signature_present)
+                    && signature_verified
                     && !safety_blocked
                     && !safety_requires_review;
                 let outcome = if valid {
@@ -439,11 +521,18 @@ impl WebhookRegistry {
                     "safety_review_required"
                 } else if record.signature_required && !signature_present {
                     "signature_missing"
+                } else if record.signature_required && !signature_verified {
+                    "signature_invalid"
                 } else {
                     "rejected"
                 };
                 let message = if issues.is_empty() {
-                    "payload passed structural and policy validation".to_owned()
+                    if record.signature_required {
+                        "payload passed structural, signature, replay, and policy validation"
+                            .to_owned()
+                    } else {
+                        "payload passed structural and policy validation".to_owned()
+                    }
                 } else {
                     issues.join("; ")
                 };
@@ -613,6 +702,100 @@ fn evaluate_readiness(record: &WebhookIntegrationRecord, vault: &Vault) -> Webho
             issues: vec![format!("failed to read signing secret metadata: {error}")],
         },
     }
+}
+
+fn verify_webhook_test_payload(
+    record: &WebhookIntegrationRecord,
+    payload_bytes: &[u8],
+    vault: &Vault,
+    nonce_store: &dyn ReplayNonceStore,
+) -> Result<(), String> {
+    let secret = read_webhook_signing_secret(record, vault)?;
+    let verifier = VaultHmacSha256WebhookVerifier { secret };
+    verify_webhook_payload(payload_bytes, nonce_store, &verifier)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn read_webhook_signing_secret(
+    record: &WebhookIntegrationRecord,
+    vault: &Vault,
+) -> Result<Vec<u8>, String> {
+    let parsed = VaultRef::parse(record.secret_vault_ref.as_str())
+        .map_err(|error| format!("secret_vault_ref is invalid: {error}"))?;
+    let secret = vault.get_secret(&parsed.scope, parsed.key.as_str()).map_err(|error| {
+        if matches!(error, VaultError::NotFound) {
+            "referenced signing secret was not found in the vault".to_owned()
+        } else {
+            format!("failed to read signing secret: {error}")
+        }
+    })?;
+    if secret.is_empty() {
+        return Err("signing secret is empty".to_owned());
+    }
+    Ok(secret)
+}
+
+fn webhook_signature_payload(payload_bytes: &[u8]) -> Result<Vec<u8>, WebhookPayloadError> {
+    let mut value = serde_json::from_slice::<Value>(payload_bytes)
+        .map_err(|_| WebhookPayloadError::InvalidJson)?;
+    let replay_protection = value
+        .get_mut("replay_protection")
+        .and_then(Value::as_object_mut)
+        .ok_or(WebhookPayloadError::InvalidType("replay_protection"))?;
+    replay_protection.remove("signature");
+    serde_json::to_vec(&value).map_err(|_| WebhookPayloadError::InvalidJson)
+}
+
+fn hmac_sha256(secret: &[u8], payload: &[u8]) -> Vec<u8> {
+    let mut key_block = [0_u8; HMAC_SHA256_BLOCK_BYTES];
+    if secret.len() > HMAC_SHA256_BLOCK_BYTES {
+        let digest = Sha256::digest(secret);
+        key_block[..digest.len()].copy_from_slice(digest.as_slice());
+    } else {
+        key_block[..secret.len()].copy_from_slice(secret);
+    }
+
+    let mut inner_key = [0x36_u8; HMAC_SHA256_BLOCK_BYTES];
+    let mut outer_key = [0x5c_u8; HMAC_SHA256_BLOCK_BYTES];
+    for index in 0..HMAC_SHA256_BLOCK_BYTES {
+        inner_key[index] ^= key_block[index];
+        outer_key[index] ^= key_block[index];
+    }
+
+    let mut inner = Sha256::new();
+    inner.update(inner_key);
+    inner.update(payload);
+    let inner_digest = inner.finalize();
+
+    let mut outer = Sha256::new();
+    outer.update(outer_key);
+    outer.update(inner_digest);
+    outer.finalize().to_vec()
+}
+
+fn decode_webhook_signature(signature: &str) -> Result<Vec<u8>, WebhookPayloadError> {
+    let trimmed = signature.trim();
+    let encoded = trimmed
+        .strip_prefix("hmac-sha256=")
+        .or_else(|| trimmed.strip_prefix("sha256="))
+        .or_else(|| trimmed.strip_prefix("hmac-sha256:"))
+        .or_else(|| trimmed.strip_prefix("sha256:"))
+        .unwrap_or(trimmed);
+    let decoded = hex::decode(encoded)
+        .map_err(|_| WebhookPayloadError::InvalidValue("replay_protection.signature"))?;
+    if decoded.len() != 32 {
+        return Err(WebhookPayloadError::InvalidValue("replay_protection.signature"));
+    }
+    Ok(decoded)
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let diff = left.iter().zip(right.iter()).fold(0_u8, |acc, (left, right)| acc | (left ^ right));
+    diff == 0
 }
 
 fn normalize_set_request(
@@ -1058,5 +1241,128 @@ mod tests {
             "webhook safety findings should surface a secret leak classification"
         );
         Ok(())
+    }
+
+    #[test]
+    fn webhook_test_integration_rejects_forged_signature() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (registry, vault, _temp) = test_registry_with_signed_webhook()?;
+        let payload_bytes = serde_json::to_vec(&json!({
+            "v": CANONICAL_JSON_ENVELOPE_VERSION,
+            "id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "event": "push",
+            "source": "github.repo_a",
+            "payload": {
+                "channel": "C123",
+                "text": "hello"
+            },
+            "replay_protection": {
+                "nonce": "01ARZ3NDEKTSV4RRFFQ69G5FAB",
+                "timestamp_unix_ms": unix_ms_now()? as u64,
+                "signature": "sig:test"
+            }
+        }))?;
+
+        let outcome =
+            registry.test_integration("github_repo_a", payload_bytes.as_slice(), &vault)?;
+
+        assert!(!outcome.result.valid);
+        assert_eq!(outcome.result.outcome, "signature_invalid");
+        assert!(outcome.result.signature_present);
+        assert_eq!(outcome.integration.last_test_status.as_deref(), Some("failed"));
+        assert!(
+            outcome.result.message.contains("payload signature verification failed"),
+            "forged signature failure should be explicit: {}",
+            outcome.result.message
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn webhook_test_integration_accepts_valid_signature_once(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (registry, vault, _temp) = test_registry_with_signed_webhook()?;
+        let payload_bytes = signed_test_webhook_payload(
+            "github.repo_a",
+            "push",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAC",
+            b"super-secret",
+        )?;
+
+        let first = registry.test_integration("github_repo_a", payload_bytes.as_slice(), &vault)?;
+        assert!(first.result.valid);
+        assert_eq!(first.result.outcome, "accepted");
+        assert_eq!(first.integration.last_test_status.as_deref(), Some("passed"));
+
+        let replayed =
+            registry.test_integration("github_repo_a", payload_bytes.as_slice(), &vault)?;
+        assert!(!replayed.result.valid);
+        assert_eq!(replayed.result.outcome, "signature_invalid");
+        assert!(
+            replayed.result.message.contains("replay_protection.nonce"),
+            "replayed payload should fail nonce consumption: {}",
+            replayed.result.message
+        );
+        Ok(())
+    }
+
+    fn test_registry_with_signed_webhook(
+    ) -> Result<(WebhookRegistry, Vault, tempfile::TempDir), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let state_root = temp.path().join("state");
+        let identity_root = state_root.join("identity");
+        fs::create_dir_all(&identity_root)?;
+
+        let registry = WebhookRegistry::open(&state_root)?;
+        let vault = Vault::open_with_config(VaultConfig {
+            root: Some(state_root.join("vault")),
+            identity_store_root: Some(identity_root),
+            backend_preference: BackendPreference::EncryptedFile,
+            ..VaultConfig::default()
+        })?;
+        vault.put_secret(&VaultScope::Global, "github_repo_a", b"super-secret")?;
+
+        registry.set_integration(
+            WebhookIntegrationSetRequest {
+                integration_id: "github_repo_a".to_owned(),
+                provider: "github".to_owned(),
+                display_name: Some("GitHub Repo A".to_owned()),
+                secret_vault_ref: "global/github_repo_a".to_owned(),
+                allowed_events: vec!["push".to_owned()],
+                allowed_sources: vec!["github.repo_a".to_owned()],
+                enabled: true,
+                signature_required: true,
+                max_payload_bytes: DEFAULT_MAX_PAYLOAD_BYTES,
+            },
+            &vault,
+        )?;
+
+        Ok((registry, vault, temp))
+    }
+
+    fn signed_test_webhook_payload(
+        source: &str,
+        event: &str,
+        nonce: &str,
+        secret: &[u8],
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let mut payload = json!({
+            "v": CANONICAL_JSON_ENVELOPE_VERSION,
+            "id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "event": event,
+            "source": source,
+            "payload": {
+                "channel": "C123",
+                "text": "hello"
+            },
+            "replay_protection": {
+                "nonce": nonce,
+                "timestamp_unix_ms": unix_ms_now()? as u64
+            }
+        });
+        let unsigned_payload = serde_json::to_vec(&payload)?;
+        let signature = hex::encode(hmac_sha256(secret, unsigned_payload.as_slice()));
+        payload["replay_protection"]["signature"] = json!(format!("sha256={signature}"));
+        Ok(serde_json::to_vec(&payload)?)
     }
 }
