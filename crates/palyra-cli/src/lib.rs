@@ -5787,6 +5787,22 @@ fn fetch_admin_status_payload(
     channel: Option<String>,
     trace_id: Option<String>,
 ) -> Result<Value> {
+    let mut payload = fetch_admin_status_payload_raw(
+        client, base_url, token, principal, device_id, channel, trace_id,
+    )?;
+    redact_json_value_tree(&mut payload, None);
+    Ok(payload)
+}
+
+fn fetch_admin_status_payload_raw(
+    client: &Client,
+    base_url: &str,
+    token: Option<String>,
+    principal: String,
+    device_id: String,
+    channel: Option<String>,
+    trace_id: Option<String>,
+) -> Result<Value> {
     let status_url = format!("{}/admin/v1/status", base_url.trim_end_matches('/'));
     let mut request = client
         .get(status_url)
@@ -5802,15 +5818,13 @@ fn fetch_admin_status_payload(
         request = request.header("x-palyra-trace-id", trace_id);
     }
 
-    let mut payload: Value = request
+    request
         .send()
         .context("failed to call daemon admin status endpoint")?
         .error_for_status()
         .context("daemon admin status endpoint returned non-success status")?
         .json()
-        .context("failed to parse daemon admin status payload")?;
-    redact_json_value_tree(&mut payload, None);
-    Ok(payload)
+        .context("failed to parse daemon admin status payload")
 }
 
 fn fetch_admin_status(

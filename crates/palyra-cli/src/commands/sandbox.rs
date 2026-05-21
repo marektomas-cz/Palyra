@@ -21,7 +21,7 @@ fn load_runtime_tool_policy_snapshot() -> Result<Value> {
         .timeout(std::time::Duration::from_secs(2))
         .build()
         .context("failed to build HTTP client")?;
-    let payload = fetch_admin_status_payload(
+    let payload = fetch_admin_status_payload_raw(
         &client,
         connection.base_url.as_str(),
         connection.token,
@@ -30,10 +30,32 @@ fn load_runtime_tool_policy_snapshot() -> Result<Value> {
         Some(connection.channel),
         Some(connection.trace_id),
     )?;
-    payload
+    sandbox_tool_policy_from_admin_status_payload(&payload)
+}
+
+fn sandbox_tool_policy_from_admin_status_payload(payload: &Value) -> Result<Value> {
+    let allowed_secret_handles =
+        payload.pointer("/tool_call_policy/wasm_runtime/allowed_secrets").cloned();
+    let mut policy = payload
         .get("tool_call_policy")
         .cloned()
-        .ok_or_else(|| anyhow!("daemon admin status did not include tool_call_policy"))
+        .ok_or_else(|| anyhow!("daemon admin status did not include tool_call_policy"))?;
+    redact_json_value_tree(&mut policy, None);
+    restore_wasm_allowed_secret_handles(&mut policy, allowed_secret_handles);
+    Ok(policy)
+}
+
+fn restore_wasm_allowed_secret_handles(policy: &mut Value, allowed_secret_handles: Option<Value>) {
+    let Some(handles) = allowed_secret_handles.filter(is_json_string_array) else {
+        return;
+    };
+    if let Some(target) = policy.pointer_mut("/wasm_runtime/allowed_secrets") {
+        *target = handles;
+    }
+}
+
+fn is_json_string_array(value: &Value) -> bool {
+    value.as_array().is_some_and(|items| items.iter().all(Value::is_string))
 }
 
 fn emit_sandbox_list(policy: &Value, json_output: bool) -> Result<()> {
@@ -376,7 +398,12 @@ fn join_json_string_list(value: Option<&Value>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{process_runner_executor_label, sandbox_status_label};
+    use serde_json::{json, Value};
+
+    use super::{
+        join_json_string_list, process_runner_executor_label, sandbox_status_label,
+        sandbox_tool_policy_from_admin_status_payload, sandbox_wasm_runtime_view,
+    };
 
     #[test]
     fn sandbox_status_tracks_enablement_and_allowlist() {
@@ -389,5 +416,38 @@ mod tests {
     fn executor_label_tracks_selected_tier() {
         assert_eq!(process_runner_executor_label("b"), "sandbox_tier_b");
         assert!(process_runner_executor_label("c").starts_with("sandbox_tier_c_"));
+    }
+
+    #[test]
+    fn sandbox_policy_preserves_wasm_allowed_secret_handles_after_redaction() {
+        let payload = json!({
+            "tool_call_policy": {
+                "allowed_tools": ["palyra.plugin.run"],
+                "admin_token": "operator-secret",
+                "wasm_runtime": {
+                    "enabled": true,
+                    "allow_inline_modules": false,
+                    "max_module_size_bytes": 1024,
+                    "fuel_budget": 1000,
+                    "max_memory_bytes": 4096,
+                    "max_table_elements": 8,
+                    "max_instances": 2,
+                    "allowed_http_hosts": ["api.example.test"],
+                    "allowed_secrets": ["db_password", "api_token"],
+                    "allowed_storage_prefixes": ["plugin/"],
+                    "allowed_channels": ["stable"]
+                }
+            }
+        });
+
+        let policy = sandbox_tool_policy_from_admin_status_payload(&payload)
+            .expect("tool policy should be extracted");
+        let wasm_runtime = sandbox_wasm_runtime_view(&policy);
+
+        assert_eq!(policy.pointer("/admin_token").and_then(Value::as_str), Some("<redacted>"));
+        assert_eq!(
+            join_json_string_list(wasm_runtime.get("allowed_secrets")),
+            "db_password,api_token"
+        );
     }
 }
