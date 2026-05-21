@@ -17,6 +17,9 @@ use crate::{
     journal::{ApprovalDecisionScope, ApprovalPromptRecord, OrchestratorTapeAppendRequest},
     transport::grpc::{auth::RequestContext, proto::palyra::common::v1 as common_v1},
 };
+
+pub(crate) const RUN_STREAM_RESPONSE_CHANNEL_CLOSED_MESSAGE: &str =
+    "run stream response channel closed";
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn append_tool_decision_tape_event(
     runtime_state: &Arc<GatewayRuntimeState>,
@@ -263,7 +266,7 @@ pub(crate) async fn send_status_with_tape(
     sender
         .send(Ok(event))
         .await
-        .map_err(|_| Status::cancelled("run stream response channel closed"))?;
+        .map_err(|_| Status::cancelled(RUN_STREAM_RESPONSE_CHANNEL_CLOSED_MESSAGE))?;
     runtime_state
         .append_orchestrator_tape_event(OrchestratorTapeAppendRequest {
             run_id: run_id.to_owned(),
@@ -294,7 +297,7 @@ pub(crate) async fn send_model_token_with_tape(
     sender
         .send(Ok(event))
         .await
-        .map_err(|_| Status::cancelled("run stream response channel closed"))?;
+        .map_err(|_| Status::cancelled(RUN_STREAM_RESPONSE_CHANNEL_CLOSED_MESSAGE))?;
     if !is_final && *token_tape_events >= MAX_MODEL_TOKEN_TAPE_EVENTS_PER_RUN {
         if !*compaction_emitted {
             compact_model_token_tape(runtime_state, request_context, session_id, run_id, tape_seq)
@@ -643,7 +646,7 @@ pub(crate) async fn send_tool_proposal_with_tape(
     sender
         .send(Ok(event))
         .await
-        .map_err(|_| Status::cancelled("run stream response channel closed"))?;
+        .map_err(|_| Status::cancelled(RUN_STREAM_RESPONSE_CHANNEL_CLOSED_MESSAGE))?;
     append_tool_proposal_tape_event(
         runtime_state,
         run_id,
@@ -684,7 +687,7 @@ pub(crate) async fn send_tool_approval_request_with_tape(
     sender
         .send(Ok(event))
         .await
-        .map_err(|_| Status::cancelled("run stream response channel closed"))?;
+        .map_err(|_| Status::cancelled(RUN_STREAM_RESPONSE_CHANNEL_CLOSED_MESSAGE))?;
     append_tool_approval_request_tape_event(
         runtime_state,
         run_id,
@@ -726,7 +729,7 @@ pub(crate) async fn send_tool_approval_response_with_tape(
     sender
         .send(Ok(event))
         .await
-        .map_err(|_| Status::cancelled("run stream response channel closed"))?;
+        .map_err(|_| Status::cancelled(RUN_STREAM_RESPONSE_CHANNEL_CLOSED_MESSAGE))?;
     append_tool_approval_response_tape_event(
         runtime_state,
         run_id,
@@ -766,7 +769,7 @@ pub(crate) async fn send_tool_decision_with_tape(
     sender
         .send(Ok(event))
         .await
-        .map_err(|_| Status::cancelled("run stream response channel closed"))?;
+        .map_err(|_| Status::cancelled(RUN_STREAM_RESPONSE_CHANNEL_CLOSED_MESSAGE))?;
     append_tool_decision_tape_event(
         runtime_state,
         run_id,
@@ -804,7 +807,7 @@ pub(crate) async fn send_tool_result_with_tape(
     sender
         .send(Ok(event))
         .await
-        .map_err(|_| Status::cancelled("run stream response channel closed"))?;
+        .map_err(|_| Status::cancelled(RUN_STREAM_RESPONSE_CHANNEL_CLOSED_MESSAGE))?;
     runtime_state
         .append_orchestrator_tape_event(OrchestratorTapeAppendRequest {
             run_id: run_id.to_owned(),
@@ -844,7 +847,7 @@ pub(crate) async fn send_tool_attestation_with_tape(
     sender
         .send(Ok(event))
         .await
-        .map_err(|_| Status::cancelled("run stream response channel closed"))?;
+        .map_err(|_| Status::cancelled(RUN_STREAM_RESPONSE_CHANNEL_CLOSED_MESSAGE))?;
     runtime_state
         .append_orchestrator_tape_event(OrchestratorTapeAppendRequest {
             run_id: run_id.to_owned(),

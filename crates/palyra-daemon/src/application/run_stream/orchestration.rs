@@ -5,8 +5,8 @@ use tokio::{
     sync::mpsc,
     time::{interval, interval_at, Instant as TokioInstant, MissedTickBehavior},
 };
-use tonic::{Status, Streaming};
-use tracing::{warn, Instrument};
+use tonic::{Code, Status, Streaming};
+use tracing::{debug, warn, Instrument};
 
 use crate::{
     application::learning::schedule_post_run_reflection,
@@ -51,7 +51,10 @@ use super::{
         AgentLoopTerminationReason, AgentRunLoopState, DEFAULT_AGENT_LOOP_WALL_CLOCK_BUDGET_MS,
     },
     cancellation::transition_run_stream_to_cancelled,
-    tape::{maybe_compact_context_after_tool_results, send_status_with_tape},
+    tape::{
+        maybe_compact_context_after_tool_results, send_status_with_tape,
+        RUN_STREAM_RESPONSE_CHANNEL_CLOSED_MESSAGE,
+    },
 };
 
 const PROVIDER_PROGRESS_HEARTBEAT_MS: u64 = 20_000;
@@ -441,6 +444,31 @@ async fn send_agent_loop_progress_status(
 }
 
 #[allow(clippy::result_large_err)]
+async fn send_terminal_agent_loop_progress_status(
+    sender: &mpsc::Sender<Result<common_v1::RunStreamEvent, Status>>,
+    runtime_state: &Arc<GatewayRuntimeState>,
+    run_id: &str,
+    tape_seq: &mut i64,
+    phase: &str,
+) -> Result<(), Status> {
+    match send_agent_loop_progress_status(sender, runtime_state, run_id, tape_seq, phase).await {
+        Ok(()) => Ok(()),
+        Err(error) if is_run_stream_response_channel_closed(&error) => {
+            debug!(
+                run_id,
+                phase, "skipping terminal agent loop progress status after client stream closed"
+            );
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn is_run_stream_response_channel_closed(error: &Status) -> bool {
+    error.code() == Code::Cancelled && error.message() == RUN_STREAM_RESPONSE_CHANNEL_CLOSED_MESSAGE
+}
+
+#[allow(clippy::result_large_err)]
 #[allow(clippy::too_many_arguments)]
 async fn terminate_run_stream_with_agent_loop_reason(
     sender: &mpsc::Sender<Result<common_v1::RunStreamEvent, Status>>,
@@ -462,7 +490,7 @@ async fn terminate_run_stream_with_agent_loop_reason(
         loop_state.termination_payload(run_id, reason, message.as_str(), provider_trace_ref),
     )
     .await?;
-    send_agent_loop_progress_status(
+    send_terminal_agent_loop_progress_status(
         sender,
         runtime_state,
         run_id,
@@ -978,7 +1006,7 @@ pub(crate) async fn process_run_stream_message(
                         ),
                     )
                     .await?;
-                    send_agent_loop_progress_status(
+                    send_terminal_agent_loop_progress_status(
                         sender,
                         runtime_state,
                         run_id.as_str(),
@@ -1779,16 +1807,19 @@ mod tests {
     use super::{
         agent_loop_budget_exhausted_message, contains_raw_provider_tool_call_markup,
         final_answer_recovery_prompt, incomplete_final_answer_without_tools,
-        incomplete_terminal_final_answer, length_recovery_prompt,
-        terminal_tool_authorization_failure, tool_result_to_provider_message,
-        truncated_final_answer_without_tools, RunStreamToolResultForModel,
+        incomplete_terminal_final_answer, is_run_stream_response_channel_closed,
+        length_recovery_prompt, terminal_tool_authorization_failure,
+        tool_result_to_provider_message, truncated_final_answer_without_tools,
+        RunStreamToolResultForModel,
     };
     use super::{AgentLoopTerminationReason, AgentRunLoopState};
+    use crate::application::run_stream::tape::RUN_STREAM_RESPONSE_CHANNEL_CLOSED_MESSAGE;
     use crate::model_provider::{
         ProviderFinishReason, ProviderMessage, ProviderMessageContentPart,
         ProviderOutputContentPart, ProviderRawProviderRefs, ProviderTurnOutput, ProviderUsage,
     };
     use serde_json::{json, Value};
+    use tonic::{Code, Status};
 
     fn loop_state_after_tool(prompt: &str, tool_name: &str) -> AgentRunLoopState {
         let mut state =
@@ -1810,6 +1841,18 @@ mod tests {
             r#"{"success":true}"#,
         )]);
         state
+    }
+
+    #[test]
+    fn run_stream_response_channel_closed_status_is_classified_narrowly() {
+        let closed = Status::cancelled(RUN_STREAM_RESPONSE_CHANNEL_CLOSED_MESSAGE);
+        assert!(is_run_stream_response_channel_closed(&closed));
+
+        let different_cancel = Status::cancelled("caller cancelled before final answer");
+        assert!(!is_run_stream_response_channel_closed(&different_cancel));
+
+        let internal = Status::new(Code::Internal, RUN_STREAM_RESPONSE_CHANNEL_CLOSED_MESSAGE);
+        assert!(!is_run_stream_response_channel_closed(&internal));
     }
 
     #[test]

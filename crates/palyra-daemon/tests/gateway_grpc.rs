@@ -4724,6 +4724,66 @@ async fn grpc_gateway_run_stream_preserves_long_model_output() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn grpc_run_stream_disconnect_after_final_token_still_marks_run_done() -> Result<()> {
+    let (child, admin_port, grpc_port, _journal_db_path) = spawn_palyrad_with_dynamic_ports()?;
+    let mut daemon = ChildGuard::new(child);
+    wait_for_health(admin_port, daemon.child_mut())?;
+
+    let endpoint = format!("http://127.0.0.1:{grpc_port}");
+    let mut client = gateway_v1::gateway_service_client::GatewayServiceClient::connect(endpoint)
+        .await
+        .context("failed to connect gRPC client")?;
+
+    let mut stream_request =
+        tonic::Request::new(tokio_stream::iter(vec![sample_run_stream_request_with_text(
+            "disconnect after final token".to_owned(),
+        )]));
+    authorize_metadata(stream_request.metadata_mut())?;
+
+    let mut response_stream =
+        client.run_stream(stream_request).await.context("failed to call RunStream")?.into_inner();
+    let mut saw_final_model_token = false;
+    while let Some(event) = tokio::time::timeout(Duration::from_secs(5), response_stream.next())
+        .await
+        .context("timed out waiting for RunStream event")?
+    {
+        let event = event.context("failed to read RunStream event")?;
+        match event.body {
+            Some(common_v1::run_stream_event::Body::ModelToken(token)) if token.is_final => {
+                saw_final_model_token = true;
+                break;
+            }
+            Some(common_v1::run_stream_event::Body::Status(status))
+                if status.kind == common_v1::stream_status::StatusKind::Failed as i32 =>
+            {
+                anyhow::bail!("run failed before final token: {}", status.message);
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_final_model_token, "test must disconnect after the successful final model token");
+    drop(response_stream);
+
+    let mut observed_state = None::<String>;
+    for _ in 0..40 {
+        let run_snapshot =
+            admin_get_json_async(admin_port, format!("/admin/v1/runs/{RUN_ID}")).await?;
+        observed_state = run_snapshot.get("state").and_then(Value::as_str).map(str::to_owned);
+        if matches!(observed_state.as_deref(), Some("done" | "failed" | "cancelled")) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    assert_eq!(
+        observed_state.as_deref(),
+        Some("done"),
+        "client disconnect after final token must not convert completed runs to failed"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn grpc_run_stream_allows_sensitive_tool_mode_for_safe_prompt() -> Result<()> {
     let (child, admin_port, grpc_port, _journal_db_path) = spawn_palyrad_with_dynamic_ports()?;
     let mut daemon = ChildGuard::new(child);
