@@ -45,8 +45,11 @@ fn proto_enum_label(name: &str, prefix: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{journal_event_actor_label, journal_event_kind_label};
+    use super::{
+        journal_event_actor_label, journal_event_kind_label, read_remote_dashboard_assist_payload,
+    };
     use crate::common_v1;
+    use serde_json::json;
 
     #[test]
     fn journal_recent_labels_known_proto_enums() {
@@ -58,6 +61,16 @@ mod tests {
             journal_event_actor_label(common_v1::journal_event::EventActor::System as i32),
             "system"
         );
+    }
+
+    #[test]
+    fn remote_dashboard_assist_reader_ignores_json_null() {
+        assert!(read_remote_dashboard_assist_payload(&json!({})).is_none());
+        assert!(read_remote_dashboard_assist_payload(&json!({ "remote_assist": null })).is_none());
+        assert!(read_remote_dashboard_assist_payload(&json!({
+            "remote_assist": { "trust_state": "verified" }
+        }))
+        .is_some());
     }
 }
 
@@ -172,7 +185,7 @@ pub(crate) fn run_daemon(command: DaemonCommand) -> Result<()> {
                         verification_report.gateway_ca_fingerprint_sha256.as_deref().unwrap_or("none")
                     );
                 }
-                if let Some(remote_assist) = output.get("remote_assist") {
+                if let Some(remote_assist) = read_remote_dashboard_assist_payload(&output) {
                     emit_remote_dashboard_assist_lines("daemon.dashboard_url", remote_assist);
                 }
                 if open {
@@ -970,7 +983,7 @@ fn run_gateway_discover(
     if let Some(hint) = payload.get("remote_access_hint").and_then(Value::as_str) {
         println!("gateway.discover.hint={hint}");
     }
-    if let Some(remote_assist) = payload.get("remote_assist") {
+    if let Some(remote_assist) = read_remote_dashboard_assist_payload(&payload) {
         emit_remote_dashboard_assist_lines("gateway.discover", remote_assist);
     }
     std::io::stdout().flush().context("stdout flush failed")
@@ -1008,6 +1021,10 @@ fn build_remote_dashboard_assist_payload(
             "Export a support bundle after repeated handshake or fingerprint failures so recovery has full diagnostics."
         ],
     }))
+}
+
+fn read_remote_dashboard_assist_payload(payload: &Value) -> Option<&Value> {
+    payload.get("remote_assist").filter(|value| value.is_object())
 }
 
 fn emit_remote_dashboard_assist_lines(prefix: &str, payload: &Value) {
