@@ -883,6 +883,23 @@ fn console_chat_endpoints_require_session_and_csrf() -> Result<()> {
         "chat stream endpoint must enforce csrf token"
     );
 
+    let unknown_session_id = "01ARZ3NDEKTSV4RRFFQ69G5FB8";
+    let reference_preview_unknown_session = client
+        .post(format!(
+            "http://127.0.0.1:{admin_port}/console/v1/chat/sessions/{unknown_session_id}/references/preview"
+        ))
+        .header("Cookie", cookie.clone())
+        .json(&serde_json::json!({
+            "text": "@file README.md",
+        }))
+        .send()
+        .context("failed to call reference preview for unknown chat session")?;
+    assert_eq!(
+        reference_preview_unknown_session.status().as_u16(),
+        404,
+        "reference preview must require an existing authenticated chat session"
+    );
+
     let unknown_run_id = "01ARZ3NDEKTSV4RRFFQ69G5FB9";
     let run_status = client
         .get(format!("http://127.0.0.1:{admin_port}/console/v1/chat/runs/{unknown_run_id}/status"))

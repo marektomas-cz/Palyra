@@ -482,10 +482,12 @@ pub(crate) async fn console_chat_context_reference_preview_handler(
     let text = trim_to_option(payload.text).ok_or_else(|| {
         runtime_status_response(tonic::Status::invalid_argument("text cannot be empty"))
     })?;
+    let session_record =
+        load_console_chat_session(&state, &session.context, session_id.as_str(), false).await?;
     let preview = crate::application::context_references::preview_context_references(
         &state.runtime,
         &session.context,
-        session_id.as_str(),
+        session_record.session_id.as_str(),
         text.as_str(),
     )
     .await
