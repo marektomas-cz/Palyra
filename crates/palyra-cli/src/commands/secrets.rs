@@ -834,9 +834,40 @@ fn secret_audit_output_findings(findings: &[SecretAuditFinding]) -> Vec<SecretAu
 fn redact_secret_audit_finding_text(value: &str, reference: Option<&str>) -> String {
     let mut redacted = sanitize_secret_error(value);
     if let Some(reference) = reference.filter(|reference| !reference.is_empty()) {
-        redacted = redacted.replace(reference, "<redacted>");
+        for term in secret_audit_reference_redaction_terms(reference) {
+            redacted = redacted.replace(term.as_str(), "<redacted>");
+        }
     }
     redacted
+}
+
+fn secret_audit_reference_redaction_terms(reference: &str) -> Vec<String> {
+    let trimmed = reference.trim();
+    let mut terms = Vec::new();
+    push_secret_audit_redaction_term(&mut terms, trimmed);
+    add_parsed_vault_ref_redaction_terms(&mut terms, trimmed);
+    if let Some(stripped) = trimmed.strip_prefix("vault://") {
+        push_secret_audit_redaction_term(&mut terms, stripped);
+        add_parsed_vault_ref_redaction_terms(&mut terms, stripped);
+    }
+    terms.sort_by(|left, right| right.len().cmp(&left.len()).then_with(|| left.cmp(right)));
+    terms.dedup();
+    terms
+}
+
+fn add_parsed_vault_ref_redaction_terms(terms: &mut Vec<String>, reference: &str) {
+    if let Ok(parsed) = VaultRef::parse(reference) {
+        let canonical = format!("{}/{}", parsed.scope, parsed.key);
+        push_secret_audit_redaction_term(terms, canonical.as_str());
+        push_secret_audit_redaction_term(terms, format!("vault://{canonical}"));
+    }
+}
+
+fn push_secret_audit_redaction_term(terms: &mut Vec<String>, term: impl AsRef<str>) {
+    let term = term.as_ref();
+    if !term.is_empty() {
+        terms.push(term.to_owned());
+    }
 }
 
 fn json_string_text_field(value: &str) -> Result<String> {
@@ -1232,6 +1263,27 @@ mod tests {
         assert!(!output.contains("vault://global/openai"));
         assert!(!output.contains("resolved from vault"));
         assert!(!output.contains("rotate vault"));
+    }
+
+    #[test]
+    fn secret_audit_output_redacts_normalized_vault_reference_terms() {
+        let findings = secret_audit_output_findings(&[SecretAuditFinding {
+            severity: "blocking".to_owned(),
+            code: "unresolved_secret_ref".to_owned(),
+            component: "model_provider".to_owned(),
+            reference: Some("GLOBAL/openai_api_key".to_owned()),
+            message: "vault reference global/openai_api_key is missing or unreadable.".to_owned(),
+            remediation: "Update GLOBAL/openai_api_key or vault://global/openai_api_key."
+                .to_owned(),
+        }]);
+        let output = serde_json::to_string(&findings).expect("audit findings should serialize");
+
+        assert!(output.contains("\"reference\":\"<redacted>\""));
+        assert!(output.contains("vault reference <redacted> is missing or unreadable"));
+        assert!(output.contains("Update <redacted> or <redacted>"));
+        assert!(!output.contains("GLOBAL/openai_api_key"));
+        assert!(!output.contains("global/openai_api_key"));
+        assert!(!output.contains("vault://global/openai_api_key"));
     }
 
     #[test]
