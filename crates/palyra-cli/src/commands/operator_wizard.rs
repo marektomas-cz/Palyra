@@ -2813,10 +2813,13 @@ fn prompt_port(
 
 fn clear_model_provider_auth(document: &mut toml::Value) -> Result<()> {
     unset_value_at_path(document, "model_provider.openai_api_key")?;
+    unset_value_at_path(document, "model_provider.openai_api_key_secret_ref")?;
     unset_value_at_path(document, "model_provider.openai_api_key_vault_ref")?;
     unset_value_at_path(document, "model_provider.anthropic_api_key")?;
+    unset_value_at_path(document, "model_provider.anthropic_api_key_secret_ref")?;
     unset_value_at_path(document, "model_provider.anthropic_api_key_vault_ref")?;
     unset_value_at_path(document, "model_provider.auth_profile_id")?;
+    unset_value_at_path(document, "model_provider.auth_profile_ref")?;
     unset_value_at_path(document, "model_provider.auth_provider_kind")?;
     Ok(())
 }
@@ -3985,6 +3988,50 @@ variable = "PALYRA_ADMIN_TOKEN"
                 .expect("require_auth lookup should succeed"),
             Some(true)
         );
+    }
+
+    #[test]
+    fn clear_model_provider_auth_removes_structured_secret_refs() {
+        let mut document: toml::Value = toml::from_str(
+            r#"
+[model_provider]
+openai_api_key = "sk-old"
+openai_api_key_vault_ref = "global/openai_old"
+anthropic_api_key = "ant-old"
+anthropic_api_key_vault_ref = "global/anthropic_old"
+auth_profile_id = "provider.default"
+auth_profile_ref = "provider.legacy"
+auth_provider_kind = "minimax"
+[model_provider.openai_api_key_secret_ref]
+kind = "env"
+variable = "PALYRA_MODEL_PROVIDER_OPENAI_API_KEY"
+[model_provider.anthropic_api_key_secret_ref]
+kind = "env"
+variable = "PALYRA_MODEL_PROVIDER_ANTHROPIC_API_KEY"
+"#,
+        )
+        .expect("model provider config should parse");
+
+        clear_model_provider_auth(&mut document).expect("model provider auth should clear");
+
+        for path in [
+            "model_provider.openai_api_key",
+            "model_provider.openai_api_key_secret_ref",
+            "model_provider.openai_api_key_vault_ref",
+            "model_provider.anthropic_api_key",
+            "model_provider.anthropic_api_key_secret_ref",
+            "model_provider.anthropic_api_key_vault_ref",
+            "model_provider.auth_profile_id",
+            "model_provider.auth_profile_ref",
+            "model_provider.auth_provider_kind",
+        ] {
+            assert!(
+                get_value_at_path(&document, path)
+                    .expect("config path lookup should succeed")
+                    .is_none(),
+                "{path} should be removed"
+            );
+        }
     }
 
     #[cfg(unix)]
