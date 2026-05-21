@@ -3468,6 +3468,7 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
         request: Request<browser_v1::ListDownloadArtifactsRequest>,
     ) -> Result<Response<browser_v1::ListDownloadArtifactsResponse>, Status> {
         self.runtime.authorize(request.metadata()).await?;
+        let caller_principal = request_principal(request.metadata())?.to_owned();
         let mut payload = request.into_inner();
         let session_id = parse_session_id_from_proto(payload.session_id.take())
             .map_err(Status::invalid_argument)?;
@@ -3478,6 +3479,16 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
         }
         .clamp(1, MAX_DOWNLOAD_ARTIFACTS_PER_SESSION);
         let quarantined_only = payload.quarantined_only;
+        {
+            let mut sessions = self.runtime.sessions.lock().await;
+            let Some(session) = sessions.get_mut(session_id.as_str()) else {
+                return Err(Status::not_found("browser session not found"));
+            };
+            if session.principal != caller_principal {
+                return Err(Status::not_found("browser session not found"));
+            }
+            session.last_active = Instant::now();
+        }
         let guard = self.runtime.download_sessions.lock().await;
         if let Some(download_session) = guard.get(session_id.as_str()) {
             let filtered = download_session
@@ -3499,12 +3510,6 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
                 truncated,
                 error: String::new(),
             }));
-        }
-        drop(guard);
-
-        let sessions = self.runtime.sessions.lock().await;
-        if !sessions.contains_key(session_id.as_str()) {
-            return Err(Status::not_found("browser session not found"));
         }
         Ok(Response::new(browser_v1::ListDownloadArtifactsResponse {
             v: CANONICAL_PROTOCOL_MAJOR,

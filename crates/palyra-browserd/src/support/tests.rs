@@ -4415,13 +4415,15 @@ async fn browser_service_download_allowlist_and_quarantine_artifacts() {
     );
     quarantine_handle.join().expect("quarantine server thread should exit");
 
+    let mut list_request = Request::new(browser_v1::ListDownloadArtifactsRequest {
+        v: 1,
+        session_id: Some(proto::palyra::common::v1::CanonicalId { ulid: session_id }),
+        limit: 10,
+        quarantined_only: false,
+    });
+    insert_principal(&mut list_request, "user:ops");
     let listed = service
-        .list_download_artifacts(Request::new(browser_v1::ListDownloadArtifactsRequest {
-            v: 1,
-            session_id: Some(proto::palyra::common::v1::CanonicalId { ulid: session_id }),
-            limit: 10,
-            quarantined_only: false,
-        }))
+        .list_download_artifacts(list_request)
         .await
         .expect("list_download_artifacts should execute")
         .into_inner();
@@ -4526,13 +4528,15 @@ async fn browser_service_rejects_downloads_that_exceed_max_file_bytes() {
     assert!(click.artifact.is_none(), "oversized download must not register an artifact");
     oversized_handle.join().expect("oversized server thread should exit");
 
+    let mut list_request = Request::new(browser_v1::ListDownloadArtifactsRequest {
+        v: 1,
+        session_id: Some(proto::palyra::common::v1::CanonicalId { ulid: session_id }),
+        limit: 10,
+        quarantined_only: false,
+    });
+    insert_principal(&mut list_request, "user:ops");
     let listed = service
-        .list_download_artifacts(Request::new(browser_v1::ListDownloadArtifactsRequest {
-            v: 1,
-            session_id: Some(proto::palyra::common::v1::CanonicalId { ulid: session_id }),
-            limit: 10,
-            quarantined_only: false,
-        }))
+        .list_download_artifacts(list_request)
         .await
         .expect("list_download_artifacts should execute")
         .into_inner();
@@ -4546,13 +4550,15 @@ async fn browser_service_lists_empty_downloads_for_existing_session_without_arti
     let created = create_test_session(&service, "user:ops").await;
     let session_id = created.session_id.expect("session id should be present");
 
+    let mut list_request = Request::new(browser_v1::ListDownloadArtifactsRequest {
+        v: 1,
+        session_id: Some(session_id),
+        limit: 10,
+        quarantined_only: false,
+    });
+    insert_principal(&mut list_request, "user:ops");
     let listed = service
-        .list_download_artifacts(Request::new(browser_v1::ListDownloadArtifactsRequest {
-            v: 1,
-            session_id: Some(session_id),
-            limit: 10,
-            quarantined_only: false,
-        }))
+        .list_download_artifacts(list_request)
         .await
         .expect("existing session without downloads should list successfully")
         .into_inner();
@@ -4560,6 +4566,63 @@ async fn browser_service_lists_empty_downloads_for_existing_session_without_arti
     assert!(listed.artifacts.is_empty());
     assert!(!listed.truncated);
     assert!(listed.error.is_empty(), "empty download list must not report an error");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn browser_service_download_listing_hides_cross_principal_session_existence() {
+    let runtime = simulated_runtime_for_tests();
+    let service = BrowserServiceImpl { runtime };
+    let no_download_session = create_test_session(&service, "user:owner").await;
+    let no_download_session_id =
+        no_download_session.session_id.expect("session id should be present");
+    let download_session = service
+        .create_session(Request::new(browser_v1::CreateSessionRequest {
+            v: 1,
+            principal: "user:owner".to_owned(),
+            idle_ttl_ms: 10_000,
+            budget: None,
+            allow_private_targets: true,
+            allow_downloads: true,
+            action_allowed_domains: Vec::new(),
+            persistence_enabled: false,
+            persistence_id: String::new(),
+            profile_id: None,
+            private_profile: false,
+            channel: String::new(),
+        }))
+        .await
+        .expect("create_session should succeed")
+        .into_inner();
+    let download_session_id = download_session.session_id.expect("session id should be present");
+    let missing_session_id =
+        proto::palyra::common::v1::CanonicalId { ulid: ulid::Ulid::new().to_string() };
+
+    let mut missing_request = Request::new(browser_v1::ListDownloadArtifactsRequest {
+        v: 1,
+        session_id: Some(missing_session_id),
+        limit: 10,
+        quarantined_only: false,
+    });
+    insert_principal(&mut missing_request, "user:other");
+    let Err(missing_status) = service.list_download_artifacts(missing_request).await else {
+        panic!("missing session should not list downloads");
+    };
+
+    for session_id in [no_download_session_id, download_session_id] {
+        let mut request = Request::new(browser_v1::ListDownloadArtifactsRequest {
+            v: 1,
+            session_id: Some(session_id),
+            limit: 10,
+            quarantined_only: false,
+        });
+        insert_principal(&mut request, "user:other");
+        let Err(status) = service.list_download_artifacts(request).await else {
+            panic!("cross-principal session should not list downloads");
+        };
+        assert_eq!(status.code(), missing_status.code());
+        assert_eq!(status.message(), missing_status.message());
+        assert_eq!(status.code(), tonic::Code::NotFound);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

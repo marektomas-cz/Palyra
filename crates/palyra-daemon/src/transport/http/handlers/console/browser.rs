@@ -1492,7 +1492,7 @@ pub(crate) async fn console_browser_downloads_list_handler(
     headers: HeaderMap,
     Query(query): Query<ConsoleBrowserDownloadsQuery>,
 ) -> Result<Json<control_plane::BrowserDownloadArtifactListEnvelope>, Response> {
-    let _session = authorize_console_session(&state, &headers, false)?;
+    let session = authorize_console_session(&state, &headers, false)?;
     let session_id =
         required_console_browser_canonical_id(query.session_id.as_str(), "session_id")?;
     let limit = query.limit.unwrap_or(50).clamp(1, 250);
@@ -1505,6 +1505,10 @@ pub(crate) async fn console_browser_downloads_list_handler(
         quarantined_only: query.quarantined_only.unwrap_or(false),
     });
     apply_browser_service_auth(&state, request.metadata_mut())?;
+    apply_browser_caller_principal_metadata(
+        session.context.principal.as_str(),
+        request.metadata_mut(),
+    )?;
     let response = client
         .list_download_artifacts(request)
         .await
