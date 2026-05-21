@@ -1,6 +1,6 @@
 import { createRequire } from "node:module";
 import { spawnSync } from "node:child_process";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, relative } from "node:path";
 
@@ -47,7 +47,18 @@ function resolveTsgolintPath() {
   return /^[a-zA-Z]:/.test(relativePath) ? relativePath : `.\\${relativePath}`;
 }
 
+function resolveVpBinPath() {
+  const packagePath = require.resolve("vite-plus/package.json");
+  const packageJson = JSON.parse(readFileSync(packagePath, "utf8"));
+  const vpBin = packageJson.bin?.vp;
+  if (typeof vpBin !== "string" || vpBin.length === 0) {
+    throw new Error("Unable to resolve vite-plus vp executable from package metadata.");
+  }
+  return join(dirname(packagePath), vpBin);
+}
+
 const tsgolintPath = resolveTsgolintPath();
+const vpBinPath = resolveVpBinPath();
 
 const targets = process.argv.slice(2);
 if (targets.length === 0) {
@@ -60,16 +71,10 @@ const env = {
   OXLINT_TSGOLINT_PATH: tsgolintPath,
 };
 
-const result =
-  process.platform === "win32"
-    ? spawnSync("cmd.exe", ["/d", "/s", "/c", `vp lint ${targets.join(" ")}`], {
-        stdio: "inherit",
-        env,
-      })
-    : spawnSync("vp", ["lint", ...targets], {
-        stdio: "inherit",
-        env,
-      });
+const result = spawnSync(process.execPath, [vpBinPath, "lint", ...targets], {
+  stdio: "inherit",
+  env,
+});
 
 if (result.error) {
   throw result.error;
