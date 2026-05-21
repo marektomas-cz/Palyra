@@ -1,3 +1,4 @@
+use super::slash_palette::{TuiSlashPreview, TuiSlashSuggestion};
 use super::*;
 
 #[derive(Debug, Default)]
@@ -449,46 +450,13 @@ pub(super) fn render_slash_palette_popup(frame: &mut Frame<'_>, area: Rect, app:
         return;
     };
     let preview = preview_for_selection(palette, app.slash_palette_selected);
-    let preview_lines = if let Some(preview) = preview {
-        vec![
-            Line::from(vec![
-                Span::styled(
-                    preview.badge,
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                ),
-                Span::raw("  "),
-                Span::raw(preview.title),
-            ]),
-            Line::from(preview.subtitle),
-            Line::from(preview.detail),
-            Line::from(format!("Example: {}", preview.example)),
-            Line::default(),
-        ]
-    } else {
-        vec![
-            Line::from("Slash command palette"),
-            Line::from("Type a slash command, then use Up/Down and Tab."),
-            Line::default(),
-        ]
-    };
-    let mut lines = preview_lines;
+    let mut lines = slash_palette_preview_lines(preview.as_ref());
     if palette.suggestions.is_empty() {
         lines.push(Line::from("No suggestions for the current token."));
     } else {
         for (index, suggestion) in palette.suggestions.iter().enumerate() {
             let selected = index == app.slash_palette_selected;
-            let prefix = if selected { ">" } else { " " };
-            lines.push(Line::from(Span::styled(
-                format!("{prefix} [{}] {}", suggestion.badge, suggestion.title),
-                if selected {
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                },
-            )));
-            lines.push(Line::from(format!("  {}", suggestion.subtitle)));
-            lines.push(Line::from(format!("  {}", suggestion.detail)));
-            lines.push(Line::default());
+            lines.extend(slash_palette_suggestion_lines(suggestion, selected));
         }
     }
     let popup = centered_rect(92, 18, area);
@@ -499,6 +467,56 @@ pub(super) fn render_slash_palette_popup(frame: &mut Frame<'_>, area: Rect, app:
             .wrap(Wrap { trim: false }),
         popup,
     );
+}
+
+fn slash_palette_preview_lines(preview: Option<&TuiSlashPreview>) -> Vec<Line<'static>> {
+    if let Some(preview) = preview {
+        return vec![
+            Line::from(vec![
+                Span::styled(
+                    sanitize_terminal_text(preview.badge.as_str()),
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("  "),
+                Span::raw(sanitize_terminal_text(preview.title.as_str())),
+            ]),
+            Line::from(sanitize_terminal_text(preview.subtitle.as_str())),
+            Line::from(sanitize_terminal_text(preview.detail.as_str())),
+            Line::from(format!("Example: {}", sanitize_terminal_text(preview.example.as_str()))),
+            Line::default(),
+        ];
+    }
+
+    vec![
+        Line::from("Slash command palette"),
+        Line::from("Type a slash command, then use Up/Down and Tab."),
+        Line::default(),
+    ]
+}
+
+fn slash_palette_suggestion_lines(
+    suggestion: &TuiSlashSuggestion,
+    selected: bool,
+) -> Vec<Line<'static>> {
+    let prefix = if selected { ">" } else { " " };
+    let badge = sanitize_terminal_text(suggestion.badge.as_str());
+    let title = sanitize_terminal_text(suggestion.title.as_str());
+    let subtitle = sanitize_terminal_text(suggestion.subtitle.as_str());
+    let detail = sanitize_terminal_text(suggestion.detail.as_str());
+
+    vec![
+        Line::from(Span::styled(
+            format!("{prefix} [{badge}] {title}"),
+            if selected {
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            },
+        )),
+        Line::from(format!("  {subtitle}")),
+        Line::from(format!("  {detail}")),
+        Line::default(),
+    ]
 }
 
 pub(super) fn render_settings_popup(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -766,7 +784,15 @@ pub(super) fn format_shell_result(result: &ShellResult) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::truncate_text;
+    use super::{
+        slash_palette_preview_lines, slash_palette_suggestion_lines, truncate_text,
+        TuiSlashPreview, TuiSlashSuggestion,
+    };
+    use ratatui::text::Line;
+
+    fn rendered_line_text(line: &Line<'_>) -> String {
+        line.spans.iter().map(|span| span.content.as_ref()).collect::<String>()
+    }
 
     #[test]
     fn truncate_text_keeps_result_within_limit() {
@@ -780,5 +806,49 @@ mod tests {
         assert_eq!(truncate_text("abcdef".to_owned(), 0), "");
         assert_eq!(truncate_text("abcdef".to_owned(), 2), "ab");
         assert_eq!(truncate_text("abc".to_owned(), 3), "abc");
+    }
+
+    #[test]
+    fn slash_palette_preview_lines_sanitize_terminal_control_sequences() {
+        let preview = TuiSlashPreview {
+            title: "profile\x1b]52;c;secret\x07".to_owned(),
+            subtitle: "browser\x1b[31m".to_owned(),
+            detail: "detail\x07".to_owned(),
+            example: "/browser profile\topen".to_owned(),
+            badge: "catalog\x1b".to_owned(),
+        };
+
+        let rendered = slash_palette_preview_lines(Some(&preview))
+            .iter()
+            .map(rendered_line_text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(rendered[0], "catalog<ESC>  profile<ESC>]52;c;secret<U+0007>");
+        assert_eq!(rendered[1], "browser<ESC>[31m");
+        assert_eq!(rendered[2], "detail<U+0007>");
+        assert_eq!(rendered[3], "Example: /browser profile<U+0009>open");
+        assert!(rendered.iter().all(|line| !line.contains('\u{1b}') && !line.contains('\u{7}')));
+    }
+
+    #[test]
+    fn slash_palette_suggestion_lines_sanitize_terminal_control_sequences() {
+        let suggestion = TuiSlashSuggestion {
+            title: "session\x1b]8;;https://example.test\x07".to_owned(),
+            subtitle: "last reply\x1b[2J".to_owned(),
+            detail: "checkpoint\x07note".to_owned(),
+            example: "/session abc".to_owned(),
+            replacement: "/session abc".to_owned(),
+            badge: "session\x1b".to_owned(),
+        };
+
+        let rendered = slash_palette_suggestion_lines(&suggestion, true)
+            .iter()
+            .map(rendered_line_text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(rendered[0], "> [session<ESC>] session<ESC>]8;;https://example.test<U+0007>");
+        assert_eq!(rendered[1], "  last reply<ESC>[2J");
+        assert_eq!(rendered[2], "  checkpoint<U+0007>note");
+        assert!(rendered.iter().all(|line| !line.contains('\u{1b}') && !line.contains('\u{7}')));
     }
 }
