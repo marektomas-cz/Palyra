@@ -183,6 +183,12 @@ when {
     context.action == "channel.command.compact" ||
     context.action == "channel.command.approve" ||
     context.action == "channel.command.queue" ||
+    context.action == "channel.command.routine.status" ||
+    context.action == "channel.command.routine.pause" ||
+    context.action == "channel.command.routine.resume" ||
+    context.action == "channel.command.routine.run_now" ||
+    context.action == "channel.command.routine.cancel" ||
+    context.action == "channel.command.routine.history" ||
     context.action == "channel.command.whoami"
 };
 
@@ -1124,6 +1130,33 @@ mod tests {
             evaluation.explanation.reason.contains("message router action allowed"),
             "channel commands should share the message router policy surface"
         );
+    }
+
+    #[test]
+    fn routine_channel_command_actions_are_explicitly_allowed() {
+        for action in [
+            "channel.command.routine.status",
+            "channel.command.routine.pause",
+            "channel.command.routine.resume",
+            "channel.command.routine.run_now",
+            "channel.command.routine.cancel",
+            "channel.command.routine.history",
+        ] {
+            let request = PolicyRequest {
+                principal: "user:ops".to_owned(),
+                action: action.to_owned(),
+                resource: "channel:discord:default".to_owned(),
+            };
+
+            let evaluation = evaluate_with_config(&request, &PolicyEvaluationConfig::default())
+                .expect("evaluation");
+
+            assert_eq!(evaluation.decision, PolicyDecision::Allow, "{action} should be allowed");
+            assert!(
+                evaluation.explanation.reason.contains("message router action allowed"),
+                "routine channel commands should share the message router policy surface"
+            );
+        }
     }
 
     #[test]
