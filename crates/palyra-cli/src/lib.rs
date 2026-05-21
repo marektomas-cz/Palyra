@@ -2991,7 +2991,7 @@ fn read_recent_support_bundle_flows(
 ) -> Result<Vec<SupportBundleFlowRecord>> {
     let limit = i64::try_from(limit).unwrap_or(i64::MAX);
     let mut statement = connection.prepare(
-        "SELECT flow_id, mode, state, title, current_step_id, revision, objective_id, routine_id, webhook_id, origin_run_id, updated_at_unix_ms \
+        "SELECT flow_ulid, mode, state, title, current_step_ulid, revision, objective_id, routine_id, webhook_id, origin_run_ulid, updated_at_unix_ms \
          FROM flows ORDER BY updated_at_unix_ms DESC LIMIT ?1",
     )?;
     let rows = statement.query_map([limit], |row| {
@@ -3019,7 +3019,7 @@ fn read_recent_support_bundle_flow_events(
 ) -> Result<Vec<SupportBundleFlowEventRecord>> {
     let limit = i64::try_from(limit).unwrap_or(i64::MAX);
     let mut statement = connection.prepare(
-        "SELECT event_id, flow_id, step_id, event_type, from_state, to_state, summary, created_at_unix_ms \
+        "SELECT event_ulid, flow_ulid, step_ulid, event_type, from_state, to_state, summary, created_at_unix_ms \
          FROM flow_events ORDER BY created_at_unix_ms DESC LIMIT ?1",
     )?;
     let rows = statement.query_map([limit], |row| {
@@ -12006,22 +12006,22 @@ mod diagnostics_bundle_tests {
             .execute_batch(
                 r#"
                 CREATE TABLE flows (
-                    flow_id TEXT PRIMARY KEY,
+                    flow_ulid TEXT PRIMARY KEY,
                     mode TEXT NOT NULL,
                     state TEXT NOT NULL,
                     title TEXT NOT NULL,
-                    current_step_id TEXT,
+                    current_step_ulid TEXT,
                     revision INTEGER NOT NULL,
                     objective_id TEXT,
                     routine_id TEXT,
                     webhook_id TEXT,
-                    origin_run_id TEXT,
+                    origin_run_ulid TEXT,
                     updated_at_unix_ms INTEGER NOT NULL
                 );
                 CREATE TABLE flow_events (
-                    event_id TEXT PRIMARY KEY,
-                    flow_id TEXT NOT NULL,
-                    step_id TEXT,
+                    event_ulid TEXT PRIMARY KEY,
+                    flow_ulid TEXT NOT NULL,
+                    step_ulid TEXT,
                     event_type TEXT NOT NULL,
                     from_state TEXT,
                     to_state TEXT,
@@ -12034,8 +12034,8 @@ mod diagnostics_bundle_tests {
         connection
             .execute(
                 "INSERT INTO flows (
-                    flow_id, mode, state, title, current_step_id, revision, objective_id,
-                    routine_id, webhook_id, origin_run_id, updated_at_unix_ms
+                    flow_ulid, mode, state, title, current_step_ulid, revision, objective_id,
+                    routine_id, webhook_id, origin_run_ulid, updated_at_unix_ms
                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     "flow-active",
@@ -12055,8 +12055,8 @@ mod diagnostics_bundle_tests {
         connection
             .execute(
                 "INSERT INTO flows (
-                    flow_id, mode, state, title, current_step_id, revision, objective_id,
-                    routine_id, webhook_id, origin_run_id, updated_at_unix_ms
+                    flow_ulid, mode, state, title, current_step_ulid, revision, objective_id,
+                    routine_id, webhook_id, origin_run_ulid, updated_at_unix_ms
                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     "flow-complete",
@@ -12076,7 +12076,7 @@ mod diagnostics_bundle_tests {
         connection
             .execute(
                 "INSERT INTO flow_events (
-                    event_id, flow_id, step_id, event_type, from_state, to_state, summary,
+                    event_ulid, flow_ulid, step_ulid, event_type, from_state, to_state, summary,
                     created_at_unix_ms
                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
