@@ -518,19 +518,57 @@ impl AuthProfileRegistry {
         self.select_auth_profile_with_clock(vault, request, unix_ms_now()?)
     }
 
+    /// Selects an auth profile and materializes runtime health records for future decisions.
     pub fn select_auth_profile_with_clock(
         &self,
         vault: &Vault,
         request: AuthProfileSelectionRequest,
         now_unix_ms: i64,
     ) -> Result<AuthProfileSelectionResult, AuthProfileError> {
+        self.select_auth_profile_with_runtime_materialization(vault, request, now_unix_ms, true)
+    }
+
+    pub fn select_auth_profile_readonly(
+        &self,
+        vault: &Vault,
+        request: AuthProfileSelectionRequest,
+    ) -> Result<AuthProfileSelectionResult, AuthProfileError> {
+        self.select_auth_profile_readonly_with_clock(vault, request, unix_ms_now()?)
+    }
+
+    /// Computes the same selection explanation without persisting runtime health materialization.
+    pub fn select_auth_profile_readonly_with_clock(
+        &self,
+        vault: &Vault,
+        request: AuthProfileSelectionRequest,
+        now_unix_ms: i64,
+    ) -> Result<AuthProfileSelectionResult, AuthProfileError> {
+        self.select_auth_profile_with_runtime_materialization(vault, request, now_unix_ms, false)
+    }
+
+    fn select_auth_profile_with_runtime_materialization(
+        &self,
+        vault: &Vault,
+        request: AuthProfileSelectionRequest,
+        now_unix_ms: i64,
+        persist_runtime_records: bool,
+    ) -> Result<AuthProfileSelectionResult, AuthProfileError> {
         let agent_id = request.agent_id.as_deref();
-        let records = self.runtime_records_for_agent_with_clock(
-            vault,
-            agent_id,
-            now_unix_ms,
-            DEFAULT_EXPIRING_WINDOW_MS,
-        )?;
+        let records = if persist_runtime_records {
+            self.runtime_records_for_agent_with_clock(
+                vault,
+                agent_id,
+                now_unix_ms,
+                DEFAULT_EXPIRING_WINDOW_MS,
+            )?
+        } else {
+            self.runtime_records_for_agent_readonly_with_clock(
+                vault,
+                agent_id,
+                now_unix_ms,
+                DEFAULT_EXPIRING_WINDOW_MS,
+            )?
+        };
         let profiles = self.merged_profiles_for_agent(agent_id)?;
         let records_by_profile = records
             .into_iter()

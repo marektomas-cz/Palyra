@@ -459,7 +459,7 @@ pub(crate) async fn console_auth_doctor_handler(
     let records = tokio::task::spawn_blocking(move || {
         auth_runtime
             .registry()
-            .runtime_records_for_agent(vault.as_ref(), agent_id_for_worker.as_deref())
+            .runtime_records_for_agent_readonly(vault.as_ref(), agent_id_for_worker.as_deref())
             .map_err(crate::application::auth::map_auth_profile_error)
     })
     .await
@@ -577,7 +577,7 @@ pub(crate) async fn console_auth_selection_explain_handler(
     let result = tokio::task::spawn_blocking(move || {
         auth_runtime
             .registry()
-            .select_auth_profile(vault.as_ref(), request)
+            .select_auth_profile_readonly(vault.as_ref(), request)
             .map_err(crate::application::auth::map_auth_profile_error)
     })
     .await

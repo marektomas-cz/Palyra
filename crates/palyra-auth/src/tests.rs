@@ -1211,3 +1211,58 @@ fn readonly_runtime_records_do_not_persist_audit_materialization() {
     );
     assert!(after_materialized.contains("openai-audit"));
 }
+
+#[test]
+fn readonly_selection_explain_does_not_persist_runtime_materialization() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let identity_root = tempdir.path().join("identity");
+    let vault_root = tempdir.path().join("vault");
+    let registry =
+        AuthProfileRegistry::open(identity_root.as_path()).expect("registry should initialize");
+    let vault = open_test_vault(vault_root.as_path(), identity_root.as_path());
+    persist_secret_utf8(&vault, "global/openai_explain", "key-explain")
+        .expect("key should persist");
+    registry
+        .set_profile(AuthProfileSetRequest {
+            profile_id: "openai-explain".to_owned(),
+            provider: AuthProvider::known(AuthProviderKind::Openai),
+            profile_name: "explain".to_owned(),
+            scope: AuthProfileScope::Global,
+            credential: AuthCredential::ApiKey {
+                api_key_vault_ref: "global/openai_explain".to_owned(),
+            },
+        })
+        .expect("api key profile should persist");
+    let runtime_path = tempdir.path().join("auth_profile_runtime_state.toml");
+    let before = fs::read_to_string(runtime_path.as_path())
+        .expect("runtime state should be initialized by registry open");
+    let request = AuthProfileSelectionRequest {
+        provider: Some(AuthProvider::known(AuthProviderKind::Openai)),
+        agent_id: None,
+        explicit_profile_order: Vec::new(),
+        allowed_credential_types: vec![AuthCredentialType::ApiKey],
+        policy_denied_profile_ids: Vec::new(),
+    };
+
+    let readonly = registry
+        .select_auth_profile_readonly_with_clock(&vault, request.clone(), 1_730_000_000_000)
+        .expect("readonly selection explain should run");
+    assert_eq!(readonly.selected_profile_id.as_deref(), Some("openai-explain"));
+    let after_readonly = fs::read_to_string(runtime_path.as_path())
+        .expect("runtime state should still be readable after readonly selection");
+    assert_eq!(
+        after_readonly, before,
+        "readonly selection explain must not mutate runtime state persistence"
+    );
+
+    registry
+        .select_auth_profile_with_clock(&vault, request, 1_730_000_000_001)
+        .expect("materializing selection should run");
+    let after_materialized = fs::read_to_string(runtime_path.as_path())
+        .expect("runtime state should be readable after materializing selection");
+    assert_ne!(
+        after_materialized, before,
+        "non-readonly selection should still persist health records"
+    );
+    assert!(after_materialized.contains("openai-explain"));
+}
