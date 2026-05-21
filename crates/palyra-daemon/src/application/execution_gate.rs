@@ -240,13 +240,20 @@ pub(crate) fn evaluate_execution_gate_pipeline(
             } else if let Some(approval_outcome) = approval_state.outcome {
                 if approval_outcome.approved {
                     let mut approved = approved_policy_decision;
-                    approved.allowed = true;
-                    approved.approval_required = true;
-                    approved.reason = format!(
-                        "explicit approval granted for tool={tool_name}; approval_reason={}; original_reason={}",
-                        approval_outcome.reason,
-                        approved.reason
-                    );
+                    if approved.allowed {
+                        approved.approval_required = true;
+                        approved.reason = format!(
+                            "explicit approval granted for tool={tool_name}; approval_reason={}; original_reason={}",
+                            approval_outcome.reason,
+                            approved.reason
+                        );
+                    } else {
+                        approved.reason = format!(
+                            "approval granted but post-approval policy denied tool={tool_name}; approval_reason={}; original_reason={}",
+                            approval_outcome.reason,
+                            approved.reason
+                        );
+                    }
                     annotate_tool_decision_with_backend_context(approved, backend_selection)
                 } else {
                     annotate_tool_decision_with_backend_context(
@@ -789,10 +796,10 @@ fn infer_policy_reason_code(reason: &str, allowed: bool) -> String {
     if allowed {
         return "policy.allowed".to_owned();
     }
-    if reason == BUDGET_DENY_REASON {
+    if reason_matches_or_wraps_original(reason, BUDGET_DENY_REASON) {
         return "policy.budget_exhausted".to_owned();
     }
-    if reason == UNSUPPORTED_TOOL_DENY_REASON {
+    if reason_matches_or_wraps_original(reason, UNSUPPORTED_TOOL_DENY_REASON) {
         return "policy.runtime.unsupported_tool".to_owned();
     }
     if reason.contains("policy evaluation failed safely") {
@@ -805,6 +812,11 @@ fn infer_policy_reason_code(reason: &str, allowed: bool) -> String {
         return "policy.denied_by_default".to_owned();
     }
     "policy.denied".to_owned()
+}
+
+fn reason_matches_or_wraps_original(reason: &str, canonical_reason: &str) -> bool {
+    reason == canonical_reason
+        || reason.contains(format!("original_reason={canonical_reason}").as_str())
 }
 
 fn infer_final_reason_code(reason: &str, allowed: bool, has_pending_approval: bool) -> String {
@@ -1083,6 +1095,38 @@ mod tests {
             .decision
             .reason
             .contains("explicit approval granted for tool=palyra.process.run"));
+    }
+
+    #[test]
+    fn pipeline_preserves_post_approval_denial_for_unsupported_tool() {
+        let outcome = evaluate_execution_gate_pipeline(ExecutionGatePipelineInput {
+            tool_call_config: &tool_call_config(&["custom.noop"]),
+            request_context: &request_context(),
+            tool_name: "custom.noop",
+            skill_context: None,
+            skill_gate_decision: None,
+            proposal_approval_required: false,
+            effective_posture: &effective_posture(ToolPostureState::AskEachTime),
+            backend_selection: &local_backend_selection(),
+            approval_state: ToolProposalApprovalState {
+                outcome: Some(&approved_outcome("operator approved unsupported tool")),
+                pending_approval_id: None,
+            },
+            remaining_budget: 2,
+        });
+
+        assert!(!outcome.decision.allowed);
+        assert!(outcome.decision.approval_required);
+        assert_eq!(outcome.remaining_budget, 2);
+        assert_eq!(outcome.report.final_reason_code, "policy.runtime.unsupported_tool");
+        assert!(outcome
+            .decision
+            .reason
+            .contains("approval granted but post-approval policy denied tool=custom.noop"));
+        assert!(outcome
+            .decision
+            .reason
+            .contains("tool is allowlisted but unsupported by runtime executor"));
     }
 
     #[test]
