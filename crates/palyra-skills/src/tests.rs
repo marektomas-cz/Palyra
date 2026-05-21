@@ -729,6 +729,57 @@ fn extension_lifecycle_blocks_quarantine_enable_without_review() {
 }
 
 #[test]
+fn extension_lifecycle_rejects_spoofed_quarantine_enable_approval() {
+    let output = build_signed_skill_artifact(sample_request()).expect("artifact should build");
+    let inspection =
+        inspect_skill_artifact(output.artifact_bytes.as_slice()).expect("artifact should inspect");
+    let record = extension_record_from_skill_artifact(
+        &inspection,
+        ExtensionPackageSource::local_artifact("dist/acme.echo_http.palyra-skill"),
+        ExtensionPackageStatus::Quarantined,
+        1,
+        1,
+    );
+    let package_id = skill_extension_package_id("acme.echo_http", "1.0.0");
+
+    for approved_by in ["", "   ", "user:ops", " user:ops "] {
+        let mut registry = InMemoryExtensionPackageRegistry::default();
+        registry.upsert_package(record.clone());
+        let error = registry
+            .transition_package(ExtensionLifecycleTransitionRequest {
+                package_id: package_id.clone(),
+                target_status: ExtensionPackageStatus::Enabled,
+                actor_principal: "user:ops".to_owned(),
+                reason: "operator reviewed".to_owned(),
+                approved_by: Some(approved_by.to_owned()),
+                requested_at_unix_ms: 2,
+            })
+            .expect_err("quarantine enable must reject empty or self approval");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("approved_by") || message.contains("distinct reviewer"),
+            "unexpected lifecycle error: {message}"
+        );
+    }
+
+    let mut registry = InMemoryExtensionPackageRegistry::default();
+    registry.upsert_package(record);
+    let updated = registry
+        .transition_package(ExtensionLifecycleTransitionRequest {
+            package_id,
+            target_status: ExtensionPackageStatus::Enabled,
+            actor_principal: "user:ops".to_owned(),
+            reason: "operator reviewed".to_owned(),
+            approved_by: Some("admin:reviewer".to_owned()),
+            requested_at_unix_ms: 3,
+        })
+        .expect("distinct reviewer approval should enable quarantined extension");
+
+    assert_eq!(updated.status, ExtensionPackageStatus::Enabled);
+}
+
+#[test]
 fn extension_contract_fixture_enforces_host_version_range() {
     let fixture = ExtensionContractFixture {
         fixture_id: "future-host-range".to_owned(),

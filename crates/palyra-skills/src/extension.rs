@@ -218,6 +218,10 @@ impl ExtensionPackageRegistry for InMemoryExtensionPackageRegistry {
 }
 
 /// Lifecycle transition request with policy/audit context.
+///
+/// Callers are responsible for authenticating and authorizing these principals before constructing
+/// the request. The lifecycle helper still validates that supplied principals are non-empty and
+/// that quarantine enablement is approved by a distinct reviewer.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ExtensionLifecycleTransitionRequest {
@@ -623,6 +627,13 @@ pub fn apply_extension_lifecycle_transition(
             "extension lifecycle transition reason cannot be empty".to_owned(),
         ));
     }
+    let actor_principal =
+        normalize_lifecycle_principal(request.actor_principal.as_str(), "actor_principal")?;
+    let approved_by = request
+        .approved_by
+        .as_deref()
+        .map(|principal| normalize_lifecycle_principal(principal, "approved_by"))
+        .transpose()?;
     if !is_lifecycle_transition_allowed(current.status, request.target_status) {
         return Err(SkillPackagingError::ExtensionLifecycle(format!(
             "invalid extension lifecycle transition {:?} -> {:?}",
@@ -635,10 +646,18 @@ pub fn apply_extension_lifecycle_transition(
                 "extension cannot be enabled with incompatible manifest".to_owned(),
             ));
         }
-        if current.status == ExtensionPackageStatus::Quarantined && request.approved_by.is_none() {
-            return Err(SkillPackagingError::ExtensionLifecycle(
-                "enabling a quarantined extension requires approved_by".to_owned(),
-            ));
+        if current.status == ExtensionPackageStatus::Quarantined {
+            let Some(approved_by) = approved_by.as_deref() else {
+                return Err(SkillPackagingError::ExtensionLifecycle(
+                    "enabling a quarantined extension requires approved_by".to_owned(),
+                ));
+            };
+            if approved_by == actor_principal {
+                return Err(SkillPackagingError::ExtensionLifecycle(
+                    "enabling a quarantined extension requires approval from a distinct reviewer"
+                        .to_owned(),
+                ));
+            }
         }
     }
     let mut updated = current.clone();
@@ -646,6 +665,19 @@ pub fn apply_extension_lifecycle_transition(
     updated.status_reason = Some(request.reason.trim().to_owned());
     updated.updated_at_unix_ms = request.requested_at_unix_ms;
     Ok(updated)
+}
+
+fn normalize_lifecycle_principal(
+    value: &str,
+    field: &'static str,
+) -> Result<String, SkillPackagingError> {
+    let principal = value.trim();
+    if principal.is_empty() {
+        return Err(SkillPackagingError::ExtensionLifecycle(format!(
+            "extension lifecycle {field} cannot be empty",
+        )));
+    }
+    Ok(principal.to_owned())
 }
 
 /// Runs extension ABI fixture checks against the current host.
