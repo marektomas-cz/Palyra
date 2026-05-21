@@ -1139,13 +1139,8 @@ fn write_profile_config_snapshot(profile_name: &str, content: &str) -> Result<Pa
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    if path.exists() {
-        write_document_with_backups(path.as_path(), &document, PROFILE_CONFIG_WRITE_BACKUPS)
-            .with_context(|| format!("failed to persist {}", path.display()))?;
-    } else {
-        fs::write(path.as_path(), content.as_bytes())
-            .with_context(|| format!("failed to write {}", path.display()))?;
-    }
+    write_document_with_backups(path.as_path(), &document, PROFILE_CONFIG_WRITE_BACKUPS)
+        .with_context(|| format!("failed to persist {}", path.display()))?;
     Ok(path)
 }
 
@@ -1652,8 +1647,8 @@ mod tests {
     use super::{
         collect_secret_references, create_profile_warnings, decrypt_profile_bundle,
         default_environment, default_risk_level, encrypt_profile_bundle,
-        ensure_safe_profile_state_root_removal, profile_mode_label, PortableProfileConfig,
-        ProfilePortabilityBundle, ProfileSecretReference,
+        ensure_safe_profile_state_root_removal, profile_mode_label, write_profile_config_snapshot,
+        PortableProfileConfig, ProfilePortabilityBundle, ProfileSecretReference,
     };
     use crate::{
         app,
@@ -1662,6 +1657,8 @@ mod tests {
     };
     use anyhow::Result;
     use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
 
     #[test]
@@ -1773,6 +1770,43 @@ state_key_vault_ref = "global/browser_state_key"
             round_trip.config.as_ref().map(|config| config.source_path.as_str()),
             Some("prod/palyra.toml")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn profile_config_snapshot_uses_owner_only_permissions_for_new_files() -> Result<()> {
+        let _guard = app::test_env_lock_for_tests().lock().expect("env lock");
+        app::clear_root_context_for_tests();
+
+        let temp = tempdir()?;
+        let root_config = temp.path().join("root-palyra.toml");
+        fs::write(&root_config, "[daemon]\nport = 7142\n")?;
+        let state_root = temp.path().join("state");
+        let _context = app::install_root_context(RootOptions {
+            config_path: Some(root_config.display().to_string()),
+            state_root: Some(state_root.display().to_string()),
+            ..RootOptions::default()
+        })?;
+
+        let snapshot_path = write_profile_config_snapshot(
+            "imported",
+            r#"
+[daemon]
+port = 7142
+
+[model_provider]
+openai_api_key = "sk-secret"
+"#,
+        )?;
+
+        #[cfg(unix)]
+        {
+            let mode = fs::metadata(&snapshot_path)?.permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        assert!(fs::read_to_string(&snapshot_path)?.contains("sk-secret"));
+
+        app::clear_root_context_for_tests();
         Ok(())
     }
 
