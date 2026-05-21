@@ -29,6 +29,7 @@ import {
   readString,
   readStringList,
   skillMetadata,
+  toPrettyJson,
   toJsonObjectArray,
   type JsonObject,
 } from "../shared";
@@ -122,6 +123,8 @@ export function SkillsSection({ app }: SkillsSectionProps) {
     selectedPluginValidation === null
       ? []
       : readStringList(selectedPluginValidation, "redacted_fields");
+  const selectedPluginConfigRequiresFullPaste =
+    selectedPlugin !== null && pluginConfigRequiresFullPaste(selectedPlugin);
 
   return (
     <main className="workspace-page">
@@ -491,10 +494,21 @@ export function SkillsSection({ app }: SkillsSectionProps) {
                       revealSensitiveValues={app.revealSensitiveValues}
                       className="workspace-code-panel"
                     />
-                    {selectedPluginRedactedFields.length > 0 && (
-                      <WorkspaceInlineNotice title="Redacted fields" tone="warning">
+                    {selectedPluginConfigRequiresFullPaste && (
+                      <WorkspaceInlineNotice
+                        title={
+                          selectedPluginRedactedFields.length > 0
+                            ? "Redacted fields"
+                            : "Protected config values"
+                        }
+                        tone="warning"
+                      >
                         <p>
-                          Hidden values are present for: {selectedPluginRedactedFields.join(", ")}.
+                          {selectedPluginRedactedFields.length > 0
+                            ? `Hidden values are present for: ${selectedPluginRedactedFields.join(
+                                ", ",
+                              )}.`
+                            : "Sensitive-looking config values are present."}{" "}
                           Paste the full object again when updating config so those values are not
                           dropped.
                         </p>
@@ -1028,13 +1042,24 @@ function pluginFilesystemIssues(detail: JsonObject): JsonObject[] {
   return Array.isArray(issues) ? toJsonObjectArray(issues) : [];
 }
 
-function editablePluginConfig(detail: JsonObject): string {
-  const validation = pluginValidation(detail);
-  if (readStringList(validation, "redacted_fields").length > 0) {
+export function editablePluginConfig(detail: JsonObject): string {
+  if (pluginConfigRequiresFullPaste(detail)) {
     return "";
   }
   const configured = readObject(pluginConfig(detail), "configured");
   return configured === null ? "" : JSON.stringify(configured, null, 2);
+}
+
+function pluginConfigRequiresFullPaste(detail: JsonObject): boolean {
+  const validation = pluginValidation(detail);
+  if (readStringList(validation, "redacted_fields").length > 0) {
+    return true;
+  }
+  const configured = readObject(pluginConfig(detail), "configured");
+  if (configured === null) {
+    return false;
+  }
+  return toPrettyJson(configured, false) !== JSON.stringify(configured, null, 2);
 }
 
 function humanizeState(value: string | null): string {
