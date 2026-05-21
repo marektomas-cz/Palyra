@@ -140,10 +140,6 @@ const CHROMIUM_PAGE_DIAGNOSTICS_SCRIPT: &str = r#"
       state.entries = [];
     }
   };
-  state.snapshotEntries = () => {
-    trimEntries();
-    return state.entries.slice();
-  };
   const push = (severity, kind, message, source, stackTrace) => {
     try {
       state.entries.push(normalizeEntry(severity, kind, message, source, stackTrace));
@@ -267,22 +263,51 @@ const CHROMIUM_READ_CONSOLE_LOG_SCRIPT: &str = r#"
   if (!state || !Array.isArray(state.entries)) {
     return "[]";
   }
-  if (typeof state.snapshotEntries === "function") {
-    return JSON.stringify(state.snapshotEntries());
-  }
-  const clamp = (value, maxChars) => {
-    const text = String(value || "");
-    return text.length > maxChars ? text.slice(0, maxChars) : text;
+  const MAX_CONSOLE_ENTRIES = 256;
+  const MAX_CONSOLE_JSON_CHARS = 32 * 1024;
+  const clampScalar = (value, maxChars) => {
+    if (typeof value === "string") {
+      return value.length > maxChars ? value.slice(0, maxChars) : value;
+    }
+    if (typeof value === "number" || typeof value === "boolean") {
+      const text = String(value);
+      return text.length > maxChars ? text.slice(0, maxChars) : text;
+    }
+    return "";
   };
-  const entries = state.entries.slice(Math.max(0, state.entries.length - 256)).map((entry) => ({
-    severity: clamp(entry.severity, 16),
-    kind: clamp(entry.kind, 64),
-    message: clamp(entry.message, 1024),
-    captured_at_unix_ms: Number(entry.captured_at_unix_ms || 0),
-    source: clamp(entry.source, 256),
-    stack_trace: clamp(entry.stack_trace, 1024),
-    page_url: clamp(entry.page_url, 2048)
-  }));
+  const normalizeEntry = (entry) => {
+    const object = entry && typeof entry === "object" ? entry : {};
+    const capturedAt = typeof object.captured_at_unix_ms === "number" && Number.isFinite(object.captured_at_unix_ms)
+      ? Math.max(0, object.captured_at_unix_ms)
+      : 0;
+    return {
+      severity: clampScalar(object.severity, 16),
+      kind: clampScalar(object.kind, 64),
+      message: clampScalar(object.message, 1024),
+      captured_at_unix_ms: capturedAt,
+      source: clampScalar(object.source, 256),
+      stack_trace: clampScalar(object.stack_trace, 1024),
+      page_url: clampScalar(object.page_url, 2048)
+    };
+  };
+  const source = Array.prototype.slice.call(
+    state.entries,
+    Math.max(0, state.entries.length - MAX_CONSOLE_ENTRIES)
+  );
+  const entries = [];
+  let totalChars = 2;
+  for (let index = source.length - 1; index >= 0; index -= 1) {
+    const entry = normalizeEntry(source[index]);
+    const entryChars = JSON.stringify(entry).length + (entries.length > 0 ? 1 : 0);
+    if (entries.length > 0 && totalChars + entryChars > MAX_CONSOLE_JSON_CHARS) {
+      break;
+    }
+    if (totalChars + entryChars > MAX_CONSOLE_JSON_CHARS) {
+      continue;
+    }
+    entries.unshift(entry);
+    totalChars += entryChars;
+  }
   return JSON.stringify(entries);
 })()
 "#;
@@ -293,12 +318,76 @@ const CHROMIUM_DRAIN_NETWORK_LOG_SCRIPT: &str = r#"
   if (!state || !Array.isArray(state.network_entries)) {
     return "[]";
   }
-  const entries = state.network_entries.splice(0, state.network_entries.length);
+  const MAX_NETWORK_ENTRIES = 256;
+  const MAX_NETWORK_JSON_CHARS = 64 * 1024;
+  const MAX_NETWORK_URL_CHARS = 2048;
+  const MAX_NETWORK_HEADER_COUNT = 24;
+  const MAX_NETWORK_HEADER_NAME_CHARS = 128;
+  const MAX_NETWORK_HEADER_VALUE_CHARS = 256;
+  const clampScalar = (value, maxChars) => {
+    if (typeof value === "string") {
+      return value.length > maxChars ? value.slice(0, maxChars) : value;
+    }
+    if (typeof value === "number" || typeof value === "boolean") {
+      const text = String(value);
+      return text.length > maxChars ? text.slice(0, maxChars) : text;
+    }
+    return "";
+  };
+  const normalizeHeader = (header) => {
+    const object = header && typeof header === "object" ? header : {};
+    return {
+      name: clampScalar(object.name, MAX_NETWORK_HEADER_NAME_CHARS),
+      value: clampScalar(object.value, MAX_NETWORK_HEADER_VALUE_CHARS)
+    };
+  };
+  const normalizeEntry = (entry) => {
+    const object = entry && typeof entry === "object" ? entry : {};
+    const headers = Array.isArray(object.headers)
+      ? Array.prototype.slice.call(object.headers, 0, MAX_NETWORK_HEADER_COUNT).map((header) => normalizeHeader(header))
+      : [];
+    const statusCode = typeof object.status_code === "number" && Number.isFinite(object.status_code)
+      ? Math.max(0, Math.min(65535, object.status_code))
+      : 0;
+    const latencyMs = typeof object.latency_ms === "number" && Number.isFinite(object.latency_ms)
+      ? Math.max(0, object.latency_ms)
+      : 0;
+    const capturedAt = typeof object.captured_at_unix_ms === "number" && Number.isFinite(object.captured_at_unix_ms)
+      ? Math.max(0, object.captured_at_unix_ms)
+      : 0;
+    return {
+      request_url: clampScalar(object.request_url, MAX_NETWORK_URL_CHARS),
+      status_code: statusCode,
+      latency_ms: latencyMs,
+      captured_at_unix_ms: capturedAt,
+      headers
+    };
+  };
+  const source = Array.prototype.slice.call(
+    state.network_entries,
+    Math.max(0, state.network_entries.length - MAX_NETWORK_ENTRIES)
+  );
+  state.network_entries.length = 0;
+  const entries = [];
+  let totalChars = 2;
+  for (let index = source.length - 1; index >= 0; index -= 1) {
+    const entry = normalizeEntry(source[index]);
+    const entryChars = JSON.stringify(entry).length + (entries.length > 0 ? 1 : 0);
+    if (entries.length > 0 && totalChars + entryChars > MAX_NETWORK_JSON_CHARS) {
+      break;
+    }
+    if (totalChars + entryChars > MAX_NETWORK_JSON_CHARS) {
+      continue;
+    }
+    entries.unshift(entry);
+    totalChars += entryChars;
+  }
   return JSON.stringify(entries);
 })()
 "#;
 
 const MAX_CHROMIUM_CONSOLE_JSON_BYTES: usize = (DEFAULT_MAX_CONSOLE_LOG_BYTES as usize) * 4;
+const MAX_CHROMIUM_NETWORK_JSON_BYTES: usize = (DEFAULT_MAX_NETWORK_LOG_BYTES as usize) * 4;
 
 pub(crate) async fn run_chromium_blocking<T, F>(operation: &str, task: F) -> Result<T, String>
 where
@@ -1227,7 +1316,7 @@ async fn chromium_drain_page_network_log(
             .map_err(|error| format!("failed to read Chromium page network diagnostics: {error}"))?
             .value
             .unwrap_or_else(|| serde_json::Value::String("[]".to_owned()));
-        Ok(decode_chromium_console_entries_value(value))
+        Ok(decode_chromium_network_entries_value(value))
     })
     .await?;
     enforce_chromium_remote_ip_guard(runtime, session_id).await?;
@@ -1235,8 +1324,19 @@ async fn chromium_drain_page_network_log(
 }
 
 fn decode_chromium_console_entries_value(value: serde_json::Value) -> serde_json::Value {
+    decode_chromium_json_array_string_value(value, MAX_CHROMIUM_CONSOLE_JSON_BYTES)
+}
+
+fn decode_chromium_network_entries_value(value: serde_json::Value) -> serde_json::Value {
+    decode_chromium_json_array_string_value(value, MAX_CHROMIUM_NETWORK_JSON_BYTES)
+}
+
+fn decode_chromium_json_array_string_value(
+    value: serde_json::Value,
+    max_json_bytes: usize,
+) -> serde_json::Value {
     match value {
-        serde_json::Value::String(raw) if raw.len() <= MAX_CHROMIUM_CONSOLE_JSON_BYTES => {
+        serde_json::Value::String(raw) if raw.len() <= max_json_bytes => {
             serde_json::from_str::<serde_json::Value>(raw.as_str())
                 .unwrap_or_else(|_| serde_json::Value::Array(Vec::new()))
         }
@@ -2398,9 +2498,11 @@ mod tests {
     use super::{
         chromium_network_log_headers, chromium_transport_idle_timeout, clamp_chromium_snapshot,
         decode_chromium_console_entries_value, decode_chromium_json_script_value,
-        parse_chromium_console_entries, parse_chromium_page_network_entries,
-        parse_chromium_viewport_metrics, parse_key_press_spec, ChromiumObserveSnapshot,
-        MAX_CHROMIUM_CONSOLE_JSON_BYTES,
+        decode_chromium_network_entries_value, parse_chromium_console_entries,
+        parse_chromium_page_network_entries, parse_chromium_viewport_metrics, parse_key_press_spec,
+        ChromiumObserveSnapshot, CHROMIUM_DRAIN_NETWORK_LOG_SCRIPT,
+        CHROMIUM_PAGE_DIAGNOSTICS_SCRIPT, CHROMIUM_READ_CONSOLE_LOG_SCRIPT,
+        MAX_CHROMIUM_CONSOLE_JSON_BYTES, MAX_CHROMIUM_NETWORK_JSON_BYTES,
     };
     use crate::{
         DEFAULT_SESSION_IDLE_TTL_MS, MAX_CONSOLE_MESSAGE_BYTES, MAX_CONSOLE_SOURCE_BYTES,
@@ -2461,6 +2563,51 @@ mod tests {
         assert!(
             decoded.as_array().is_some_and(Vec::is_empty),
             "oversized console payload must be dropped before serde parsing"
+        );
+    }
+
+    #[test]
+    fn chromium_diagnostics_read_scripts_bound_page_controlled_payloads() {
+        assert!(
+            !CHROMIUM_PAGE_DIAGNOSTICS_SCRIPT.contains("snapshotEntries"),
+            "the page hook should not export callable diagnostics snapshots into page state"
+        );
+        assert!(
+            !CHROMIUM_READ_CONSOLE_LOG_SCRIPT.contains("snapshotEntries"),
+            "console reads must not call page-defined snapshot functions"
+        );
+        assert!(
+            CHROMIUM_READ_CONSOLE_LOG_SCRIPT.contains("MAX_CONSOLE_JSON_CHARS"),
+            "console reads should enforce a page-side aggregate JSON budget"
+        );
+        assert!(
+            CHROMIUM_DRAIN_NETWORK_LOG_SCRIPT.contains("MAX_NETWORK_JSON_CHARS"),
+            "network diagnostics reads should enforce a page-side aggregate JSON budget"
+        );
+        assert!(
+            CHROMIUM_READ_CONSOLE_LOG_SCRIPT.contains("clampScalar")
+                && CHROMIUM_DRAIN_NETWORK_LOG_SCRIPT.contains("clampScalar"),
+            "diagnostics reads should only serialize bounded scalar fields"
+        );
+        assert!(
+            CHROMIUM_READ_CONSOLE_LOG_SCRIPT.contains("Array.prototype.slice.call")
+                && CHROMIUM_DRAIN_NETWORK_LOG_SCRIPT.contains("Array.prototype.slice.call"),
+            "diagnostics reads should not call page-overridable array slice methods"
+        );
+    }
+
+    #[test]
+    fn decode_chromium_network_entries_rejects_oversized_string_payload() {
+        let raw = serde_json::Value::String(format!(
+            "[{}]",
+            " ".repeat(MAX_CHROMIUM_NETWORK_JSON_BYTES + 1)
+        ));
+
+        let decoded = decode_chromium_network_entries_value(raw);
+
+        assert!(
+            decoded.as_array().is_some_and(Vec::is_empty),
+            "oversized network diagnostics payload must be dropped before serde parsing"
         );
     }
 
