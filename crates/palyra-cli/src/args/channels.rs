@@ -213,12 +213,31 @@ pub enum ChannelsCommand {
         account_id: String,
         #[arg(long, default_value_t = false)]
         interactive: bool,
-        #[arg(long)]
+        #[arg(
+            long,
+            conflicts_with_all = ["credential_stdin", "credential_prompt"],
+            requires = "allow_insecure_credential_arg",
+            help = "Read the connector credential from argv after acknowledging process-list exposure"
+        )]
         credential: Option<String>,
-        #[arg(long, default_value_t = false)]
+        #[arg(
+            long,
+            default_value_t = false,
+            conflicts_with_all = ["credential", "credential_prompt"]
+        )]
         credential_stdin: bool,
-        #[arg(long, default_value_t = false)]
+        #[arg(
+            long,
+            default_value_t = false,
+            conflicts_with_all = ["credential", "credential_stdin"]
+        )]
         credential_prompt: bool,
+        #[arg(
+            long,
+            default_value_t = false,
+            help = "Allow --credential despite process-list exposure; prefer --credential-stdin or --credential-prompt"
+        )]
+        allow_insecure_credential_arg: bool,
         #[arg(long, default_value = "local")]
         mode: String,
         #[arg(long, default_value = "dm_only")]
@@ -259,12 +278,31 @@ pub enum ChannelsCommand {
         provider: ChannelProviderArg,
         #[arg(long, default_value = "default")]
         account_id: String,
-        #[arg(long)]
+        #[arg(
+            long,
+            conflicts_with_all = ["credential_stdin", "credential_prompt"],
+            requires = "allow_insecure_credential_arg",
+            help = "Read the connector credential from argv after acknowledging process-list exposure"
+        )]
         credential: Option<String>,
-        #[arg(long, default_value_t = false)]
+        #[arg(
+            long,
+            default_value_t = false,
+            conflicts_with_all = ["credential", "credential_prompt"]
+        )]
         credential_stdin: bool,
-        #[arg(long, default_value_t = false)]
+        #[arg(
+            long,
+            default_value_t = false,
+            conflicts_with_all = ["credential", "credential_stdin"]
+        )]
         credential_prompt: bool,
+        #[arg(
+            long,
+            default_value_t = false,
+            help = "Allow --credential despite process-list exposure; prefer --credential-stdin or --credential-prompt"
+        )]
+        allow_insecure_credential_arg: bool,
         #[arg(long, default_value = "local")]
         mode: String,
         #[arg(long, default_value = "dm_only")]

@@ -24,6 +24,7 @@ pub(super) fn run_channel_lifecycle_upsert(
     credential: Option<String>,
     credential_stdin: bool,
     credential_prompt: bool,
+    allow_insecure_credential_arg: bool,
     mode: String,
     inbound_scope: String,
     allow_from: Vec<String>,
@@ -67,6 +68,7 @@ pub(super) fn run_channel_lifecycle_upsert(
         credential,
         credential_stdin,
         credential_prompt,
+        allow_insecure_credential_arg,
         "Discord bot token: ",
     )?;
     let mode = normalize_required_text_arg(mode, "mode")?;

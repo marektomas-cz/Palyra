@@ -12,6 +12,7 @@ pub(super) fn load_channel_credential(
     explicit: Option<String>,
     from_stdin: bool,
     from_prompt: bool,
+    allow_insecure_credential_arg: bool,
     prompt: &str,
 ) -> Result<String> {
     let source_count =
@@ -22,6 +23,11 @@ pub(super) fn load_channel_credential(
         );
     }
     let credential = if let Some(value) = explicit {
+        if !allow_insecure_credential_arg {
+            bail!(
+                "refusing --credential without --allow-insecure-credential-arg because command-line arguments can be exposed through process lists; use --credential-stdin or --credential-prompt instead"
+            );
+        }
         value
     } else if from_stdin {
         let mut value = String::new();
@@ -231,7 +237,9 @@ pub(super) fn post_discord_account_action(
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_connector_selector, resolve_optional_connector_selector};
+    use super::{
+        load_channel_credential, resolve_connector_selector, resolve_optional_connector_selector,
+    };
     use crate::args::ChannelProviderArg;
 
     #[test]
@@ -275,5 +283,36 @@ mod tests {
         .expect("provider selector should produce connector id");
 
         assert_eq!(selector, "discord:ops");
+    }
+
+    #[test]
+    fn argv_channel_credential_requires_insecure_acknowledgement() {
+        let error = load_channel_credential(
+            Some("discord-token".to_owned()),
+            false,
+            false,
+            false,
+            "Discord bot token: ",
+        )
+        .expect_err("argv credential must require explicit acknowledgement");
+
+        assert!(
+            error.to_string().contains("--allow-insecure-credential-arg"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn acknowledged_argv_channel_credential_is_trimmed() {
+        let credential = load_channel_credential(
+            Some(" discord-token \n".to_owned()),
+            false,
+            false,
+            true,
+            "Discord bot token: ",
+        )
+        .expect("acknowledged argv credential should resolve");
+
+        assert_eq!(credential, "discord-token");
     }
 }

@@ -3149,6 +3149,7 @@ fn parse_channels_add_non_interactive_discord() {
                 credential: None,
                 credential_stdin: true,
                 credential_prompt: false,
+                allow_insecure_credential_arg: false,
                 mode: "remote_vps".to_owned(),
                 inbound_scope: "allowlisted_guild_channels".to_owned(),
                 allow_from: vec!["ops-team".to_owned()],
@@ -3168,6 +3169,46 @@ fn parse_channels_add_non_interactive_discord() {
                 json: true,
             }
         }
+    );
+}
+
+#[test]
+fn parse_channels_add_rejects_credential_without_insecure_acknowledgement() {
+    let error = Cli::try_parse_from([
+        "palyra",
+        "channels",
+        "add",
+        "--provider",
+        "discord",
+        "--credential",
+        "discord-token",
+    ])
+    .expect_err("argv credential must require explicit acknowledgement");
+
+    assert_eq!(error.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    assert!(
+        error.to_string().contains("--allow-insecure-credential-arg"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn parse_channels_login_rejects_credential_without_insecure_acknowledgement() {
+    let error = Cli::try_parse_from([
+        "palyra",
+        "channels",
+        "login",
+        "--provider",
+        "discord",
+        "--credential",
+        "discord-token",
+    ])
+    .expect_err("argv credential must require explicit acknowledgement");
+
+    assert_eq!(error.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    assert!(
+        error.to_string().contains("--allow-insecure-credential-arg"),
+        "unexpected error: {error}"
     );
 }
 
