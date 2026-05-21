@@ -134,4 +134,49 @@ describe("console contracts", () => {
     expect(aggregate.funnel.first_run_inspected).toBe(1);
     expect(aggregate.funnel.second_session_resumed).toBe(1);
   });
+
+  it("aggregates UX telemetry from daemon journal event envelopes", () => {
+    const aggregate = aggregateUxTelemetry([
+      {
+        operator_event: "system.operator.ux.onboarding.step",
+        payload_json: {
+          event: "system.operator.ux.onboarding.step",
+          details: {
+            name: "ux.onboarding.step",
+            summary: "Setup started.",
+            details: { surface: "desktop", step: "setup_started" },
+            emitted_at_unix_ms: 1_730_000_000_000,
+          },
+        },
+      },
+      {
+        operator_event: "system.operator.ux.approval.resolved",
+        session_id: "journal-session",
+        payload_json: {
+          event: "system.operator.ux.approval.resolved",
+          details: {
+            name: "ux.approval.resolved",
+            summary: "Approval blocked.",
+            details: {
+              surface: "tui",
+              toolName: "palyra.fs.apply_patch",
+              sessionId: "operator-session",
+              outcome: "blocked",
+            },
+            emitted_at_unix_ms: 1_730_000_000_100,
+          },
+        },
+      },
+    ]);
+
+    expect(aggregate.totalEvents).toBe(2);
+    expect(aggregate.countsBySurface.desktop).toBe(1);
+    expect(aggregate.countsBySurface.tui).toBe(1);
+    expect(aggregate.approvalFatigueByTool["palyra.fs.apply_patch"]).toBe(1);
+    expect(aggregate.approvalFatigueBySession["operator-session"]).toBe(1);
+    expect(aggregate.approvalFatigueBySession["journal-session"]).toBeUndefined();
+    expect(aggregate.frictionBySurface.tui).toBe(1);
+    expect(aggregate.funnel.setup_started).toBe(1);
+    expect(aggregate.funnel.first_approval_resolved).toBe(1);
+  });
 });

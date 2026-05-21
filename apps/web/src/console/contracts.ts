@@ -323,13 +323,16 @@ export function aggregateUxTelemetry(records: SystemEventRecord[]): UxTelemetryA
 }
 
 function readRecordDetails(payload: JsonValue | undefined): Record<string, JsonValue> {
-  if (payload !== null && typeof payload === "object" && !Array.isArray(payload)) {
-    const details = payload.details;
-    if (details !== null && typeof details === "object" && !Array.isArray(details)) {
-      return details as Record<string, JsonValue>;
-    }
+  const payloadObject = readJsonObject(payload);
+  const details = readJsonObject(payloadObject?.details);
+  return readJsonObject(details?.details) ?? details ?? {};
+}
+
+function readJsonObject(value: JsonValue | undefined): Record<string, JsonValue> | null {
+  if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, JsonValue>;
   }
-  return {};
+  return null;
 }
 
 function readSurface(value: JsonValue): TelemetrySurface {
