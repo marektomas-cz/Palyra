@@ -381,8 +381,14 @@ pub(crate) async fn plan_usage_routing(
         )
         .await
         .unwrap_or_default();
-    let approved_subjects =
-        load_budget_override_approvals(request.runtime_state, &budget_policies).await;
+    let approved_subjects = load_budget_override_approvals(
+        request.runtime_state,
+        request.request_context,
+        Some(request.session_id),
+        Some(request.run_id),
+        &budget_policies,
+    )
+    .await;
     let provider_health_state = provider_health_state(request.provider_snapshot);
     let prompt_tokens_estimate = estimate_token_count(request.prompt_text);
     let lease_previews = build_provider_lease_previews(
@@ -1631,8 +1637,11 @@ pub(crate) async fn request_usage_budget_override(
     requested_reason: Option<&str>,
 ) -> Result<ApprovalRecord, Status> {
     let subject_id = usage_budget_subject_id(policy.policy_id.as_str());
+    let approval_context = BudgetOverrideApprovalContext::new(request_context, session_id, run_id);
     if let Some(existing) = runtime_state.latest_approval_by_subject(subject_id.clone()).await? {
-        if existing.decision.is_none() || is_active_budget_override_allow(&existing) {
+        if is_pending_budget_override_for_context(&existing, &approval_context)
+            || is_active_budget_override_allow(&existing, &approval_context)
+        {
             return Ok(existing);
         }
     }
@@ -1712,9 +1721,13 @@ pub(crate) async fn request_usage_budget_override(
 
 pub(crate) async fn load_budget_override_approvals(
     runtime_state: &Arc<GatewayRuntimeState>,
+    request_context: &RequestContext,
+    session_id: Option<&str>,
+    run_id: Option<&str>,
     policies: &[UsageBudgetPolicyRecord],
 ) -> HashMap<String, bool> {
     let mut approvals = HashMap::new();
+    let approval_context = BudgetOverrideApprovalContext::new(request_context, session_id, run_id);
     for policy in policies {
         let subject_id = usage_budget_subject_id(policy.policy_id.as_str());
         let approved = runtime_state
@@ -1722,7 +1735,7 @@ pub(crate) async fn load_budget_override_approvals(
             .await
             .ok()
             .flatten()
-            .is_some_and(|record| is_active_budget_override_allow(&record));
+            .is_some_and(|record| is_active_budget_override_allow(&record, &approval_context));
         approvals.insert(subject_id, approved);
     }
     approvals
@@ -1734,10 +1747,16 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        estimate_cost_for_model, latest_routing_decisions_by_run_id, select_routing_models,
-        RoutingDecisionContext, RoutingMode, RoutingTaskClass,
+        estimate_cost_for_model, is_active_budget_override_allow,
+        is_pending_budget_override_for_context, latest_routing_decisions_by_run_id,
+        select_routing_models, BudgetOverrideApprovalContext, RoutingDecisionContext, RoutingMode,
+        RoutingTaskClass,
     };
-    use crate::journal::{UsagePricingRecord, UsageRoutingDecisionRecord};
+    use crate::journal::{
+        ApprovalDecision, ApprovalDecisionScope, ApprovalPolicySnapshot, ApprovalPromptRecord,
+        ApprovalRecord, ApprovalRiskLevel, ApprovalSubjectType, UsagePricingRecord,
+        UsageRoutingDecisionRecord,
+    };
     use crate::model_provider::{
         ProviderCapabilitiesSnapshot, ProviderCircuitBreakerSnapshot, ProviderDiscoverySnapshot,
         ProviderHealthProbeSnapshot, ProviderRegistryModelSnapshot,
@@ -2257,15 +2276,245 @@ mod tests {
             Some(latest.decision_id.as_str())
         );
     }
+
+    #[test]
+    fn budget_override_once_allow_is_bound_to_original_run() {
+        let record = budget_approval_record(
+            Some(ApprovalDecision::Allow),
+            Some(ApprovalDecisionScope::Once),
+            "session-a",
+            "run-a",
+        );
+
+        assert!(is_active_budget_override_allow(
+            &record,
+            &budget_context(Some("session-a"), Some("run-a"))
+        ));
+        assert!(
+            !is_active_budget_override_allow(
+                &record,
+                &budget_context(Some("session-a"), Some("run-b"))
+            ),
+            "allow-once budget approvals must not carry forward to later runs"
+        );
+        assert!(
+            !is_active_budget_override_allow(
+                &record,
+                &budget_context(Some("session-b"), Some("run-a"))
+            ),
+            "allow-once budget approvals must stay within the approved session"
+        );
+        assert!(
+            !is_active_budget_override_allow(&record, &budget_context(None, None)),
+            "allow-once budget approvals must not become policy-wide approvals"
+        );
+    }
+
+    #[test]
+    fn budget_override_session_allow_is_bound_to_session_and_actor() {
+        let record = budget_approval_record(
+            Some(ApprovalDecision::Allow),
+            Some(ApprovalDecisionScope::Session),
+            "session-a",
+            "run-a",
+        );
+
+        assert!(is_active_budget_override_allow(
+            &record,
+            &budget_context(Some("session-a"), Some("run-b"))
+        ));
+        assert!(!is_active_budget_override_allow(
+            &record,
+            &budget_context(Some("session-b"), Some("run-b"))
+        ));
+        assert!(!is_active_budget_override_allow(
+            &record,
+            &budget_context_for_actor(
+                "admin:other",
+                "device-a",
+                Some("web"),
+                Some("session-a"),
+                Some("run-b"),
+            )
+        ));
+    }
+
+    #[test]
+    fn budget_override_pending_reuse_stays_in_request_context() {
+        let record = budget_approval_record(None, None, "session-a", "run-a");
+
+        assert!(is_pending_budget_override_for_context(
+            &record,
+            &budget_context(Some("session-a"), Some("run-a"))
+        ));
+        assert!(!is_pending_budget_override_for_context(
+            &record,
+            &budget_context(Some("session-a"), Some("run-b"))
+        ));
+    }
+
+    fn budget_context<'a>(
+        session_id: Option<&'a str>,
+        run_id: Option<&'a str>,
+    ) -> BudgetOverrideApprovalContext<'a> {
+        budget_context_for_actor("admin:web-console", "device-a", Some("web"), session_id, run_id)
+    }
+
+    fn budget_context_for_actor<'a>(
+        principal: &'a str,
+        device_id: &'a str,
+        channel: Option<&'a str>,
+        session_id: Option<&'a str>,
+        run_id: Option<&'a str>,
+    ) -> BudgetOverrideApprovalContext<'a> {
+        BudgetOverrideApprovalContext { principal, device_id, channel, session_id, run_id }
+    }
+
+    fn budget_approval_record(
+        decision: Option<ApprovalDecision>,
+        decision_scope: Option<ApprovalDecisionScope>,
+        session_id: &str,
+        run_id: &str,
+    ) -> ApprovalRecord {
+        let resolved_at_unix_ms = decision.map(|_| crate::gateway::current_unix_ms());
+        ApprovalRecord {
+            approval_id: "approval-budget-1".to_owned(),
+            session_id: session_id.to_owned(),
+            run_id: run_id.to_owned(),
+            principal: "admin:web-console".to_owned(),
+            device_id: "device-a".to_owned(),
+            channel: Some("web".to_owned()),
+            requested_at_unix_ms: 1,
+            resolved_at_unix_ms,
+            subject_type: ApprovalSubjectType::Tool,
+            subject_id: "usage-budget:daily-cost".to_owned(),
+            request_summary: "Budget override requested for policy daily-cost".to_owned(),
+            decision,
+            decision_scope,
+            decision_reason: decision.map(|_| "approved for test".to_owned()),
+            decision_scope_ttl_ms: None,
+            policy_snapshot: ApprovalPolicySnapshot {
+                policy_id: "usage_budget_policy.v1".to_owned(),
+                policy_hash: "usage-governance-v1".to_owned(),
+                evaluation_summary: "budget hard limit exceeded".to_owned(),
+            },
+            prompt: ApprovalPromptRecord {
+                title: "Approve usage budget override".to_owned(),
+                risk_level: ApprovalRiskLevel::High,
+                subject_id: "usage-budget:daily-cost".to_owned(),
+                summary: "A run exceeded a hard budget limit.".to_owned(),
+                options: Vec::new(),
+                timeout_seconds: 60,
+                details_json: "{}".to_owned(),
+                policy_explanation: "Hard budget limits require an override.".to_owned(),
+            },
+            created_at_unix_ms: 1,
+            updated_at_unix_ms: 1,
+        }
+    }
 }
 
-fn is_active_budget_override_allow(record: &ApprovalRecord) -> bool {
-    record.decision == Some(ApprovalDecision::Allow)
-        && !record.decision_scope_ttl_ms.zip(record.resolved_at_unix_ms).is_some_and(
-            |(ttl_ms, resolved_at)| {
-                resolved_at.saturating_add(ttl_ms) <= crate::gateway::current_unix_ms()
-            },
-        )
+#[derive(Debug, Clone, Copy)]
+struct BudgetOverrideApprovalContext<'a> {
+    principal: &'a str,
+    device_id: &'a str,
+    channel: Option<&'a str>,
+    session_id: Option<&'a str>,
+    run_id: Option<&'a str>,
+}
+
+impl<'a> BudgetOverrideApprovalContext<'a> {
+    fn new(
+        request_context: &'a RequestContext,
+        session_id: Option<&'a str>,
+        run_id: Option<&'a str>,
+    ) -> Self {
+        Self {
+            principal: request_context.principal.as_str(),
+            device_id: request_context.device_id.as_str(),
+            channel: request_context.channel.as_deref(),
+            session_id,
+            run_id,
+        }
+    }
+}
+
+fn is_pending_budget_override_for_context(
+    record: &ApprovalRecord,
+    context: &BudgetOverrideApprovalContext<'_>,
+) -> bool {
+    record.decision.is_none() && budget_override_record_matches_request_context(record, context)
+}
+
+fn is_active_budget_override_allow(
+    record: &ApprovalRecord,
+    context: &BudgetOverrideApprovalContext<'_>,
+) -> bool {
+    if record.decision != Some(ApprovalDecision::Allow) || record.resolved_at_unix_ms.is_none() {
+        return false;
+    }
+
+    match record.decision_scope.unwrap_or(ApprovalDecisionScope::Once) {
+        ApprovalDecisionScope::Once => budget_override_record_matches_run(record, context),
+        ApprovalDecisionScope::Session => {
+            budget_override_record_matches_session(record, context)
+                && !budget_override_ttl_expired(record)
+        }
+        ApprovalDecisionScope::Timeboxed => {
+            budget_override_record_matches_session(record, context)
+                && record.decision_scope_ttl_ms.is_some_and(|ttl_ms| ttl_ms > 0)
+                && !budget_override_ttl_expired(record)
+        }
+    }
+}
+
+fn budget_override_record_matches_request_context(
+    record: &ApprovalRecord,
+    context: &BudgetOverrideApprovalContext<'_>,
+) -> bool {
+    if !budget_override_record_matches_actor(record, context) {
+        return false;
+    }
+    if context.session_id.is_some_and(|session_id| record.session_id != session_id) {
+        return false;
+    }
+    if context.run_id.is_some_and(|run_id| record.run_id != run_id) {
+        return false;
+    }
+    true
+}
+
+fn budget_override_record_matches_run(
+    record: &ApprovalRecord,
+    context: &BudgetOverrideApprovalContext<'_>,
+) -> bool {
+    budget_override_record_matches_session(record, context)
+        && context.run_id.is_some_and(|run_id| record.run_id == run_id)
+}
+
+fn budget_override_record_matches_session(
+    record: &ApprovalRecord,
+    context: &BudgetOverrideApprovalContext<'_>,
+) -> bool {
+    budget_override_record_matches_actor(record, context)
+        && context.session_id.is_some_and(|session_id| record.session_id == session_id)
+}
+
+fn budget_override_record_matches_actor(
+    record: &ApprovalRecord,
+    context: &BudgetOverrideApprovalContext<'_>,
+) -> bool {
+    record.principal == context.principal
+        && record.device_id == context.device_id
+        && record.channel.as_deref() == context.channel
+}
+
+fn budget_override_ttl_expired(record: &ApprovalRecord) -> bool {
+    record.decision_scope_ttl_ms.zip(record.resolved_at_unix_ms).is_some_and(
+        |(ttl_ms, resolved_at)| {
+            resolved_at.saturating_add(ttl_ms) <= crate::gateway::current_unix_ms()
+        },
+    )
 }
 
 fn provider_health_state(snapshot: &ProviderStatusSnapshot) -> &'static str {

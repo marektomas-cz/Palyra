@@ -959,8 +959,14 @@ pub(crate) async fn console_usage_insights_handler(
             }
         })
         .collect::<Vec<_>>();
-    let approved_subjects =
-        load_budget_override_approvals(&state.runtime, budget_policies.as_slice()).await;
+    let approved_subjects = load_budget_override_approvals(
+        &state.runtime,
+        &session.context,
+        None,
+        None,
+        budget_policies.as_slice(),
+    )
+    .await;
     let total_estimated_cost =
         enriched_runs.iter().filter_map(|entry| entry.cost_estimate.upper_usd).sum::<f64>();
     let cost_projection = PricingEstimate {
