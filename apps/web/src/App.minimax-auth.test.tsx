@@ -106,7 +106,10 @@ describe("MiniMax web auth surface", () => {
     expect(apiKeyBody).toContain('"profile_name":"default-minimax"');
     expect(apiKeyBody).toContain('"api_key":"minimax-api-key"');
 
-    await selectProvider(await screen.findByRole("button", { name: "Start OpenAI OAuth" }), "MiniMax");
+    await selectProvider(
+      await screen.findByRole("button", { name: "Start OpenAI OAuth" }),
+      "MiniMax",
+    );
     fireEvent.change(screen.getAllByLabelText("Profile name")[1], {
       target: { value: "minimax-oauth" },
     });
@@ -221,7 +224,10 @@ describe("MiniMax web auth surface", () => {
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "Profiles" }));
 
-    await selectProvider(await screen.findByRole("button", { name: "Start OpenAI OAuth" }), "MiniMax");
+    await selectProvider(
+      await screen.findByRole("button", { name: "Start OpenAI OAuth" }),
+      "MiniMax",
+    );
     fireEvent.change(screen.getAllByLabelText("Profile name")[1], {
       target: { value: "minimax-oauth" },
     });
