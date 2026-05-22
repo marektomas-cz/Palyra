@@ -21,6 +21,34 @@ function Get-DefaultHarnessRoot {
     return Join-Path $localAppData "Palyra-TestHarness"
 }
 
+function Resolve-WindowsCleanDesktopCliExposure {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FallbackCommandRoot,
+        [Parameter(Mandatory = $true)]
+        [string]$FallbackCommandPath
+    )
+
+    foreach ($aliasRoot in (Get-WindowsPalyraCliAliasRoots)) {
+        if ([string]::IsNullOrWhiteSpace($aliasRoot)) {
+            continue
+        }
+
+        $aliasCommandPath = Join-Path $aliasRoot "palyra.cmd"
+        if (Test-Path -LiteralPath $aliasCommandPath -PathType Leaf) {
+            return [ordered]@{
+                command_root = [IO.Path]::GetFullPath($aliasRoot)
+                command_path = [IO.Path]::GetFullPath($aliasCommandPath)
+            }
+        }
+    }
+
+    return [ordered]@{
+        command_root = [IO.Path]::GetFullPath($FallbackCommandRoot)
+        command_path = [IO.Path]::GetFullPath($FallbackCommandPath)
+    }
+}
+
 $repoRoot = Get-RepoRoot
 $workspaceRoot =
     if ([string]::IsNullOrWhiteSpace($WorkspaceRoot)) {
@@ -166,8 +194,15 @@ if ([string]::IsNullOrWhiteSpace($cliUserPathUpdated)) {
 }
 
 $cliPathPreflightSource = $null
-$cliPathPreflightMatchesHarness = "not_checked"
+$cliPathPreflightMatchesCommandRoot = "not_checked"
 if ($IsWindows) {
+    $windowsCliExposure = Resolve-WindowsCleanDesktopCliExposure `
+        -FallbackCommandRoot $resolvedCliCommandRoot `
+        -FallbackCommandPath $resolvedCliCommandPath
+    $resolvedCliCommandRoot = $windowsCliExposure.command_root
+    $resolvedCliCommandPath = $windowsCliExposure.command_path
+    $resolvedCliCurrentShellCommand = $resolvedCliCommandPath
+
     if (Add-CurrentSessionPathEntry -Entry $resolvedCliCommandRoot) {
         $cliSessionPathUpdated = "true"
     }
@@ -185,18 +220,18 @@ if ($IsWindows) {
 
     $resolvedPalyraCommand = Get-Command palyra -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($null -eq $resolvedPalyraCommand -or [string]::IsNullOrWhiteSpace($resolvedPalyraCommand.Source)) {
-        throw "Clean desktop install could not resolve 'palyra' on PATH after selecting harness CLI command root: $resolvedCliCommandRoot"
+        throw "Clean desktop install could not resolve 'palyra' on PATH after selecting CLI command root: $resolvedCliCommandRoot"
     }
     $cliPathPreflightSource = [IO.Path]::GetFullPath($resolvedPalyraCommand.Source)
     $cliPathPreflightRoot = Split-Path -Parent $cliPathPreflightSource
-    $cliPathPreflightMatchesHarness =
+    $cliPathPreflightMatchesCommandRoot =
         if (Test-PathEntryEquals -Left $cliPathPreflightRoot -Right $resolvedCliCommandRoot) {
             "true"
         } else {
             "false"
         }
-    if ($cliPathPreflightMatchesHarness -ne "true") {
-        throw "Clean desktop install resolved 'palyra' to '$cliPathPreflightSource' instead of the harness CLI command root '$resolvedCliCommandRoot'. Use cli_command_path='$resolvedCliCommandPath' in this shell, or open a new shell after PATH persistence."
+    if ($cliPathPreflightMatchesCommandRoot -ne "true") {
+        throw "Clean desktop install resolved 'palyra' to '$cliPathPreflightSource' instead of the selected CLI command root '$resolvedCliCommandRoot'. Use cli_command_path='$resolvedCliCommandPath' in this shell, or open a new shell after PATH persistence."
     }
 }
 
@@ -259,7 +294,8 @@ $installSummary = [ordered]@{
     cli_new_shell_command = $resolvedCliNewShellCommand
     cli_parent_shell_note = $resolvedCliParentShellNote
     cli_path_preflight_source = $cliPathPreflightSource
-    cli_path_preflight_matches_harness = $cliPathPreflightMatchesHarness
+    cli_path_preflight_matches_command_root = $cliPathPreflightMatchesCommandRoot
+    cli_path_preflight_matches_harness = $cliPathPreflightMatchesCommandRoot
     launcher_path = $launcherPath
 }
 $installSummary |
@@ -284,5 +320,6 @@ Write-Output "cli_current_shell_command=$resolvedCliCurrentShellCommand"
 Write-Output "cli_new_shell_command=$resolvedCliNewShellCommand"
 Write-Output "cli_parent_shell_note=$resolvedCliParentShellNote"
 Write-Output "cli_path_preflight_source=$cliPathPreflightSource"
-Write-Output "cli_path_preflight_matches_harness=$cliPathPreflightMatchesHarness"
+Write-Output "cli_path_preflight_matches_command_root=$cliPathPreflightMatchesCommandRoot"
+Write-Output "cli_path_preflight_matches_harness=$cliPathPreflightMatchesCommandRoot"
 Write-Output "launcher_path=$launcherPath"

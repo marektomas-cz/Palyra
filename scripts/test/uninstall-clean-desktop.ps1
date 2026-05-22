@@ -42,7 +42,8 @@ function Stop-InstalledProcess {
 function Remove-CleanDesktopCliExposureFallback {
     param(
         [Parameter(Mandatory = $true)]
-        [string]$CommandRoot
+        [string]$CommandRoot,
+        [string[]]$AdditionalCommandRoots = @()
     )
 
     $sessionPathUpdated = $false
@@ -51,6 +52,11 @@ function Remove-CleanDesktopCliExposureFallback {
     $commandRootPath = [IO.Path]::GetFullPath($CommandRoot)
     $candidateRoots = New-Object System.Collections.Generic.List[string]
     $candidateRoots.Add($commandRootPath) | Out-Null
+    foreach ($additionalCommandRoot in $AdditionalCommandRoots) {
+        if (-not [string]::IsNullOrWhiteSpace($additionalCommandRoot)) {
+            $candidateRoots.Add([IO.Path]::GetFullPath($additionalCommandRoot)) | Out-Null
+        }
+    }
     foreach ($aliasRoot in (Get-WindowsPalyraCliAliasRoots)) {
         if (-not [string]::IsNullOrWhiteSpace($aliasRoot)) {
             $candidateRoots.Add($aliasRoot) | Out-Null
@@ -136,7 +142,8 @@ $artifactsRoot = Join-Path $workspaceRoot "artifacts"
 $installRoot = Join-Path $workspaceRoot "install"
 $stateRoot = Join-Path $workspaceRoot "state"
 $metadataPath = Join-Path $workspaceRoot "clean-install-metadata.json"
-$cliCommandRoot = Join-Path $workspaceRoot "cli-bin"
+$defaultCliCommandRoot = Join-Path $workspaceRoot "cli-bin"
+$cliCommandRoot = $defaultCliCommandRoot
 if (Test-Path -LiteralPath $metadataPath -PathType Leaf) {
     $cleanMetadata = Read-JsonFile -Path $metadataPath
     $metadataCliCommandRoot = $cleanMetadata.PSObject.Properties["cli_command_root"]
@@ -165,7 +172,9 @@ if (Test-Path -LiteralPath $installRoot) {
     $uninstallMetadata = Convert-KeyValueOutputToHashtable -Lines $uninstallOutput
 }
 
-$cliCleanup = Remove-CleanDesktopCliExposureFallback -CommandRoot $cliCommandRoot
+$cliCleanup = Remove-CleanDesktopCliExposureFallback `
+    -CommandRoot $cliCommandRoot `
+    -AdditionalCommandRoots @($defaultCliCommandRoot)
 $cliCommandRootRemoved = $uninstallMetadata["cli_command_root_removed"]
 if ([string]::IsNullOrWhiteSpace($cliCommandRootRemoved)) {
     $cliCommandRootRemoved = [string]$cliCleanup.command_root_removed
