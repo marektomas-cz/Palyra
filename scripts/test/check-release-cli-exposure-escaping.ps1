@@ -93,6 +93,7 @@ Assert-Equal `
     -Message "cmd shim literals must escape metacharacters used by cmd.exe."
 
 $previousPath = $env:PATH
+$previousWindowsUserPath = if ($IsWindows) { [Environment]::GetEnvironmentVariable("Path", "User") } else { $null }
 $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("palyra-cli-exposure-escaping-" + [guid]::NewGuid().ToString("N"))
 try {
     $targetRoot = Join-Path $tempRoot ("target " + '$(' + "pwn)")
@@ -101,12 +102,25 @@ try {
     $targetBinary = Join-Path $targetRoot (Resolve-ExecutableName -BaseName "palyra")
     Set-Content -LiteralPath $targetBinary -Value "" -NoNewline
 
+    if ($IsWindows) {
+        $legacyAliasRoot = Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "Palyra/bin"
+        [Environment]::SetEnvironmentVariable(
+            "Path",
+            (Prepend-PathEntry -Entry $legacyAliasRoot -PathValue $previousWindowsUserPath),
+            "User"
+        )
+    }
+
     $cliExposure = Install-PalyraCliExposure `
         -TargetBinaryPath $targetBinary `
         -CommandRoot $commandRoot `
         -PersistPath:$false
 
     if ($IsWindows) {
+        Assert-Equal `
+            -Actual (Test-PathEntryPresent -Entry $legacyAliasRoot -PathValue ([Environment]::GetEnvironmentVariable("Path", "User"))) `
+            -Expected $true `
+            -Message "Session-only CLI exposure must not remove persistent Windows user PATH entries."
         $powerShellShim = $cliExposure.shim_paths | Where-Object { [string]$_ -like "*-pwsh.ps1" } | Select-Object -First 1
         $cmdShim = $cliExposure.shim_paths | Where-Object { [string]$_ -like "*.cmd" } | Select-Object -First 1
         Assert-Contains `
@@ -137,6 +151,9 @@ try {
 }
 finally {
     $env:PATH = $previousPath
+    if ($IsWindows) {
+        [Environment]::SetEnvironmentVariable("Path", $previousWindowsUserPath, "User")
+    }
     if (Test-Path -LiteralPath $tempRoot) {
         Remove-Item -LiteralPath $tempRoot -Recurse -Force
     }

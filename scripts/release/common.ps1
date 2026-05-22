@@ -630,7 +630,8 @@ function Test-WindowsPalyraCliAliasRootIsOsManaged {
 function Remove-LegacyPalyraCliPathEntries {
     param(
         [Parameter(Mandatory = $true)]
-        [string]$CommandRoot
+        [string]$CommandRoot,
+        [bool]$RemovePersistentPath = $true
     )
 
     $removedRoots = New-Object System.Collections.Generic.List[string]
@@ -644,7 +645,7 @@ function Remove-LegacyPalyraCliPathEntries {
 
         $removedCurrentSession = Remove-CurrentSessionPathEntry -Entry $legacyRoot
         $removedWindowsUserPath = $false
-        if ($IsWindows) {
+        if ($IsWindows -and $RemovePersistentPath) {
             $removedWindowsUserPath = Remove-WindowsUserPathEntry -Entry $legacyRoot
         }
 
@@ -885,7 +886,9 @@ function Install-PalyraCliExposure {
     $resolvedCommandRoot = Assert-CliShimLiteralSafe `
         -Value (Get-PalyraCliCommandRoot -CommandRootOverride $CommandRoot) `
         -Label "CLI command root"
-    $legacyPathCleanup = Remove-LegacyPalyraCliPathEntries -CommandRoot $resolvedCommandRoot
+    $legacyPathCleanup = Remove-LegacyPalyraCliPathEntries `
+        -CommandRoot $resolvedCommandRoot `
+        -RemovePersistentPath:$PersistPath
     New-Item -ItemType Directory -Path $resolvedCommandRoot -Force | Out-Null
     $resolvedStateRoot = $null
     if (-not [string]::IsNullOrWhiteSpace($StateRoot)) {
@@ -1004,7 +1007,9 @@ exec $shTargetBinary "$@"
                 }
                 $secondaryAliasRoots.Add($aliasRoot) | Out-Null
                 Add-CurrentSessionPathEntry -Entry $aliasRoot | Out-Null
-                Add-WindowsUserPathEntry -Entry $aliasRoot | Out-Null
+                if (Add-WindowsUserPathEntry -Entry $aliasRoot) {
+                    $userPathUpdated = $true
+                }
             }
         } elseif (-not $commandRootAlreadyOnPath) {
             foreach ($profilePath in (Get-PalyraCliManagedProfilePaths)) {
