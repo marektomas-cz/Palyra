@@ -444,10 +444,15 @@ pub(crate) async fn console_routine_upsert_handler(
     }
 
     let schedule = resolve_routine_schedule(&payload, trigger_kind, state.cron_timezone_mode)?;
+    let workdir = if payload.workdir.is_some() {
+        normalize_optional_workdir(payload.workdir.as_deref())?
+    } else {
+        existing_job.as_ref().and_then(|job| job.workdir.clone())
+    };
     let execution = parse_execution_config(
         payload.run_mode.as_deref(),
         default_run_mode_for_trigger_kind(trigger_kind),
-        default_execution_posture_for_trigger_kind(trigger_kind),
+        default_execution_posture_for_trigger_kind(trigger_kind, workdir.as_deref()),
         payload.procedure_profile_id.clone(),
         payload.skill_profile_id.clone(),
         payload.provider_profile_id.clone(),
@@ -467,20 +472,21 @@ pub(crate) async fn console_routine_upsert_handler(
         payload.quiet_hours_end.as_deref(),
         payload.quiet_hours_timezone,
     )?;
+    let approval_mode_was_requested = payload.approval_mode.is_some();
     let requested_approval_policy = parse_approval_policy(payload.approval_mode.as_deref())?;
     let approval_policy = routine_approval_policy_with_auto_enable_guard(
         schedule.schedule_type,
         schedule.schedule_payload_json.as_str(),
-        requested_approval_policy,
+        default_approval_policy_for_execution(
+            &execution,
+            requested_approval_policy,
+            approval_mode_was_requested,
+        ),
     );
+    validate_sensitive_tool_approval_policy(&execution, &approval_policy)?;
     let concurrency_policy = parse_concurrency_policy(payload.concurrency_policy.as_deref())?;
     let retry_policy = parse_retry_policy(payload.retry_max_attempts, payload.retry_backoff_ms)?;
     let misfire_policy = parse_misfire_policy(payload.misfire_policy.as_deref())?;
-    let workdir = if payload.workdir.is_some() {
-        normalize_optional_workdir(payload.workdir.as_deref())?
-    } else {
-        existing_job.as_ref().and_then(|job| job.workdir.clone())
-    };
     let approval_required = enabled
         && approval_policy.mode == RoutineApprovalMode::BeforeEnable
         && !routine_approval_granted(
@@ -2211,8 +2217,12 @@ fn default_run_mode_for_trigger_kind(trigger_kind: RoutineTriggerKind) -> Routin
 
 fn default_execution_posture_for_trigger_kind(
     trigger_kind: RoutineTriggerKind,
+    workdir: Option<&str>,
 ) -> RoutineExecutionPosture {
     match trigger_kind {
+        RoutineTriggerKind::Schedule if workdir.is_some() => {
+            RoutineExecutionPosture::SensitiveTools
+        }
         RoutineTriggerKind::Schedule
         | RoutineTriggerKind::Hook
         | RoutineTriggerKind::Webhook
@@ -2422,6 +2432,35 @@ fn parse_approval_policy(value: Option<&str>) -> Result<RoutineApprovalPolicy, R
     Ok(RoutineApprovalPolicy { mode })
 }
 
+fn default_approval_policy_for_execution(
+    execution: &RoutineExecutionConfig,
+    approval_policy: RoutineApprovalPolicy,
+    approval_mode_was_requested: bool,
+) -> RoutineApprovalPolicy {
+    if !approval_mode_was_requested
+        && execution.execution_posture == RoutineExecutionPosture::SensitiveTools
+        && approval_policy.mode == RoutineApprovalMode::None
+    {
+        return RoutineApprovalPolicy { mode: RoutineApprovalMode::BeforeEnable };
+    }
+    approval_policy
+}
+
+#[allow(clippy::result_large_err)]
+fn validate_sensitive_tool_approval_policy(
+    execution: &RoutineExecutionConfig,
+    approval_policy: &RoutineApprovalPolicy,
+) -> Result<(), Response> {
+    if execution.execution_posture == RoutineExecutionPosture::SensitiveTools
+        && approval_policy.mode == RoutineApprovalMode::None
+    {
+        return Err(runtime_status_response(tonic::Status::invalid_argument(
+            "approval_mode=before_enable or before_first_run is required when execution_posture=sensitive_tools",
+        )));
+    }
+    Ok(())
+}
+
 #[allow(clippy::result_large_err)]
 fn normalize_owner_principal(
     requested: &Option<String>,
@@ -2568,7 +2607,7 @@ mod tests {
     };
     use crate::journal::{OrchestratorSessionRecord, OrchestratorTapeRecord};
     use crate::routines::{
-        RoutineApprovalPolicy, RoutineDeliveryMode, RoutineExecutionConfig,
+        RoutineApprovalMode, RoutineApprovalPolicy, RoutineDeliveryMode, RoutineExecutionConfig,
         RoutineExecutionPosture, RoutineMetadataRecord, RoutineRunMode, RoutineSilentPolicy,
         RoutineTriggerKind,
     };
@@ -2689,7 +2728,7 @@ mod tests {
         let execution = parse_execution_config(
             None,
             super::default_run_mode_for_trigger_kind(trigger_kind),
-            super::default_execution_posture_for_trigger_kind(trigger_kind),
+            super::default_execution_posture_for_trigger_kind(trigger_kind, None),
             None,
             None,
             None,
@@ -2699,6 +2738,24 @@ mod tests {
 
         assert_eq!(execution.run_mode, RoutineRunMode::FreshSession);
         assert_eq!(execution.execution_posture, RoutineExecutionPosture::Standard);
+    }
+
+    #[test]
+    fn parse_execution_config_defaults_schedule_workdirs_to_sensitive_tools() {
+        let trigger_kind = RoutineTriggerKind::Schedule;
+        let execution = parse_execution_config(
+            None,
+            super::default_run_mode_for_trigger_kind(trigger_kind),
+            super::default_execution_posture_for_trigger_kind(trigger_kind, Some("C:\\workspace")),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("execution config should parse");
+
+        assert_eq!(execution.run_mode, RoutineRunMode::FreshSession);
+        assert_eq!(execution.execution_posture, RoutineExecutionPosture::SensitiveTools);
     }
 
     #[test]
@@ -2748,6 +2805,36 @@ mod tests {
         .expect("execution config should parse");
 
         assert_eq!(execution.execution_posture, RoutineExecutionPosture::SensitiveTools);
+    }
+
+    #[test]
+    fn default_approval_policy_requires_enable_approval_for_implicit_sensitive_tools() {
+        let execution = RoutineExecutionConfig {
+            run_mode: RoutineRunMode::FreshSession,
+            execution_posture: RoutineExecutionPosture::SensitiveTools,
+            ..RoutineExecutionConfig::default()
+        };
+        let approval_policy = super::default_approval_policy_for_execution(
+            &execution,
+            RoutineApprovalPolicy { mode: RoutineApprovalMode::None },
+            false,
+        );
+
+        assert_eq!(approval_policy.mode, RoutineApprovalMode::BeforeEnable);
+    }
+
+    #[test]
+    fn validate_sensitive_tool_approval_policy_requires_routine_gate() {
+        let execution = RoutineExecutionConfig {
+            run_mode: RoutineRunMode::FreshSession,
+            execution_posture: RoutineExecutionPosture::SensitiveTools,
+            ..RoutineExecutionConfig::default()
+        };
+        let approval_policy = RoutineApprovalPolicy { mode: RoutineApprovalMode::None };
+        let response = super::validate_sensitive_tool_approval_policy(&execution, &approval_policy)
+            .expect_err("sensitive tool routines require an approval gate");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[test]

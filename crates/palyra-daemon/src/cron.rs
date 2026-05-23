@@ -2873,27 +2873,27 @@ mod tests {
     }
 
     #[test]
-    fn routines_automation_gate_fails_closed_until_feature_enabled() {
+    fn routines_automation_gate_uses_default_rollout_flag() {
         let temp = tempdir().expect("tempdir should be created");
         let registry = Arc::new(Mutex::new(
             AccessRegistry::open(temp.path()).expect("access registry should open"),
         ));
 
         assert!(
-            !routines_automation_enabled(&registry),
-            "routine scheduler automation should be disabled by default"
+            routines_automation_enabled(&registry),
+            "routine scheduler automation should be enabled for local quickstart defaults"
         );
 
         {
             let mut guard = registry.lock().expect("access registry lock should be available");
             guard
-                .set_feature_flag(FEATURE_ROUTINES_AUTOMATION, true, None, "admin:test", 1)
+                .set_feature_flag(FEATURE_ROUTINES_AUTOMATION, false, None, "admin:test", 1)
                 .expect("routine automation flag should update");
         }
 
         assert!(
-            routines_automation_enabled(&registry),
-            "routine scheduler automation should run only after the rollout flag is enabled"
+            !routines_automation_enabled(&registry),
+            "routine scheduler automation should still honor explicit operator disablement"
         );
     }
 

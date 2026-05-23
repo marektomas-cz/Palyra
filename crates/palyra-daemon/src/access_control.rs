@@ -1799,7 +1799,7 @@ fn default_feature_flags() -> Vec<FeatureFlagRecord> {
             description:
                 "Enable unattended routine scheduler controls with command kill switches and operator review fallback."
                     .to_owned(),
-            enabled: false,
+            enabled: true,
             stage: "pilot".to_owned(),
             depends_on: vec![FEATURE_STAGED_ROLLOUT.to_owned()],
             updated_at_unix_ms: 0,
@@ -2352,7 +2352,7 @@ mod tests {
             .iter()
             .find(|flag| flag.key == FEATURE_ROUTINES_AUTOMATION)
             .expect("backfill should restore routine automation rollout flag");
-        assert!(!routines_flag.enabled);
+        assert!(routines_flag.enabled);
         assert_eq!(routines_flag.depends_on, vec![FEATURE_STAGED_ROLLOUT.to_owned()]);
         assert_eq!(snapshot.api_tokens[0].rate_limit_per_minute, 10);
         assert!(snapshot.api_tokens[0]

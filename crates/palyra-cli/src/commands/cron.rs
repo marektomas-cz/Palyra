@@ -6,7 +6,10 @@ use std::{
 
 use serde_json::{json, Map, Value};
 
-use crate::cli::{CronConcurrencyPolicyArg, CronMisfirePolicyArg, CronScheduleTypeArg};
+use crate::cli::{
+    CronConcurrencyPolicyArg, CronMisfirePolicyArg, CronScheduleTypeArg, RoutineApprovalModeArg,
+    RoutineExecutionPostureArg,
+};
 use crate::*;
 
 use super::routines::{
@@ -69,6 +72,8 @@ pub(crate) async fn run_cron_async(command: CronCommand) -> Result<()> {
             session_key,
             session_label,
             workdir,
+            execution_posture,
+            approval_mode,
             json,
         } => {
             let prompt = resolve_prompt_input(prompt, prompt_stdin)?;
@@ -91,6 +96,8 @@ pub(crate) async fn run_cron_async(command: CronCommand) -> Result<()> {
                     session_key,
                     session_label,
                     workdir,
+                    execution_posture,
+                    approval_mode,
                 },
             )?;
             let response = upsert_routine_value(&context.client, &payload).await?;
@@ -114,6 +121,8 @@ pub(crate) async fn run_cron_async(command: CronCommand) -> Result<()> {
             session_key,
             session_label,
             workdir,
+            execution_posture,
+            approval_mode,
             json,
         } => {
             let any_other_field = name.is_some()
@@ -130,7 +139,9 @@ pub(crate) async fn run_cron_async(command: CronCommand) -> Result<()> {
                 || channel.is_some()
                 || session_key.is_some()
                 || session_label.is_some()
-                || workdir.is_some();
+                || workdir.is_some()
+                || execution_posture.is_some()
+                || approval_mode.is_some();
             if cron_update_only_changes_enabled(enabled, any_other_field) {
                 let enabled = enabled.expect("enabled-only update requires an enabled value");
                 let response =
@@ -185,6 +196,8 @@ pub(crate) async fn run_cron_async(command: CronCommand) -> Result<()> {
                         json_optional_string_at(routine, "/session_label").unwrap_or_default()
                     })),
                     workdir: workdir.or_else(|| json_optional_string_at(routine, "/workdir")),
+                    execution_posture,
+                    approval_mode,
                 },
             )?;
             let response = upsert_routine_value(&context.client, &payload).await?;
@@ -283,6 +296,16 @@ fn build_schedule_routine_payload(
     insert_optional_string(&mut payload, "session_key", config.session_key);
     insert_optional_string(&mut payload, "session_label", config.session_label);
     insert_optional_string(&mut payload, "workdir", config.workdir);
+    insert_optional_string(
+        &mut payload,
+        "execution_posture",
+        config.execution_posture.map(|value| value.as_str().to_owned()),
+    );
+    insert_optional_string(
+        &mut payload,
+        "approval_mode",
+        config.approval_mode.map(|value| value.as_str().to_owned()),
+    );
     if let Some(enabled) = config.enabled {
         payload.insert("enabled".to_owned(), Value::Bool(enabled));
     }
@@ -371,13 +394,24 @@ fn preserve_existing_routine_fields(existing: &Value, payload: &mut Map<String, 
         "cooldown_ms".to_owned(),
         Value::from(json_i64_at(existing, "/cooldown_ms").unwrap_or_default().max(0) as u64),
     );
-    payload.insert(
-        "approval_mode".to_owned(),
-        Value::String(
-            json_optional_string_at(existing, "/approval_mode")
-                .unwrap_or_else(|| "none".to_owned()),
-        ),
-    );
+    if !payload.contains_key("approval_mode") {
+        payload.insert(
+            "approval_mode".to_owned(),
+            Value::String(
+                json_optional_string_at(existing, "/approval_mode")
+                    .unwrap_or_else(|| "none".to_owned()),
+            ),
+        );
+    }
+    if !payload.contains_key("execution_posture") {
+        payload.insert(
+            "execution_posture".to_owned(),
+            Value::String(
+                json_optional_string_at(existing, "/execution_posture")
+                    .unwrap_or_else(|| "standard".to_owned()),
+            ),
+        );
+    }
     insert_optional_string(
         payload,
         "template_id",
@@ -551,17 +585,38 @@ fn emit_cron_show(payload: &Value, json: bool) -> Result<()> {
 fn emit_cron_mutation(event: &str, payload: &Value, json: bool) -> Result<()> {
     let routine = payload.pointer("/routine").unwrap_or(payload);
     if json {
-        return output::print_json_pretty(routine, "failed to encode cron mutation output as JSON");
+        return output::print_json_pretty(
+            &cron_mutation_json_payload(routine, payload),
+            "failed to encode cron mutation output as JSON",
+        );
     }
+    let approval_fragment = payload
+        .pointer("/approval")
+        .filter(|approval| !approval.is_null())
+        .and_then(|approval| json_optional_string_at(approval, "/approval_id"))
+        .map(|approval_id| format!(" approval_pending=true approval_id={approval_id}"))
+        .unwrap_or_default();
     println!(
-        "{event} id={} enabled={} owner={} channel={} workdir={}",
+        "{event} id={} enabled={} owner={} channel={} workdir={}{}",
         json_optional_string_at(routine, "/routine_id").unwrap_or_else(|| "unknown".to_owned()),
         json_bool_at(routine, "/enabled").unwrap_or(false),
         json_optional_string_at(routine, "/owner_principal").unwrap_or_default(),
         json_optional_string_at(routine, "/channel").unwrap_or_default(),
         json_optional_string_at(routine, "/workdir").unwrap_or_else(|| "none".to_owned()),
+        approval_fragment,
     );
     std::io::stdout().flush().context("stdout flush failed")
+}
+
+fn cron_mutation_json_payload(routine: &Value, payload: &Value) -> Value {
+    let Some(approval) = payload.pointer("/approval").filter(|approval| !approval.is_null()) else {
+        return routine.clone();
+    };
+    let mut output = routine.clone();
+    if let Some(object) = output.as_object_mut() {
+        object.insert("approval".to_owned(), approval.clone());
+    }
+    output
 }
 
 fn emit_cron_runs(id: &str, payload: &Value, json: bool) -> Result<()> {
@@ -721,11 +776,22 @@ struct ScheduleRoutineConfig {
     session_key: Option<String>,
     session_label: Option<String>,
     workdir: Option<String>,
+    execution_posture: Option<RoutineExecutionPostureArg>,
+    approval_mode: Option<RoutineApprovalModeArg>,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::cron_update_only_changes_enabled;
+    use serde_json::json;
+
+    use super::{
+        build_schedule_routine_payload, cron_mutation_json_payload,
+        cron_update_only_changes_enabled, ScheduleRoutineConfig,
+    };
+    use crate::cli::{
+        CronConcurrencyPolicyArg, CronMisfirePolicyArg, CronScheduleTypeArg,
+        RoutineApprovalModeArg, RoutineExecutionPostureArg,
+    };
 
     #[test]
     fn cron_update_enabled_only_uses_enabled_endpoint() {
@@ -737,5 +803,136 @@ mod tests {
     fn cron_update_with_other_fields_uses_full_upsert() {
         assert!(!cron_update_only_changes_enabled(Some(false), true));
         assert!(!cron_update_only_changes_enabled(None, false));
+    }
+
+    #[test]
+    fn cron_add_payload_leaves_workdir_sensitive_posture_to_daemon_default() {
+        let payload = build_schedule_routine_payload(
+            None,
+            ScheduleRoutineConfig {
+                name: "workdir job".to_owned(),
+                prompt: "write report".to_owned(),
+                schedule_type: CronScheduleTypeArg::Every,
+                schedule: "1m".to_owned(),
+                enabled: Some(true),
+                concurrency: CronConcurrencyPolicyArg::Forbid,
+                retry_max_attempts: 1,
+                retry_backoff_ms: 1_000,
+                misfire: CronMisfirePolicyArg::Skip,
+                jitter_ms: 0,
+                owner: None,
+                channel: None,
+                session_key: None,
+                session_label: None,
+                workdir: Some("C:\\workspace".to_owned()),
+                execution_posture: None,
+                approval_mode: None,
+            },
+        )
+        .expect("cron payload should build");
+
+        assert_eq!(
+            payload.get("workdir").and_then(serde_json::Value::as_str),
+            Some("C:\\workspace")
+        );
+        assert!(payload.get("execution_posture").is_none());
+        assert!(payload.get("approval_mode").is_none());
+    }
+
+    #[test]
+    fn cron_update_payload_preserves_or_overrides_execution_controls() {
+        let existing = json!({
+            "routine_id": "01TEST",
+            "execution_posture": "sensitive_tools",
+            "approval_mode": "before_enable"
+        });
+        let preserved = build_schedule_routine_payload(
+            Some(&existing),
+            ScheduleRoutineConfig {
+                name: "workdir job".to_owned(),
+                prompt: "write report".to_owned(),
+                schedule_type: CronScheduleTypeArg::Every,
+                schedule: "1m".to_owned(),
+                enabled: Some(true),
+                concurrency: CronConcurrencyPolicyArg::Forbid,
+                retry_max_attempts: 1,
+                retry_backoff_ms: 1_000,
+                misfire: CronMisfirePolicyArg::Skip,
+                jitter_ms: 0,
+                owner: None,
+                channel: None,
+                session_key: None,
+                session_label: None,
+                workdir: None,
+                execution_posture: None,
+                approval_mode: None,
+            },
+        )
+        .expect("cron payload should build");
+        assert_eq!(
+            preserved.get("execution_posture").and_then(serde_json::Value::as_str),
+            Some("sensitive_tools")
+        );
+        assert_eq!(
+            preserved.get("approval_mode").and_then(serde_json::Value::as_str),
+            Some("before_enable")
+        );
+
+        let overridden = build_schedule_routine_payload(
+            Some(&existing),
+            ScheduleRoutineConfig {
+                execution_posture: Some(RoutineExecutionPostureArg::Standard),
+                approval_mode: Some(RoutineApprovalModeArg::None),
+                ..ScheduleRoutineConfig {
+                    name: "workdir job".to_owned(),
+                    prompt: "write report".to_owned(),
+                    schedule_type: CronScheduleTypeArg::Every,
+                    schedule: "1m".to_owned(),
+                    enabled: Some(true),
+                    concurrency: CronConcurrencyPolicyArg::Forbid,
+                    retry_max_attempts: 1,
+                    retry_backoff_ms: 1_000,
+                    misfire: CronMisfirePolicyArg::Skip,
+                    jitter_ms: 0,
+                    owner: None,
+                    channel: None,
+                    session_key: None,
+                    session_label: None,
+                    workdir: None,
+                    execution_posture: None,
+                    approval_mode: None,
+                }
+            },
+        )
+        .expect("cron payload should build");
+        assert_eq!(
+            overridden.get("execution_posture").and_then(serde_json::Value::as_str),
+            Some("standard")
+        );
+        assert_eq!(
+            overridden.get("approval_mode").and_then(serde_json::Value::as_str),
+            Some("none")
+        );
+    }
+
+    #[test]
+    fn cron_mutation_json_payload_surfaces_pending_approval() {
+        let payload = json!({
+            "routine": {
+                "routine_id": "01TEST",
+                "enabled": false
+            },
+            "approval": {
+                "approval_id": "01APPROVAL",
+                "subject_id": "routine:01TEST:before_enable"
+            }
+        });
+        let routine = payload.pointer("/routine").expect("routine should exist");
+        let output = cron_mutation_json_payload(routine, &payload);
+
+        assert_eq!(
+            output.pointer("/approval/approval_id").and_then(serde_json::Value::as_str),
+            Some("01APPROVAL")
+        );
     }
 }

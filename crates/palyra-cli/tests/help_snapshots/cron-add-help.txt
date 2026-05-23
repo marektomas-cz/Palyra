@@ -33,6 +33,10 @@ Options:
 
       --workdir <PATH>
           Project working directory for scheduled runs; relative paths resolve from the current directory and are stored as absolute paths
+      --execution-posture <EXECUTION_POSTURE>
+          Tool posture for scheduled runs; when omitted, jobs with --workdir default to sensitive-tools with enable approval [possible values: standard, sensitive-tools]
+      --approval-mode <APPROVAL_MODE>
+          Approval gate for enabling or first-running this job; when omitted, sensitive-tool jobs default to before-enable [possible values: none, before-enable, before-first-run]
       --json
 
   -h, --help

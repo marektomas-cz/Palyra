@@ -1549,6 +1549,8 @@ fn parse_cron_add() {
                 session_key: Some("cron:health".to_owned()),
                 session_label: Some("Health".to_owned()),
                 workdir: Some("scenarios/S028-cron-workdir".to_owned()),
+                execution_posture: None,
+                approval_mode: None,
                 json: false,
             }
         }
@@ -1590,6 +1592,8 @@ fn parse_cron_add_defaults_to_disabled() {
                 session_key: None,
                 session_label: None,
                 workdir: None,
+                execution_posture: None,
+                approval_mode: None,
                 json: false,
             }
         }
@@ -1630,6 +1634,8 @@ fn parse_cron_add_with_prompt_stdin() {
                 session_key: None,
                 session_label: None,
                 workdir: None,
+                execution_posture: None,
+                approval_mode: None,
                 json: false,
             }
         }
@@ -1692,6 +1698,8 @@ fn parse_cron_update() {
                 session_key: Some("cron:health-v2".to_owned()),
                 session_label: Some("Health summary v2".to_owned()),
                 workdir: None,
+                execution_posture: None,
+                approval_mode: None,
                 json: false,
             }
         }

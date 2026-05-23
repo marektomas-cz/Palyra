@@ -35,6 +35,10 @@ Options:
 
       --workdir <PATH>
           Update the project working directory for scheduled runs; relative paths resolve from the current directory
+      --execution-posture <EXECUTION_POSTURE>
+          [possible values: standard, sensitive-tools]
+      --approval-mode <APPROVAL_MODE>
+          [possible values: none, before-enable, before-first-run]
       --json
 
   -h, --help

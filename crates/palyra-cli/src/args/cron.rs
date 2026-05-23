@@ -1,5 +1,7 @@
 use clap::{ArgGroup, Subcommand, ValueEnum};
 
+use super::routines::{RoutineApprovalModeArg, RoutineExecutionPostureArg};
+
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum CronCommand {
     Status {
@@ -88,6 +90,18 @@ pub enum CronCommand {
             help = "Project working directory for scheduled runs; relative paths resolve from the current directory and are stored as absolute paths"
         )]
         workdir: Option<String>,
+        #[arg(
+            long,
+            value_enum,
+            help = "Tool posture for scheduled runs; when omitted, jobs with --workdir default to sensitive-tools with enable approval"
+        )]
+        execution_posture: Option<RoutineExecutionPostureArg>,
+        #[arg(
+            long,
+            value_enum,
+            help = "Approval gate for enabling or first-running this job; when omitted, sensitive-tool jobs default to before-enable"
+        )]
+        approval_mode: Option<RoutineApprovalModeArg>,
         #[arg(long, default_value_t = false)]
         json: bool,
     },
@@ -138,6 +152,10 @@ pub enum CronCommand {
             help = "Update the project working directory for scheduled runs; relative paths resolve from the current directory"
         )]
         workdir: Option<String>,
+        #[arg(long, value_enum)]
+        execution_posture: Option<RoutineExecutionPostureArg>,
+        #[arg(long, value_enum)]
+        approval_mode: Option<RoutineApprovalModeArg>,
         #[arg(long, default_value_t = false)]
         json: bool,
     },
