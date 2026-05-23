@@ -384,12 +384,20 @@ fn process_failure_message(
     stdout: &StreamCapture,
     stderr: &StreamCapture,
 ) -> String {
+    let stdout_preview = redacted_process_output_preview(stdout.bytes.as_slice())
+        .map(|preview| format!(", stdout_preview={preview:?}"))
+        .unwrap_or_default();
+    let stderr_preview = redacted_process_output_preview(stderr.bytes.as_slice())
+        .map(|preview| format!(", stderr_preview={preview:?}"))
+        .unwrap_or_default();
     format!(
-        "sandbox process exited unsuccessfully (code={exit_code}, stdout_bytes={}, stdout_truncated={}, stderr_bytes={}, stderr_truncated={})",
+        "sandbox process exited unsuccessfully (code={exit_code}, stdout_bytes={}, stdout_truncated={}, stderr_bytes={}, stderr_truncated={}{}{})",
         stdout.bytes.len(),
         stdout.truncated,
         stderr.bytes.len(),
         stderr.truncated,
+        stdout_preview,
+        stderr_preview,
     )
 }
 
@@ -4680,7 +4688,11 @@ mod tests {
             !error.message.contains(secret_marker),
             "runtime failure message must not leak raw stderr payload"
         );
-        assert!(!error.message.contains("stderr_preview="), "{}", error.message);
+        assert!(
+            error.message.contains("stderr_preview="),
+            "runtime failure should include a redacted stderr preview: {}",
+            error.message
+        );
     }
 
     #[test]
@@ -4697,7 +4709,7 @@ mod tests {
     }
 
     #[test]
-    fn process_failure_message_omits_stdout_and_stderr_previews() {
+    fn process_failure_message_includes_redacted_stdout_and_stderr_previews() {
         let stdout = StreamCapture {
             bytes: b"AssertionError: expected 180 but got 190\naccess_token=stdout-secret".to_vec(),
             truncated: false,
@@ -4713,12 +4725,12 @@ mod tests {
 
         assert!(message.contains("stdout_bytes="), "{message}");
         assert!(message.contains("stderr_bytes="), "{message}");
-        assert!(!message.contains("stdout_preview="), "{message}");
-        assert!(!message.contains("stderr_preview="), "{message}");
-        assert!(!message.contains("AssertionError"), "{message}");
+        assert!(message.contains("stdout_preview="), "{message}");
+        assert!(message.contains("stderr_preview="), "{message}");
+        assert!(message.contains("AssertionError"), "{message}");
         assert!(!message.contains("stdout-secret"), "{message}");
         assert!(!message.contains("stderr-secret"), "{message}");
-        assert!(!message.contains("<redacted>"), "{message}");
+        assert!(message.contains("<redacted>"), "{message}");
     }
 
     #[test]
