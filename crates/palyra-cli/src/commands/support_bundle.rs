@@ -708,6 +708,7 @@ mod tests {
         let encoded = serde_json::to_string(&bundle).expect("bundle should serialize");
         assert!(!encoded.contains("access_token=raw"));
         assert!(!encoded.contains("Bearer raw"));
-        assert_eq!(replay_bundle_offline(&bundle).status, ReplayRunStatus::Passed);
+        let report = replay_bundle_offline(&bundle);
+        assert_eq!(report.status, ReplayRunStatus::Passed, "{report:#?}");
     }
 }

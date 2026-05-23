@@ -722,11 +722,15 @@ impl ReplayNormalizer {
             .map(|key| key_contains_any(key, &["error", "reason", "message", "detail"]))
             .unwrap_or(false)
         {
-            *raw = redact_auth_error(redact_url_segments_in_text(raw).as_str());
+            *raw = redact_replay_text(
+                redact_auth_error(redact_url_segments_in_text(raw).as_str()).as_str(),
+            );
             self.redaction.redacted_fields += 1;
             return;
         }
-        let redacted = redact_auth_error(redact_url_segments_in_text(raw).as_str());
+        let redacted = redact_replay_text(
+            redact_auth_error(redact_url_segments_in_text(raw).as_str()).as_str(),
+        );
         if redacted != *raw {
             *raw = redacted;
             self.redaction.redacted_fields += 1;
@@ -776,6 +780,72 @@ fn redact_replay_url(raw: &str) -> String {
     }
 
     output
+}
+
+fn redact_replay_text(raw: &str) -> String {
+    let mut output = String::with_capacity(raw.len());
+    let mut token = String::new();
+    for ch in raw.chars() {
+        if ch.is_whitespace() {
+            flush_replay_text_token(token.as_str(), &mut output);
+            token.clear();
+            output.push(ch);
+        } else {
+            token.push(ch);
+        }
+    }
+    flush_replay_text_token(token.as_str(), &mut output);
+    output
+}
+
+fn flush_replay_text_token(token: &str, output: &mut String) {
+    if token.is_empty() {
+        return;
+    }
+    let (core, suffix) = split_replay_trailing_punctuation(token);
+    if core.contains("://") || core.starts_with("www.") {
+        output.push_str(redact_replay_url(core).as_str());
+        output.push_str(suffix);
+        return;
+    }
+    if let Some(redacted) = redact_replay_assignment_token(core) {
+        output.push_str(redacted.as_str());
+        output.push_str(suffix);
+    } else {
+        output.push_str(token);
+    }
+}
+
+fn redact_replay_assignment_token(token: &str) -> Option<String> {
+    let (key, separator, value) = split_replay_assignment(token)?;
+    if value.is_empty() || !is_sensitive_key(key) {
+        return None;
+    }
+    Some(format!("{key}{separator}{REDACTED}"))
+}
+
+fn split_replay_assignment(token: &str) -> Option<(&str, char, &str)> {
+    for separator in ['=', ':'] {
+        if let Some(index) = token.find(separator) {
+            let key = token[..index].trim_matches('"').trim_matches('\'');
+            let value = token[index + 1..].trim_matches('"').trim_matches('\'');
+            return Some((key, separator, value));
+        }
+    }
+    None
+}
+
+fn split_replay_trailing_punctuation(token: &str) -> (&str, &str) {
+    let bytes = token.as_bytes();
+    let mut index = bytes.len();
+    while index > 0 {
+        if matches!(bytes[index - 1], b',' | b';' | b'.' | b')' | b']' | b'}') {
+            index -= 1;
+        } else {
+            break;
+        }
+    }
+    token.split_at(index)
 }
 
 fn split_replay_once(value: &str, delimiter: char) -> (&str, Option<&str>) {

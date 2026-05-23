@@ -2072,7 +2072,75 @@ fn resolve_doctor_admin_principal() -> String {
 fn sanitize_diagnostic_error(raw: &str) -> String {
     let mut sanitized = redact_auth_error(raw);
     sanitized = redact_url_segments_in_text(sanitized.as_str());
+    sanitized = redact_diagnostic_sensitive_tokens(sanitized.as_str());
     truncate_utf8_chars(sanitized.as_str(), 1_024)
+}
+
+fn redact_diagnostic_sensitive_tokens(raw: &str) -> String {
+    let mut output = String::with_capacity(raw.len());
+    let mut token = String::new();
+
+    for ch in raw.chars() {
+        if ch.is_whitespace() {
+            flush_diagnostic_sensitive_token(token.as_str(), &mut output);
+            token.clear();
+            output.push(ch);
+        } else {
+            token.push(ch);
+        }
+    }
+    flush_diagnostic_sensitive_token(token.as_str(), &mut output);
+    output
+}
+
+fn flush_diagnostic_sensitive_token(token: &str, output: &mut String) {
+    if token.is_empty() {
+        return;
+    }
+    let (core, suffix) = split_diagnostic_trailing_punctuation(token);
+    if core.contains("://") || core.starts_with("www.") {
+        output.push_str(redact_cli_json_url(core, None).as_str());
+        output.push_str(suffix);
+        return;
+    }
+    if let Some(redacted) = redact_diagnostic_assignment_token(core) {
+        output.push_str(redacted.as_str());
+        output.push_str(suffix);
+    } else {
+        output.push_str(token);
+    }
+}
+
+fn redact_diagnostic_assignment_token(token: &str) -> Option<String> {
+    let (key, separator, value) = split_diagnostic_assignment(token)?;
+    if value.is_empty() || !is_sensitive_key(key) {
+        return None;
+    }
+    Some(format!("{key}{separator}{REDACTED}"))
+}
+
+fn split_diagnostic_assignment(token: &str) -> Option<(&str, char, &str)> {
+    for separator in ['=', ':'] {
+        if let Some(index) = token.find(separator) {
+            let key = token[..index].trim_matches('"').trim_matches('\'');
+            let value = token[index + 1..].trim_matches('"').trim_matches('\'');
+            return Some((key, separator, value));
+        }
+    }
+    None
+}
+
+fn split_diagnostic_trailing_punctuation(token: &str) -> (&str, &str) {
+    let bytes = token.as_bytes();
+    let mut index = bytes.len();
+    while index > 0 {
+        if matches!(bytes[index - 1], b',' | b';' | b'.' | b')' | b']' | b'}') {
+            index -= 1;
+        } else {
+            break;
+        }
+    }
+    token.split_at(index)
 }
 
 fn redact_json_value_tree(value: &mut Value, key_context: Option<&str>) {
@@ -4965,7 +5033,60 @@ fn sanitize_stream_json_string_with_context(raw: &str, key_context: Option<&str>
 
 fn redact_cli_json_url(raw: &str, key_context: Option<&str>) -> String {
     let redacted = redact_url(raw);
+    let redacted = redact_cli_json_url_query_secrets(redacted.as_str());
     redact_cli_json_url_path_secrets(redacted.as_str(), key_context)
+}
+
+fn redact_cli_json_url_query_secrets(redacted_url: &str) -> String {
+    let (base_and_query, fragment) = split_cli_url_once(redacted_url, '#');
+    let (base, query) = split_cli_url_once(base_and_query, '?');
+    let mut output = base.to_owned();
+    if let Some(query) = query {
+        let redacted_query = redact_cli_query_pairs(query);
+        if !redacted_query.is_empty() {
+            output.push('?');
+            output.push_str(redacted_query.as_str());
+        }
+    }
+    if let Some(fragment) = fragment {
+        output.push('#');
+        output.push_str(redact_cli_query_pairs(fragment).as_str());
+    }
+    output
+}
+
+fn split_cli_url_once(value: &str, delimiter: char) -> (&str, Option<&str>) {
+    if let Some((left, right)) = value.split_once(delimiter) {
+        (left, Some(right))
+    } else {
+        (value, None)
+    }
+}
+
+fn redact_cli_query_pairs(raw: &str) -> String {
+    let mut redacted_pairs = Vec::new();
+    for pair in raw.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        let (key, value) = split_cli_query_pair(pair);
+        if is_sensitive_key(key) {
+            redacted_pairs.push(format!("{key}={REDACTED}"));
+        } else if value.is_empty() {
+            redacted_pairs.push(key.to_owned());
+        } else {
+            redacted_pairs.push(format!("{key}={value}"));
+        }
+    }
+    redacted_pairs.join("&")
+}
+
+fn split_cli_query_pair(pair: &str) -> (&str, &str) {
+    if let Some(index) = pair.find('=') {
+        (&pair[..index], &pair[index + 1..])
+    } else {
+        (pair, "")
+    }
 }
 
 fn redact_cli_json_url_path_secrets(redacted_url: &str, key_context: Option<&str>) -> String {
