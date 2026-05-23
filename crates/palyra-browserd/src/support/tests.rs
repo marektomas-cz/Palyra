@@ -306,6 +306,26 @@ fn action_log_entry_to_proto_redacts_url_selector_query_secrets() {
     assert_navigation_selector_redacted(proto.selector.as_str());
 }
 
+#[test]
+fn action_log_entry_to_proto_preserves_password_field_css_selector() {
+    let entry = BrowserActionLogEntryInternal {
+        action_id: ulid::Ulid::new().to_string(),
+        action_name: "type".to_owned(),
+        selector: "#password".to_owned(),
+        success: true,
+        outcome: "typed".to_owned(),
+        error: String::new(),
+        started_at_unix_ms: 1,
+        completed_at_unix_ms: 2,
+        attempts: 1,
+        page_url: String::new(),
+    };
+
+    let proto = action_log_entry_to_proto(&entry);
+
+    assert_eq!(proto.selector, "#password");
+}
+
 fn assert_navigation_selector_redacted(selector: &str) {
     assert!(selector.contains("code=<redacted>"), "oauth code must be redacted: {selector}");
     assert!(selector.contains("state=<redacted>"), "oauth state must be redacted: {selector}");

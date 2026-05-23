@@ -19682,12 +19682,44 @@ fn looks_like_secret(value: &str) -> bool {
         || normalized.starts_with("sk-")
         || normalized.contains("api_key=")
         || normalized.contains("secret=")
-        || normalized.contains("token=")
+        || contains_secret_like_bare_token_assignment(normalized.as_str())
         || normalized.contains("refresh_token")
         || normalized.contains("oauth_refresh_token")
         || normalized.contains("set-cookie:")
         || normalized.contains("cookie:")
         || SENSITIVE_VALUE_PHRASES.iter().any(|phrase| normalized.contains(phrase))
+}
+
+fn contains_secret_like_bare_token_assignment(normalized: &str) -> bool {
+    let mut search_start = 0usize;
+    while let Some(relative_index) = normalized[search_start..].find("token=") {
+        let value_start = search_start + relative_index + "token=".len();
+        let value_end = normalized[value_start..]
+            .char_indices()
+            .find_map(|(offset, ch)| {
+                (ch.is_whitespace()
+                    || matches!(ch, '&' | '"' | '\'' | '`' | ',' | ';' | ')' | ']' | '}'))
+                .then_some(value_start + offset)
+            })
+            .unwrap_or(normalized.len());
+        if bare_token_value_looks_secret(&normalized[value_start..value_end]) {
+            return true;
+        }
+        search_start = value_end.saturating_add(1).min(normalized.len());
+    }
+    false
+}
+
+fn bare_token_value_looks_secret(value: &str) -> bool {
+    let trimmed = value.trim();
+    !trimmed.is_empty()
+        && (trimmed.contains("secret")
+            || trimmed.starts_with("bearer")
+            || trimmed.starts_with("sk-")
+            || trimmed.starts_with("ghp_")
+            || trimmed.starts_with("github_pat_")
+            || trimmed.starts_with("xox")
+            || trimmed.len() >= 16)
 }
 
 fn redact_secret_like_markers(input: &str) -> String {
@@ -20096,6 +20128,18 @@ mod tests {
                 .expect("payload redaction should succeed");
 
         assert_eq!(redacted, r#"{"reply_text":"Use password managers for safety."}"#);
+    }
+
+    #[test]
+    fn redact_payload_json_preserves_structural_password_selectors_and_benign_tokens() {
+        let redacted = super::redact_payload_json(
+            br##"{"selector":"#password","tool_output":"const fixture = 'token=a%3Db%3Dc';"}"##,
+        )
+        .expect("payload redaction should succeed");
+
+        assert!(redacted.contains(r##""selector":"#password""##), "{redacted}");
+        assert!(redacted.contains("token=a%3Db%3Dc"), "{redacted}");
+        assert!(!redacted.contains("<redacted>"), "{redacted}");
     }
 
     #[test]

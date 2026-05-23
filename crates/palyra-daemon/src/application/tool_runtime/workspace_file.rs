@@ -2031,6 +2031,28 @@ mod tests {
     }
 
     #[test]
+    fn read_workspace_file_preserves_cookie_regex_and_benign_token_fixture() {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let file_path = tempdir.path().join("app.js");
+        let contents = "const match = document.cookie.match(/(?:^|; )s057_user=([^;]*)/);\n\
+                        const fixture = 'token=a%3Db%3Dc';\n\
+                        const selector = '#password';\n";
+        fs::write(file_path, contents).expect("workspace file should be written");
+        let input = WorkspaceReadFileInput {
+            path: "app.js".to_owned(),
+            workspace_root: None,
+            offset_bytes: 0,
+            max_bytes: None,
+        };
+
+        let output = read_workspace_file_from_roots(&[tempdir.path().to_path_buf()], &input)
+            .expect("workspace file should be readable");
+
+        assert!(!output.redacted);
+        assert_eq!(output.text.as_deref(), Some(contents));
+    }
+
+    #[test]
     fn read_workspace_file_returns_bounded_chunk() {
         let tempdir = tempfile::tempdir().expect("tempdir should be created");
         fs::write(tempdir.path().join("chunk.txt"), "abcdef").expect("workspace file should exist");

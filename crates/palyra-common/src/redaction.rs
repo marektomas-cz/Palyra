@@ -168,11 +168,27 @@ fn flush_redacted_url_token(token: &str, output: &mut String) {
     if token.is_empty() {
         return;
     }
-    if token.contains("://") || token.contains('?') || token.contains('#') {
+    if looks_like_url_token(token) {
         output.push_str(redact_url(token).as_str());
     } else {
         output.push_str(token);
     }
+}
+
+fn looks_like_url_token(token: &str) -> bool {
+    if token.contains("://") || token.starts_with("www.") {
+        return true;
+    }
+    let Some(separator_index) = token.find('?').or_else(|| token.find('#')) else {
+        return false;
+    };
+    let base = token[..separator_index]
+        .trim_matches(['"', '\'', '`', '(', '[', '{'])
+        .trim_end_matches(['"', '\'', '`', ')', ']', '}']);
+    if base.is_empty() || base.contains('(') || base.contains(')') {
+        return false;
+    }
+    base.starts_with('/') || base.starts_with("./") || base.starts_with("../") || base.contains('.')
 }
 
 fn redact_assignment_token(token: &str) -> Cow<'_, str> {
@@ -180,7 +196,7 @@ fn redact_assignment_token(token: &str) -> Cow<'_, str> {
         return Cow::Borrowed(token);
     }
     if let Some((key, separator, value)) = split_assignment(token) {
-        if is_sensitive_key(key) && !value.is_empty() {
+        if should_redact_assignment_value(key, value) {
             return Cow::Owned(format!("{key}{separator}{REDACTED}"));
         }
     }
@@ -192,9 +208,45 @@ fn should_redact_following_bearer_token(token: &str) -> bool {
         return true;
     }
     if let Some((key, _, value)) = split_assignment(token) {
-        return is_sensitive_key(key) && value.eq_ignore_ascii_case("bearer");
+        return assignment_key_is_plain(key)
+            && is_sensitive_key(key)
+            && value.eq_ignore_ascii_case("bearer");
     }
     false
+}
+
+fn should_redact_assignment_value(key: &str, value: &str) -> bool {
+    if value.is_empty() || !assignment_key_is_plain(key) || !is_sensitive_key(key) {
+        return false;
+    }
+    if normalize_key(key) == "token" {
+        return value_looks_like_secret_token(value);
+    }
+    true
+}
+
+fn assignment_key_is_plain(key: &str) -> bool {
+    let trimmed = key.trim().trim_matches(['"', '\'']);
+    !trimmed.is_empty()
+        && trimmed.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+}
+
+fn value_looks_like_secret_token(value: &str) -> bool {
+    let trimmed = value
+        .trim()
+        .trim_matches(['"', '\'', '`'])
+        .trim_end_matches([',', ';', '.', ')', ']', '}']);
+    if trimmed.is_empty() {
+        return false;
+    }
+    let lowered = trimmed.to_ascii_lowercase();
+    lowered.contains("secret")
+        || lowered.starts_with("bearer")
+        || lowered.starts_with("sk-")
+        || lowered.starts_with("ghp_")
+        || lowered.starts_with("github_pat_")
+        || lowered.starts_with("xox")
+        || trimmed.len() >= 16
 }
 
 fn split_assignment(token: &str) -> Option<(&str, char, &str)> {
@@ -245,7 +297,7 @@ fn redact_query_pairs(raw: &str) -> String {
             continue;
         }
         let (key, value) = split_query_pair(pair);
-        if is_sensitive_key(key) {
+        if should_redact_assignment_value(key, value) {
             redacted_pairs.push(format!("{key}={REDACTED}"));
         } else if value.is_empty() {
             redacted_pairs.push(key.to_owned());
@@ -311,12 +363,20 @@ mod tests {
 
     #[test]
     fn url_redaction_masks_sensitive_query_values_only() {
-        let redacted =
-            redact_url("https://example.test/path?token=abc123&mode=full&refresh_token=qwe");
+        let redacted = redact_url(
+            "https://example.test/path?token=very-secret-token&mode=full&refresh_token=qwe",
+        );
         assert_eq!(
             redacted,
             "https://example.test/path?token=<redacted>&mode=full&refresh_token=<redacted>"
         );
+    }
+
+    #[test]
+    fn url_redaction_preserves_short_benign_bare_token_values() {
+        let redacted = redact_url("https://example.test/path?token=a%3Db%3Dc&mode=full");
+
+        assert_eq!(redacted, "https://example.test/path?token=a%3Db%3Dc&mode=full");
     }
 
     #[test]
@@ -335,7 +395,7 @@ mod tests {
     #[test]
     fn auth_error_redaction_masks_bearer_and_token_assignments() {
         let redacted = redact_auth_error(
-            "provider failed: Bearer secret-token authorization=topsecret token=abc123 code=429",
+            "provider failed: Bearer secret-token authorization=topsecret token=very-secret-token code=429",
         );
         assert!(
             redacted.contains("Bearer <redacted>"),
@@ -347,6 +407,15 @@ mod tests {
             redacted.contains("code=429"),
             "non-sensitive diagnostic values should remain visible: {redacted}"
         );
+    }
+
+    #[test]
+    fn auth_error_redaction_preserves_short_benign_bare_token_assignments() {
+        let redacted =
+            redact_auth_error("fixture line: token=a%3Db%3Dc selector=#password code=ok");
+
+        assert!(redacted.contains("token=a%3Db%3Dc"), "{redacted}");
+        assert!(redacted.contains("selector=#password"), "{redacted}");
     }
 
     #[test]
@@ -378,5 +447,12 @@ mod tests {
         assert!(redacted.contains("refresh_token=<redacted>"));
         assert!(redacted.contains("mode=ok"));
         assert!(!redacted.contains("refresh_token=secret"));
+    }
+
+    #[test]
+    fn url_segments_in_text_preserves_regex_query_syntax() {
+        let source = "document.cookie.match(/(?:^|; )s057_user=([^;]*)/)";
+
+        assert_eq!(redact_url_segments_in_text(source), source);
     }
 }

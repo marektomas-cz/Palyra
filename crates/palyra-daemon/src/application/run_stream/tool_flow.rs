@@ -1492,13 +1492,16 @@ fn summarize_tool_result_for_model(output_json: &[u8], max_bytes: usize) -> Stri
 }
 
 fn redacted_tool_result_preview(output_json: &[u8], max_bytes: usize) -> String {
-    let redacted = serde_json::from_slice::<Value>(output_json)
-        .map(|mut value| {
+    let redacted = match serde_json::from_slice::<Value>(output_json) {
+        Ok(mut value) => {
             redact_sensitive_json_value(&mut value);
             serde_json::to_string(&value).unwrap_or_else(|_| REDACTED.to_owned())
-        })
-        .unwrap_or_else(|_| String::from_utf8_lossy(output_json).to_string());
-    let redacted = redact_auth_error(redact_url_segments_in_text(redacted.as_str()).as_str());
+        }
+        Err(_) => {
+            let raw = String::from_utf8_lossy(output_json);
+            redact_auth_error(redact_url_segments_in_text(raw.as_ref()).as_str())
+        }
+    };
     truncate_utf8(redacted.as_str(), max_bytes)
 }
 
@@ -1675,6 +1678,29 @@ mod tests {
         assert!(preview.contains("\"size_bytes\":3072"), "{preview}");
         assert!(preview.contains("\"image_base64\":\"<redacted:base64 chars=4096>\""), "{preview}");
         assert!(!preview.contains("AAAA"), "{preview}");
+    }
+
+    #[test]
+    fn tool_result_projection_preview_preserves_benign_source_structure() {
+        let source = "const match = document.cookie.match(/(?:^|; )s057_user=([^;]*)/);\n\
+                      const fixture = 'token=a%3Db%3Dc';\n\
+                      const selector = '#password';\n";
+        let output_json = serde_json::to_vec(&json!({
+            "path": "app.js",
+            "text": source,
+            "redacted": false,
+        }))
+        .expect("test payload should serialize");
+
+        let preview = super::redacted_tool_result_preview(output_json.as_slice(), 2048);
+
+        assert!(
+            preview.contains("document.cookie.match(/(?:^|; )s057_user=([^;]*)/)"),
+            "{preview}"
+        );
+        assert!(preview.contains("token=a%3Db%3Dc"), "{preview}");
+        assert!(preview.contains("#password"), "{preview}");
+        assert!(!preview.contains("<redacted>"), "{preview}");
     }
 
     #[test]

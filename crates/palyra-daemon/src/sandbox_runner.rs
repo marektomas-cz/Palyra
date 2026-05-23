@@ -3918,6 +3918,15 @@ mod tests {
     }
 
     #[test]
+    fn process_output_text_preserves_benign_token_fixture_and_password_selector() {
+        let output = "fixture token=a%3Db%3Dc selector=#password\n";
+        let redacted = redacted_process_output_text(output);
+
+        assert!(!redacted.redacted, "{redacted:?}");
+        assert_eq!(redacted.text, output);
+    }
+
+    #[test]
     fn run_constrained_process_redacts_secret_like_builtin_stdout() {
         let workspace = unique_temp_dir("workspace-cat-builtin-secret");
         fs::create_dir_all(workspace.as_path()).expect("workspace directory should be created");

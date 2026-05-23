@@ -768,7 +768,11 @@ fn detect_sensitive_assignment(line: &str, _lowered: &str) -> Option<&'static st
     if value.is_empty() || key.ends_with("_ref") || is_safe_secret_reference_value(value) {
         return None;
     }
-    classify_sensitive_assignment_key(key.as_str())
+    let classification = classify_sensitive_assignment_key(key.as_str())?;
+    if classification == "token" && !bare_token_assignment_value_looks_secret(value) {
+        return None;
+    }
+    Some(classification)
 }
 
 fn sensitive_assignment_separator_index(line: &str) -> Option<usize> {
@@ -882,6 +886,33 @@ fn is_env_identifier(value: &str) -> bool {
     };
     (first.is_ascii_alphabetic() || first == '_')
         && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+}
+
+fn bare_token_assignment_value_looks_secret(value: &str) -> bool {
+    let bounded_value = value
+        .char_indices()
+        .find_map(|(index, ch)| {
+            (ch.is_whitespace()
+                || matches!(ch, '&' | '"' | '\'' | '`' | ',' | ';' | ')' | ']' | '}'))
+            .then_some(index)
+        })
+        .map(|index| &value[..index])
+        .unwrap_or(value);
+    let normalized = bounded_value
+        .trim()
+        .trim_matches(['"', '\'', '`'])
+        .trim_end_matches([',', ';', '.', ')', ']', '}']);
+    if normalized.is_empty() {
+        return false;
+    }
+    let lowered = normalized.to_ascii_lowercase();
+    lowered.contains("secret")
+        || lowered.starts_with("bearer")
+        || lowered.starts_with("sk-")
+        || lowered.starts_with("ghp_")
+        || lowered.starts_with("github_pat_")
+        || lowered.starts_with("xox")
+        || normalized.len() >= 16
 }
 
 fn detect_prefixed_secret_token(line: &str) -> Option<&'static str> {
@@ -1547,6 +1578,27 @@ mod tests {
         let source = "const apiKey = import.meta.env.PRIVATE_API_KEY;\n\
                       const token = process.env.ACCESS_TOKEN;\n\
                       const fallback = Deno.env.get(\"CLIENT_SECRET\");";
+        let outcome = redact_text_for_export(
+            source,
+            SafetySourceKind::Workspace,
+            SafetyContentKind::WorkspaceDocument,
+            TrustLabel::TrustedLocal,
+        );
+
+        assert!(!outcome.redacted);
+        assert_eq!(outcome.redacted_text, source);
+        assert!(!outcome
+            .scan
+            .finding_codes()
+            .iter()
+            .any(|code| code.starts_with("secret_leak.assignment.")));
+    }
+
+    #[test]
+    fn benign_bare_token_fixture_values_are_not_redacted() {
+        let source = "const fixtureUrl = '/callback?token=a%3Db%3Dc';\n\
+                      const params = 'token=a%3Db%3Dc';\n\
+                      const selector = '#password';";
         let outcome = redact_text_for_export(
             source,
             SafetySourceKind::Workspace,
