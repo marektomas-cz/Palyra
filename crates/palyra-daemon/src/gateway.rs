@@ -189,6 +189,7 @@ pub(crate) const WORKSPACE_READ_FILE_TOOL_NAME: &str = "palyra.fs.read_file";
 pub(crate) const WORKSPACE_LIST_DIR_TOOL_NAME: &str = "palyra.fs.list_dir";
 pub(crate) const WORKSPACE_SEARCH_TOOL_NAME: &str = "palyra.fs.search";
 pub(crate) const WORKSPACE_PATCH_TOOL_NAME: &str = "palyra.fs.apply_patch";
+pub(crate) const OS_FILE_TOOL_NAME: &str = "palyra.fs.os_file";
 pub(crate) const PROCESS_RUNNER_TOOL_NAME: &str = "palyra.process.run";
 pub(crate) const HTTP_FETCH_TOOL_NAME: &str = "palyra.http.fetch";
 pub(crate) const TOOL_PROGRAM_RUN_TOOL_NAME: &str = "palyra.tool_program.run";
@@ -722,6 +723,14 @@ pub(crate) async fn execute_tool_with_runtime_dispatch(
                 proposal_id,
                 input_json,
             ),
+        )
+        .await
+    } else if tool_name == OS_FILE_TOOL_NAME {
+        crate::application::tool_runtime::os_file::execute_os_file_tool(
+            runtime_state,
+            context,
+            proposal_id,
+            input_json,
         )
         .await
     } else if tool_name == PROCESS_RUNNER_TOOL_NAME {

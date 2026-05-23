@@ -748,6 +748,15 @@ pub const TOOL_CATALOG: &[ToolCatalogEntry] = &[
         recommend_always_allow: false,
     },
     ToolCatalogEntry {
+        tool_name: "palyra.fs.os_file",
+        title: "OS file operation",
+        description:
+            "Reads or mutates approved user-owned OS paths with resolved-path audit metadata.",
+        category: "filesystem",
+        risk_level: ApprovalRiskLevel::Critical,
+        recommend_always_allow: false,
+    },
+    ToolCatalogEntry {
         tool_name: "palyra.browser.session.create",
         title: "Browser session create",
         description: "Starts a browser automation session through the relay broker.",

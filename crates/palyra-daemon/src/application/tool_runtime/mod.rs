@@ -4,6 +4,7 @@ pub(crate) mod delegation;
 pub(crate) mod http_fetch;
 pub(crate) mod memory;
 pub(crate) mod networked_worker;
+pub(crate) mod os_file;
 pub(crate) mod process_registry;
 pub(crate) mod routines;
 pub(crate) mod tool_program;

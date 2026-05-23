@@ -334,6 +334,49 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
             ToolResultProjectionPolicy::InlineUnlessLarge,
         ),
         entry(
+            "palyra.fs.os_file",
+            "Perform an audited file operation on an absolute user-owned OS path. Use this for requested files outside the workspace, such as Downloads, user config files, local test harness OS roots, or user-cache cleanup. Protected system paths are denied, and paths are limited to workspace roots plus user-owned OS roots.",
+            object_schema(
+                &["operation", "path"],
+                vec![
+                    (
+                        "operation",
+                        json!({"type":"string","enum":["stat","read","write","copy","move","delete_file","mkdir"],"description":"Operation to perform. Prefer read/write for ordinary OS-level files; use copy/move/delete_file/mkdir only when explicitly requested."}),
+                    ),
+                    (
+                        "path",
+                        json!({"type":"string","description":"Absolute OS path to inspect or modify. Use this only for user-owned paths such as profile, temp, Downloads, or configured harness OS roots; protected system paths are denied."}),
+                    ),
+                    (
+                        "target_path",
+                        json!({"type":"string","description":"Absolute OS destination path for copy or move operations."}),
+                    ),
+                    (
+                        "content_text",
+                        json!({"type":"string","maxLength":262144,"description":"UTF-8 file content for write. Do not include raw secrets; write vault references or redacted-safe config values when possible."}),
+                    ),
+                    (
+                        "bytes_base64",
+                        json!({"type":"string","maxLength":349528,"description":"Base64 file content for binary writes. Provide either content_text or bytes_base64, not both."}),
+                    ),
+                    (
+                        "create_parent_dirs",
+                        json!({"type":"boolean","description":"Defaults to true for write/copy/move so requested user-owned destination directories can be created."}),
+                    ),
+                    (
+                        "overwrite",
+                        json!({"type":"boolean","description":"Defaults to true for write/copy/move. Set false to fail if the target already exists."}),
+                    ),
+                    ("dry_run", json!({"type":"boolean"})),
+                    ("offset_bytes", json!({"type":"integer","minimum":0})),
+                    ("max_bytes", json!({"type":"integer","minimum":1,"maximum":131072})),
+                ],
+                false,
+            ),
+            ToolParallelismPolicy::Exclusive,
+            ToolResultProjectionPolicy::RedactedPreviewAndArtifact,
+        ),
+        entry(
             "palyra.delegation.query",
             "Inspect delegated child tasks, child run status and merge previews in the current scope.",
             object_schema(

@@ -138,6 +138,8 @@ const EMPTY_TOOL_CAPABILITIES: &[ToolCapability] = &[];
 const PROCESS_RUNNER_CAPABILITIES: &[ToolCapability] = &[ToolCapability::ProcessExec];
 const WORKSPACE_FILE_READ_CAPABILITIES: &[ToolCapability] = &[ToolCapability::FilesystemRead];
 const WORKSPACE_PATCH_CAPABILITIES: &[ToolCapability] = &[ToolCapability::FilesystemWrite];
+const OS_FILE_CAPABILITIES: &[ToolCapability] =
+    &[ToolCapability::FilesystemRead, ToolCapability::FilesystemWrite];
 const NETWORK_TOOL_CAPABILITIES: &[ToolCapability] = &[ToolCapability::Network];
 const HTTP_FETCH_TOOL_CAPABILITIES: &[ToolCapability] =
     &[ToolCapability::Network, ToolCapability::SecretsRead];
@@ -163,6 +165,7 @@ const MAX_WORKSPACE_READ_FILE_TOOL_INPUT_BYTES: usize = 16 * 1024;
 const MAX_WORKSPACE_LIST_DIR_TOOL_INPUT_BYTES: usize = 16 * 1024;
 const MAX_WORKSPACE_SEARCH_TOOL_INPUT_BYTES: usize = 16 * 1024;
 const MAX_WORKSPACE_PATCH_TOOL_INPUT_BYTES: usize = 256 * 1024;
+const MAX_OS_FILE_TOOL_INPUT_BYTES: usize = 384 * 1024;
 const MAX_BROWSER_TOOL_INPUT_BYTES: usize = 128 * 1024;
 const MAX_ARTIFACT_READ_TOOL_INPUT_BYTES: usize = 16 * 1024;
 const MAX_WASM_PLUGIN_TOOL_INPUT_BYTES: usize = 448 * 1024;
@@ -362,6 +365,9 @@ pub fn tool_metadata(tool_name: &str) -> Option<ToolMetadata> {
             capabilities: WORKSPACE_PATCH_CAPABILITIES,
             default_sensitive: true,
         }),
+        "palyra.fs.os_file" => {
+            Some(ToolMetadata { capabilities: OS_FILE_CAPABILITIES, default_sensitive: true })
+        }
         "palyra.browser.session.create" => {
             Some(ToolMetadata { capabilities: NETWORK_TOOL_CAPABILITIES, default_sensitive: true })
         }
@@ -775,6 +781,14 @@ async fn run_allowlisted_tool(
             executor: "workspace_file".to_owned(),
             sandbox_enforcement: "workspace_roots".to_owned(),
         },
+        "palyra.fs.os_file" => ToolExecutionRawResult {
+            success: false,
+            output_json: b"{}".to_vec(),
+            error: "palyra.fs.os_file requires gateway OS file runtime context".to_owned(),
+            timed_out: false,
+            executor: "os_file".to_owned(),
+            sandbox_enforcement: "approved_os_paths".to_owned(),
+        },
         "palyra.browser.session.create"
         | "palyra.browser.session.close"
         | "palyra.browser.navigate"
@@ -842,6 +856,7 @@ fn is_runtime_supported_tool(tool_name: &str) -> bool {
             | "palyra.fs.list_dir"
             | "palyra.fs.search"
             | "palyra.fs.apply_patch"
+            | "palyra.fs.os_file"
             | "palyra.browser.session.create"
             | "palyra.browser.session.close"
             | "palyra.browser.navigate"
@@ -881,6 +896,8 @@ fn tool_executor_name(config: &ToolCallConfig, tool_name: &str) -> String {
         "workspace_file".to_owned()
     } else if tool_name == "palyra.fs.apply_patch" {
         "workspace_patch".to_owned()
+    } else if tool_name == "palyra.fs.os_file" {
+        "os_file".to_owned()
     } else if tool_name == "palyra.http.fetch" {
         "gateway_http_fetch".to_owned()
     } else if tool_name.starts_with("palyra.browser.") {
@@ -931,6 +948,7 @@ fn tool_input_limit_bytes(tool_name: &str) -> usize {
         "palyra.fs.list_dir" => MAX_WORKSPACE_LIST_DIR_TOOL_INPUT_BYTES,
         "palyra.fs.search" => MAX_WORKSPACE_SEARCH_TOOL_INPUT_BYTES,
         "palyra.fs.apply_patch" => MAX_WORKSPACE_PATCH_TOOL_INPUT_BYTES,
+        "palyra.fs.os_file" => MAX_OS_FILE_TOOL_INPUT_BYTES,
         "palyra.browser.session.create"
         | "palyra.browser.session.close"
         | "palyra.browser.navigate"
@@ -975,6 +993,8 @@ fn sandbox_enforcement_for_tool(config: &ToolCallConfig, tool_name: &str) -> Str
         "palyra.fs.read_file" | "palyra.fs.list_dir" | "palyra.fs.search" | "palyra.fs.apply_patch"
     ) {
         "workspace_roots".to_owned()
+    } else if tool_name == "palyra.fs.os_file" {
+        "approved_os_paths".to_owned()
     } else if tool_name == "palyra.http.fetch" {
         "ssrf_guard".to_owned()
     } else if tool_name.starts_with("palyra.browser.") {
@@ -1572,6 +1592,7 @@ mod tests {
         assert!(tool_requires_approval("palyra.http.fetch"));
         assert!(tool_requires_approval("palyra.process.run"));
         assert!(tool_requires_approval("palyra.fs.apply_patch"));
+        assert!(tool_requires_approval("palyra.fs.os_file"));
         assert!(tool_requires_approval("palyra.tool_program.run"));
         assert!(tool_requires_approval("palyra.browser.session.create"));
         assert!(tool_requires_approval("palyra.browser.navigate"));
@@ -1670,6 +1691,17 @@ mod tests {
         assert!(tool_requires_approval("palyra.fs.search"));
     }
 
+    #[test]
+    fn os_file_tool_exposes_approval_gated_filesystem_read_write() {
+        let metadata = tool_metadata("palyra.fs.os_file").expect("OS file metadata");
+        assert_eq!(
+            metadata.capabilities,
+            &[ToolCapability::FilesystemRead, ToolCapability::FilesystemWrite]
+        );
+        assert!(metadata.default_sensitive);
+        assert!(tool_requires_approval("palyra.fs.os_file"));
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn execute_tool_call_runs_echo_tool() {
         let config = allowlisted_config();
@@ -1723,6 +1755,7 @@ mod tests {
                 "palyra.fs.read_file".to_owned(),
                 "palyra.fs.list_dir".to_owned(),
                 "palyra.fs.search".to_owned(),
+                "palyra.fs.os_file".to_owned(),
             ],
             max_calls_per_run: 1,
             execution_timeout_ms: 250,
@@ -1779,6 +1812,23 @@ mod tests {
         );
         assert_eq!(outcome.attestation.executor, "workspace_file");
         assert_eq!(outcome.attestation.sandbox_enforcement, "workspace_roots");
+
+        let outcome = execute_tool_call(
+            &config,
+            "01ARZ3NDEKTSV4RRFFQ69G5FAF",
+            "palyra.fs.os_file",
+            br#"{"operation":"stat","path":"/tmp/palyra-os-file.txt"}"#,
+        )
+        .await;
+
+        assert!(!outcome.success, "generic tool executor should not run OS file operations");
+        assert!(
+            outcome.error.contains("requires gateway OS file runtime context"),
+            "delegated executor error should be explicit: {}",
+            outcome.error
+        );
+        assert_eq!(outcome.attestation.executor, "os_file");
+        assert_eq!(outcome.attestation.sandbox_enforcement, "approved_os_paths");
     }
 
     #[tokio::test(flavor = "multi_thread")]
