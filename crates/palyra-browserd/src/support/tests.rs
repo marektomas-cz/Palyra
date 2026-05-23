@@ -1698,6 +1698,131 @@ async fn browser_service_chromium_network_log_includes_same_origin_fetch_failure
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn browser_service_chromium_preserves_navigated_private_origin_for_user_fetches() {
+    let Some(chromium_path) = resolve_chromium_path_for_tests() else {
+        return;
+    };
+    let runtime = std::sync::Arc::new(
+        BrowserRuntimeState::new(&Args {
+            bind: "127.0.0.1".to_owned(),
+            port: 7143,
+            grpc_bind: "127.0.0.1".to_owned(),
+            grpc_port: 7543,
+            auth_token: None,
+            session_idle_ttl_ms: 60_000,
+            max_sessions: 16,
+            max_navigation_timeout_ms: 10_000,
+            max_session_lifetime_ms: 60_000,
+            max_screenshot_bytes: 256 * 1024,
+            max_response_bytes: 256 * 1024,
+            max_title_bytes: 4 * 1024,
+            engine_mode: BrowserEngineMode::Chromium,
+            chromium_path: Some(chromium_path),
+            chromium_startup_timeout_ms: DEFAULT_CHROMIUM_STARTUP_TIMEOUT_MS,
+        })
+        .expect("chromium runtime should initialize"),
+    );
+    let service = BrowserServiceImpl { runtime };
+    let created = create_session_with_retry_for_chromium_test(
+        &service,
+        browser_v1::CreateSessionRequest {
+            v: 1,
+            principal: "user:ops".to_owned(),
+            idle_ttl_ms: 10_000,
+            budget: None,
+            allow_private_targets: false,
+            allow_downloads: false,
+            action_allowed_domains: Vec::new(),
+            persistence_enabled: false,
+            persistence_id: String::new(),
+            profile_id: None,
+            private_profile: false,
+            channel: String::new(),
+        },
+        3,
+    )
+    .await
+    .expect("create_session should succeed for chromium private-origin fetch test");
+    let session_id = created.session_id.expect("session id should exist");
+
+    let (url, handle) = spawn_click_fetch_http_server();
+    let navigate = service
+        .navigate(Request::new(browser_v1::NavigateRequest {
+            v: 1,
+            session_id: Some(session_id.clone()),
+            url,
+            timeout_ms: 8_000,
+            allow_redirects: true,
+            max_redirects: 3,
+            allow_private_targets: true,
+        }))
+        .await
+        .expect("navigate should execute")
+        .into_inner();
+    assert!(navigate.success, "chromium navigate should succeed: {}", navigate.error);
+
+    let click = service
+        .click(Request::new(browser_v1::ClickRequest {
+            v: 1,
+            session_id: Some(session_id.clone()),
+            selector: "#loadData".to_owned(),
+            max_retries: 1,
+            timeout_ms: 3_000,
+            capture_failure_screenshot: true,
+            max_failure_screenshot_bytes: 16 * 1024,
+        }))
+        .await
+        .expect("click should execute")
+        .into_inner();
+    assert!(click.success, "chromium click should succeed: {}", click.error);
+
+    let waited = service
+        .wait_for(Request::new(browser_v1::WaitForRequest {
+            v: 1,
+            session_id: Some(session_id.clone()),
+            selector: "#items".to_owned(),
+            text: "Atlas".to_owned(),
+            timeout_ms: 5_000,
+            poll_interval_ms: 50,
+            capture_failure_screenshot: true,
+            max_failure_screenshot_bytes: 16 * 1024,
+        }))
+        .await
+        .expect("wait_for same-origin fetch result should execute")
+        .into_inner();
+    assert!(
+        waited.success,
+        "same-origin local fetch after navigation should render fetched data: {}",
+        waited.error
+    );
+
+    let mut network_log_request = Request::new(browser_v1::NetworkLogRequest {
+        v: 1,
+        session_id: Some(session_id),
+        limit: 20,
+        include_headers: false,
+        max_payload_bytes: 32 * 1024,
+    });
+    insert_principal(&mut network_log_request, "user:ops");
+    let network_log = service
+        .network_log(network_log_request)
+        .await
+        .expect("network_log should execute")
+        .into_inner();
+    assert!(network_log.success, "network log call should succeed: {}", network_log.error);
+    assert!(
+        network_log
+            .entries
+            .iter()
+            .any(|entry| entry.request_url.ends_with("/mock-data.json") && entry.status_code == 200),
+        "network log should include same-origin JSON fetch entries: {:?}",
+        network_log.entries
+    );
+
+    handle.join().expect("test server thread should exit");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn browser_service_chromium_refreshes_snapshot_before_allowlisted_actions() {
     let Some(chromium_path) = resolve_chromium_path_for_tests() else {
         return;
@@ -5312,6 +5437,81 @@ fn spawn_fetch_failure_http_server() -> (String, thread::JoinHandle<()>) {
             }
         }
         assert!(api_seen, "fixture should receive the same-origin fetch request before shutdown");
+    });
+    (format!("http://{address}/"), handle)
+}
+
+fn spawn_click_fetch_http_server() -> (String, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    listener.set_nonblocking(true).expect("listener should become nonblocking");
+    let address = listener.local_addr().expect("listener local address should resolve");
+    let handle = thread::spawn(move || {
+        let started_at = std::time::Instant::now();
+        let mut root_seen = false;
+        let mut data_seen = false;
+        while started_at.elapsed() < Duration::from_secs(10) && !(root_seen && data_seen) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false).expect("accepted stream should become blocking");
+                    let request = read_http_request(&mut stream);
+                    let path = http_request_path(request.as_str());
+                    if path.starts_with("/mock-data.json") {
+                        data_seen = true;
+                        let body = r#"[{"name":"Atlas"},{"name":"Beacon"},{"name":"Cobalt"}]"#;
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        stream
+                            .write_all(response.as_bytes())
+                            .expect("server should write JSON response");
+                        stream.flush().expect("server should flush JSON response");
+                        continue;
+                    }
+                    if path == "/" || path.starts_with("/index.html") {
+                        root_seen = true;
+                        let body = r#"<html><head><title>Fetch After Click</title></head><body><button id="loadData">Load</button><div id="items">empty</div><script>
+document.getElementById("loadData").addEventListener("click", async () => {
+  try {
+    const response = await fetch("./mock-data.json");
+    const items = await response.json();
+    document.getElementById("items").textContent = items.map((item) => item.name).join(", ");
+  } catch (error) {
+    document.getElementById("items").textContent = "fetch failed";
+  }
+});
+</script></body></html>"#;
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        stream
+                            .write_all(response.as_bytes())
+                            .expect("server should write page response");
+                        stream.flush().expect("server should flush page response");
+                        continue;
+                    }
+                    let body = "not found";
+                    let response = format!(
+                        "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    stream
+                        .write_all(response.as_bytes())
+                        .expect("server should write fallback response");
+                    stream.flush().expect("server should flush fallback response");
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("listener accept failed: {error}"),
+            }
+        }
+        assert!(root_seen, "fixture should receive the initial page request before shutdown");
+        assert!(
+            data_seen,
+            "fixture should receive the click-triggered JSON request before shutdown"
+        );
     });
     (format!("http://{address}/"), handle)
 }

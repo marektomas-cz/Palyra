@@ -474,6 +474,7 @@ pub(crate) enum ChromiumPrivateTargetScope {
 pub(crate) struct ChromiumPrivateTargetPolicy {
     allow_session_private_targets: bool,
     scoped_targets: std::sync::Mutex<HashMap<ChromiumPrivateTargetScope, usize>>,
+    retained_targets: std::sync::Mutex<HashSet<ChromiumPrivateTargetScope>>,
 }
 
 #[derive(Debug)]
@@ -487,6 +488,7 @@ impl ChromiumPrivateTargetPolicy {
         Self {
             allow_session_private_targets,
             scoped_targets: std::sync::Mutex::new(HashMap::new()),
+            retained_targets: std::sync::Mutex::new(HashSet::new()),
         }
     }
 
@@ -529,7 +531,29 @@ impl ChromiumPrivateTargetPolicy {
         Ok(Some(ChromiumScopedPrivateTarget { policy: Arc::clone(self), scope }))
     }
 
+    pub(crate) fn retain_url_allowance(&self, raw_url: &str) -> Result<(), String> {
+        if self.allow_session_private_targets {
+            return Ok(());
+        }
+        let Some(scope) = ChromiumPrivateTargetScope::from_url(raw_url)? else {
+            return Ok(());
+        };
+        self.retained_targets
+            .lock()
+            .map_err(|_| "private-target policy lock was poisoned".to_owned())?
+            .insert(scope);
+        Ok(())
+    }
+
     fn allows_scope(&self, scope: &ChromiumPrivateTargetScope) -> bool {
+        if self
+            .retained_targets
+            .lock()
+            .map(|retained_targets| retained_targets.contains(scope))
+            .unwrap_or(false)
+        {
+            return true;
+        }
         self.scoped_targets
             .lock()
             .map(|scoped_targets| scoped_targets.contains_key(scope))
@@ -1814,6 +1838,13 @@ pub(crate) async fn navigate_tab_with_chromium(
     outcome.title = snapshot.title;
     outcome.page_body = snapshot.page_body;
     outcome.body_bytes = body_bytes;
+    if params.allow_private_targets {
+        if let Err(error) = private_target_policy.retain_url_allowance(outcome.final_url.as_str()) {
+            outcome.success = false;
+            outcome.error = format!("failed to retain navigated private-target scope: {error}");
+            return outcome;
+        }
+    }
     let _ = chromium_install_page_diagnostics(runtime, session_id, tab_id).await;
     let _ = chromium_refresh_tab_snapshot(runtime, session_id, tab_id).await;
     outcome
