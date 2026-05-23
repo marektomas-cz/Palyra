@@ -19698,7 +19698,7 @@ fn contains_secret_like_bare_token_assignment(normalized: &str) -> bool {
             .char_indices()
             .find_map(|(offset, ch)| {
                 (ch.is_whitespace()
-                    || matches!(ch, '&' | '"' | '\'' | '`' | ',' | ';' | ')' | ']' | '}'))
+                    || matches!(ch, '&' | '"' | '\'' | '`' | ',' | ';' | ':' | ')' | ']' | '}'))
                 .then_some(value_start + offset)
             })
             .unwrap_or(normalized.len());
@@ -19711,7 +19711,7 @@ fn contains_secret_like_bare_token_assignment(normalized: &str) -> bool {
 }
 
 fn bare_token_value_looks_secret(value: &str) -> bool {
-    let trimmed = value.trim();
+    let trimmed = value.trim().trim_end_matches([',', ';', ':', '.', ')', ']', '}']);
     !trimmed.is_empty()
         && (trimmed.contains("secret")
             || trimmed.starts_with("bearer")
@@ -20152,6 +20152,16 @@ mod tests {
     fn redact_payload_json_masks_short_simple_token_assignments() {
         let redacted = super::redact_payload_json(br#"{"tool_output":"stderr token=abc123 next"}"#)
             .expect("payload redaction should succeed");
+
+        assert!(redacted.contains("<redacted>"), "{redacted}");
+        assert!(!redacted.contains("token=abc123"), "{redacted}");
+    }
+
+    #[test]
+    fn redact_payload_json_masks_colon_terminated_token_assignments() {
+        let redacted =
+            super::redact_payload_json(br#"{"tool_output":"wc: token=abc123: missing"}"#)
+                .expect("payload redaction should succeed");
 
         assert!(redacted.contains("<redacted>"), "{redacted}");
         assert!(!redacted.contains("token=abc123"), "{redacted}");

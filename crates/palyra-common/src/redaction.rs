@@ -325,7 +325,7 @@ fn value_looks_like_secret_token(value: &str) -> bool {
     let trimmed = value
         .trim()
         .trim_matches(['"', '\'', '`'])
-        .trim_end_matches([',', ';', '.', ')', ']', '}']);
+        .trim_end_matches([',', ';', ':', '.', ')', ']', '}']);
     if trimmed.is_empty() {
         return false;
     }
@@ -361,7 +361,7 @@ fn split_trailing_punctuation(token: &str) -> (&str, &str) {
     let mut index = bytes.len();
     while index > 0 {
         let value = bytes[index - 1];
-        if matches!(value, b',' | b';' | b'.' | b')' | b']' | b'}') {
+        if matches!(value, b',' | b';' | b':' | b'.' | b')' | b']' | b'}') {
             index -= 1;
             continue;
         }
@@ -531,6 +531,14 @@ mod tests {
         let redacted = redact_auth_error("stderr preview token=abc123 next");
 
         assert!(redacted.contains("token=<redacted>"), "{redacted}");
+        assert!(!redacted.contains("token=abc123"), "{redacted}");
+    }
+
+    #[test]
+    fn auth_error_redaction_masks_colon_terminated_token_assignments() {
+        let redacted = redact_auth_error("wc: token=abc123: No such file or directory");
+
+        assert!(redacted.contains("token=<redacted>:"), "{redacted}");
         assert!(!redacted.contains("token=abc123"), "{redacted}");
     }
 

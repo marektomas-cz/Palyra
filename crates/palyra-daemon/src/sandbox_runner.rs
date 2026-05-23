@@ -4899,7 +4899,7 @@ mod tests {
     #[test]
     fn process_stderr_preview_redacts_secret_like_values() {
         let preview = redacted_process_output_preview(
-            b"node failed for https://example.com/token/abc123?api_key=qwerty token=abc123\nnext",
+            b"wc: token=abc123: No such file or directory\nnode failed for https://example.com/token/abc123?api_key=qwerty\nnext",
         )
         .expect("preview should be present");
 
