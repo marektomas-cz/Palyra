@@ -1243,11 +1243,40 @@ async fn enrich_routine_view_with_latest_run(
     routine_id: &str,
     job_id: &str,
 ) -> Result<Value, Response> {
+    let automation_enabled = routines_automation_feature_enabled(state);
+    if let Some(object) = view.as_object_mut() {
+        object.insert(
+            "automation".to_owned(),
+            json!({
+                "feature_flag": FEATURE_ROUTINES_AUTOMATION,
+                "routines_automation_enabled": automation_enabled,
+            }),
+        );
+    }
     let (runs, _) = state
         .runtime
         .list_cron_runs(Some(job_id.to_owned()), None, Some(10))
         .await
         .map_err(runtime_status_response)?;
+    if runs.is_empty() && !automation_enabled {
+        if let Some(object) = view.as_object_mut() {
+            object.insert(
+                "troubleshooting".to_owned(),
+                json!({
+                    "window_size": 0,
+                    "failed_runs": 0,
+                    "skipped_runs": 0,
+                    "denied_runs": 0,
+                    "recommended_action": routine_troubleshooting_recommended_action(
+                        automation_enabled,
+                        0,
+                        0,
+                        0,
+                    ),
+                }),
+            );
+        }
+    }
     let Some(run) = runs.last() else {
         return Ok(view);
     };
@@ -1279,19 +1308,36 @@ async fn enrich_routine_view_with_latest_run(
                 "failed_runs": failure_count,
                 "skipped_runs": skip_count,
                 "denied_runs": denied_count,
-                "recommended_action": if failure_count > 0 {
-                    "Inspect the latest run details, provider routing, and delivery preview before re-running."
-                } else if denied_count > 0 {
-                    "Resolve the approval or safety gate and use safe test-run before re-enabling production delivery."
-                } else if skip_count > 0 {
-                    "Review cooldown, quiet hours, or trigger dedupe rules that may be suppressing execution."
-                } else {
-                    "Routine is healthy; use safe test-run when you need a no-delivery diagnostic run."
-                },
+                "recommended_action": routine_troubleshooting_recommended_action(
+                    automation_enabled,
+                    failure_count,
+                    denied_count,
+                    skip_count,
+                ),
             }),
         );
     }
     Ok(view)
+}
+
+fn routine_troubleshooting_recommended_action(
+    automation_enabled: bool,
+    failure_count: usize,
+    denied_count: usize,
+    skip_count: usize,
+) -> &'static str {
+    if !automation_enabled {
+        return "Enable the routines_automation feature flag before enabling or running scheduled routines.";
+    }
+    if failure_count > 0 {
+        "Inspect the latest run details, provider routing, and delivery preview before re-running."
+    } else if denied_count > 0 {
+        "Resolve the approval or safety gate and use safe test-run before re-enabling production delivery."
+    } else if skip_count > 0 {
+        "Review cooldown, quiet hours, or trigger dedupe rules that may be suppressing execution."
+    } else {
+        "Routine is healthy; use safe test-run when you need a no-delivery diagnostic run."
+    }
 }
 
 fn routine_approval_subject_id(routine_id: &str, mode: RoutineApprovalMode) -> String {
@@ -2676,6 +2722,7 @@ mod tests {
         parse_execution_config, parse_optional_schedule_timezone_mode, parse_quiet_hours,
         routine_automation_flag_permits_enabled_write, routine_matches_trigger,
         routine_output_fields_from_session, routine_output_text_from_tape_events,
+        routine_troubleshooting_recommended_action,
     };
     use crate::cron::CronTimezoneMode;
     use crate::journal::{OrchestratorSessionRecord, OrchestratorTapeRecord};
@@ -2731,6 +2778,18 @@ mod tests {
         assert!(
             routine_automation_flag_permits_enabled_write(true, true),
             "enabled rollout flag should permit enabled routine writes"
+        );
+    }
+
+    #[test]
+    fn routine_troubleshooting_prioritizes_disabled_automation_flag() {
+        assert_eq!(
+            routine_troubleshooting_recommended_action(false, 0, 0, 1),
+            "Enable the routines_automation feature flag before enabling or running scheduled routines."
+        );
+        assert_eq!(
+            routine_troubleshooting_recommended_action(true, 0, 0, 1),
+            "Review cooldown, quiet hours, or trigger dedupe rules that may be suppressing execution."
         );
     }
 
