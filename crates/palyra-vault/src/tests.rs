@@ -151,6 +151,32 @@ fn vault_put_get_list_delete_roundtrip() -> Result<()> {
 }
 
 #[test]
+fn vault_list_all_secrets_returns_all_scopes_sorted() -> Result<()> {
+    let temp = tempdir()?;
+    let identity_root = temp.path().join("identity");
+    let vault_root = temp.path().join("vault");
+    let vault = Vault::open_with_config(VaultConfig {
+        root: Some(vault_root),
+        identity_store_root: Some(identity_root),
+        backend_preference: BackendPreference::EncryptedFile,
+        max_secret_bytes: 1024,
+    })?;
+    vault.put_secret(
+        &VaultScope::Principal { principal_id: "user:ops".to_owned() },
+        "ops_token",
+        b"ops-secret",
+    )?;
+    vault.put_secret(&VaultScope::Global, "api_key", b"global-secret")?;
+
+    let listed = vault.list_all_secrets()?;
+    let references =
+        listed.iter().map(|entry| format!("{}/{}", entry.scope, entry.key)).collect::<Vec<_>>();
+
+    assert_eq!(references, vec!["global/api_key", "principal:user:ops/ops_token"]);
+    Ok(())
+}
+
+#[test]
 fn vault_decryption_fails_with_different_identity_root() -> Result<()> {
     let temp = tempdir()?;
     let shared_vault_root = temp.path().join("vault");

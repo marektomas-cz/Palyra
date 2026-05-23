@@ -252,6 +252,21 @@ impl Vault {
         Ok(results)
     }
 
+    /// Lists metadata for every local vault secret without reading or decrypting secret values.
+    ///
+    /// The returned records include scope, key, timestamps, and stored byte counts so callers can
+    /// build redacted inventory views without exposing secret material.
+    pub fn list_all_secrets(&self) -> Result<Vec<SecretMetadata>, VaultError> {
+        let _lock = self.acquire_metadata_lock()?;
+        let index = self.read_metadata()?;
+        let mut results =
+            index.entries.iter().cloned().map(SecretMetadata::from).collect::<Vec<_>>();
+        results.sort_by(|left, right| {
+            left.scope.to_string().cmp(&right.scope.to_string()).then(left.key.cmp(&right.key))
+        });
+        Ok(results)
+    }
+
     pub(crate) fn ensure_metadata_exists(&self) -> Result<(), VaultError> {
         metadata::ensure_metadata_exists(self.root.as_path())
     }

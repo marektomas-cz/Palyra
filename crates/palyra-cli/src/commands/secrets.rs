@@ -2,6 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{args::SecretsConfigureCommand, *};
 use palyra_control_plane as control_plane;
+use palyra_vault::SecretMetadata;
+use serde_json::Value;
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct SecretAuditPayload {
@@ -1029,14 +1031,79 @@ fn run_configured_secret_inventory(json: bool) -> Result<()> {
                 .await?;
         context.client.list_configured_secrets().await.map_err(anyhow::Error::from)
     })?;
+    let local_vault = build_local_vault_inventory()?;
     if output::preferred_json(json) {
-        output::print_json_pretty(&envelope, "failed to encode configured secret inventory")?;
+        let payload = configured_secret_inventory_output(&envelope, local_vault)?;
+        output::print_json_pretty(&payload, "failed to encode configured secret inventory")?;
         return Ok(());
     }
+    let configured_returned = envelope.page.returned;
+    let vault_returned = local_vault.get("returned").and_then(Value::as_u64).unwrap_or(0);
+    let vault_backend = local_vault.get("backend").and_then(Value::as_str).unwrap_or("unknown");
     output::print_text_line(
-        "Sensitive configuration details are redacted in text output; use --json for structured output",
+        format!(
+            "secrets.inventory configured_returned={} vault_returned={} vault_backend={}",
+            configured_returned, vault_returned, vault_backend
+        )
+        .as_str(),
+    )?;
+    output::print_text_line(
+        "Configured secret references and local vault keys are inventory-only; values and byte lengths are not shown. Use `palyra secrets list <scope>` for scoped vault listings.",
     )?;
     Ok(())
+}
+
+fn build_local_vault_inventory() -> Result<Value> {
+    let vault = open_cli_vault().context("failed to initialize vault runtime")?;
+    let entries =
+        vault.list_all_secrets().context("failed to list local vault secret inventory")?;
+    Ok(local_vault_inventory_payload(vault.backend_kind().as_str(), entries.as_slice()))
+}
+
+fn configured_secret_inventory_output(
+    envelope: &control_plane::ConfiguredSecretListEnvelope,
+    local_vault: Value,
+) -> Result<Value> {
+    let mut payload =
+        serde_json::to_value(envelope).context("failed to encode configured secret inventory")?;
+    let vault_secrets = local_vault.get("secrets").cloned().unwrap_or_else(|| json!([]));
+    let vault_returned = local_vault.get("returned").cloned().unwrap_or_else(|| json!(0));
+    if let Value::Object(object) = &mut payload {
+        object.insert("kind".to_owned(), json!("secrets_inventory"));
+        object.insert(
+            "inventory_scope".to_owned(),
+            json!("configured_runtime_references_and_local_vault"),
+        );
+        object.insert(
+            "note".to_owned(),
+            json!(
+                "secrets lists configured runtime references; vault_secrets lists local vault keys without values or byte lengths"
+            ),
+        );
+        object.insert("configured_returned".to_owned(), json!(envelope.page.returned));
+        object.insert("local_vault".to_owned(), local_vault);
+        object.insert("vault_secrets".to_owned(), vault_secrets);
+        object.insert("vault_returned".to_owned(), vault_returned);
+    }
+    Ok(payload)
+}
+
+fn local_vault_inventory_payload(backend: &str, entries: &[SecretMetadata]) -> Value {
+    json!({
+        "kind": "local_vault_inventory",
+        "backend": backend,
+        "returned": entries.len(),
+        "secrets": entries.iter().map(|entry| {
+            json!({
+                "reference": format!("{}/{}", entry.scope, entry.key),
+                "scope": entry.scope.to_string(),
+                "key": entry.key,
+                "status": "stored",
+                "created_at_unix_ms": entry.created_at_unix_ms,
+                "updated_at_unix_ms": entry.updated_at_unix_ms,
+            })
+        }).collect::<Vec<_>>(),
+    })
 }
 
 fn run_secret_explain(secret_id: &str, json: bool) -> Result<()> {
@@ -1310,5 +1377,67 @@ mod tests {
         .expect("serialize");
         assert!(output.contains("\"vault_ref_configured\":true"));
         assert!(!output.contains("global/openai"));
+    }
+
+    #[test]
+    fn local_vault_inventory_lists_keys_without_values_or_lengths() {
+        let entries = vec![SecretMetadata {
+            scope: VaultScope::Global,
+            key: "e2e_secret".to_owned(),
+            created_at_unix_ms: 100,
+            updated_at_unix_ms: 200,
+            value_bytes: 42,
+        }];
+
+        let payload = local_vault_inventory_payload("encrypted_file", entries.as_slice());
+        let encoded = serde_json::to_string(&payload).expect("inventory payload should serialize");
+
+        assert_eq!(payload.get("returned").and_then(Value::as_u64), Some(1));
+        assert!(encoded.contains("\"reference\":\"global/e2e_secret\""));
+        assert!(encoded.contains("\"status\":\"stored\""));
+        assert!(!encoded.contains("value_bytes"));
+        assert!(!encoded.contains("42"));
+    }
+
+    #[test]
+    fn configured_secret_inventory_output_preserves_runtime_inventory_and_adds_vault_keys() {
+        let envelope = control_plane::ConfiguredSecretListEnvelope {
+            contract: control_plane::ContractDescriptor {
+                contract_version: control_plane::CONTROL_PLANE_CONTRACT_VERSION.to_owned(),
+            },
+            generated_at_unix_ms: 10,
+            snapshot_generation: 2,
+            secrets: Vec::new(),
+            page: control_plane::PageInfo {
+                limit: 100,
+                returned: 0,
+                next_cursor: None,
+                has_more: false,
+            },
+        };
+        let local_vault = local_vault_inventory_payload(
+            "encrypted_file",
+            &[SecretMetadata {
+                scope: VaultScope::Global,
+                key: "e2e_secret".to_owned(),
+                created_at_unix_ms: 100,
+                updated_at_unix_ms: 200,
+                value_bytes: 42,
+            }],
+        );
+
+        let payload = configured_secret_inventory_output(&envelope, local_vault)
+            .expect("inventory output should serialize");
+
+        assert_eq!(payload.pointer("/page/returned").and_then(Value::as_u64), Some(0));
+        assert_eq!(payload.get("vault_returned").and_then(Value::as_u64), Some(1));
+        assert_eq!(
+            payload.pointer("/vault_secrets/0/reference").and_then(Value::as_str),
+            Some("global/e2e_secret")
+        );
+        assert_eq!(
+            payload.get("inventory_scope").and_then(Value::as_str),
+            Some("configured_runtime_references_and_local_vault")
+        );
     }
 }

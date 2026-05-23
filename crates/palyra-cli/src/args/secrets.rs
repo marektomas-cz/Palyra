@@ -56,6 +56,7 @@ pub enum SecretsCommand {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    #[command(about = "Inventory configured secret references and local vault keys")]
     Inventory {
         #[arg(long, default_value_t = false)]
         json: bool,
