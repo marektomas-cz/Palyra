@@ -32,6 +32,7 @@ pub(crate) enum AgentLoopTerminationReason {
     ProviderError,
     ContextBudgetExhausted,
     IncompleteFinalAnswer,
+    RepeatedToolFailure,
 }
 
 impl AgentLoopTerminationReason {
@@ -46,6 +47,7 @@ impl AgentLoopTerminationReason {
             Self::ProviderError => "provider_error",
             Self::ContextBudgetExhausted => "context_budget_exhausted",
             Self::IncompleteFinalAnswer => "incomplete_final_answer",
+            Self::RepeatedToolFailure => "repeated_tool_failure",
         }
     }
 
