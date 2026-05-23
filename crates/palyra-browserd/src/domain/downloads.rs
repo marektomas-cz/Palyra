@@ -150,20 +150,9 @@ pub(crate) async fn store_generated_artifact(
     mime_type: &str,
     body: &[u8],
 ) -> Result<DownloadArtifactRecord, String> {
-    let mut quarantined = false;
-    let mut quarantine_reason = String::new();
-    if !extension_is_allowed(file_name) {
-        quarantined = true;
-        quarantine_reason = "extension_not_allowlisted".to_owned();
-    }
-    if !mime_type_is_allowed(mime_type) {
-        quarantined = true;
-        quarantine_reason = if quarantine_reason.is_empty() {
-            "mime_type_not_allowlisted".to_owned()
-        } else {
-            format!("{quarantine_reason}|mime_type_not_allowlisted")
-        };
-    }
+    let quarantine_reason = download_quarantine_reason(file_name, mime_type);
+    let quarantined = quarantine_reason.is_some();
+    let quarantine_reason = quarantine_reason.unwrap_or_default();
 
     let artifact_id = Ulid::new().to_string();
     let sanitized_name = sanitize_download_file_name(file_name);
@@ -288,6 +277,11 @@ pub(crate) fn sniff_download_mime_type(
     file_name: &str,
     bytes: &[u8],
 ) -> String {
+    let extension = Path::new(file_name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_default();
     if let Some(content_type) = header_content_type {
         let normalized =
             content_type.split(';').next().unwrap_or_default().trim().to_ascii_lowercase();
@@ -298,26 +292,34 @@ pub(crate) fn sniff_download_mime_type(
     if bytes.starts_with(b"%PDF-") {
         return "application/pdf".to_owned();
     }
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
+        return "image/png".to_owned();
+    }
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return "image/jpeg".to_owned();
+    }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return "image/gif".to_owned();
+    }
+    if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && bytes[8..12] == *b"WEBP" {
+        return "image/webp".to_owned();
+    }
+    if bytes.len() >= 12 && bytes[4..8] == *b"ftyp" {
+        return mime_type_for_download_extension(extension.as_str())
+            .unwrap_or("video/mp4")
+            .to_owned();
+    }
     if bytes.starts_with(&[0x50, 0x4B, 0x03, 0x04]) {
-        return "application/zip".to_owned();
+        return mime_type_for_download_extension(extension.as_str())
+            .unwrap_or("application/zip")
+            .to_owned();
     }
     if bytes.starts_with(&[0x1F, 0x8B]) {
         return "application/gzip".to_owned();
     }
-    let extension = Path::new(file_name)
-        .extension()
-        .and_then(|value| value.to_str())
-        .map(|value| value.to_ascii_lowercase())
-        .unwrap_or_default();
-    match extension.as_str() {
-        "json" => "application/json".to_owned(),
-        "csv" => "text/csv".to_owned(),
-        "txt" => "text/plain".to_owned(),
-        "pdf" => "application/pdf".to_owned(),
-        "zip" => "application/zip".to_owned(),
-        "gz" => "application/gzip".to_owned(),
-        _ => "application/octet-stream".to_owned(),
-    }
+    mime_type_for_download_extension(extension.as_str())
+        .unwrap_or("application/octet-stream")
+        .to_owned()
 }
 
 pub(crate) fn extension_is_allowed(file_name: &str) -> bool {
@@ -330,7 +332,108 @@ pub(crate) fn extension_is_allowed(file_name: &str) -> bool {
 }
 
 pub(crate) fn mime_type_is_allowed(mime_type: &str) -> bool {
-    DOWNLOAD_ALLOWED_MIME_TYPES.contains(&mime_type)
+    let normalized = normalize_mime_type(mime_type);
+    if normalized.starts_with("audio/")
+        || normalized.starts_with("font/")
+        || normalized.starts_with("image/")
+        || normalized.starts_with("text/")
+        || normalized.starts_with("video/")
+    {
+        return true;
+    }
+    DOWNLOAD_ALLOWED_MIME_TYPES.contains(&normalized.as_str())
+}
+
+fn download_quarantine_reason(file_name: &str, mime_type: &str) -> Option<String> {
+    let extension_allowed = extension_is_allowed(file_name);
+    let mime_allowed = mime_type_is_allowed(mime_type)
+        || (extension_allowed && mime_type_is_generic_binary(mime_type));
+    let mut reasons = Vec::new();
+    if !extension_allowed {
+        reasons.push("extension_not_allowlisted");
+    }
+    if !mime_allowed {
+        reasons.push("mime_type_not_allowlisted");
+    }
+    (!reasons.is_empty()).then(|| reasons.join("|"))
+}
+
+fn normalize_mime_type(mime_type: &str) -> String {
+    mime_type.split(';').next().unwrap_or_default().trim().to_ascii_lowercase()
+}
+
+fn mime_type_is_generic_binary(mime_type: &str) -> bool {
+    matches!(
+        normalize_mime_type(mime_type).as_str(),
+        "application/octet-stream" | "binary/octet-stream"
+    )
+}
+
+fn mime_type_for_download_extension(extension: &str) -> Option<&'static str> {
+    match extension {
+        "7z" => Some("application/x-7z-compressed"),
+        "aac" => Some("audio/aac"),
+        "avif" => Some("image/avif"),
+        "bmp" => Some("image/bmp"),
+        "br" => Some("application/x-brotli"),
+        "bz2" | "tbz2" => Some("application/x-bzip2"),
+        "cjs" | "js" | "mjs" => Some("text/javascript"),
+        "conf" | "ini" | "log" | "txt" => Some("text/plain"),
+        "css" => Some("text/css"),
+        "csv" => Some("text/csv"),
+        "doc" => Some("application/msword"),
+        "docx" => Some("application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+        "eot" => Some("application/vnd.ms-fontobject"),
+        "flac" => Some("audio/flac"),
+        "gif" => Some("image/gif"),
+        "gz" | "tgz" => Some("application/gzip"),
+        "heic" => Some("image/heic"),
+        "heif" => Some("image/heif"),
+        "htm" | "html" => Some("text/html"),
+        "ico" => Some("image/x-icon"),
+        "jpeg" | "jpg" => Some("image/jpeg"),
+        "json" | "map" => Some("application/json"),
+        "jsonl" => Some("application/x-ndjson"),
+        "m4a" => Some("audio/mp4"),
+        "m4v" | "mp4" => Some("video/mp4"),
+        "markdown" | "md" => Some("text/markdown"),
+        "mov" => Some("video/quicktime"),
+        "mp3" => Some("audio/mpeg"),
+        "mpeg" | "mpg" => Some("video/mpeg"),
+        "odf" => Some("application/vnd.oasis.opendocument.formula"),
+        "odp" => Some("application/vnd.oasis.opendocument.presentation"),
+        "ods" => Some("application/vnd.oasis.opendocument.spreadsheet"),
+        "odt" => Some("application/vnd.oasis.opendocument.text"),
+        "oga" | "ogg" => Some("audio/ogg"),
+        "opus" => Some("audio/opus"),
+        "otf" => Some("font/otf"),
+        "pdf" => Some("application/pdf"),
+        "png" => Some("image/png"),
+        "ppt" => Some("application/vnd.ms-powerpoint"),
+        "pptx" => Some("application/vnd.openxmlformats-officedocument.presentationml.presentation"),
+        "rar" => Some("application/vnd.rar"),
+        "rtf" => Some("application/rtf"),
+        "svg" => Some("image/svg+xml"),
+        "tar" => Some("application/x-tar"),
+        "tif" | "tiff" => Some("image/tiff"),
+        "toml" => Some("application/toml"),
+        "tsv" => Some("text/tab-separated-values"),
+        "ttf" => Some("font/ttf"),
+        "wasm" => Some("application/wasm"),
+        "wav" => Some("audio/wav"),
+        "webm" => Some("video/webm"),
+        "webp" => Some("image/webp"),
+        "woff" => Some("font/woff"),
+        "woff2" => Some("font/woff2"),
+        "xls" => Some("application/vnd.ms-excel"),
+        "xlsx" => Some("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+        "xml" => Some("application/xml"),
+        "xz" => Some("application/x-xz"),
+        "yaml" | "yml" => Some("application/x-yaml"),
+        "zip" => Some("application/zip"),
+        "zst" => Some("application/zstd"),
+        _ => None,
+    }
 }
 
 pub(crate) async fn fetch_download_artifact(
@@ -411,20 +514,9 @@ pub(crate) async fn fetch_download_artifact(
     }
     let mime_type =
         sniff_download_mime_type(header_content_type.as_deref(), file_name, body.as_ref());
-    let mut quarantined = false;
-    let mut quarantine_reason = String::new();
-    if !extension_is_allowed(file_name) {
-        quarantined = true;
-        quarantine_reason = "extension_not_allowlisted".to_owned();
-    }
-    if !mime_type_is_allowed(mime_type.as_str()) {
-        quarantined = true;
-        quarantine_reason = if quarantine_reason.is_empty() {
-            "mime_type_not_allowlisted".to_owned()
-        } else {
-            format!("{quarantine_reason}|mime_type_not_allowlisted")
-        };
-    }
+    let quarantine_reason = download_quarantine_reason(file_name, mime_type.as_str());
+    let quarantined = quarantine_reason.is_some();
+    let quarantine_reason = quarantine_reason.unwrap_or_default();
 
     let artifact_id = Ulid::new().to_string();
     let sanitized_name = sanitize_download_file_name(file_name);
@@ -472,4 +564,62 @@ pub(crate) async fn fetch_download_artifact(
     };
     sandbox.artifacts.push_back(artifact.clone());
     Ok(artifact)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn download_allowlist_accepts_common_user_file_types() {
+        for file_name in [
+            "photo.png",
+            "diagram.svg",
+            "report.docx",
+            "spreadsheet.xlsx",
+            "slides.pptx",
+            "archive.7z",
+            "clip.mp4",
+            "font.woff2",
+            "notes.md",
+        ] {
+            assert!(extension_is_allowed(file_name), "{file_name} should be extension-allowed");
+        }
+
+        for mime_type in [
+            "image/png",
+            "image/svg+xml",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            "application/x-7z-compressed",
+            "video/mp4",
+            "font/woff2",
+            "text/markdown",
+        ] {
+            assert!(mime_type_is_allowed(mime_type), "{mime_type} should be MIME-allowed");
+        }
+    }
+
+    #[test]
+    fn download_allowlist_accepts_generic_binary_for_allowed_extensions_only() {
+        assert_eq!(download_quarantine_reason("report.xlsx", "application/octet-stream"), None);
+        assert_eq!(
+            download_quarantine_reason("payload.exe", "application/octet-stream").as_deref(),
+            Some("extension_not_allowlisted|mime_type_not_allowlisted")
+        );
+    }
+
+    #[test]
+    fn download_sniffing_maps_common_extensions_without_content_type() {
+        assert_eq!(
+            sniff_download_mime_type(None, "photo.png", b"\x89PNG\r\n\x1A\npayload"),
+            "image/png"
+        );
+        assert_eq!(
+            sniff_download_mime_type(None, "report.docx", b"PK\x03\x04"),
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        );
+        assert_eq!(sniff_download_mime_type(None, "notes.md", b"# Notes"), "text/markdown");
+    }
 }
