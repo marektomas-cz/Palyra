@@ -5730,6 +5730,103 @@ async fn grpc_run_stream_executes_memory_recall_tool_and_emits_memory_attestatio
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn grpc_run_stream_memory_recall_without_session_uses_current_channel_durable_memory(
+) -> Result<()> {
+    let response_body = openai_tool_call_response(
+        "palyra.memory.recall",
+        &serde_json::json!({
+            "query": "cobalt durable channel marker",
+            "memory_top_k": 5,
+            "workspace_top_k": 0,
+            "min_score": 0.0,
+            "max_candidates": 4,
+            "prompt_budget_tokens": 1600
+        }),
+    )?;
+    let (openai_base_url, _request_count, server_handle) =
+        spawn_scripted_openai_server(vec![ScriptedOpenAiResponse::immediate(200, response_body)])?;
+    let (child, admin_port, grpc_port, _journal_db_path) =
+        spawn_palyrad_with_openai_provider_and_tool_policy(
+            openai_base_url.as_str(),
+            OPENAI_API_KEY,
+            "palyra.memory.recall",
+            2,
+            250,
+        )?;
+    let mut daemon = ChildGuard::new(child);
+    wait_for_health(admin_port, daemon.child_mut())?;
+
+    let endpoint = format!("http://127.0.0.1:{grpc_port}");
+    let mut memory_client =
+        memory_v1::memory_service_client::MemoryServiceClient::connect(endpoint.clone())
+            .await
+            .context("failed to connect memory gRPC client")?;
+    let mut ingest_request = tonic::Request::new(memory_v1::IngestMemoryRequest {
+        v: 1,
+        source: memory_v1::MemorySource::Manual as i32,
+        content_text: "cobalt durable channel marker for no-session recall".to_owned(),
+        channel: String::new(),
+        session_id: None,
+        tags: vec!["recall".to_owned()],
+        confidence: 0.9,
+        ttl_unix_ms: 0,
+    });
+    authorize_metadata_with_principal_and_channel(
+        ingest_request.metadata_mut(),
+        "user:ops",
+        "cli",
+    )?;
+    let ingested_memory_id = memory_client
+        .ingest_memory(ingest_request)
+        .await
+        .context("failed to ingest current-channel durable memory for recall tool test")?
+        .into_inner()
+        .item
+        .and_then(|item| item.memory_id)
+        .map(|id| id.ulid)
+        .context("ingested memory should include canonical id")?;
+
+    let mut gateway_client =
+        gateway_v1::gateway_service_client::GatewayServiceClient::connect(endpoint)
+            .await
+            .context("failed to connect gateway gRPC client")?;
+    let mut run_request =
+        sample_run_stream_request_with_text("trigger no-session memory recall tool".to_owned());
+    run_request.allow_sensitive_tools = true;
+    let mut request = tonic::Request::new(tokio_stream::iter(vec![run_request]));
+    authorize_metadata_with_principal_and_channel(request.metadata_mut(), "user:ops", "cli")?;
+    let mut response_stream =
+        gateway_client.run_stream(request).await.context("failed to call RunStream")?.into_inner();
+
+    let mut saw_recall_result = false;
+    while let Some(event) = response_stream.next().await {
+        let event = event.context("failed to read RunStream event")?;
+        if let Some(common_v1::run_stream_event::Body::ToolResult(result)) = event.body {
+            if result.success {
+                let output = serde_json::from_slice::<Value>(&result.output_json)
+                    .context("memory recall tool output_json should be valid JSON")?;
+                let top_candidates = output
+                    .get("top_candidates")
+                    .and_then(Value::as_array)
+                    .context("memory recall tool output must contain top_candidates")?;
+                assert!(
+                    top_candidates.iter().any(|candidate| {
+                        candidate.get("source_ref").and_then(Value::as_str)
+                            == Some(ingested_memory_id.as_str())
+                    }),
+                    "no-session memory recall should surface durable memory from the current channel: {output}"
+                );
+                saw_recall_result = true;
+            }
+        }
+    }
+
+    assert!(saw_recall_result, "no-session memory recall should produce a successful tool result");
+    server_handle.join().expect("scripted openai server thread should exit");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn grpc_run_stream_memory_search_principal_scope_uses_durable_memory() -> Result<()> {
     let response_body = openai_tool_call_response(
         "palyra.memory.search",
@@ -5779,6 +5876,31 @@ async fn grpc_run_stream_memory_search_principal_scope_uses_durable_memory() -> 
         .and_then(|item| item.memory_id)
         .map(|id| id.ulid)
         .context("durable ingest should return memory id")?;
+
+    let mut current_channel_durable_ingest = tonic::Request::new(memory_v1::IngestMemoryRequest {
+        v: 1,
+        source: memory_v1::MemorySource::Manual as i32,
+        content_text: "cross-channel marker current cli durable".to_owned(),
+        channel: String::new(),
+        session_id: None,
+        tags: Vec::new(),
+        confidence: 0.9,
+        ttl_unix_ms: 0,
+    });
+    authorize_metadata_with_principal_and_channel(
+        current_channel_durable_ingest.metadata_mut(),
+        "user:ops",
+        "cli",
+    )?;
+    let current_channel_durable_memory_id = memory_client
+        .ingest_memory(current_channel_durable_ingest)
+        .await
+        .context("failed to ingest current-channel durable memory for principal-scope test")?
+        .into_inner()
+        .item
+        .and_then(|item| item.memory_id)
+        .map(|id| id.ulid)
+        .context("current-channel durable ingest should return memory id")?;
 
     let mut cli_ingest = tonic::Request::new(memory_v1::IngestMemoryRequest {
         v: 1,
@@ -5863,6 +5985,10 @@ async fn grpc_run_stream_memory_search_principal_scope_uses_durable_memory() -> 
                 assert!(
                     returned_ids.contains(&durable_memory_id.as_str()),
                     "principal-scope tool search should include durable principal memory"
+                );
+                assert!(
+                    returned_ids.contains(&current_channel_durable_memory_id.as_str()),
+                    "principal-scope tool search should include durable memory for the current channel"
                 );
                 assert!(
                     !returned_ids.contains(&cli_memory_id.as_str()),

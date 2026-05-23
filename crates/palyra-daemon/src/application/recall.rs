@@ -660,39 +660,19 @@ async fn execute_recall(
     let (memory_hits, memory_diagnostics) =
         if plan_source_selected(plan.sources.as_slice(), RecallSourceKind::Memory) {
             let memory_channel_scope = request.channel.clone().or_else(|| context.channel.clone());
-            let broaden_for_channel_global_recall =
-                scoped_session_id.is_none() && memory_channel_scope.is_some();
-            let search_top_k = if broaden_for_channel_global_recall {
-                request.memory_top_k.max(1).saturating_mul(4).min(MAX_RECALL_TOP_K)
-            } else {
-                request.memory_top_k.max(1)
-            };
             let outcome = runtime_state
                 .search_memory_with_diagnostics(MemorySearchRequest {
                     principal: context.principal.clone(),
-                    channel: if broaden_for_channel_global_recall {
-                        None
-                    } else {
-                        memory_channel_scope.clone()
-                    },
+                    channel: memory_channel_scope,
                     session_id: scoped_session_id.clone(),
                     query: query.to_owned(),
-                    top_k: search_top_k,
+                    top_k: request.memory_top_k.max(1),
                     min_score: request.min_score,
                     tags: Vec::new(),
                     sources: Vec::new(),
                 })
                 .await?;
-            let memory_hits = if scoped_session_id.is_none() {
-                filter_memory_hits_for_recall_channel_scope(
-                    outcome.hits,
-                    memory_channel_scope.as_deref(),
-                    request.memory_top_k.max(1),
-                )
-            } else {
-                outcome.hits
-            };
-            (memory_hits, vec![outcome.diagnostics])
+            (outcome.hits, vec![outcome.diagnostics])
         } else {
             (Vec::new(), Vec::new())
         };
@@ -830,28 +810,6 @@ async fn execute_recall(
         plan,
         diagnostics,
     })
-}
-
-fn filter_memory_hits_for_recall_channel_scope(
-    hits: Vec<MemorySearchHit>,
-    channel_scope: Option<&str>,
-    limit: usize,
-) -> Vec<MemorySearchHit> {
-    hits.into_iter()
-        .filter(|hit| memory_hit_matches_recall_channel_scope(hit, channel_scope))
-        .take(limit)
-        .collect()
-}
-
-fn memory_hit_matches_recall_channel_scope(
-    hit: &MemorySearchHit,
-    channel_scope: Option<&str>,
-) -> bool {
-    match (hit.item.channel.as_deref(), channel_scope) {
-        (None, _) => true,
-        (Some(item_channel), Some(scope_channel)) => item_channel == scope_channel,
-        (Some(_), None) => false,
-    }
 }
 
 async fn build_selection_context(
