@@ -1896,6 +1896,8 @@ fn parse_routines_upsert() {
                 schedule: None,
                 trigger_payload: None,
                 trigger_payload_stdin: false,
+                watch_path: None,
+                watch_poll_interval_ms: None,
                 concurrency: CronConcurrencyPolicyArg::QueueOne,
                 retry_max_attempts: 2,
                 retry_backoff_ms: 5000,

@@ -229,6 +229,18 @@ pub struct RoutineUpsertCommand {
     pub trigger_payload: Option<String>,
     #[arg(long, default_value_t = false, conflicts_with = "trigger_payload")]
     pub trigger_payload_stdin: bool,
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Absolute user-owned OS path watched by trigger-kind=file-watch"
+    )]
+    pub watch_path: Option<String>,
+    #[arg(
+        long,
+        value_name = "MS",
+        help = "Polling interval for file-watch routines; minimum 30000"
+    )]
+    pub watch_poll_interval_ms: Option<u64>,
     #[arg(long, value_enum, default_value_t = CronConcurrencyPolicyArg::Forbid)]
     pub concurrency: CronConcurrencyPolicyArg,
     #[arg(long, default_value_t = 1)]
@@ -287,6 +299,7 @@ pub enum RoutineTriggerKindArg {
     Hook,
     Webhook,
     SystemEvent,
+    FileWatch,
     Manual,
 }
 
@@ -298,6 +311,7 @@ impl RoutineTriggerKindArg {
             Self::Hook => "hook",
             Self::Webhook => "webhook",
             Self::SystemEvent => "system_event",
+            Self::FileWatch => "file_watch",
             Self::Manual => "manual",
         }
     }

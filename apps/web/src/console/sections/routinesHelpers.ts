@@ -13,7 +13,7 @@ export type RoutineEditorForm = {
   routineId: string;
   name: string;
   prompt: string;
-  triggerKind: "schedule" | "manual" | "hook" | "webhook" | "system_event";
+  triggerKind: "schedule" | "manual" | "hook" | "webhook" | "system_event" | "file_watch";
   naturalLanguageSchedule: string;
   scheduleType: "cron" | "every" | "at";
   cronExpression: string;
@@ -65,6 +65,7 @@ export const TRIGGER_OPTIONS = [
   { key: "hook", label: "Hook" },
   { key: "webhook", label: "Webhook" },
   { key: "system_event", label: "System event" },
+  { key: "file_watch", label: "File watch" },
 ] as const;
 
 export const CONCURRENCY_OPTIONS = [
@@ -387,6 +388,9 @@ export function routineSummary(routine: JsonObject): string {
   const triggerKind = readString(routine, "trigger_kind") ?? "manual";
   if (triggerKind !== "schedule") {
     const triggerPayload = readObject(routine, "trigger_payload") ?? {};
+    if (triggerKind === "file_watch") {
+      return `file_watch · ${readString(triggerPayload, "path") ?? "path unavailable"}`;
+    }
     return `${triggerKind} · ${readString(triggerPayload, "event") ?? readString(triggerPayload, "hook_id") ?? readString(triggerPayload, "integration_id") ?? "custom matcher"}`;
   }
   const scheduleType = readString(routine, "schedule_type") ?? "schedule";

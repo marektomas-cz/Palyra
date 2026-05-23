@@ -88,6 +88,8 @@ pub(crate) async fn run_routines_async(command: RoutinesCommand) -> Result<()> {
                 schedule,
                 trigger_payload,
                 trigger_payload_stdin,
+                watch_path,
+                watch_poll_interval_ms,
                 concurrency,
                 retry_max_attempts,
                 retry_backoff_ms,
@@ -132,6 +134,8 @@ pub(crate) async fn run_routines_async(command: RoutinesCommand) -> Result<()> {
                 schedule_type,
                 schedule,
                 trigger_payload,
+                watch_path,
+                watch_poll_interval_ms,
                 concurrency,
                 retry_max_attempts,
                 retry_backoff_ms,
@@ -932,6 +936,8 @@ fn build_routine_upsert_payload(args: RoutineUpsertArgs) -> Result<Map<String, V
         schedule_type,
         schedule,
         trigger_payload,
+        watch_path,
+        watch_poll_interval_ms,
         concurrency,
         retry_max_attempts,
         retry_backoff_ms,
@@ -981,7 +987,12 @@ fn build_routine_upsert_payload(args: RoutineUpsertArgs) -> Result<Map<String, V
         schedule_type,
         schedule,
     )?;
-    if trigger_kind != RoutineTriggerKindArg::Schedule {
+    if trigger_kind == RoutineTriggerKindArg::FileWatch {
+        payload.insert(
+            "trigger_payload".to_owned(),
+            build_file_watch_trigger_payload(trigger_payload, watch_path, watch_poll_interval_ms)?,
+        );
+    } else if trigger_kind != RoutineTriggerKindArg::Schedule {
         payload.insert(
             "trigger_payload".to_owned(),
             trigger_payload.unwrap_or_else(|| Value::Object(Map::new())),
@@ -1175,6 +1186,35 @@ fn insert_schedule_fields(
         }
     }
     Ok(())
+}
+
+fn build_file_watch_trigger_payload(
+    trigger_payload: Option<Value>,
+    watch_path: Option<String>,
+    watch_poll_interval_ms: Option<u64>,
+) -> Result<Value> {
+    let mut object = match trigger_payload {
+        Some(Value::Object(object)) => object,
+        Some(_) => anyhow::bail!("file-watch trigger payload must be a JSON object"),
+        None => Map::new(),
+    };
+    if let Some(path) =
+        watch_path.map(|value| value.trim().to_owned()).filter(|value| !value.is_empty())
+    {
+        object.insert("path".to_owned(), Value::String(path));
+    }
+    if let Some(interval_ms) = watch_poll_interval_ms {
+        if interval_ms == 0 {
+            anyhow::bail!("--watch-poll-interval-ms must be greater than zero");
+        }
+        object.insert("poll_interval_ms".to_owned(), Value::from(interval_ms));
+    }
+    let has_path =
+        object.get("path").and_then(Value::as_str).is_some_and(|value| !value.trim().is_empty());
+    if !has_path {
+        anyhow::bail!("file-watch routines require --watch-path or trigger_payload.path");
+    }
+    Ok(Value::Object(object))
 }
 
 pub(crate) fn parse_every_schedule_interval_ms(schedule: &str) -> Result<u64> {
@@ -1464,6 +1504,8 @@ struct RoutineUpsertArgs {
     schedule_type: Option<CronScheduleTypeArg>,
     schedule: Option<String>,
     trigger_payload: Option<Value>,
+    watch_path: Option<String>,
+    watch_poll_interval_ms: Option<u64>,
     concurrency: CronConcurrencyPolicyArg,
     retry_max_attempts: u32,
     retry_backoff_ms: u64,
@@ -1505,7 +1547,8 @@ struct TemplateRoutineArgs {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_every_schedule_interval_ms;
+    use super::{build_file_watch_trigger_payload, parse_every_schedule_interval_ms};
+    use serde_json::json;
 
     #[test]
     fn parse_every_schedule_interval_accepts_ms_and_human_durations() {
@@ -1524,5 +1567,27 @@ mod tests {
 
         assert!(message.contains("schedule-type=every requires --schedule"));
         assert!(message.contains("30s, 5m, 2h, or 1d"));
+    }
+
+    #[test]
+    fn build_file_watch_trigger_payload_merges_cli_path_and_interval() {
+        let payload = build_file_watch_trigger_payload(
+            Some(json!({ "fire_on_start": true })),
+            Some("C:/Users/palo/inbox.txt".to_owned()),
+            Some(30_000),
+        )
+        .expect("file-watch payload should build");
+
+        assert_eq!(payload["path"], "C:/Users/palo/inbox.txt");
+        assert_eq!(payload["poll_interval_ms"], 30_000);
+        assert_eq!(payload["fire_on_start"], true);
+    }
+
+    #[test]
+    fn build_file_watch_trigger_payload_requires_path() {
+        let error = build_file_watch_trigger_payload(None, None, None)
+            .expect_err("missing watch path should fail before reaching daemon");
+
+        assert!(error.to_string().contains("file-watch routines require --watch-path"));
     }
 }

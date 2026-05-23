@@ -2,7 +2,7 @@ use std::{
     collections::BTreeSet,
     fs,
     io::{Read, Seek, SeekFrom, Write},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::Mutex,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -20,6 +20,7 @@ use palyra_common::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 const ROUTINE_REGISTRY_VERSION: u32 = 1;
@@ -37,6 +38,8 @@ pub const ROUTINE_EXPORT_SCHEMA_ID: &str = "palyra.routine.export.v1";
 pub const ROUTINE_EXPORT_SCHEMA_VERSION: u32 = 1;
 pub const ROUTINE_TEMPLATE_PACK_VERSION: u32 = 1;
 pub const ROUTINE_RUN_LEASE_TTL_MS: i64 = 15 * 60 * 1_000;
+pub const DEFAULT_FILE_WATCH_POLL_INTERVAL_MS: u64 = 30 * 1_000;
+pub const MIN_FILE_WATCH_POLL_INTERVAL_MS: u64 = 30 * 1_000;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -45,6 +48,7 @@ pub enum RoutineTriggerKind {
     Hook,
     Webhook,
     SystemEvent,
+    FileWatch,
     Manual,
 }
 
@@ -56,6 +60,7 @@ impl RoutineTriggerKind {
             Self::Hook => "hook",
             Self::Webhook => "webhook",
             Self::SystemEvent => "system_event",
+            Self::FileWatch => "file_watch",
             Self::Manual => "manual",
         }
     }
@@ -66,6 +71,7 @@ impl RoutineTriggerKind {
             "hook" => Some(Self::Hook),
             "webhook" => Some(Self::Webhook),
             "system_event" => Some(Self::SystemEvent),
+            "file_watch" | "file-watch" => Some(Self::FileWatch),
             "manual" => Some(Self::Manual),
             _ => None,
         }
@@ -827,6 +833,40 @@ pub struct RoutineSchedulePreview {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+pub struct RoutineFileWatchObservation {
+    pub exists: bool,
+    pub path: String,
+    pub resolved_path: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modified_unix_ms: Option<u64>,
+    pub signature: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RoutineFileWatchConfig {
+    pub path: String,
+    pub resolved_path: String,
+    pub poll_interval_ms: u64,
+    #[serde(default)]
+    pub fire_on_start: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_observed: Option<RoutineFileWatchObservation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutineFileWatchChange {
+    pub event: String,
+    pub config: RoutineFileWatchConfig,
+    pub previous: Option<RoutineFileWatchObservation>,
+    pub current: RoutineFileWatchObservation,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct RoutineTemplateDefinition {
     pub template_id: String,
     pub title: String,
@@ -1236,6 +1276,334 @@ pub fn resolve_routines_root(state_root: Option<&Path>) -> Result<PathBuf, Routi
 #[must_use]
 pub fn shadow_manual_schedule_payload_json() -> String {
     json!({ "timestamp_rfc3339": SHADOW_AT_TIMESTAMP_RFC3339 }).to_string()
+}
+
+pub fn normalize_file_watch_trigger_payload(
+    payload: Option<&Value>,
+) -> Result<RoutineFileWatchConfig, RoutineRegistryError> {
+    let payload = payload.ok_or_else(|| RoutineRegistryError::InvalidField {
+        field: "trigger_payload",
+        message: "file_watch routines require trigger_payload.path".to_owned(),
+    })?;
+    let path = payload
+        .get("path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| RoutineRegistryError::InvalidField {
+            field: "trigger_payload.path",
+            message: "file_watch path must be a non-empty absolute OS path".to_owned(),
+        })?;
+    let poll_interval_ms = payload
+        .get("poll_interval_ms")
+        .and_then(Value::as_u64)
+        .unwrap_or(DEFAULT_FILE_WATCH_POLL_INTERVAL_MS);
+    if poll_interval_ms < MIN_FILE_WATCH_POLL_INTERVAL_MS {
+        return Err(RoutineRegistryError::InvalidField {
+            field: "trigger_payload.poll_interval_ms",
+            message: format!(
+                "file_watch poll interval must be at least {MIN_FILE_WATCH_POLL_INTERVAL_MS} ms"
+            ),
+        });
+    }
+    let fire_on_start = payload.get("fire_on_start").and_then(Value::as_bool).unwrap_or(false);
+    let observation = observe_file_watch_path(path)?;
+    Ok(RoutineFileWatchConfig {
+        path: path.to_owned(),
+        resolved_path: observation.resolved_path.clone(),
+        poll_interval_ms,
+        fire_on_start,
+        last_observed: if fire_on_start { None } else { Some(observation) },
+    })
+}
+
+pub fn parse_file_watch_config(
+    payload_json: &str,
+) -> Result<RoutineFileWatchConfig, RoutineRegistryError> {
+    serde_json::from_str::<RoutineFileWatchConfig>(payload_json).map_err(|error| {
+        RoutineRegistryError::InvalidField {
+            field: "trigger_payload_json",
+            message: format!("file_watch trigger payload is invalid: {error}"),
+        }
+    })
+}
+
+pub fn evaluate_file_watch_change(
+    mut config: RoutineFileWatchConfig,
+) -> Result<Option<RoutineFileWatchChange>, RoutineRegistryError> {
+    let current = observe_file_watch_path(config.path.as_str())?;
+    let previous = config.last_observed.clone();
+    if previous.as_ref().is_some_and(|previous| previous.signature == current.signature) {
+        config.last_observed = Some(current);
+        return Ok(None);
+    }
+    let event = match previous.as_ref() {
+        None if current.exists => "created",
+        None => "missing",
+        Some(previous) if !previous.exists && current.exists => "created",
+        Some(previous) if previous.exists && !current.exists => "deleted",
+        Some(_) => "modified",
+    }
+    .to_owned();
+    config.resolved_path = current.resolved_path.clone();
+    config.last_observed = Some(current.clone());
+    Ok(Some(RoutineFileWatchChange { event, config, previous, current }))
+}
+
+pub fn observe_file_watch_path(
+    path: &str,
+) -> Result<RoutineFileWatchObservation, RoutineRegistryError> {
+    let requested_path = parse_absolute_watch_path(path)?;
+    let resolved_path = resolve_watch_target_path(requested_path.as_path())?;
+    ensure_watch_path_allowed(resolved_path.as_path())?;
+    let requested = display_path(requested_path.as_path());
+    let resolved = display_path(resolved_path.as_path());
+    let metadata = match fs::metadata(resolved_path.as_path()) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let signature = file_watch_signature(false, resolved.as_str(), "missing", None, None);
+            return Ok(RoutineFileWatchObservation {
+                exists: false,
+                path: requested,
+                resolved_path: resolved,
+                kind: "missing".to_owned(),
+                size_bytes: None,
+                modified_unix_ms: None,
+                signature,
+            });
+        }
+        Err(error) => {
+            return Err(RoutineRegistryError::InvalidField {
+                field: "trigger_payload.path",
+                message: format!("failed to inspect watched path: {error}"),
+            })
+        }
+    };
+    let kind = if metadata.is_dir() {
+        "directory"
+    } else if metadata.is_file() {
+        "file"
+    } else {
+        "other"
+    };
+    let size_bytes = Some(metadata.len());
+    let modified_unix_ms = metadata
+        .modified()
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX));
+    let signature =
+        file_watch_signature(true, resolved.as_str(), kind, size_bytes, modified_unix_ms);
+    Ok(RoutineFileWatchObservation {
+        exists: true,
+        path: requested,
+        resolved_path: resolved,
+        kind: kind.to_owned(),
+        size_bytes,
+        modified_unix_ms,
+        signature,
+    })
+}
+
+fn file_watch_signature(
+    exists: bool,
+    resolved_path: &str,
+    kind: &str,
+    size_bytes: Option<u64>,
+    modified_unix_ms: Option<u64>,
+) -> String {
+    let payload = json!({
+        "exists": exists,
+        "resolved_path": resolved_path,
+        "kind": kind,
+        "size_bytes": size_bytes,
+        "modified_unix_ms": modified_unix_ms,
+    });
+    hex::encode(Sha256::digest(payload.to_string().as_bytes()))
+}
+
+fn parse_absolute_watch_path(path: &str) -> Result<PathBuf, RoutineRegistryError> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err(RoutineRegistryError::InvalidField {
+            field: "trigger_payload.path",
+            message: "path must be non-empty".to_owned(),
+        });
+    }
+    if trimmed.chars().any(char::is_control) {
+        return Err(RoutineRegistryError::InvalidField {
+            field: "trigger_payload.path",
+            message: "path contains unsupported control characters".to_owned(),
+        });
+    }
+    let parsed = PathBuf::from(trimmed);
+    if !parsed.is_absolute() {
+        return Err(RoutineRegistryError::InvalidField {
+            field: "trigger_payload.path",
+            message: "file_watch path must be absolute".to_owned(),
+        });
+    }
+    if parsed
+        .components()
+        .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+    {
+        return Err(RoutineRegistryError::InvalidField {
+            field: "trigger_payload.path",
+            message: "file_watch path must not contain '.' or '..' components".to_owned(),
+        });
+    }
+    Ok(parsed)
+}
+
+fn resolve_watch_target_path(path: &Path) -> Result<PathBuf, RoutineRegistryError> {
+    if path.exists() {
+        return fs::canonicalize(path).map_err(|error| RoutineRegistryError::InvalidField {
+            field: "trigger_payload.path",
+            message: format!("failed to resolve watched path: {error}"),
+        });
+    }
+    let (existing_ancestor, missing_suffix) = nearest_existing_watch_ancestor(path)?;
+    let canonical_ancestor = fs::canonicalize(existing_ancestor.as_path()).map_err(|error| {
+        RoutineRegistryError::InvalidField {
+            field: "trigger_payload.path",
+            message: format!("failed to resolve watched path ancestor: {error}"),
+        }
+    })?;
+    Ok(canonical_ancestor.join(missing_suffix))
+}
+
+fn nearest_existing_watch_ancestor(
+    path: &Path,
+) -> Result<(PathBuf, PathBuf), RoutineRegistryError> {
+    let mut cursor = path.to_path_buf();
+    while !cursor.exists() {
+        if !cursor.pop() {
+            return Err(RoutineRegistryError::InvalidField {
+                field: "trigger_payload.path",
+                message: "watched path has no existing ancestor".to_owned(),
+            });
+        }
+    }
+    if !cursor.is_dir() {
+        let Some(parent) = cursor.parent() else {
+            return Err(RoutineRegistryError::InvalidField {
+                field: "trigger_payload.path",
+                message: "watched path ancestor has no parent directory".to_owned(),
+            });
+        };
+        cursor = parent.to_path_buf();
+    }
+    let suffix = path
+        .strip_prefix(cursor.as_path())
+        .map_err(|_| RoutineRegistryError::InvalidField {
+            field: "trigger_payload.path",
+            message: "failed to resolve watched path relative to existing ancestor".to_owned(),
+        })?
+        .to_path_buf();
+    Ok((cursor, suffix))
+}
+
+fn ensure_watch_path_allowed(path: &Path) -> Result<(), RoutineRegistryError> {
+    if protected_os_path(path) {
+        return Err(RoutineRegistryError::InvalidField {
+            field: "trigger_payload.path",
+            message: format!("watched path is protected: {}", display_path(path)),
+        });
+    }
+    let roots = user_owned_os_roots();
+    if roots.iter().any(|root| path_starts_with(path, root.as_path())) {
+        return Ok(());
+    }
+    Err(RoutineRegistryError::InvalidField {
+        field: "trigger_payload.path",
+        message: format!(
+            "watched path {} is outside approved user-owned OS roots",
+            display_path(path)
+        ),
+    })
+}
+
+fn user_owned_os_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    for key in ["USERPROFILE", "HOME"] {
+        if let Some(value) = std::env::var_os(key) {
+            push_canonical_root(&mut roots, PathBuf::from(value));
+        }
+    }
+    push_canonical_root(&mut roots, std::env::temp_dir());
+    #[cfg(unix)]
+    {
+        push_canonical_root(&mut roots, PathBuf::from("/var/tmp"));
+    }
+    roots
+}
+
+fn push_canonical_root(roots: &mut Vec<PathBuf>, root: PathBuf) {
+    if let Ok(canonical) = fs::canonicalize(root.as_path()) {
+        if canonical.is_dir()
+            && !roots.iter().any(|existing| same_path(existing.as_path(), canonical.as_path()))
+        {
+            roots.push(canonical);
+        }
+    }
+}
+
+fn protected_os_path(path: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        let normalized = path.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+        normalized.ends_with(":/")
+            || normalized.contains(":/windows")
+            || normalized.contains(":/program files")
+            || normalized.contains(":/program files (x86)")
+            || normalized.contains(":/system volume information")
+    }
+    #[cfg(not(windows))]
+    {
+        let normalized = path.to_string_lossy().replace('\\', "/");
+        if normalized == "/" {
+            return true;
+        }
+        for prefix in ["/etc", "/bin", "/sbin", "/usr", "/lib", "/lib64", "/System", "/Library"] {
+            if normalized == prefix || normalized.starts_with(format!("{prefix}/").as_str()) {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+fn path_starts_with(path: &Path, root: &Path) -> bool {
+    if path.starts_with(root) {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        let path = path.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+        let root = root.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+        path == root || path.starts_with(format!("{root}/").as_str())
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        left.to_string_lossy()
+            .replace('\\', "/")
+            .eq_ignore_ascii_case(&right.to_string_lossy().replace('\\', "/"))
+    }
+    #[cfg(not(windows))]
+    {
+        left == right
+    }
+}
+
+fn display_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
 }
 
 #[must_use]
@@ -2527,18 +2895,18 @@ fn humanize_duration(duration_ms: u64) -> String {
 mod tests {
     use super::{
         build_routine_export_bundle, default_outcome_from_cron_status, join_run_metadata,
-        natural_language_schedule_preview, resolve_routines_root,
-        routine_approval_policy_with_auto_enable_guard, routine_delivery_contract,
-        routine_delivery_preview, routine_retention_dry_run, routine_run_lifecycle_snapshot,
-        routine_runtime_backfill_plan, schedule_requires_auto_enable_guard,
-        shadow_manual_schedule_payload_json, validate_routine_export_bundle,
-        validate_routine_prompt_self_contained, RoutineApprovalGateState, RoutineApprovalMode,
-        RoutineApprovalPolicy, RoutineDeliveryConfig, RoutineDeliveryContractKind,
-        RoutineDeliveryMode, RoutineExecutionConfig, RoutineMetadataRecord, RoutineRegistry,
-        RoutineRetentionPolicy, RoutineRunLeaseState, RoutineRunMetadataRecord,
-        RoutineRunMetadataUpsert, RoutineRunMode, RoutineRunOutcomeKind, RoutineSilentPolicy,
-        RoutineTriggerKind, MIN_AUTO_ENABLE_EVERY_INTERVAL_MS, ROUTINE_EXPORT_SCHEMA_ID,
-        ROUTINE_RUN_LEASE_TTL_MS,
+        natural_language_schedule_preview, normalize_file_watch_trigger_payload,
+        resolve_routines_root, routine_approval_policy_with_auto_enable_guard,
+        routine_delivery_contract, routine_delivery_preview, routine_retention_dry_run,
+        routine_run_lifecycle_snapshot, routine_runtime_backfill_plan,
+        schedule_requires_auto_enable_guard, shadow_manual_schedule_payload_json,
+        validate_routine_export_bundle, validate_routine_prompt_self_contained,
+        RoutineApprovalGateState, RoutineApprovalMode, RoutineApprovalPolicy,
+        RoutineDeliveryConfig, RoutineDeliveryContractKind, RoutineDeliveryMode,
+        RoutineExecutionConfig, RoutineMetadataRecord, RoutineRegistry, RoutineRetentionPolicy,
+        RoutineRunLeaseState, RoutineRunMetadataRecord, RoutineRunMetadataUpsert, RoutineRunMode,
+        RoutineRunOutcomeKind, RoutineSilentPolicy, RoutineTriggerKind,
+        MIN_AUTO_ENABLE_EVERY_INTERVAL_MS, ROUTINE_EXPORT_SCHEMA_ID, ROUTINE_RUN_LEASE_TTL_MS,
     };
     use crate::{
         cron::CronTimezoneMode,
@@ -2551,6 +2919,7 @@ mod tests {
     use serde_json::{json, Value};
     use std::{
         collections::BTreeSet,
+        fs,
         time::{SystemTime, UNIX_EPOCH},
     };
 
@@ -2658,6 +3027,43 @@ mod tests {
         let routines_root =
             resolve_routines_root(Some(root.as_path())).expect("root should resolve");
         assert!(routines_root.exists(), "routines directory should exist");
+    }
+
+    #[test]
+    fn file_watch_payload_baselines_and_detects_modifications() {
+        let root = temp_state_root();
+        fs::create_dir_all(root.as_path()).expect("watch root should be created");
+        let watched_path = root.join("watch.txt");
+        fs::write(watched_path.as_path(), "baseline").expect("watch file should write");
+        let config = normalize_file_watch_trigger_payload(Some(&json!({
+            "path": watched_path.to_string_lossy(),
+            "poll_interval_ms": 30_000,
+        })))
+        .expect("file_watch config should normalize");
+
+        assert_eq!(config.poll_interval_ms, 30_000);
+        assert!(config.last_observed.as_ref().is_some_and(|entry| entry.exists));
+        assert!(
+            super::evaluate_file_watch_change(config.clone())
+                .expect("unchanged watch should evaluate")
+                .is_none(),
+            "unchanged watched files must not dispatch a routine run"
+        );
+
+        fs::write(watched_path.as_path(), "baseline plus update")
+            .expect("watch file should update");
+        let change = super::evaluate_file_watch_change(config)
+            .expect("changed watch should evaluate")
+            .expect("changed watch should dispatch");
+
+        assert_eq!(change.event, "modified");
+        assert!(change.current.exists);
+        assert_ne!(
+            change.previous.expect("baseline should exist").signature,
+            change.current.signature
+        );
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

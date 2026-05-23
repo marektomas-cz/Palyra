@@ -22,13 +22,13 @@ use crate::{
     },
     routines::{
         default_outcome_from_cron_status, join_run_metadata, natural_language_schedule_preview,
-        routine_approval_policy_with_auto_enable_guard, routine_delivery_preview,
-        shadow_manual_schedule_payload_json, validate_routine_prompt_self_contained,
-        RoutineApprovalMode, RoutineApprovalPolicy, RoutineDeliveryConfig, RoutineDeliveryMode,
-        RoutineDispatchMode, RoutineExecutionConfig, RoutineExecutionPosture,
-        RoutineMetadataRecord, RoutineMetadataUpsert, RoutineQuietHours, RoutineRegistry,
-        RoutineRegistryError, RoutineRunMetadataUpsert, RoutineRunMode, RoutineRunOutcomeKind,
-        RoutineSilentPolicy, RoutineTriggerKind,
+        normalize_file_watch_trigger_payload, routine_approval_policy_with_auto_enable_guard,
+        routine_delivery_preview, shadow_manual_schedule_payload_json,
+        validate_routine_prompt_self_contained, RoutineApprovalMode, RoutineApprovalPolicy,
+        RoutineDeliveryConfig, RoutineDeliveryMode, RoutineDispatchMode, RoutineExecutionConfig,
+        RoutineExecutionPosture, RoutineMetadataRecord, RoutineMetadataUpsert, RoutineQuietHours,
+        RoutineRegistry, RoutineRegistryError, RoutineRunMetadataUpsert, RoutineRunMode,
+        RoutineRunOutcomeKind, RoutineSilentPolicy, RoutineTriggerKind,
     },
     tool_protocol::{ToolAttestation, ToolExecutionOutcome},
     transport::grpc::proto::palyra::cron::v1 as cron_v1,
@@ -172,6 +172,7 @@ struct ScheduleResolution {
     schedule_type: crate::journal::CronScheduleType,
     schedule_payload_json: String,
     next_run_at_unix_ms: Option<i64>,
+    trigger_payload_json_override: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -461,15 +462,20 @@ async fn upsert_routine(
     let approval_mode_was_requested = payload.contains_key("approval_mode");
     let requested_approval_policy =
         parse_approval_policy(optional_string_field(payload, "approval_mode").as_deref())?;
-    let approval_policy = routine_approval_policy_with_auto_enable_guard(
-        schedule.schedule_type,
-        schedule.schedule_payload_json.as_str(),
-        default_approval_policy_for_execution(
-            &execution,
-            requested_approval_policy,
-            approval_mode_was_requested,
-        ),
+    let approval_policy = default_approval_policy_for_execution(
+        &execution,
+        requested_approval_policy,
+        approval_mode_was_requested,
     );
+    let approval_policy = if trigger_kind == RoutineTriggerKind::FileWatch {
+        approval_policy
+    } else {
+        routine_approval_policy_with_auto_enable_guard(
+            schedule.schedule_type,
+            schedule.schedule_payload_json.as_str(),
+            approval_policy,
+        )
+    };
     validate_sensitive_tool_approval_policy(&execution, &approval_policy)?;
     let concurrency_policy =
         parse_concurrency_policy(optional_string_field(payload, "concurrency_policy").as_deref())?;
@@ -511,7 +517,11 @@ async fn upsert_routine(
     .await?;
     runtime.scheduler_wake.notify_one();
 
-    let trigger_payload_json = if trigger_kind == RoutineTriggerKind::Schedule {
+    let trigger_payload_json = if let Some(trigger_payload_json) =
+        schedule.trigger_payload_json_override
+    {
+        trigger_payload_json
+    } else if trigger_kind == RoutineTriggerKind::Schedule {
         build_schedule_trigger_payload(&job_record)
     } else {
         serde_json::to_string(payload.get("trigger_payload").unwrap_or(&Value::Object(Map::new())))
@@ -1447,11 +1457,35 @@ fn resolve_routine_schedule(
     trigger_kind: RoutineTriggerKind,
     timezone_mode: CronTimezoneMode,
 ) -> Result<ScheduleResolution, String> {
+    if trigger_kind == RoutineTriggerKind::FileWatch {
+        let config = normalize_file_watch_trigger_payload(payload.get("trigger_payload"))
+            .map_err(map_registry_error)?;
+        let normalized = cron::normalize_schedule(
+            Some(cron_v1::Schedule {
+                r#type: cron_v1::ScheduleType::Every as i32,
+                spec: Some(cron_v1::schedule::Spec::Every(cron_v1::EverySchedule {
+                    interval_ms: config.poll_interval_ms,
+                })),
+            }),
+            unix_ms_now_string_safe()?,
+            CronTimezoneMode::Utc,
+        )
+        .map_err(sanitize_status_message)?;
+        let trigger_payload_json = serde_json::to_string(&config)
+            .map_err(|error| format!("failed to encode file_watch trigger payload: {error}"))?;
+        return Ok(ScheduleResolution {
+            schedule_type: normalized.schedule_type,
+            schedule_payload_json: normalized.schedule_payload_json,
+            next_run_at_unix_ms: normalized.next_run_at_unix_ms,
+            trigger_payload_json_override: Some(trigger_payload_json),
+        });
+    }
     if trigger_kind != RoutineTriggerKind::Schedule {
         return Ok(ScheduleResolution {
             schedule_type: crate::journal::CronScheduleType::At,
             schedule_payload_json: shadow_manual_schedule_payload_json(),
             next_run_at_unix_ms: None,
+            trigger_payload_json_override: None,
         });
     }
     if let Some(phrase) = optional_string_field(payload, "natural_language_schedule") {
@@ -1465,6 +1499,7 @@ fn resolve_routine_schedule(
             schedule_type: parse_schedule_type(preview.schedule_type.as_str())?,
             schedule_payload_json: preview.schedule_payload_json,
             next_run_at_unix_ms: preview.next_run_at_unix_ms,
+            trigger_payload_json_override: None,
         });
     }
     let schedule = build_schedule(payload)?;
@@ -1475,6 +1510,7 @@ fn resolve_routine_schedule(
         schedule_type: normalized.schedule_type,
         schedule_payload_json: normalized.schedule_payload_json,
         next_run_at_unix_ms: normalized.next_run_at_unix_ms,
+        trigger_payload_json_override: None,
     })
 }
 
@@ -1566,6 +1602,7 @@ fn build_cron_trigger_options(
             RoutineDispatchMode::TestRun => "routine_test_run".to_owned(),
             RoutineDispatchMode::Replay => "routine_replay".to_owned(),
         }),
+        ..cron::TriggerJobOptions::default()
     }
 }
 
@@ -1608,13 +1645,16 @@ fn delivery_reason_for_outcome(
 
 fn parse_trigger_kind(value: &str) -> Result<RoutineTriggerKind, String> {
     RoutineTriggerKind::from_str(value).ok_or_else(|| {
-        "trigger_kind must be one of schedule|hook|webhook|system_event|manual".to_owned()
+        "trigger_kind must be one of schedule|hook|webhook|system_event|file_watch|manual"
+            .to_owned()
     })
 }
 
 fn default_run_mode_for_trigger_kind(trigger_kind: RoutineTriggerKind) -> RoutineRunMode {
     match trigger_kind {
-        RoutineTriggerKind::Schedule => RoutineRunMode::FreshSession,
+        RoutineTriggerKind::Schedule | RoutineTriggerKind::FileWatch => {
+            RoutineRunMode::FreshSession
+        }
         RoutineTriggerKind::Hook
         | RoutineTriggerKind::Webhook
         | RoutineTriggerKind::SystemEvent
@@ -1630,6 +1670,7 @@ fn default_execution_posture_for_trigger_kind(
         RoutineTriggerKind::Schedule if workdir.is_some() => {
             RoutineExecutionPosture::SensitiveTools
         }
+        RoutineTriggerKind::FileWatch => RoutineExecutionPosture::SensitiveTools,
         RoutineTriggerKind::Schedule
         | RoutineTriggerKind::Hook
         | RoutineTriggerKind::Webhook
@@ -2007,11 +2048,14 @@ fn routines_tool_execution_outcome(
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use crate::routines::{
         RoutineApprovalMode, RoutineApprovalPolicy, RoutineExecutionConfig,
         RoutineExecutionPosture, RoutineRunMode, RoutineTriggerKind,
     };
     use serde_json::json;
+    use ulid::Ulid;
 
     #[test]
     fn build_schedule_rejects_too_short_routines_control_every_interval() {
@@ -2050,6 +2094,45 @@ mod tests {
     }
 
     #[test]
+    fn resolve_routine_schedule_builds_file_watch_poll_schedule() {
+        let watched_path =
+            std::env::temp_dir().join(format!("palyra-tool-file-watch-{}.txt", Ulid::new()));
+        fs::write(watched_path.as_path(), "baseline").expect("watch fixture should write");
+        let payload = json!({
+            "trigger_payload": {
+                "path": watched_path.to_string_lossy(),
+                "poll_interval_ms": 30_000,
+            }
+        })
+        .as_object()
+        .expect("payload should be an object")
+        .clone();
+
+        let schedule = super::resolve_routine_schedule(
+            &payload,
+            RoutineTriggerKind::FileWatch,
+            crate::cron::CronTimezoneMode::Utc,
+        )
+        .expect("file_watch should build a poll schedule");
+        let schedule_payload: serde_json::Value =
+            serde_json::from_str(schedule.schedule_payload_json.as_str())
+                .expect("schedule payload should parse");
+        let trigger_payload: serde_json::Value = serde_json::from_str(
+            schedule
+                .trigger_payload_json_override
+                .as_deref()
+                .expect("file_watch should override trigger payload"),
+        )
+        .expect("trigger payload should parse");
+
+        assert_eq!(schedule.schedule_type, crate::journal::CronScheduleType::Every);
+        assert_eq!(schedule_payload["interval_ms"], 30_000);
+        assert_eq!(trigger_payload["last_observed"]["exists"], true);
+
+        let _ = fs::remove_file(watched_path);
+    }
+
+    #[test]
     fn parse_execution_config_uses_schedule_safe_defaults() {
         let trigger_kind = RoutineTriggerKind::Schedule;
         let execution = super::parse_execution_config(
@@ -2080,6 +2163,24 @@ mod tests {
             None,
         )
         .expect("execution config should parse");
+
+        assert_eq!(execution.run_mode, RoutineRunMode::FreshSession);
+        assert_eq!(execution.execution_posture, RoutineExecutionPosture::SensitiveTools);
+    }
+
+    #[test]
+    fn parse_execution_config_defaults_file_watch_to_fresh_sensitive_runs() {
+        let trigger_kind = RoutineTriggerKind::FileWatch;
+        let execution = super::parse_execution_config(
+            None,
+            super::default_run_mode_for_trigger_kind(trigger_kind),
+            super::default_execution_posture_for_trigger_kind(trigger_kind, None),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("file watch execution config should parse");
 
         assert_eq!(execution.run_mode, RoutineRunMode::FreshSession);
         assert_eq!(execution.execution_posture, RoutineExecutionPosture::SensitiveTools);

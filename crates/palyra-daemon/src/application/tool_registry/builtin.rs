@@ -201,7 +201,7 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
         ),
         entry(
             "palyra.routines.control",
-            "Create, update, pause, resume, or manually dispatch routines through the approval-aware runtime. For new reminders and monitors, omit routine_id and use operation=upsert with trigger_kind=schedule, name, prompt, and natural_language_schedule such as 'every 30 minutes' or 'every 40 seconds'. Use workdir for a scheduled project root that future runs should treat as their cwd and output base. Scheduled routines default to execution_posture=standard. Set execution_posture=sensitive_tools only when future runs genuinely need sensitive tools, and include approval_mode=before_enable or approval_mode=before_first_run.",
+            "Create, update, pause, resume, or manually dispatch routines through the approval-aware runtime. For new reminders and monitors, omit routine_id and use operation=upsert with trigger_kind=schedule, name, prompt, and natural_language_schedule such as 'every 30 minutes' or 'every 40 seconds'. For standing orders tied to an absolute user-owned OS file path, use trigger_kind=file_watch with trigger_payload.path and optional trigger_payload.poll_interval_ms. Use workdir for a scheduled project root that future runs should treat as their cwd and output base. Scheduled routines default to execution_posture=standard. File-watch routines default to fresh sessions and sensitive-tools posture because follow-up work often needs audited OS file tools; include approval_mode=before_enable or approval_mode=before_first_run when setting sensitive_tools explicitly.",
             object_schema(
                 &["operation"],
                 vec![
@@ -221,7 +221,11 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
                     ),
                     (
                         "trigger_kind",
-                        json!({"type":"string","enum":["schedule","hook","webhook","system_event","manual"]}),
+                        json!({"type":"string","enum":["schedule","hook","webhook","system_event","file_watch","manual"]}),
+                    ),
+                    (
+                        "trigger_payload",
+                        json!({"type":"object","description":"Trigger-specific payload. For trigger_kind=file_watch, provide path as an absolute user-owned OS path and optional poll_interval_ms >= 30000 plus fire_on_start."}),
                     ),
                     ("natural_language_schedule", json!({"type":"string"})),
                     ("schedule_type", json!({"type":"string","enum":["cron","every","at"]})),

@@ -467,7 +467,7 @@ export function CronSection({ app }: CronSectionProps) {
         eyebrow="Control"
         title="Automations"
         headingLabel="Automations"
-        description="Productize heartbeats, standing orders, programs, and low-level routines on top of the same schedule, hook, webhook, and approval backend."
+        description="Productize heartbeats, standing orders, programs, and low-level routines on top of the same schedule, file-watch, hook, webhook, and approval backend."
         status={
           <>
             <WorkspaceStatusChip tone="default">
@@ -1335,11 +1335,11 @@ export function CronSection({ app }: CronSectionProps) {
               onChange={setDispatchDedupeKey}
             />
           </div>
-          {selectedTriggerKind === "schedule" ? (
-            <InlineNotice title="Schedule routines" tone="default">
-              Scheduled automations use run-now. Hook, webhook, and system-event routines can fire
-              their adapter path directly from this panel. Safe test-run and replay always force
-              audit-only delivery.
+          {selectedTriggerKind === "schedule" || selectedTriggerKind === "file_watch" ? (
+            <InlineNotice title="Recurring routines" tone="default">
+              Scheduled and file-watch automations use run-now. Hook, webhook, and system-event
+              routines can fire their adapter path directly from this panel. Safe test-run and
+              replay always force audit-only delivery.
             </InlineNotice>
           ) : null}
         </WorkspaceSectionCard>

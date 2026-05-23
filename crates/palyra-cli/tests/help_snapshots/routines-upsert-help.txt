@@ -8,7 +8,7 @@ Options:
       --prompt <PROMPT>
 
       --trigger-kind <TRIGGER_KIND>
-          [possible values: schedule, hook, webhook, system-event, manual]
+          [possible values: schedule, hook, webhook, system-event, file-watch, manual]
       --owner <OWNER>
 
       --channel <CHANNEL>
@@ -31,6 +31,10 @@ Options:
 
       --trigger-payload-stdin
 
+      --watch-path <PATH>
+          Absolute user-owned OS path watched by trigger-kind=file-watch
+      --watch-poll-interval-ms <MS>
+          Polling interval for file-watch routines; minimum 30000
       --concurrency <CONCURRENCY>
           [default: forbid] [possible values: forbid, replace, queue-one]
       --retry-max-attempts <RETRY_MAX_ATTEMPTS>
