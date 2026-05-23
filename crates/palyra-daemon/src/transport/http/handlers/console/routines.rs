@@ -2167,6 +2167,7 @@ fn resolve_routine_schedule(
     })
 }
 
+#[allow(clippy::result_large_err)]
 fn schedule_payload_with_max_runs(
     schedule_payload_json: String,
     requested_max_runs: Option<u32>,

@@ -84,7 +84,7 @@ pub(crate) enum RunStreamProviderResponseOutcome {
         tool_result_messages: Vec<ProviderMessage>,
         provider_trace_ref: Option<String>,
         final_reply_text: Option<String>,
-        final_provider_output: Option<ProviderTurnOutput>,
+        final_provider_output: Option<Box<ProviderTurnOutput>>,
         final_reply_tokens_deferred: bool,
     },
     Failed {
@@ -1367,7 +1367,7 @@ async fn process_run_stream_provider_response(
         provider_trace_ref: provider_output.raw_provider_refs.provider_trace_ref.clone(),
         final_reply_text: (!has_pending_tool_results).then_some(reply_text),
         final_provider_output: (!has_pending_tool_results && !stream_model_tokens_immediately)
-            .then_some(provider_output),
+            .then_some(Box::new(provider_output)),
         final_reply_tokens_deferred: !has_pending_tool_results && !stream_model_tokens_immediately,
     })
 }

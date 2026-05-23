@@ -606,11 +606,11 @@ fn protected_os_path(path: &Path) -> bool {
     #[cfg(windows)]
     {
         let normalized = path.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
-        return normalized.ends_with(":/")
+        normalized.ends_with(":/")
             || normalized.contains(":/windows")
             || normalized.contains(":/program files")
             || normalized.contains(":/program files (x86)")
-            || normalized.contains(":/system volume information");
+            || normalized.contains(":/system volume information")
     }
     #[cfg(not(windows))]
     {
