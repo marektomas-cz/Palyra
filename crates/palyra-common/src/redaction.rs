@@ -257,30 +257,68 @@ fn should_redact_following_bearer_token(token: &str) -> bool {
         return true;
     }
     if let Some((key, _, value)) = split_assignment(token) {
-        return assignment_key_is_plain(key)
-            && is_sensitive_key(key)
-            && value.eq_ignore_ascii_case("bearer");
+        return assignment_key_is_sensitive(key) && value.eq_ignore_ascii_case("bearer");
     }
     false
 }
 
 fn should_redact_assignment_value(key: &str, value: &str, strictness: RedactionStrictness) -> bool {
-    if value.is_empty() || !assignment_key_is_plain(key) || !is_sensitive_key(key) {
+    let Some(sensitive_key) = sensitive_assignment_key(key) else {
+        return false;
+    };
+    if value.is_empty() {
         return false;
     }
     if strictness == RedactionStrictness::Diagnostic {
         return true;
     }
-    if normalize_key(key) == "token" {
+    if normalize_key(sensitive_key) == "token" {
         return value_looks_like_secret_token(value);
     }
     true
 }
 
-fn assignment_key_is_plain(key: &str) -> bool {
+fn assignment_key_is_sensitive(key: &str) -> bool {
+    sensitive_assignment_key(key).is_some()
+}
+
+fn sensitive_assignment_key(key: &str) -> Option<&str> {
     let trimmed = key.trim().trim_matches(['"', '\'']);
-    !trimmed.is_empty()
-        && trimmed.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+    let plain = trailing_plain_key_segment(trimmed)?;
+    if matches!(plain.prefix, Some('?') | Some('&') | Some('#')) {
+        return None;
+    }
+    if plain.is_empty() || !is_sensitive_key(plain.segment) {
+        return None;
+    }
+    Some(plain.segment)
+}
+
+struct PlainKeySegment<'a> {
+    segment: &'a str,
+    prefix: Option<char>,
+}
+
+impl PlainKeySegment<'_> {
+    fn is_empty(&self) -> bool {
+        self.segment.is_empty()
+    }
+}
+
+fn trailing_plain_key_segment(value: &str) -> Option<PlainKeySegment<'_>> {
+    let end = value
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+        .map(|(index, ch)| index + ch.len_utf8())?;
+    let start = value[..end]
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-')))
+        .map(|(index, ch)| index + ch.len_utf8())
+        .unwrap_or(0);
+    let prefix = if start == 0 { None } else { value[..start].chars().next_back() };
+    Some(PlainKeySegment { segment: &value[start..end], prefix })
 }
 
 fn value_looks_like_secret_token(value: &str) -> bool {
@@ -501,6 +539,19 @@ mod tests {
         assert!(redacted.contains("authorization=<redacted> <redacted>"));
         assert!(redacted.contains("oauth=Bearer NEXT_TOKEN"));
         assert!(!redacted.contains("SECRET_TOKEN"));
+    }
+
+    #[test]
+    fn auth_error_redaction_masks_sensitive_assignments_after_context_prefixes() {
+        let redacted = redact_auth_error(
+            r#"provider returned HTTP 401: {"error":"authorization=Bearer sk-secret-token invalid"}"#,
+        );
+
+        assert!(
+            redacted.contains(r#""authorization=<redacted> <redacted> invalid""#),
+            "{redacted}"
+        );
+        assert!(!redacted.contains("sk-secret-token"), "{redacted}");
     }
 
     #[test]
