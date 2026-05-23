@@ -114,6 +114,10 @@ pub mod palyra_browser_v1 {
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct ExportPdfResponse;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct GetDownloadArtifactRequest;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct GetDownloadArtifactResponse;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct GetPermissionsRequest;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct GetPermissionsResponse;
@@ -224,6 +228,10 @@ pub mod palyra_browser_v1 {
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct SetActiveProfileResponse;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct SetFileInputRequest;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct SetFileInputResponse;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct SetPermissionsRequest;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct SetPermissionsResponse;
@@ -252,6 +260,7 @@ pub mod palyra_browser_v1 {
         fn CreateSession(&self);
         fn DeleteProfile(&self);
         fn ExportPdf(&self);
+        fn GetDownloadArtifact(&self);
         fn GetPermissions(&self);
         fn GetSession(&self);
         fn GetTitle(&self);
@@ -274,6 +283,7 @@ pub mod palyra_browser_v1 {
         fn Scroll(&self);
         fn Select(&self);
         fn SetActiveProfile(&self);
+        fn SetFileInput(&self);
         fn SetPermissions(&self);
         fn SetViewport(&self);
         fn SwitchTab(&self);

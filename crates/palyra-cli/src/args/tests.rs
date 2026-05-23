@@ -4018,8 +4018,73 @@ fn parse_browser_downloads_json_flag() {
         Command::Browser {
             command: BrowserCommand::Downloads {
                 session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+                artifact_id: None,
+                output: None,
+                max_bytes: None,
                 limit: None,
                 quarantined_only: false,
+                json: true,
+            }
+        }
+    );
+}
+
+#[test]
+fn parse_browser_downloads_save_flags() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "browser",
+        "downloads",
+        "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "--artifact-id",
+        "01ARZ3NDEKTSV4RRFFQ69G5FB1",
+        "--output",
+        "exports/report.csv",
+        "--max-bytes",
+        "1048576",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Browser {
+            command: BrowserCommand::Downloads {
+                session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+                artifact_id: Some("01ARZ3NDEKTSV4RRFFQ69G5FB1".to_owned()),
+                output: Some("exports/report.csv".to_owned()),
+                max_bytes: Some(1_048_576),
+                limit: None,
+                quarantined_only: false,
+                json: false,
+            }
+        }
+    );
+}
+
+#[test]
+fn parse_browser_upload() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "browser",
+        "upload",
+        "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "--selector",
+        "input[type=file]",
+        "--file",
+        "fixtures/upload.csv",
+        "--timeout-ms",
+        "2000",
+        "--json",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Browser {
+            command: BrowserCommand::Upload {
+                session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+                selector: "input[type=file]".to_owned(),
+                file: "fixtures/upload.csv".to_owned(),
+                timeout_ms: Some(2000),
+                capture_failure_screenshot: false,
+                max_failure_screenshot_bytes: None,
+                output: None,
                 json: true,
             }
         }

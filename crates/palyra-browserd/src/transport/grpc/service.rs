@@ -1521,6 +1521,172 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
         }))
     }
 
+    async fn set_file_input(
+        &self,
+        request: Request<browser_v1::SetFileInputRequest>,
+    ) -> Result<Response<browser_v1::SetFileInputResponse>, Status> {
+        self.runtime.authorize(request.metadata()).await?;
+        let mut payload = request.into_inner();
+        let session_id = parse_session_id_from_proto(payload.session_id.take())
+            .map_err(Status::invalid_argument)?;
+        let selector = payload.selector.trim();
+        if selector.is_empty() {
+            return Err(Status::invalid_argument("set_file_input requires non-empty selector"));
+        }
+        let file_name = sanitize_download_file_name(payload.file_name.as_str());
+        if file_name.is_empty() {
+            return Err(Status::invalid_argument("set_file_input requires non-empty file_name"));
+        }
+
+        let context = match consume_action_budget_and_snapshot(
+            self.runtime.as_ref(),
+            session_id.as_str(),
+            true,
+        )
+        .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                return Ok(Response::new(browser_v1::SetFileInputResponse {
+                    v: CANONICAL_PROTOCOL_MAJOR,
+                    success: false,
+                    error,
+                    action_log: None,
+                    failure_screenshot_bytes: Vec::new(),
+                    failure_screenshot_mime_type: String::new(),
+                    uploaded_file_name: String::new(),
+                    uploaded_file_bytes: 0,
+                }));
+            }
+        };
+
+        if (payload.file_bytes.len() as u64) > UPLOAD_MAX_FILE_BYTES {
+            let error = format!(
+                "upload file exceeds max_file_bytes ({} > {})",
+                payload.file_bytes.len(),
+                UPLOAD_MAX_FILE_BYTES
+            );
+            let (action_log, failure_screenshot_bytes, failure_screenshot_mime_type) =
+                finalize_session_action(
+                    self.runtime.as_ref(),
+                    session_id.as_str(),
+                    FinalizeActionRequest {
+                        action_name: "set_file_input",
+                        selector,
+                        success: false,
+                        outcome: "input_too_large",
+                        error: error.as_str(),
+                        started_at_unix_ms: current_unix_ms(),
+                        attempts: 1,
+                        capture_failure_screenshot: payload.capture_failure_screenshot,
+                        max_failure_screenshot_bytes: payload.max_failure_screenshot_bytes,
+                    },
+                )
+                .await;
+            return Ok(Response::new(browser_v1::SetFileInputResponse {
+                v: CANONICAL_PROTOCOL_MAJOR,
+                success: false,
+                error,
+                action_log,
+                failure_screenshot_bytes,
+                failure_screenshot_mime_type,
+                uploaded_file_name: file_name,
+                uploaded_file_bytes: 0,
+            }));
+        }
+
+        let timeout_ms =
+            request_timeout_ms(payload.timeout_ms, context.budget.max_action_timeout_ms);
+        let started_at_unix_ms = current_unix_ms();
+        let (success, outcome, error, attempts) = match self.runtime.engine_mode {
+            BrowserEngineMode::Simulated => {
+                let started_at = Instant::now();
+                let mut attempts = 0_u32;
+                let mut success = false;
+                let mut outcome = "selector_not_found".to_owned();
+                let mut error = format!("selector '{}' was not found", selector);
+                loop {
+                    attempts = attempts.saturating_add(1);
+                    if let Some(tag) = find_matching_html_tag(selector, context.page_body.as_str())
+                    {
+                        if !is_file_input_tag(tag.as_str()) {
+                            outcome = "selector_not_file_input".to_owned();
+                            error = format!(
+                                "selector '{}' does not target an input[type=file] element",
+                                selector
+                            );
+                            break;
+                        }
+                        success = true;
+                        outcome = "file_input_set".to_owned();
+                        error.clear();
+                        break;
+                    }
+                    if started_at.elapsed() >= Duration::from_millis(timeout_ms) {
+                        break;
+                    }
+                    let remaining_ms =
+                        timeout_ms.saturating_sub(started_at.elapsed().as_millis() as u64);
+                    let sleep_ms = DEFAULT_ACTION_RETRY_INTERVAL_MS.min(remaining_ms.max(1));
+                    tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+                }
+                (success, outcome, error, attempts)
+            }
+            BrowserEngineMode::Chromium => {
+                let result = set_file_input_with_chromium(
+                    self.runtime.as_ref(),
+                    session_id.as_str(),
+                    selector,
+                    file_name.as_str(),
+                    payload.file_bytes.as_slice(),
+                    timeout_ms,
+                )
+                .await;
+                (result.success, result.outcome, result.error, result.attempts)
+            }
+        };
+
+        let uploaded_file_bytes = if success { payload.file_bytes.len() as u64 } else { 0 };
+        let (action_log, failure_screenshot_bytes, failure_screenshot_mime_type) =
+            finalize_session_action(
+                self.runtime.as_ref(),
+                session_id.as_str(),
+                FinalizeActionRequest {
+                    action_name: "set_file_input",
+                    selector,
+                    success,
+                    outcome: outcome.as_str(),
+                    error: error.as_str(),
+                    started_at_unix_ms,
+                    attempts,
+                    capture_failure_screenshot: payload.capture_failure_screenshot,
+                    max_failure_screenshot_bytes: payload.max_failure_screenshot_bytes,
+                },
+            )
+            .await;
+        let session_for_persist = {
+            let sessions = self.runtime.sessions.lock().await;
+            sessions.get(session_id.as_str()).filter(|session| session.persistence.enabled).cloned()
+        };
+        persist_session_after_mutation(
+            self.runtime.as_ref(),
+            session_for_persist,
+            "set_file_input",
+        )
+        .map_err(map_persist_error_to_status)?;
+
+        Ok(Response::new(browser_v1::SetFileInputResponse {
+            v: CANONICAL_PROTOCOL_MAJOR,
+            success,
+            error,
+            action_log,
+            failure_screenshot_bytes,
+            failure_screenshot_mime_type,
+            uploaded_file_name: file_name,
+            uploaded_file_bytes,
+        }))
+    }
+
     async fn press(
         &self,
         request: Request<browser_v1::PressRequest>,
@@ -3546,6 +3712,52 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
             truncated: false,
             error: String::new(),
         }))
+    }
+
+    async fn get_download_artifact(
+        &self,
+        request: Request<browser_v1::GetDownloadArtifactRequest>,
+    ) -> Result<Response<browser_v1::GetDownloadArtifactResponse>, Status> {
+        self.runtime.authorize(request.metadata()).await?;
+        let caller_principal = request_principal(request.metadata())?.to_owned();
+        let mut payload = request.into_inner();
+        let session_id = parse_session_id_from_proto(payload.session_id.take())
+            .map_err(Status::invalid_argument)?;
+        let artifact_id = parse_session_id_from_proto(payload.artifact_id.take())
+            .map_err(Status::invalid_argument)?;
+        {
+            let mut sessions = self.runtime.sessions.lock().await;
+            let Some(session) = sessions.get_mut(session_id.as_str()) else {
+                return Err(Status::not_found("browser session not found"));
+            };
+            if session.principal != caller_principal {
+                return Err(Status::not_found("browser session not found"));
+            }
+            session.last_active = Instant::now();
+        }
+        match get_download_artifact_content(
+            self.runtime.as_ref(),
+            session_id.as_str(),
+            artifact_id.as_str(),
+            payload.max_bytes,
+        )
+        .await
+        {
+            Ok((artifact, content)) => Ok(Response::new(browser_v1::GetDownloadArtifactResponse {
+                v: CANONICAL_PROTOCOL_MAJOR,
+                success: true,
+                error: String::new(),
+                artifact: Some(download_artifact_to_proto(&artifact)),
+                content,
+            })),
+            Err(error) => Ok(Response::new(browser_v1::GetDownloadArtifactResponse {
+                v: CANONICAL_PROTOCOL_MAJOR,
+                success: false,
+                error,
+                artifact: None,
+                content: Vec::new(),
+            })),
+        }
     }
 }
 

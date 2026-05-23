@@ -19,6 +19,7 @@ service BrowserService {
   rpc Navigate(NavigateRequest) returns (NavigateResponse);
   rpc Click(ClickRequest) returns (ClickResponse);
   rpc Type(TypeRequest) returns (TypeResponse);
+  rpc SetFileInput(SetFileInputRequest) returns (SetFileInputResponse);
   rpc Press(PressRequest) returns (PressResponse);
   rpc Select(SelectRequest) returns (SelectResponse);
   rpc SetViewport(SetViewportRequest) returns (SetViewportResponse);
@@ -40,6 +41,7 @@ service BrowserService {
   rpc SetPermissions(SetPermissionsRequest) returns (SetPermissionsResponse);
   rpc RelayAction(RelayActionRequest) returns (RelayActionResponse);
   rpc ListDownloadArtifacts(ListDownloadArtifactsRequest) returns (ListDownloadArtifactsResponse);
+  rpc GetDownloadArtifact(GetDownloadArtifactRequest) returns (GetDownloadArtifactResponse);
 }
 
 message BrowserHealthRequest {
@@ -361,6 +363,32 @@ message TypeResponse {
   string failure_screenshot_mime_type = 7;
 
   reserved 8 to 14;
+}
+
+message SetFileInputRequest {
+  uint32 v = 1;
+  palyra.common.v1.CanonicalId session_id = 2;
+  string selector = 3;
+  string file_name = 4;
+  bytes file_bytes = 5;
+  uint64 timeout_ms = 6;
+  bool capture_failure_screenshot = 7;
+  uint64 max_failure_screenshot_bytes = 8;
+
+  reserved 9 to 16;
+}
+
+message SetFileInputResponse {
+  uint32 v = 1;
+  bool success = 2;
+  string error = 3;
+  BrowserActionLogEntry action_log = 4;
+  bytes failure_screenshot_bytes = 5;
+  string failure_screenshot_mime_type = 6;
+  string uploaded_file_name = 7;
+  uint64 uploaded_file_bytes = 8;
+
+  reserved 9 to 16;
 }
 
 message PressRequest {
@@ -938,6 +966,25 @@ message ListDownloadArtifactsResponse {
   string error = 4;
 
   reserved 5 to 10;
+}
+
+message GetDownloadArtifactRequest {
+  uint32 v = 1;
+  palyra.common.v1.CanonicalId session_id = 2;
+  palyra.common.v1.CanonicalId artifact_id = 3;
+  uint64 max_bytes = 4;
+
+  reserved 5 to 10;
+}
+
+message GetDownloadArtifactResponse {
+  uint32 v = 1;
+  bool success = 2;
+  string error = 3;
+  DownloadArtifact artifact = 4;
+  bytes content = 5;
+
+  reserved 6 to 12;
 }
 
 message ResetStateRequest {

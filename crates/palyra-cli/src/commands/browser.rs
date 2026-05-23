@@ -41,6 +41,7 @@ const BROWSERD_STATE_ENCRYPTION_KEY_LEN: usize = 32;
 const BROWSER_ARTIFACT_DIR: &str = "browser-artifacts";
 const BROWSER_CALLER_PRINCIPAL_HEADER: &str = "x-palyra-principal";
 const BROWSER_PROBE_PRINCIPAL: &str = "admin:browser-probe";
+const BROWSER_UPLOAD_MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 const BROWSER_GATEWAY_TOOL_NAMES: &[&str] = &[
     "palyra.browser.session.create",
     "palyra.browser.session.close",
@@ -212,6 +213,17 @@ struct BrowserTypeArgs {
     json: bool,
 }
 
+struct BrowserUploadArgs {
+    session_id: String,
+    selector: String,
+    file: String,
+    timeout_ms: Option<u64>,
+    capture_failure_screenshot: bool,
+    max_failure_screenshot_bytes: Option<u64>,
+    output: Option<String>,
+    json: bool,
+}
+
 struct BrowserWaitArgs {
     session_id: String,
     selector: Option<String>,
@@ -355,6 +367,28 @@ async fn run_browser_async(command: BrowserCommand) -> Result<()> {
             })
             .await
         }
+        BrowserCommand::Upload {
+            session_id,
+            selector,
+            file,
+            timeout_ms,
+            capture_failure_screenshot,
+            max_failure_screenshot_bytes,
+            output,
+            json,
+        } => {
+            run_browser_upload(BrowserUploadArgs {
+                session_id,
+                selector,
+                file,
+                timeout_ms,
+                capture_failure_screenshot,
+                max_failure_screenshot_bytes,
+                output,
+                json,
+            })
+            .await
+        }
         BrowserCommand::Fill {
             session_id,
             selector,
@@ -460,8 +494,25 @@ async fn run_browser_async(command: BrowserCommand) -> Result<()> {
             run_browser_errors(session_id, limit, output, json).await
         }
         BrowserCommand::Trace { session_id, output } => run_browser_trace(session_id, output).await,
-        BrowserCommand::Downloads { session_id, limit, quarantined_only, json } => {
-            run_browser_downloads(session_id, limit, quarantined_only, json).await
+        BrowserCommand::Downloads {
+            session_id,
+            artifact_id,
+            output,
+            max_bytes,
+            limit,
+            quarantined_only,
+            json,
+        } => {
+            run_browser_downloads(
+                session_id,
+                artifact_id,
+                output,
+                max_bytes,
+                limit,
+                quarantined_only,
+                json,
+            )
+            .await
         }
         BrowserCommand::Permissions { session_id, command } => {
             run_browser_permissions_command(session_id, command).await
@@ -509,6 +560,7 @@ fn browser_command_policy_action(command: &BrowserCommand) -> Option<&'static st
         BrowserCommand::Navigate { .. } => Some("navigate"),
         BrowserCommand::Click { .. } => Some("click"),
         BrowserCommand::Type { .. } => Some("type"),
+        BrowserCommand::Upload { .. } => Some("upload"),
         BrowserCommand::Fill { .. } => Some("fill"),
         BrowserCommand::Scroll { .. } => Some("scroll"),
         BrowserCommand::Wait { .. } => Some("wait"),
@@ -1804,6 +1856,98 @@ async fn run_browser_type(args: BrowserTypeArgs) -> Result<()> {
     )
 }
 
+async fn run_browser_upload(args: BrowserUploadArgs) -> Result<()> {
+    let BrowserUploadArgs {
+        session_id,
+        selector,
+        file,
+        timeout_ms,
+        capture_failure_screenshot,
+        max_failure_screenshot_bytes,
+        output,
+        json,
+    } = args;
+    let file_path = PathBuf::from(file.as_str());
+    let metadata = fs::metadata(file_path.as_path())
+        .with_context(|| format!("failed to inspect upload file {}", file_path.display()))?;
+    if !metadata.is_file() {
+        anyhow::bail!("browser upload file is not a regular file: {}", file_path.display());
+    }
+    if metadata.len() > BROWSER_UPLOAD_MAX_FILE_BYTES {
+        anyhow::bail!(
+            "browser upload file exceeds max bytes ({} > {})",
+            metadata.len(),
+            BROWSER_UPLOAD_MAX_FILE_BYTES
+        );
+    }
+    let file_name = file_path
+        .file_name()
+        .and_then(OsStr::to_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("browser upload file path has no file name"))?
+        .to_owned();
+    let file_bytes = fs::read(file_path.as_path())
+        .with_context(|| format!("failed to read upload file {}", file_path.display()))?;
+
+    let resolved = resolve_browser_config(None, None, None)?;
+    let caller_principal = resolve_browser_caller_principal(app::ConnectionDefaults::USER)?;
+    let mut client = connect_browser_service(&resolved.connection).await?;
+    let response = client
+        .set_file_input(browser_request(
+            browser_v1::SetFileInputRequest {
+                v: CANONICAL_PROTOCOL_MAJOR,
+                session_id: Some(resolve_required_canonical_id(session_id.clone())?),
+                selector: selector.clone(),
+                file_name: file_name.clone(),
+                file_bytes,
+                timeout_ms: timeout_ms.unwrap_or(0),
+                capture_failure_screenshot,
+                max_failure_screenshot_bytes: max_failure_screenshot_bytes.unwrap_or(0),
+            },
+            resolved.connection.auth_token.as_deref(),
+            caller_principal.as_str(),
+        )?)
+        .await
+        .context("failed to upload file through browser session")?
+        .into_inner();
+    let success = response.success;
+    let error = response.error.clone();
+    let screenshot_path = write_optional_failure_screenshot(
+        output.as_deref(),
+        session_id.as_str(),
+        "upload",
+        (!response.failure_screenshot_bytes.is_empty())
+            .then_some(response.failure_screenshot_bytes.as_slice()),
+    )?;
+    let mut value = json!({
+        "session_id": browser_identifier_json_value(Some(session_id.as_str())),
+        "success": response.success,
+        "selector": selector,
+        "file_name": response.uploaded_file_name,
+        "uploaded_file_bytes": response.uploaded_file_bytes,
+        "error": response.error,
+        "action_log": response.action_log.as_ref().map(action_log_entry_value).unwrap_or(Value::Null),
+        "failure_screenshot_mime_type": response.failure_screenshot_mime_type,
+    });
+    maybe_attach_output_path(&mut value, screenshot_path.as_ref());
+    emit_browser_value_with_json(
+        &value,
+        format!(
+            "browser.upload session_id={} success={} selector={} file={} bytes={} artifact={}",
+            browser_session_handle_text(Some(session_id.as_str())),
+            success,
+            value.get("selector").and_then(Value::as_str).unwrap_or("-"),
+            value.get("file_name").and_then(Value::as_str).unwrap_or("-"),
+            value.get("uploaded_file_bytes").and_then(Value::as_u64).unwrap_or(0),
+            screenshot_path.as_deref().unwrap_or("-"),
+        ),
+        "failed to encode browser upload output",
+        json,
+    )?;
+    ensure_browser_command_success("browser.upload", success, error.as_str())
+}
+
 async fn run_browser_scroll(
     session_id: String,
     delta_x: i64,
@@ -2476,10 +2620,20 @@ async fn run_browser_highlight(session_id: String, selector: String) -> Result<(
 
 async fn run_browser_downloads(
     session_id: String,
+    artifact_id: Option<String>,
+    output: Option<String>,
+    max_bytes: Option<u64>,
     limit: Option<u32>,
     quarantined_only: bool,
     json: bool,
 ) -> Result<()> {
+    if output.is_some() {
+        return run_browser_download_save(session_id, artifact_id, output, max_bytes, json).await;
+    }
+    if artifact_id.is_some() {
+        anyhow::bail!("--artifact-id requires --output to save a download artifact");
+    }
+
     let context =
         client::control_plane::connect_admin_console(app::ConnectionOverrides::default()).await?;
     let envelope = context
@@ -2516,6 +2670,83 @@ async fn run_browser_downloads(
         );
     }
     emit_browser_value_with_json(&value, text, "failed to encode browser downloads output", json)
+}
+
+async fn run_browser_download_save(
+    session_id: String,
+    artifact_id: Option<String>,
+    output: Option<String>,
+    max_bytes: Option<u64>,
+    json: bool,
+) -> Result<()> {
+    let artifact_id = match artifact_id {
+        Some(value) => value,
+        None => latest_browser_download_artifact_id(session_id.as_str()).await?,
+    };
+    let output =
+        output.ok_or_else(|| anyhow::anyhow!("--output is required to save a download"))?;
+    let resolved = resolve_browser_config(None, None, None)?;
+    let caller_principal = resolve_browser_caller_principal(app::ConnectionDefaults::USER)?;
+    let mut client = connect_browser_service(&resolved.connection).await?;
+    let response = client
+        .get_download_artifact(browser_request(
+            browser_v1::GetDownloadArtifactRequest {
+                v: CANONICAL_PROTOCOL_MAJOR,
+                session_id: Some(resolve_required_canonical_id(session_id.clone())?),
+                artifact_id: Some(resolve_required_canonical_id(artifact_id.clone())?),
+                max_bytes: max_bytes.unwrap_or(0),
+            },
+            resolved.connection.auth_token.as_deref(),
+            caller_principal.as_str(),
+        )?)
+        .await
+        .context("failed to fetch browser download artifact")?
+        .into_inner();
+    if !response.success {
+        anyhow::bail!("browser download save failed: {}", empty_as_dash(response.error.as_str()));
+    }
+    let output_path = PathBuf::from(output.as_str());
+    write_artifact_bytes(output_path.as_path(), response.content.as_slice())?;
+    let artifact = response.artifact.as_ref().map(download_artifact_proto_value);
+    let value = json!({
+        "session_id": browser_identifier_json_value(Some(session_id.as_str())),
+        "success": response.success,
+        "artifact_id": browser_identifier_json_value(Some(artifact_id.as_str())),
+        "artifact": artifact.unwrap_or(Value::Null),
+        "size_bytes": response.content.len(),
+        "output_path": output_path.display().to_string(),
+    });
+    emit_browser_value_with_json(
+        &value,
+        format!(
+            "browser.downloads.save session_id={} artifact_id={} size_bytes={} output={}",
+            browser_session_handle_text(Some(session_id.as_str())),
+            redacted_browser_identifier_text(Some(artifact_id.as_str()), "artifact"),
+            response.content.len(),
+            output_path.display(),
+        ),
+        "failed to encode browser download save output",
+        json,
+    )
+}
+
+async fn latest_browser_download_artifact_id(session_id: &str) -> Result<String> {
+    let context =
+        client::control_plane::connect_admin_console(app::ConnectionOverrides::default()).await?;
+    let envelope = context
+        .client
+        .list_browser_download_artifacts(&control_plane::BrowserDownloadArtifactsQuery {
+            session_id: session_id.to_owned(),
+            limit: Some(1),
+            quarantined_only: false,
+        })
+        .await
+        .context("failed to list browser download artifacts before save")?;
+    envelope
+        .artifacts
+        .first()
+        .and_then(|artifact| artifact.artifact_id.clone())
+        .ok_or_else(|| anyhow::anyhow!("browser session has no download artifacts to save"))
 }
 
 async fn run_browser_permissions_command(

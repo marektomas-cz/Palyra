@@ -846,6 +846,12 @@ pub(crate) fn is_typable_tag(tag: &str) -> bool {
     matches!(html_tag_name(tag_lower.as_str()), Some("input" | "textarea"))
 }
 
+pub(crate) fn is_file_input_tag(tag: &str) -> bool {
+    let tag_lower = tag.to_ascii_lowercase();
+    html_tag_name(tag_lower.as_str()) == Some("input")
+        && has_attr_value(tag_lower.as_str(), "type", "file")
+}
+
 pub(crate) fn is_download_like_tag(tag: &str) -> bool {
     let tag_lower = tag.to_ascii_lowercase();
     if html_tag_name(tag_lower.as_str()) != Some("a") {

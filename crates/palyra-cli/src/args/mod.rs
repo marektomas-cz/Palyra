@@ -338,10 +338,12 @@ Examples:
   palyra browser navigate <session-id> --url https://example.com/
   palyra browser snapshot <session-id> --include-visible-text --output ./snapshot.json
   palyra browser screenshot <session-id> --output ./page.png
+  palyra browser upload <session-id> --selector 'input[type=file]' --file ./input.csv
+  palyra browser downloads <session-id> --output ./download.csv
   palyra browser trace <session-id> --output ./trace.json
 
 Discoverability:
-  Session list/show/inspect talks directly to browserd. Mutating actions go through the control plane so policy and audit hooks stay intact.";
+  Session list/show/inspect and local artifact transfers talk directly to browserd. Control-plane-backed actions keep policy and audit hooks intact.";
 
 const SYSTEM_AFTER_HELP: &str = "\
 Examples:

@@ -101,6 +101,8 @@ It distinguishes expected parity posture (`done` / `partial` / `intentional_devi
 | `browser tabs` | `nested_surface` | `done` | `verified` | `browser-tabs-help.txt` | - | - | - |
 | `browser tabs open` | `nested_surface` | `done` | `verified` | `browser-tabs-open-help.txt` | - | `--url`, `--activate`, `--allow-private-targets` | - |
 | `browser navigate` | `nested_surface` | `done` | `verified` | `browser-navigate-help.txt` | - | `--url`, `--timeout-ms`, `--allow-redirects`, `--allow-private-targets` | - |
+| `browser upload` | `nested_surface` | `done` | `verified` | `browser-upload-help.txt` | - | `--selector`, `--file`, `--timeout-ms`, `--output`, `--json` | - |
+| `browser downloads` | `nested_surface` | `done` | `verified` | `browser-downloads-help.txt` | - | `--artifact-id`, `--output`, `--max-bytes`, `--limit`, `--quarantined-only`, `--json` | - |
 | `browser snapshot` | `nested_surface` | `done` | `verified` | `browser-snapshot-help.txt` | - | `--include-dom-snapshot`, `--include-visible-text`, `--output` | - |
 | `browser trace` | `nested_surface` | `done` | `verified` | `browser-trace-help.txt` | - | `--output` | - |
 | `channels discord` | `nested_surface` | `done` | `verified` | `channels-discord-help.txt` | - | - | - |

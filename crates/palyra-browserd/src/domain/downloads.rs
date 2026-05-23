@@ -69,6 +69,54 @@ pub(crate) fn download_artifact_to_proto(
     }
 }
 
+pub(crate) async fn get_download_artifact_content(
+    runtime: &BrowserRuntimeState,
+    session_id: &str,
+    artifact_id: &str,
+    max_bytes: u64,
+) -> Result<(DownloadArtifactRecord, Vec<u8>), String> {
+    let max_bytes = if max_bytes == 0 {
+        DOWNLOAD_MAX_FILE_BYTES
+    } else {
+        max_bytes.min(DOWNLOAD_MAX_FILE_BYTES)
+    };
+    let artifact = {
+        let guard = runtime.download_sessions.lock().await;
+        let sandbox = guard
+            .get(session_id)
+            .ok_or_else(|| "download sandbox is not active for this session".to_owned())?;
+        sandbox
+            .artifacts
+            .iter()
+            .find(|record| record.artifact_id == artifact_id)
+            .cloned()
+            .ok_or_else(|| "download artifact not found".to_owned())?
+    };
+    if artifact.quarantined {
+        return Err(format!(
+            "download artifact '{}' is quarantined: {}",
+            artifact.artifact_id, artifact.quarantine_reason
+        ));
+    }
+    if artifact.size_bytes > max_bytes {
+        return Err(format!(
+            "download artifact exceeds max_bytes ({} > {})",
+            artifact.size_bytes, max_bytes
+        ));
+    }
+    let content = fs::read(artifact.storage_path.as_path()).map_err(|error| {
+        format!("failed to read download artifact '{}' from storage: {error}", artifact.artifact_id)
+    })?;
+    if content.len() as u64 > max_bytes {
+        return Err(format!(
+            "download artifact exceeds max_bytes after read ({} > {})",
+            content.len(),
+            max_bytes
+        ));
+    }
+    Ok((artifact, content))
+}
+
 pub(crate) async fn capture_download_artifact_for_click(
     runtime: &BrowserRuntimeState,
     session_id: &str,

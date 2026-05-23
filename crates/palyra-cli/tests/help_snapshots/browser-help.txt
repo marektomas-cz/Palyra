@@ -14,6 +14,7 @@ Commands:
   navigate     Navigate an existing browser session
   click        Click an element in the active tab
   type         Type text into an element in the active tab
+  upload       Upload a local file through an input[type=file] element
   fill         Clear an element and then type text into it
   scroll       Scroll the active tab
   wait         Wait for selector or text to appear
@@ -24,7 +25,7 @@ Commands:
   storage      Inspect cookies and storage for a browser session
   errors       Inspect failed browser actions for a session
   trace        Export a trace-like debug artifact for a browser session
-  downloads    List download artifacts for a browser session
+  downloads    List or save download artifacts for a browser session
   permissions  Get or set browser permissions for a session
   reset-state  Reset browser state for a session
   console      Show browser console diagnostics for a session
@@ -85,7 +86,9 @@ Examples:
   palyra browser navigate <session-id> --url https://example.com/
   palyra browser snapshot <session-id> --include-visible-text --output ./snapshot.json
   palyra browser screenshot <session-id> --output ./page.png
+  palyra browser upload <session-id> --selector 'input[type=file]' --file ./input.csv
+  palyra browser downloads <session-id> --output ./download.csv
   palyra browser trace <session-id> --output ./trace.json
 
 Discoverability:
-  Session list/show/inspect talks directly to browserd. Mutating actions go through the control plane so policy and audit hooks stay intact.
+  Session list/show/inspect and local artifact transfers talk directly to browserd. Control-plane-backed actions keep policy and audit hooks intact.

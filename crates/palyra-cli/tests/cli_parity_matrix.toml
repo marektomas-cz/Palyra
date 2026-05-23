@@ -889,6 +889,28 @@ path = "browser navigate"
 file = "browser-navigate-help.txt"
 
 [[entries]]
+path = "browser upload"
+category = "nested_surface"
+status = "done"
+summary = "Browser file input upload contract."
+required_flags = ["selector", "file", "timeout-ms", "output", "json"]
+
+[entries.snapshot]
+path = "browser upload"
+file = "browser-upload-help.txt"
+
+[[entries]]
+path = "browser downloads"
+category = "nested_surface"
+status = "done"
+summary = "Browser download artifact list and save contract."
+required_flags = ["artifact-id", "output", "max-bytes", "limit", "quarantined-only", "json"]
+
+[entries.snapshot]
+path = "browser downloads"
+file = "browser-downloads-help.txt"
+
+[[entries]]
 path = "browser snapshot"
 category = "nested_surface"
 status = "done"

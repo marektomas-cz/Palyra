@@ -158,6 +158,12 @@ public enum PalyraBrowserV1 {
     public struct ExportPdfResponse: Equatable {
         public init() {}
     }
+    public struct GetDownloadArtifactRequest: Equatable {
+        public init() {}
+    }
+    public struct GetDownloadArtifactResponse: Equatable {
+        public init() {}
+    }
     public struct GetPermissionsRequest: Equatable {
         public init() {}
     }
@@ -323,6 +329,12 @@ public enum PalyraBrowserV1 {
     public struct SetActiveProfileResponse: Equatable {
         public init() {}
     }
+    public struct SetFileInputRequest: Equatable {
+        public init() {}
+    }
+    public struct SetFileInputResponse: Equatable {
+        public init() {}
+    }
     public struct SetPermissionsRequest: Equatable {
         public init() {}
     }
@@ -362,6 +374,7 @@ public enum PalyraBrowserV1 {
         func createSession()
         func deleteProfile()
         func exportPdf()
+        func getDownloadArtifact()
         func getPermissions()
         func getSession()
         func getTitle()
@@ -384,6 +397,7 @@ public enum PalyraBrowserV1 {
         func scroll()
         func select()
         func setActiveProfile()
+        func setFileInput()
         func setPermissions()
         func setViewport()
         func switchTab()

@@ -2089,6 +2089,164 @@ pub(crate) async fn type_with_chromium(
     }
 }
 
+pub(crate) async fn set_file_input_with_chromium(
+    runtime: &BrowserRuntimeState,
+    session_id: &str,
+    selector: &str,
+    file_name: &str,
+    file_bytes: &[u8],
+    timeout_ms: u64,
+) -> ChromiumActionOutcome {
+    enum FileInputAttempt {
+        Set,
+        NotFound,
+        NotFileInput,
+        Disabled,
+    }
+
+    let (tab_id, tab) = match chromium_active_tab_for_session(runtime, session_id).await {
+        Ok(value) => value,
+        Err(error) => {
+            return ChromiumActionOutcome {
+                success: false,
+                outcome: "chromium_runtime_missing".to_owned(),
+                error,
+                attempts: 1,
+            }
+        }
+    };
+    let upload_path =
+        match write_chromium_upload_file(runtime, session_id, file_name, file_bytes).await {
+            Ok(value) => value,
+            Err(error) => {
+                return ChromiumActionOutcome {
+                    success: false,
+                    outcome: "upload_file_prepare_failed".to_owned(),
+                    error,
+                    attempts: 1,
+                }
+            }
+        };
+    let upload_path_text = upload_path.to_string_lossy().to_string();
+    let started = Instant::now();
+    let mut attempts = 0_u32;
+    loop {
+        attempts = attempts.saturating_add(1);
+        let selector_for_attempt = selector.to_owned();
+        let upload_path_for_attempt = upload_path_text.clone();
+        let tab_for_attempt = Arc::clone(&tab);
+        let attempt = run_chromium_blocking("chromium set file input", move || {
+            let page_body = tab_for_attempt.get_content().map_err(|error| {
+                format!("failed to read Chromium DOM before file upload: {error}")
+            })?;
+            let Some(tag) =
+                find_matching_html_tag(selector_for_attempt.as_str(), page_body.as_str())
+            else {
+                return Ok(FileInputAttempt::NotFound);
+            };
+            if !is_file_input_tag(tag.as_str()) {
+                return Ok(FileInputAttempt::NotFileInput);
+            }
+            if tag.to_ascii_lowercase().contains(" disabled") {
+                return Ok(FileInputAttempt::Disabled);
+            }
+            let element =
+                tab_for_attempt.find_element(selector_for_attempt.as_str()).map_err(|error| {
+                    format!(
+                        "failed to resolve selector '{}' on Chromium page: {error}",
+                        selector_for_attempt
+                    )
+                })?;
+            element.set_input_files(&[upload_path_for_attempt.as_str()]).map_err(|error| {
+                format!(
+                    "failed to set file input '{}' on Chromium page: {error}",
+                    selector_for_attempt
+                )
+            })?;
+            Ok(FileInputAttempt::Set)
+        })
+        .await;
+
+        match attempt {
+            Ok(FileInputAttempt::Set) => {
+                let _ = chromium_refresh_tab_snapshot(runtime, session_id, tab_id.as_str()).await;
+                return ChromiumActionOutcome {
+                    success: true,
+                    outcome: "file_input_set".to_owned(),
+                    error: String::new(),
+                    attempts,
+                };
+            }
+            Ok(FileInputAttempt::NotFileInput) => {
+                return ChromiumActionOutcome {
+                    success: false,
+                    outcome: "selector_not_file_input".to_owned(),
+                    error: format!(
+                        "selector '{selector}' does not target an input[type=file] element"
+                    ),
+                    attempts,
+                };
+            }
+            Ok(FileInputAttempt::Disabled) => {
+                return ChromiumActionOutcome {
+                    success: false,
+                    outcome: "selector_disabled".to_owned(),
+                    error: format!("selector '{selector}' is disabled"),
+                    attempts,
+                };
+            }
+            Ok(FileInputAttempt::NotFound) => {}
+            Err(error) => {
+                return ChromiumActionOutcome {
+                    success: false,
+                    outcome: "file_input_failed".to_owned(),
+                    error,
+                    attempts,
+                };
+            }
+        }
+        if started.elapsed() >= Duration::from_millis(timeout_ms) {
+            break;
+        }
+        let remaining_ms = timeout_ms.saturating_sub(started.elapsed().as_millis() as u64);
+        let sleep_ms = DEFAULT_ACTION_RETRY_INTERVAL_MS.min(remaining_ms.max(1));
+        tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+    }
+    ChromiumActionOutcome {
+        success: false,
+        outcome: "selector_not_found".to_owned(),
+        error: format!("selector '{selector}' was not found"),
+        attempts,
+    }
+}
+
+async fn write_chromium_upload_file(
+    runtime: &BrowserRuntimeState,
+    session_id: &str,
+    file_name: &str,
+    file_bytes: &[u8],
+) -> Result<PathBuf, String> {
+    let upload_dir = {
+        let chromium_sessions = runtime.chromium_sessions.lock().await;
+        let Some(chromium_session) = chromium_sessions.get(session_id) else {
+            return Err("chromium_session_not_found".to_owned());
+        };
+        chromium_session._profile_dir.path().join(UPLOADS_DIR)
+    };
+    fs::create_dir_all(upload_dir.as_path()).map_err(|error| {
+        format!(
+            "failed to initialize Chromium upload directory '{}': {error}",
+            upload_dir.display()
+        )
+    })?;
+    let file_name = sanitize_download_file_name(file_name);
+    let path = upload_dir.join(format!("{}-{}", Ulid::new(), file_name));
+    fs::write(path.as_path(), file_bytes).map_err(|error| {
+        format!("failed to stage uploaded browser file '{}': {error}", path.display())
+    })?;
+    Ok(path)
+}
+
 fn chromium_type_script(
     selector: &str,
     text: &str,

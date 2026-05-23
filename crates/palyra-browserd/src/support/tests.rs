@@ -5,7 +5,7 @@ use super::{
     enforce_non_loopback_bind_auth, navigate_with_guards, parse_daemon_bind_socket,
     persisted_snapshot_hash, persisted_snapshot_legacy_hash, record_chromium_remote_ip_incident,
     reset_dns_validation_tracking_for_tests, run_chromium_blocking, sha256_hex,
-    store_dns_nxdomain_cache, update_profile_state_metadata,
+    store_dns_nxdomain_cache, store_generated_artifact, update_profile_state_metadata,
     validate_restored_snapshot_against_profile, validate_target_url, validate_target_url_blocking,
     Args, BrowserActionLogEntryInternal, BrowserEngineMode, BrowserProfileRecord,
     BrowserRuntimeState, BrowserServiceImpl, BrowserTabRecord, ChromiumPrivateTargetPolicy,
@@ -193,6 +193,88 @@ async fn browser_service_records_failed_navigation_in_action_log() {
     assert!(
         inspected.console_log.iter().any(|entry| entry.message.contains("navigate failed")),
         "failed navigation should also appear in diagnostics"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn browser_service_sets_file_input_in_simulated_mode() {
+    let runtime = simulated_runtime_for_tests();
+    let service = BrowserServiceImpl { runtime: Arc::clone(&runtime) };
+    let created = create_test_session(&service, "user:ops").await;
+    let session_id = created.session_id.expect("session id should be present");
+
+    {
+        let mut sessions = runtime.sessions.lock().await;
+        let session = sessions.get_mut(session_id.ulid.as_str()).expect("session should exist");
+        let tab = session.active_tab_mut().expect("active tab should exist");
+        tab.last_url = Some("https://example.test/upload".to_owned());
+        tab.last_page_body =
+            r#"<html><body><input id="upload" type="file"></body></html>"#.to_owned();
+    }
+
+    let upload = service
+        .set_file_input(Request::new(browser_v1::SetFileInputRequest {
+            v: 1,
+            session_id: Some(session_id.clone()),
+            selector: "#upload".to_owned(),
+            file_name: "input.csv".to_owned(),
+            file_bytes: b"name,score\nalice,9\n".to_vec(),
+            timeout_ms: 1_000,
+            capture_failure_screenshot: false,
+            max_failure_screenshot_bytes: 0,
+        }))
+        .await
+        .expect("set_file_input should return")
+        .into_inner();
+
+    assert!(upload.success, "file input upload should succeed: {}", upload.error);
+    assert_eq!(upload.uploaded_file_name, "input.csv");
+    assert_eq!(upload.uploaded_file_bytes, 19);
+    assert_eq!(
+        upload.action_log.as_ref().map(|entry| entry.action_name.as_str()),
+        Some("set_file_input")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn browser_service_get_download_artifact_returns_content() {
+    let runtime = simulated_runtime_for_tests();
+    let service = BrowserServiceImpl { runtime: Arc::clone(&runtime) };
+    let created = create_test_session(&service, "user:ops").await;
+    let session_id = created.session_id.expect("session id should be present");
+    let content = b"name,score\nalice,9\n";
+    let artifact = store_generated_artifact(
+        runtime.as_ref(),
+        session_id.ulid.as_str(),
+        None,
+        "https://example.test/report.csv",
+        "report.csv",
+        "text/csv",
+        content,
+    )
+    .await
+    .expect("artifact should be stored");
+
+    let mut request = Request::new(browser_v1::GetDownloadArtifactRequest {
+        v: 1,
+        session_id: Some(session_id),
+        artifact_id: Some(proto::palyra::common::v1::CanonicalId {
+            ulid: artifact.artifact_id.clone(),
+        }),
+        max_bytes: DOWNLOAD_MAX_FILE_BYTES,
+    });
+    insert_principal(&mut request, "user:ops");
+    let fetched = service
+        .get_download_artifact(request)
+        .await
+        .expect("get_download_artifact should return")
+        .into_inner();
+
+    assert!(fetched.success, "download artifact fetch should succeed: {}", fetched.error);
+    assert_eq!(fetched.content, content);
+    assert_eq!(
+        fetched.artifact.and_then(|artifact| artifact.artifact_id).map(|id| id.ulid),
+        Some(artifact.artifact_id)
     );
 }
 

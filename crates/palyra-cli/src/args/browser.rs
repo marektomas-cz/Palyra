@@ -133,6 +133,24 @@ pub enum BrowserCommand {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    #[command(about = "Upload a local file through an input[type=file] element")]
+    Upload {
+        session_id: String,
+        #[arg(long, help = "CSS selector for the input[type=file] element")]
+        selector: String,
+        #[arg(long, value_name = "PATH", help = "Local file path to upload")]
+        file: String,
+        #[arg(long)]
+        timeout_ms: Option<u64>,
+        #[arg(long, default_value_t = false)]
+        capture_failure_screenshot: bool,
+        #[arg(long)]
+        max_failure_screenshot_bytes: Option<u64>,
+        #[arg(long, help = "Write a failure screenshot to this path when captured")]
+        output: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     #[command(about = "Clear an element and then type text into it")]
     Fill {
         session_id: String,
@@ -259,9 +277,18 @@ pub enum BrowserCommand {
         #[arg(long)]
         output: Option<String>,
     },
-    #[command(about = "List download artifacts for a browser session")]
+    #[command(about = "List or save download artifacts for a browser session")]
     Downloads {
         session_id: String,
+        #[arg(
+            long,
+            help = "Download artifact id to save; defaults to the latest artifact with --output"
+        )]
+        artifact_id: Option<String>,
+        #[arg(long, help = "Destination path for saving artifact bytes")]
+        output: Option<String>,
+        #[arg(long, help = "Maximum artifact bytes to fetch when saving")]
+        max_bytes: Option<u64>,
         #[arg(long)]
         limit: Option<u32>,
         #[arg(long, default_value_t = false)]
