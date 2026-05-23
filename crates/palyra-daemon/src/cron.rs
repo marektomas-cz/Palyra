@@ -76,6 +76,7 @@ const SYSTEM_DAEMON_PRINCIPAL: &str = "system:daemon";
 pub const MEMORY_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 pub const MEMORY_EMBEDDINGS_BACKFILL_INTERVAL: Duration = Duration::from_secs(10 * 60);
 const MEMORY_EMBEDDINGS_BACKFILL_BATCH_SIZE: usize = 64;
+const CRON_MAX_RUNS_EXHAUSTED_ERROR_KIND: &str = "cron_max_runs_exhausted";
 const OBJECTIVE_BUDGET_EXHAUSTED_ERROR_KIND: &str = "objective_budget_exhausted";
 const OBJECTIVE_BUDGET_EXHAUSTED_ACTION: &str = "budget_exhausted";
 const ROUTINE_APPROVAL_TIMEOUT_SECONDS: u32 = 900;
@@ -205,6 +206,12 @@ pub struct TriggerJobOptions {
 #[derive(Debug, Clone)]
 struct ObjectiveBudgetExhaustion {
     objective: ObjectiveRecord,
+    max_runs: u32,
+    completed_runs: u32,
+}
+
+#[derive(Debug, Clone)]
+struct CronMaxRunsExhaustion {
     max_runs: u32,
     completed_runs: u32,
 }
@@ -601,6 +608,17 @@ pub fn visible_next_run_at_unix_ms(job: &CronJobRecord) -> Option<i64> {
     } else {
         None
     }
+}
+
+#[must_use]
+pub fn max_runs_for_job(job: &CronJobRecord) -> Option<u32> {
+    max_runs_from_schedule_payload_json(job.schedule_payload_json.as_str())
+}
+
+fn max_runs_from_schedule_payload_json(schedule_payload_json: &str) -> Option<u32> {
+    let payload = serde_json::from_str::<Value>(schedule_payload_json).ok()?;
+    let value = payload.get("max_runs")?.as_u64()?;
+    u32::try_from(value).ok().filter(|max_runs| *max_runs > 0)
 }
 
 pub fn next_run_at_for_enabled_state(
@@ -1560,6 +1578,90 @@ async fn disable_objective_if_budget_exhausted(
     Ok(Some(exhaustion))
 }
 
+async fn disable_cron_if_max_runs_exhausted(
+    state: Arc<GatewayRuntimeState>,
+    job: &CronJobRecord,
+) -> Result<Option<CronMaxRunsExhaustion>, Status> {
+    let Some(exhaustion) = cron_max_runs_exhaustion_for_job(Arc::clone(&state), job).await? else {
+        return Ok(None);
+    };
+    apply_cron_max_runs_exhaustion(Arc::clone(&state), job).await?;
+    Ok(Some(exhaustion))
+}
+
+async fn cron_max_runs_exhaustion_for_job(
+    state: Arc<GatewayRuntimeState>,
+    job: &CronJobRecord,
+) -> Result<Option<CronMaxRunsExhaustion>, Status> {
+    let Some(max_runs) = max_runs_for_job(job) else {
+        return Ok(None);
+    };
+    let completed_runs =
+        count_budgeted_cron_runs_for_job(Arc::clone(&state), job.job_id.as_str(), max_runs).await?;
+    if completed_runs < max_runs {
+        return Ok(None);
+    }
+    Ok(Some(CronMaxRunsExhaustion { max_runs, completed_runs }))
+}
+
+async fn count_budgeted_cron_runs_for_job(
+    state: Arc<GatewayRuntimeState>,
+    job_id: &str,
+    stop_after: u32,
+) -> Result<u32, Status> {
+    if stop_after == 0 {
+        return Ok(0);
+    }
+    let mut after_run_id = None::<String>;
+    let mut count = 0_u32;
+    loop {
+        let (runs, next_after_run_id) =
+            state.list_cron_runs(Some(job_id.to_owned()), after_run_id.clone(), Some(500)).await?;
+        count = count.saturating_add(budgeted_cron_run_count(&runs));
+        if count >= stop_after {
+            return Ok(count);
+        }
+        let Some(next_after_run_id) = next_after_run_id else {
+            return Ok(count);
+        };
+        after_run_id = Some(next_after_run_id);
+    }
+}
+
+fn budgeted_cron_run_count(runs: &[CronRunRecord]) -> u32 {
+    runs.iter()
+        .filter(|run| is_budgeted_cron_run(run))
+        .fold(0_u32, |count, _| count.saturating_add(1))
+}
+
+fn is_budgeted_cron_run(run: &CronRunRecord) -> bool {
+    !run.status.is_active()
+        && run.orchestrator_run_id.is_some()
+        && run.error_kind.as_deref() != Some(CRON_MAX_RUNS_EXHAUSTED_ERROR_KIND)
+}
+
+async fn apply_cron_max_runs_exhaustion(
+    state: Arc<GatewayRuntimeState>,
+    job: &CronJobRecord,
+) -> Result<(), Status> {
+    state
+        .update_cron_job(
+            job.job_id.clone(),
+            CronJobUpdatePatch {
+                enabled: Some(false),
+                next_run_at_unix_ms: Some(None),
+                queued_run: Some(false),
+                ..CronJobUpdatePatch::default()
+            },
+        )
+        .await?;
+    Ok(())
+}
+
+fn cron_max_runs_exhausted_message(exhaustion: &CronMaxRunsExhaustion) -> String {
+    format!("cron max_runs exhausted ({}/{})", exhaustion.completed_runs, exhaustion.max_runs)
+}
+
 async fn objective_budget_exhaustion_for_job(
     state: Arc<GatewayRuntimeState>,
     job_id: &str,
@@ -1868,6 +1970,18 @@ async fn dispatch_job(
     manual_trigger: bool,
     options: TriggerJobOptions,
 ) -> Result<DispatchOutcome, Status> {
+    if let Some(exhaustion) = disable_cron_if_max_runs_exhausted(Arc::clone(&state), &job).await? {
+        let message = cron_max_runs_exhausted_message(&exhaustion);
+        return register_terminal(
+            Arc::clone(&state),
+            &job.job_id,
+            CronRunStatus::Skipped,
+            CRON_MAX_RUNS_EXHAUSTED_ERROR_KIND,
+            message.as_str(),
+        )
+        .await;
+    }
+
     if let Some(exhaustion) =
         disable_objective_if_budget_exhausted(Arc::clone(&state), &job).await?
     {
@@ -2095,6 +2209,8 @@ async fn run_job_with_retries(
 
         match result {
             Ok(terminal_status) => {
+                let cron_max_runs_exhausted =
+                    disable_cron_if_max_runs_exhausted(Arc::clone(&state), &job).await?.is_some();
                 let budget_exhausted =
                     disable_objective_if_budget_exhausted(Arc::clone(&state), &job)
                         .await?
@@ -2107,6 +2223,10 @@ async fn run_job_with_retries(
                     false,
                 ) {
                     pause_recurring_cron_after_policy_denied(Arc::clone(&state), &job).await?;
+                    wake_signal.notify_one();
+                    return Ok(());
+                }
+                if cron_max_runs_exhausted {
                     wake_signal.notify_one();
                     return Ok(());
                 }
@@ -2778,17 +2898,19 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        budgeted_objective_run_count, build_cron_prompt, build_scheduler_health_snapshot,
-        compute_misfire_recovery_plan, compute_next_run_after, cron_misfire_audit_payload,
-        cron_successful_completion_tool, cron_terminal_status_from_stream,
-        decide_concurrency_policy, load_periodic_reaudit_skills_index, normalize_schedule,
+        budgeted_cron_run_count, budgeted_objective_run_count, build_cron_prompt,
+        build_scheduler_health_snapshot, compute_misfire_recovery_plan, compute_next_run_after,
+        cron_misfire_audit_payload, cron_successful_completion_tool,
+        cron_terminal_status_from_stream, decide_concurrency_policy,
+        load_periodic_reaudit_skills_index, max_runs_for_job, normalize_schedule,
         now_unix_ms_or_fallback, parse_skill_reaudit_interval, periodic_reaudit_targets,
         routine_approval_subject_id, routines_automation_enabled,
         scheduled_routine_requires_first_run_approval, scheduled_routine_run_metadata_upsert,
         scheduler_attempt_failure, should_pause_recurring_cron_after_policy_denied,
         should_repair_stale_cron_run, ConcurrencyDecision, CronMatcher, CronMisfireRecoveryAction,
         CronTimezoneMode, InstalledSkillRecord, InstalledSkillsIndex, SchedulerHealthInput,
-        TriggerJobOptions, OBJECTIVE_BUDGET_EXHAUSTED_ERROR_KIND, SCHEDULER_STALE_RUN_AFTER_MS,
+        TriggerJobOptions, CRON_MAX_RUNS_EXHAUSTED_ERROR_KIND,
+        OBJECTIVE_BUDGET_EXHAUSTED_ERROR_KIND, SCHEDULER_STALE_RUN_AFTER_MS,
         SKILLS_INDEX_FILE_NAME, SKILLS_LAYOUT_VERSION,
     };
     use crate::access_control::{AccessRegistry, FEATURE_ROUTINES_AUTOMATION};
@@ -2870,6 +2992,35 @@ mod tests {
         let runs = vec![succeeded, failed, active, skipped_without_orchestrator, budget_skip];
 
         assert_eq!(budgeted_objective_run_count(&runs), 2);
+    }
+
+    #[test]
+    fn budgeted_cron_run_count_excludes_cap_skip_records() {
+        let mut succeeded = sample_cron_run(CronRunStatus::Succeeded, 10);
+        succeeded.orchestrator_run_id = Some("orch-1".to_owned());
+        let mut denied = sample_cron_run(CronRunStatus::Denied, 20);
+        denied.orchestrator_run_id = Some("orch-2".to_owned());
+        let active = sample_cron_run(CronRunStatus::Running, 30);
+        let skipped_without_orchestrator = sample_cron_run(CronRunStatus::Skipped, 40);
+        let mut cap_skip = sample_cron_run(CronRunStatus::Skipped, 50);
+        cap_skip.orchestrator_run_id = Some("orch-3".to_owned());
+        cap_skip.error_kind = Some(CRON_MAX_RUNS_EXHAUSTED_ERROR_KIND.to_owned());
+
+        let runs = vec![succeeded, denied, active, skipped_without_orchestrator, cap_skip];
+
+        assert_eq!(budgeted_cron_run_count(&runs), 2);
+    }
+
+    #[test]
+    fn max_runs_for_job_reads_positive_schedule_payload_limit() {
+        let mut job =
+            sample_every_job("01ARZ3NDEKTSV4RRFFQ69G5FB0", Some(1_000), CronMisfirePolicy::Skip);
+        job.schedule_payload_json = json!({ "interval_ms": 1_000_i64, "max_runs": 2 }).to_string();
+
+        assert_eq!(max_runs_for_job(&job), Some(2));
+
+        job.schedule_payload_json = json!({ "interval_ms": 1_000_i64, "max_runs": 0 }).to_string();
+        assert_eq!(max_runs_for_job(&job), None);
     }
 
     #[test]

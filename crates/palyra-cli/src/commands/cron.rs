@@ -68,6 +68,7 @@ pub(crate) async fn run_cron_async(command: CronCommand) -> Result<()> {
             retry_backoff_ms,
             misfire,
             jitter_ms,
+            max_runs,
             owner,
             channel,
             session_key,
@@ -93,6 +94,7 @@ pub(crate) async fn run_cron_async(command: CronCommand) -> Result<()> {
                     retry_backoff_ms,
                     misfire,
                     jitter_ms,
+                    max_runs,
                     owner,
                     channel,
                     session_key,
@@ -119,6 +121,7 @@ pub(crate) async fn run_cron_async(command: CronCommand) -> Result<()> {
             retry_backoff_ms,
             misfire,
             jitter_ms,
+            max_runs,
             owner,
             channel,
             session_key,
@@ -139,6 +142,7 @@ pub(crate) async fn run_cron_async(command: CronCommand) -> Result<()> {
                 || retry_backoff_ms.is_some()
                 || misfire.is_some()
                 || jitter_ms.is_some()
+                || max_runs.is_some()
                 || owner.is_some()
                 || channel.is_some()
                 || session_key.is_some()
@@ -189,6 +193,10 @@ pub(crate) async fn run_cron_async(command: CronCommand) -> Result<()> {
                     misfire: misfire.unwrap_or_else(|| existing_misfire_policy(routine)),
                     jitter_ms: jitter_ms.unwrap_or_else(|| {
                         json_i64_at(routine, "/jitter_ms").unwrap_or_default().max(0) as u64
+                    }),
+                    max_runs: max_runs.or_else(|| {
+                        json_i64_at(routine, "/max_runs")
+                            .and_then(|value| u32::try_from(value).ok())
                     }),
                     owner: Some(owner.unwrap_or_else(|| {
                         json_optional_string_at(routine, "/owner_principal").unwrap_or_default()
@@ -337,6 +345,7 @@ fn build_schedule_routine_payload(
         Value::String(cron_misfire_policy_text(config.misfire).to_owned()),
     );
     payload.insert("jitter_ms".to_owned(), Value::from(config.jitter_ms));
+    insert_optional_u32(&mut payload, "max_runs", config.max_runs)?;
 
     if let Some(existing) = existing {
         preserve_existing_routine_fields(existing, &mut payload);
@@ -752,6 +761,20 @@ fn insert_optional_string(payload: &mut Map<String, Value>, key: &str, value: Op
     }
 }
 
+fn insert_optional_u32(
+    payload: &mut Map<String, Value>,
+    key: &str,
+    value: Option<u32>,
+) -> Result<()> {
+    if let Some(value) = value {
+        if value == 0 {
+            anyhow::bail!("--{} must be greater than zero", key.replace('_', "-"));
+        }
+        payload.insert(key.to_owned(), Value::from(value));
+    }
+    Ok(())
+}
+
 fn cron_schedule_type_text(value: CronScheduleTypeArg) -> &'static str {
     match value {
         CronScheduleTypeArg::Cron => "cron",
@@ -791,6 +814,7 @@ struct ScheduleRoutineConfig {
     retry_backoff_ms: u64,
     misfire: CronMisfirePolicyArg,
     jitter_ms: u64,
+    max_runs: Option<u32>,
     owner: Option<String>,
     channel: Option<String>,
     session_key: Option<String>,
@@ -841,6 +865,7 @@ mod tests {
                 retry_backoff_ms: 1_000,
                 misfire: CronMisfirePolicyArg::Skip,
                 jitter_ms: 0,
+                max_runs: Some(2),
                 owner: None,
                 channel: None,
                 session_key: None,
@@ -862,6 +887,7 @@ mod tests {
             payload.get("schedule_timezone").and_then(serde_json::Value::as_str),
             Some("local")
         );
+        assert_eq!(payload.get("max_runs").and_then(serde_json::Value::as_u64), Some(2));
     }
 
     #[test]
@@ -885,6 +911,7 @@ mod tests {
                 retry_backoff_ms: 1_000,
                 misfire: CronMisfirePolicyArg::Skip,
                 jitter_ms: 0,
+                max_runs: None,
                 owner: None,
                 channel: None,
                 session_key: None,
@@ -921,6 +948,7 @@ mod tests {
                     retry_backoff_ms: 1_000,
                     misfire: CronMisfirePolicyArg::Skip,
                     jitter_ms: 0,
+                    max_runs: None,
                     owner: None,
                     channel: None,
                     session_key: None,

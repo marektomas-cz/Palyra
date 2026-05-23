@@ -41,6 +41,8 @@ Options:
           [default: skip] [possible values: skip, catch-up]
       --jitter-ms <JITTER_MS>
           [default: 0]
+      --max-runs <COUNT>
+          Automatically disable scheduled routines after this many executed runs
       --delivery-mode <DELIVERY_MODE>
           [default: same-channel] [possible values: same-channel, specific-channel, local-only, logs-only]
       --delivery-channel <DELIVERY_CHANNEL>

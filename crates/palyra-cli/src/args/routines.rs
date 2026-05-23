@@ -239,6 +239,12 @@ pub struct RoutineUpsertCommand {
     pub misfire: CronMisfirePolicyArg,
     #[arg(long, default_value_t = 0)]
     pub jitter_ms: u64,
+    #[arg(
+        long,
+        value_name = "COUNT",
+        help = "Automatically disable scheduled routines after this many executed runs"
+    )]
+    pub max_runs: Option<u32>,
     #[arg(long, value_enum, default_value_t = RoutineDeliveryModeArg::SameChannel)]
     pub delivery_mode: RoutineDeliveryModeArg,
     #[arg(long)]

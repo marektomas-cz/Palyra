@@ -85,6 +85,12 @@ pub enum CronCommand {
         misfire: CronMisfirePolicyArg,
         #[arg(long, default_value_t = 0)]
         jitter_ms: u64,
+        #[arg(
+            long,
+            value_name = "COUNT",
+            help = "Automatically disable the job after this many executed runs"
+        )]
+        max_runs: Option<u32>,
         #[arg(long)]
         owner: Option<String>,
         #[arg(long)]
@@ -149,6 +155,12 @@ pub enum CronCommand {
         misfire: Option<CronMisfirePolicyArg>,
         #[arg(long)]
         jitter_ms: Option<u64>,
+        #[arg(
+            long,
+            value_name = "COUNT",
+            help = "Automatically disable the job after this many executed runs"
+        )]
+        max_runs: Option<u32>,
         #[arg(long)]
         owner: Option<String>,
         #[arg(long)]

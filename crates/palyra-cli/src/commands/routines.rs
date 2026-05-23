@@ -93,6 +93,7 @@ pub(crate) async fn run_routines_async(command: RoutinesCommand) -> Result<()> {
                 retry_backoff_ms,
                 misfire,
                 jitter_ms,
+                max_runs,
                 delivery_mode,
                 delivery_channel,
                 delivery_failure_mode,
@@ -136,6 +137,7 @@ pub(crate) async fn run_routines_async(command: RoutinesCommand) -> Result<()> {
                 retry_backoff_ms,
                 misfire,
                 jitter_ms,
+                max_runs,
                 delivery_mode,
                 delivery_channel,
                 delivery_failure_mode,
@@ -935,6 +937,7 @@ fn build_routine_upsert_payload(args: RoutineUpsertArgs) -> Result<Map<String, V
         retry_backoff_ms,
         misfire,
         jitter_ms,
+        max_runs,
         delivery_mode,
         delivery_channel,
         delivery_failure_mode,
@@ -995,6 +998,7 @@ fn build_routine_upsert_payload(args: RoutineUpsertArgs) -> Result<Map<String, V
         Value::String(cron_misfire_policy_text(misfire).to_owned()),
     );
     payload.insert("jitter_ms".to_owned(), Value::from(jitter_ms));
+    insert_optional_u32(&mut payload, "max_runs", max_runs)?;
     payload.insert("delivery_mode".to_owned(), Value::String(delivery_mode.as_str().to_owned()));
     insert_optional_string(&mut payload, "delivery_channel", delivery_channel);
     insert_optional_string(
@@ -1328,6 +1332,20 @@ fn insert_optional_bool(payload: &mut Map<String, Value>, key: &str, value: Opti
     }
 }
 
+fn insert_optional_u32(
+    payload: &mut Map<String, Value>,
+    key: &str,
+    value: Option<u32>,
+) -> Result<()> {
+    if let Some(value) = value {
+        if value == 0 {
+            anyhow::bail!("--{} must be greater than zero", key.replace('_', "-"));
+        }
+        payload.insert(key.to_owned(), Value::from(value));
+    }
+    Ok(())
+}
+
 fn routine_array(payload: &Value) -> &[Value] {
     payload.pointer("/routines").and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[])
 }
@@ -1451,6 +1469,7 @@ struct RoutineUpsertArgs {
     retry_backoff_ms: u64,
     misfire: CronMisfirePolicyArg,
     jitter_ms: u64,
+    max_runs: Option<u32>,
     delivery_mode: RoutineDeliveryModeArg,
     delivery_channel: Option<String>,
     delivery_failure_mode: Option<RoutineDeliveryModeArg>,

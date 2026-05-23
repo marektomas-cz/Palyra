@@ -101,6 +101,8 @@ pub(crate) struct ConsoleRoutineUpsertRequest {
     #[serde(default)]
     jitter_ms: Option<u64>,
     #[serde(default)]
+    max_runs: Option<u32>,
+    #[serde(default)]
     delivery_mode: Option<String>,
     #[serde(default)]
     delivery_channel: Option<String>,
@@ -445,7 +447,12 @@ pub(crate) async fn console_routine_upsert_handler(
         ensure_job_owner(job, session.context.principal.as_str())?;
     }
 
-    let schedule = resolve_routine_schedule(&payload, trigger_kind, state.cron_timezone_mode)?;
+    let schedule = resolve_routine_schedule(
+        &payload,
+        trigger_kind,
+        state.cron_timezone_mode,
+        existing_job.as_ref(),
+    )?;
     let workdir = if payload.workdir.is_some() {
         normalize_optional_workdir(payload.workdir.as_deref())?
     } else {
@@ -1975,6 +1982,7 @@ fn routine_view_from_parts(job: &CronJobRecord, metadata: &RoutineMetadataRecord
         },
         "misfire_policy": job.misfire_policy.as_str(),
         "jitter_ms": job.jitter_ms,
+        "max_runs": cron::max_runs_for_job(job),
         "trigger_kind": metadata.trigger_kind.as_str(),
         "trigger_payload": serde_json::from_str::<Value>(metadata.trigger_payload_json.as_str()).unwrap_or_else(|_| json!({ "raw": metadata.trigger_payload_json })),
         "run_mode": metadata.execution.run_mode.as_str(),
@@ -2006,8 +2014,14 @@ fn resolve_routine_schedule(
     payload: &ConsoleRoutineUpsertRequest,
     trigger_kind: RoutineTriggerKind,
     timezone_mode: CronTimezoneMode,
+    existing_job: Option<&CronJobRecord>,
 ) -> Result<ScheduleResolution, Response> {
     if trigger_kind != RoutineTriggerKind::Schedule {
+        if payload.max_runs.is_some() {
+            return Err(runtime_status_response(tonic::Status::invalid_argument(
+                "max_runs is only supported for scheduled routines",
+            )));
+        }
         return Ok(ScheduleResolution {
             schedule_type: CronScheduleType::At,
             schedule_payload_json: shadow_manual_schedule_payload_json(),
@@ -2028,9 +2042,14 @@ fn resolve_routine_schedule(
             unix_ms_now().map_err(internal_console_error)?,
         )
         .map_err(routine_registry_error_response)?;
+        let schedule_payload_json = schedule_payload_with_max_runs(
+            preview.schedule_payload_json,
+            payload.max_runs,
+            existing_job,
+        )?;
         return Ok(ScheduleResolution {
             schedule_type: parse_schedule_type(preview.schedule_type.as_str())?,
-            schedule_payload_json: preview.schedule_payload_json,
+            schedule_payload_json,
             next_run_at_unix_ms: preview.next_run_at_unix_ms,
         });
     }
@@ -2042,11 +2061,45 @@ fn resolve_routine_schedule(
         schedule_timezone_mode,
     )
     .map_err(runtime_status_response)?;
+    let schedule_payload_json = schedule_payload_with_max_runs(
+        normalized.schedule_payload_json,
+        payload.max_runs,
+        existing_job,
+    )?;
     Ok(ScheduleResolution {
         schedule_type: normalized.schedule_type,
-        schedule_payload_json: normalized.schedule_payload_json,
+        schedule_payload_json,
         next_run_at_unix_ms: normalized.next_run_at_unix_ms,
     })
+}
+
+fn schedule_payload_with_max_runs(
+    schedule_payload_json: String,
+    requested_max_runs: Option<u32>,
+    existing_job: Option<&CronJobRecord>,
+) -> Result<String, Response> {
+    let max_runs = match requested_max_runs {
+        Some(0) => {
+            return Err(runtime_status_response(tonic::Status::invalid_argument(
+                "max_runs must be greater than zero",
+            )))
+        }
+        Some(value) => Some(value),
+        None => existing_job.and_then(cron::max_runs_for_job),
+    };
+    let Some(max_runs) = max_runs else {
+        return Ok(schedule_payload_json);
+    };
+    let mut schedule_payload = serde_json::from_str::<Value>(schedule_payload_json.as_str())
+        .map_err(|error| internal_console_error(anyhow::Error::new(error)))?;
+    let Some(object) = schedule_payload.as_object_mut() else {
+        return Err(runtime_status_response(tonic::Status::internal(
+            "schedule payload must be a JSON object",
+        )));
+    };
+    object.insert("max_runs".to_owned(), Value::from(max_runs));
+    serde_json::to_string(&schedule_payload)
+        .map_err(|error| internal_console_error(anyhow::Error::new(error)))
 }
 
 fn build_console_schedule(
@@ -2717,6 +2770,7 @@ mod tests {
             &payload,
             RoutineTriggerKind::Schedule,
             CronTimezoneMode::Utc,
+            None,
         )
         .expect("explicit schedule timezone should override daemon default");
         let schedule_payload: serde_json::Value =
@@ -2724,6 +2778,43 @@ mod tests {
                 .expect("schedule payload should be valid json");
         assert_eq!(schedule_payload["expression"], json!("0 9 * * 1"));
         assert_eq!(schedule_payload["timezone"], json!("local"));
+    }
+
+    #[test]
+    fn routine_schedule_resolution_embeds_max_runs_limit() {
+        let mut payload = schedule_upsert_payload();
+        payload.schedule_type = Some("every".to_owned());
+        payload.every_interval_ms = Some(60_000);
+        payload.max_runs = Some(2);
+
+        let schedule = super::resolve_routine_schedule(
+            &payload,
+            RoutineTriggerKind::Schedule,
+            CronTimezoneMode::Utc,
+            None,
+        )
+        .expect("max_runs should be accepted for scheduled routines");
+        let schedule_payload: serde_json::Value =
+            serde_json::from_str(schedule.schedule_payload_json.as_str())
+                .expect("schedule payload should be valid json");
+        assert_eq!(schedule_payload["interval_ms"], json!(60_000));
+        assert_eq!(schedule_payload["max_runs"], json!(2));
+    }
+
+    #[test]
+    fn routine_schedule_resolution_rejects_max_runs_for_non_schedule_trigger() {
+        let mut payload = schedule_upsert_payload();
+        payload.max_runs = Some(2);
+
+        let response = super::resolve_routine_schedule(
+            &payload,
+            RoutineTriggerKind::Manual,
+            CronTimezoneMode::Utc,
+            None,
+        )
+        .expect_err("max_runs should not be silently ignored outside scheduled routines");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[test]
@@ -2768,6 +2859,7 @@ mod tests {
             retry_backoff_ms: None,
             misfire_policy: None,
             jitter_ms: None,
+            max_runs: None,
             delivery_mode: None,
             delivery_channel: None,
             delivery_failure_mode: None,

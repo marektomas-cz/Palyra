@@ -1037,7 +1037,7 @@ category = "nested_surface"
 status = "done"
 summary = "Cron update workflow with edit alias."
 required_aliases = ["edit"]
-required_flags = ["id", "prompt-stdin", "timezone"]
+required_flags = ["id", "prompt-stdin", "timezone", "max-runs"]
 
 [entries.snapshot]
 path = "cron update"
@@ -1048,7 +1048,7 @@ path = "cron add"
 category = "nested_surface"
 status = "done"
 summary = "Cron creation contract."
-required_flags = ["name", "prompt", "prompt-stdin", "schedule-type", "schedule", "timezone"]
+required_flags = ["name", "prompt", "prompt-stdin", "schedule-type", "schedule", "timezone", "max-runs"]
 
 [entries.snapshot]
 path = "cron add"
@@ -1084,7 +1084,7 @@ category = "nested_surface"
 status = "done"
 summary = "Unified routine upsert contract for schedule and event-driven triggers."
 required_aliases = ["apply"]
-required_flags = ["name", "prompt", "trigger-kind"]
+required_flags = ["name", "prompt", "trigger-kind", "max-runs"]
 
 [entries.snapshot]
 path = "routines upsert"

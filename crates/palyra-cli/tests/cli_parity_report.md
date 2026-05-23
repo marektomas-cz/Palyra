@@ -114,11 +114,11 @@ It distinguishes expected parity posture (`done` / `partial` / `intentional_devi
 | `profile clone` | `nested_surface` | `done` | `verified` | `profile-clone-help.txt` | - | `--label`, `--environment`, `--color`, `--risk-level`, `--strict-mode`, `--set-default`, `--force` | - |
 | `profile export` | `nested_surface` | `done` | `verified` | `profile-export-help.txt` | - | `--output`, `--mode`, `--password-stdin` | - |
 | `profile import` | `nested_surface` | `done` | `verified` | `profile-import-help.txt` | - | `--input`, `--name`, `--password-stdin`, `--set-default`, `--force` | - |
-| `cron update` | `nested_surface` | `done` | `verified` | `cron-update-help.txt` | `edit` | `--id`, `--prompt-stdin`, `--timezone` | - |
-| `cron add` | `nested_surface` | `done` | `verified` | `cron-add-help.txt` | - | `--name`, `--prompt`, `--prompt-stdin`, `--schedule-type`, `--schedule`, `--timezone` | - |
+| `cron update` | `nested_surface` | `done` | `verified` | `cron-update-help.txt` | `edit` | `--id`, `--prompt-stdin`, `--timezone`, `--max-runs` | - |
+| `cron add` | `nested_surface` | `done` | `verified` | `cron-add-help.txt` | - | `--name`, `--prompt`, `--prompt-stdin`, `--schedule-type`, `--schedule`, `--timezone`, `--max-runs` | - |
 | `cron delete` | `nested_surface` | `done` | `verified` | `cron-delete-help.txt` | `rm` | `--id` | - |
 | `cron logs` | `nested_surface` | `done` | `verified` | `cron-logs-help.txt` | `runs` | `--id`, `--limit` | - |
-| `routines upsert` | `nested_surface` | `done` | `verified` | `routines-upsert-help.txt` | `apply` | `--name`, `--prompt`, `--trigger-kind` | - |
+| `routines upsert` | `nested_surface` | `done` | `verified` | `routines-upsert-help.txt` | `apply` | `--name`, `--prompt`, `--trigger-kind`, `--max-runs` | - |
 | `routines create-from-template` | `nested_surface` | `done` | `verified` | `routines-create-from-template-help.txt` | - | `--template-id` | - |
 | `routines import` | `nested_surface` | `done` | `verified` | `routines-import-help.txt` | - | - | - |
 | `routines logs` | `nested_surface` | `done` | `verified` | `routines-logs-help.txt` | `runs` | `--id`, `--limit` | - |

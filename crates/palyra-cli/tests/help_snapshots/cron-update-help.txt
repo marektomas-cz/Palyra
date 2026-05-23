@@ -27,6 +27,8 @@ Options:
           [possible values: skip, catch-up]
       --jitter-ms <JITTER_MS>
 
+      --max-runs <COUNT>
+          Automatically disable the job after this many executed runs
       --owner <OWNER>
 
       --channel <CHANNEL>
