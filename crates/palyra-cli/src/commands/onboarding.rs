@@ -1039,7 +1039,7 @@ fn gateway_runtime_status() -> (bool, String) {
 }
 
 fn diagnostic_endpoint_url(raw_url: &str) -> String {
-    redact_url(raw_url)
+    redact_url_strict(raw_url)
 }
 
 fn tcp_url_reachable(raw_url: &str, timeout: Duration, endpoint_label: &str) -> Result<()> {

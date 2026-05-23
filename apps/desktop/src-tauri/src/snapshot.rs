@@ -12,7 +12,7 @@ use palyra_common::{
     config_system::parse_document_with_migration,
     daemon_config_schema::RootFileConfig,
     default_config_search_paths, parse_config_path, parse_daemon_bind_socket,
-    redaction::{redact_auth_error, redact_url},
+    redaction::{redact_auth_error_strict, redact_url_strict},
 };
 use palyra_control_plane::{self as control_plane, ControlPlaneClient, ControlPlaneClientConfig};
 use reqwest::{Client, Url};
@@ -1497,7 +1497,7 @@ pub(crate) fn is_error_like_key(key: &str) -> bool {
 }
 
 pub(crate) fn sanitize_log_line(raw: &str) -> String {
-    let mut line = redact_auth_error(raw);
+    let mut line = redact_auth_error_strict(raw);
     line = redact_inline_urls(line.as_str());
     line.trim().to_owned()
 }
@@ -1546,12 +1546,12 @@ pub(crate) fn sanitize_token_with_url(token: &str) -> String {
     let suffix = &trimmed[end..];
 
     if core.starts_with("http://") || core.starts_with("https://") {
-        return format!("{prefix}{}{suffix}", redact_url(core));
+        return format!("{prefix}{}{suffix}", redact_url_strict(core));
     }
 
     if let Some((key, value)) = core.split_once('=') {
         if value.starts_with("http://") || value.starts_with("https://") {
-            return format!("{prefix}{key}={}{}", redact_url(value), suffix);
+            return format!("{prefix}{key}={}{}", redact_url_strict(value), suffix);
         }
     }
 

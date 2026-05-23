@@ -28,6 +28,12 @@ const SENSITIVE_KEY_MARKERS: &[&str] = &[
     "x_goog_signature",
 ];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RedactionStrictness {
+    Heuristic,
+    Diagnostic,
+}
+
 #[must_use]
 pub fn is_sensitive_key(key: &str) -> bool {
     let normalized = normalize_key(key);
@@ -68,6 +74,15 @@ pub fn redact_header(name: &str, value: &str) -> String {
 
 #[must_use]
 pub fn redact_url(raw: &str) -> String {
+    redact_url_with_strictness(raw, RedactionStrictness::Heuristic)
+}
+
+#[must_use]
+pub fn redact_url_strict(raw: &str) -> String {
+    redact_url_with_strictness(raw, RedactionStrictness::Diagnostic)
+}
+
+fn redact_url_with_strictness(raw: &str, strictness: RedactionStrictness) -> String {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return String::new();
@@ -78,7 +93,7 @@ pub fn redact_url(raw: &str) -> String {
     let mut output = redact_url_userinfo(base);
 
     if let Some(query) = query {
-        let redacted = redact_query_pairs(query);
+        let redacted = redact_query_pairs(query, strictness);
         if !redacted.is_empty() {
             output.push('?');
             output.push_str(redacted.as_str());
@@ -87,13 +102,27 @@ pub fn redact_url(raw: &str) -> String {
 
     if let Some(fragment) = fragment {
         output.push('#');
-        output.push_str(redact_query_pairs(fragment).as_str());
+        output.push_str(redact_query_pairs(fragment, strictness).as_str());
     }
     output
 }
 
 #[must_use]
 pub fn redact_auth_error(message: &str) -> String {
+    redact_auth_error_with_strictness(message, RedactionStrictness::Heuristic)
+}
+
+#[must_use]
+pub fn redact_auth_error_strict(message: &str) -> String {
+    redact_auth_error_with_strictness(message, RedactionStrictness::Diagnostic)
+}
+
+#[must_use]
+pub fn redact_diagnostic_text(message: &str) -> String {
+    redact_auth_error_strict(redact_url_segments_in_text_strict(message).as_str())
+}
+
+fn redact_auth_error_with_strictness(message: &str, strictness: RedactionStrictness) -> String {
     let mut output = String::with_capacity(message.len());
     let mut token = String::new();
     let mut redact_next_bearer = false;
@@ -103,6 +132,7 @@ pub fn redact_auth_error(message: &str) -> String {
             flush_redacted_token(
                 token.as_str(),
                 redact_next_bearer,
+                strictness,
                 &mut output,
                 &mut redact_next_bearer,
             );
@@ -113,18 +143,36 @@ pub fn redact_auth_error(message: &str) -> String {
         token.push(ch);
     }
 
-    flush_redacted_token(token.as_str(), redact_next_bearer, &mut output, &mut redact_next_bearer);
+    flush_redacted_token(
+        token.as_str(),
+        redact_next_bearer,
+        strictness,
+        &mut output,
+        &mut redact_next_bearer,
+    );
     output
 }
 
 #[must_use]
 pub fn redact_url_segments_in_text(raw: &str) -> String {
+    redact_url_segments_in_text_with_strictness(raw, RedactionStrictness::Heuristic)
+}
+
+#[must_use]
+pub fn redact_url_segments_in_text_strict(raw: &str) -> String {
+    redact_url_segments_in_text_with_strictness(raw, RedactionStrictness::Diagnostic)
+}
+
+fn redact_url_segments_in_text_with_strictness(
+    raw: &str,
+    strictness: RedactionStrictness,
+) -> String {
     let mut output = String::with_capacity(raw.len());
     let mut token = String::new();
 
     for ch in raw.chars() {
         if ch.is_whitespace() {
-            flush_redacted_url_token(token.as_str(), &mut output);
+            flush_redacted_url_token(token.as_str(), strictness, &mut output);
             token.clear();
             output.push(ch);
             continue;
@@ -132,13 +180,14 @@ pub fn redact_url_segments_in_text(raw: &str) -> String {
         token.push(ch);
     }
 
-    flush_redacted_url_token(token.as_str(), &mut output);
+    flush_redacted_url_token(token.as_str(), strictness, &mut output);
     output
 }
 
 fn flush_redacted_token(
     token: &str,
     redact_next_bearer: bool,
+    strictness: RedactionStrictness,
     output: &mut String,
     next_bearer_state: &mut bool,
 ) {
@@ -157,19 +206,19 @@ fn flush_redacted_token(
     }
 
     let (core, suffix) = split_trailing_punctuation(token);
-    let processed = redact_assignment_token(core);
+    let processed = redact_assignment_token(core, strictness);
     output.push_str(processed.as_ref());
     output.push_str(suffix);
 
     *next_bearer_state = should_redact_following_bearer_token(core);
 }
 
-fn flush_redacted_url_token(token: &str, output: &mut String) {
+fn flush_redacted_url_token(token: &str, strictness: RedactionStrictness, output: &mut String) {
     if token.is_empty() {
         return;
     }
     if looks_like_url_token(token) {
-        output.push_str(redact_url(token).as_str());
+        output.push_str(redact_url_with_strictness(token, strictness).as_str());
     } else {
         output.push_str(token);
     }
@@ -191,12 +240,12 @@ fn looks_like_url_token(token: &str) -> bool {
     base.starts_with('/') || base.starts_with("./") || base.starts_with("../") || base.contains('.')
 }
 
-fn redact_assignment_token(token: &str) -> Cow<'_, str> {
+fn redact_assignment_token(token: &str, strictness: RedactionStrictness) -> Cow<'_, str> {
     if token.is_empty() {
         return Cow::Borrowed(token);
     }
     if let Some((key, separator, value)) = split_assignment(token) {
-        if should_redact_assignment_value(key, value) {
+        if should_redact_assignment_value(key, value, strictness) {
             return Cow::Owned(format!("{key}{separator}{REDACTED}"));
         }
     }
@@ -215,9 +264,12 @@ fn should_redact_following_bearer_token(token: &str) -> bool {
     false
 }
 
-fn should_redact_assignment_value(key: &str, value: &str) -> bool {
+fn should_redact_assignment_value(key: &str, value: &str, strictness: RedactionStrictness) -> bool {
     if value.is_empty() || !assignment_key_is_plain(key) || !is_sensitive_key(key) {
         return false;
+    }
+    if strictness == RedactionStrictness::Diagnostic {
+        return true;
     }
     if normalize_key(key) == "token" {
         return value_looks_like_secret_token(value);
@@ -290,14 +342,14 @@ fn split_query_pair(pair: &str) -> (&str, &str) {
     }
 }
 
-fn redact_query_pairs(raw: &str) -> String {
+fn redact_query_pairs(raw: &str, strictness: RedactionStrictness) -> String {
     let mut redacted_pairs = Vec::new();
     for pair in raw.split('&') {
         if pair.is_empty() {
             continue;
         }
         let (key, value) = split_query_pair(pair);
-        if should_redact_assignment_value(key, value) {
+        if should_redact_assignment_value(key, value, strictness) {
             redacted_pairs.push(format!("{key}={REDACTED}"));
         } else if value.is_empty() {
             redacted_pairs.push(key.to_owned());
@@ -334,8 +386,8 @@ fn normalize_key(key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_sensitive_key, redact_auth_error, redact_header, redact_url,
-        redact_url_segments_in_text, REDACTED,
+        is_sensitive_key, redact_auth_error, redact_auth_error_strict, redact_diagnostic_text,
+        redact_header, redact_url, redact_url_segments_in_text, redact_url_strict, REDACTED,
     };
 
     #[test]
@@ -380,6 +432,18 @@ mod tests {
     }
 
     #[test]
+    fn strict_url_redaction_masks_short_sensitive_query_values() {
+        let redacted = redact_url_strict(
+            "https://user:pass@example.test/path?token=abc&mode=full#access_token=x",
+        );
+
+        assert_eq!(
+            redacted,
+            "https://example.test/path?token=<redacted>&mode=full#access_token=<redacted>"
+        );
+    }
+
+    #[test]
     fn url_redaction_removes_embedded_userinfo_credentials() {
         let redacted = redact_url("https://user:pass@example.test/path");
         assert_eq!(redacted, "https://example.test/path");
@@ -419,6 +483,17 @@ mod tests {
     }
 
     #[test]
+    fn strict_auth_error_redaction_masks_short_sensitive_assignments() {
+        let redacted =
+            redact_auth_error_strict("provider failed: token=abc authorization=topsecret code=ok");
+
+        assert!(redacted.contains("token=<redacted>"), "{redacted}");
+        assert!(redacted.contains("authorization=<redacted>"), "{redacted}");
+        assert!(redacted.contains("code=ok"), "{redacted}");
+        assert!(!redacted.contains("token=abc"), "{redacted}");
+    }
+
+    #[test]
     fn auth_error_redaction_masks_authorization_bearer_with_following_token() {
         let redacted =
             redact_auth_error("error: authorization=Bearer SECRET_TOKEN oauth=Bearer NEXT_TOKEN");
@@ -454,5 +529,17 @@ mod tests {
         let source = "document.cookie.match(/(?:^|; )s057_user=([^;]*)/)";
 
         assert_eq!(redact_url_segments_in_text(source), source);
+    }
+
+    #[test]
+    fn diagnostic_text_redacts_url_segments_and_inline_assignments_strictly() {
+        let redacted = redact_diagnostic_text(
+            "failed http://127.0.0.1:7443?token=abc&mode=ok provider token=alpha",
+        );
+
+        assert!(redacted.contains("mode=ok"), "{redacted}");
+        assert!(redacted.contains("token=<redacted>"), "{redacted}");
+        assert!(!redacted.contains("token=abc"), "{redacted}");
+        assert!(!redacted.contains("token=alpha"), "{redacted}");
     }
 }

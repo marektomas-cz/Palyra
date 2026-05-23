@@ -1,7 +1,7 @@
 use std::{fmt, io::Write, process::ExitCode};
 
 use anyhow::{Context, Result};
-use palyra_common::redaction::{redact_auth_error, redact_url_segments_in_text};
+use palyra_common::redaction::redact_diagnostic_text;
 use serde::Serialize;
 
 use crate::{app, args::OutputFormatArg};
@@ -115,7 +115,7 @@ fn sanitize_text_output_line(line: &str) -> String {
 }
 
 pub(crate) fn sanitize_diagnostic_text(line: &str) -> String {
-    redact_auth_error(redact_url_segments_in_text(line).as_str())
+    redact_diagnostic_text(line)
 }
 
 pub(crate) fn preferred_json(explicit_json: bool) -> bool {

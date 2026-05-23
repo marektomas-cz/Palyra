@@ -109,7 +109,8 @@ use palyra_common::{
     },
     default_config_search_paths, parse_config_path, parse_daemon_bind_socket,
     redaction::{
-        is_sensitive_key, redact_auth_error, redact_url, redact_url_segments_in_text, REDACTED,
+        is_sensitive_key, redact_auth_error, redact_url, redact_url_segments_in_text,
+        redact_url_strict, REDACTED,
     },
     replay_bundle::{
         build_replay_bundle, canonical_replay_bundle_bytes, ensure_replay_report_passed,
