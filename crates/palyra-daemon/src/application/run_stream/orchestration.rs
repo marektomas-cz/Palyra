@@ -230,7 +230,7 @@ pub(crate) async fn finalize_run_stream_after_provider_response(
         runtime_state
             .update_orchestrator_run_state(run_id.to_owned(), RunLifecycleState::Done, None)
             .await?;
-        forget_successful_run_cleanup_tracking(runtime_state, run_id);
+        cleanup_run_resources(runtime_state, run_id, "completed").await;
         runtime_state.clear_self_healing_heartbeat(WorkHeartbeatKind::Run, run_id);
         send_status_with_tape(
             sender,
@@ -244,20 +244,6 @@ pub(crate) async fn finalize_run_stream_after_provider_response(
     }
 
     Ok(RunStreamPostProviderOutcome::Completed)
-}
-
-fn forget_successful_run_cleanup_tracking(runtime_state: &GatewayRuntimeState, run_id: &str) {
-    let resources = runtime_state.take_run_cleanup_resources(run_id);
-    if resources.is_empty() {
-        return;
-    }
-
-    tracing::debug!(
-        run_id,
-        browser_session_count = resources.browser_session_ids.len(),
-        background_process_count = resources.background_process_pids.len(),
-        "forgot run-owned cleanup tracking after successful run"
-    );
 }
 
 #[allow(clippy::result_large_err)]

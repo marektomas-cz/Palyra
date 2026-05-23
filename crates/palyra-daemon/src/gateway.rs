@@ -1,8 +1,9 @@
 #![cfg_attr(test, allow(dead_code, private_interfaces))]
 
+#[cfg(not(windows))]
+use std::process::Command;
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
-    process::Command,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex, RwLock,
@@ -1105,21 +1106,9 @@ async fn terminate_run_background_process(pid: u32) -> Result<(), String> {
 
 #[cfg(windows)]
 fn terminate_run_background_process_blocking(pid: u32) -> Result<(), String> {
-    let pid_arg = pid.to_string();
-    let output = Command::new("taskkill")
-        .args(["/PID", pid_arg.as_str(), "/T", "/F"])
-        .output()
-        .map_err(|error| format!("failed to invoke taskkill for pid {pid}: {error}"))?;
-    if output.status.success() {
-        return Ok(());
-    }
-
-    Err(format!(
-        "taskkill failed for pid {pid} with status {}; stdout={:?}; stderr={:?}",
-        output.status,
-        String::from_utf8_lossy(output.stdout.as_slice()),
-        String::from_utf8_lossy(output.stderr.as_slice())
-    ))
+    crate::sandbox_runner::terminate_background_process_tree(pid).map_err(|error| {
+        format!("failed to terminate background process tree for pid {pid}: {error}")
+    })
 }
 
 #[cfg(not(windows))]

@@ -13,6 +13,19 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(windows)]
+use std::{collections::HashMap, os::windows::io::AsRawHandle, sync::OnceLock};
+
+#[cfg(windows)]
+use windows_sys::Win32::{
+    Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE},
+    System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    },
+};
+
 use palyra_common::{
     process_runner_input::{parse_process_runner_tool_input, ProcessRunnerToolInput},
     redaction::{redact_auth_error, redact_url_segments_in_text, REDACTED},
@@ -178,6 +191,48 @@ struct BackgroundOutputMonitor {
     stdout: Arc<Mutex<StreamCapture>>,
     stderr: Arc<Mutex<StreamCapture>>,
 }
+
+#[cfg(windows)]
+#[derive(Debug)]
+struct WindowsBackgroundJob {
+    handle: HANDLE,
+    terminated: AtomicBool,
+}
+
+#[cfg(windows)]
+unsafe impl Send for WindowsBackgroundJob {}
+
+#[cfg(windows)]
+unsafe impl Sync for WindowsBackgroundJob {}
+
+#[cfg(windows)]
+impl WindowsBackgroundJob {
+    fn terminate(&self) -> io::Result<()> {
+        if self.terminated.swap(true, Ordering::SeqCst) {
+            return Ok(());
+        }
+        // SAFETY: `handle` is a valid job handle owned by this wrapper until Drop closes it.
+        let terminated = unsafe { TerminateJobObject(self.handle, 1) };
+        if terminated == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WindowsBackgroundJob {
+    fn drop(&mut self) {
+        if windows_handle_is_valid(self.handle) {
+            // SAFETY: `handle` is owned by this wrapper and is closed exactly once in Drop.
+            let _ = unsafe { CloseHandle(self.handle) };
+        }
+    }
+}
+
+#[cfg(windows)]
+static WINDOWS_BACKGROUND_JOBS: OnceLock<Mutex<HashMap<u32, Arc<WindowsBackgroundJob>>>> =
+    OnceLock::new();
 
 impl BackgroundOutputMonitor {
     fn snapshot(&self) -> (StreamCapture, StreamCapture) {
@@ -2026,6 +2081,11 @@ fn spawn_background_process(
         kind: SandboxProcessRunErrorKind::SpawnFailed,
         message: format!("sandbox process spawn failed for command '{}': {error}", input.command),
     })?;
+    let pid = child.id();
+    #[cfg(windows)]
+    let windows_job_bound = bind_child_to_windows_background_job(&child, pid).is_ok();
+    #[cfg(not(windows))]
+    let windows_job_bound = false;
     let started_at = Instant::now();
     let output_monitor =
         match start_background_output_monitor(&mut child, policy.max_output_bytes as usize) {
@@ -2064,8 +2124,7 @@ fn spawn_background_process(
         let (stdout, stderr) = output_monitor.snapshot_after_startup_drain(startup_output_drain);
         return Err(background_process_startup_failure(input, status, &stdout, &stderr));
     }
-    let pid = child.id();
-    let cleanup = background_cleanup_metadata(pid, lifetime_ms);
+    let cleanup = background_cleanup_metadata(pid, lifetime_ms, windows_job_bound);
     let startup_output_drain = bounded_background_process_wait(
         startup_budget,
         started_at.elapsed(),
@@ -2123,6 +2182,7 @@ fn spawn_background_process(
             "kind": "pid",
             "direct_process_pid": pid,
             "process_tree": cfg!(windows),
+            "windows_job_object": windows_job_bound,
             "identity_note": "pid is the direct process spawned by palyra.process.run; a descendant process may own listening sockets"
         },
         "cleanup": cleanup,
@@ -2264,6 +2324,115 @@ fn terminate_background_child(mut child: Child) {
 }
 
 #[cfg(windows)]
+fn bind_child_to_windows_background_job(child: &Child, pid: u32) -> io::Result<()> {
+    let job = create_windows_background_job()?;
+    let child_handle = child.as_raw_handle() as HANDLE;
+    if !windows_handle_is_valid(child_handle) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("child process handle for pid {pid} is invalid"),
+        ));
+    }
+
+    // SAFETY: `job.handle` is a valid job handle and `child_handle` is the live child process
+    // handle exposed by `std::process::Child`.
+    let assigned = unsafe { AssignProcessToJobObject(job.handle, child_handle) };
+    if assigned == 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    register_windows_background_job(pid, Arc::new(job))
+}
+
+#[cfg(windows)]
+fn create_windows_background_job() -> io::Result<WindowsBackgroundJob> {
+    // SAFETY: null security attributes and an unnamed job object are valid inputs.
+    let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+    if !windows_handle_is_valid(handle) {
+        return Err(io::Error::last_os_error());
+    }
+
+    let job = WindowsBackgroundJob { handle, terminated: AtomicBool::new(false) };
+    let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    // SAFETY: `limits` points to a properly initialized JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+    // value for the requested JobObjectExtendedLimitInformation class.
+    let configured = unsafe {
+        SetInformationJobObject(
+            job.handle,
+            JobObjectExtendedLimitInformation,
+            (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        )
+    };
+    if configured == 0 {
+        let error = io::Error::last_os_error();
+        drop(job);
+        return Err(error);
+    }
+
+    Ok(job)
+}
+
+#[cfg(windows)]
+fn windows_handle_is_valid(handle: HANDLE) -> bool {
+    !handle.is_null() && handle != INVALID_HANDLE_VALUE
+}
+
+#[cfg(windows)]
+fn windows_background_jobs() -> &'static Mutex<HashMap<u32, Arc<WindowsBackgroundJob>>> {
+    WINDOWS_BACKGROUND_JOBS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(windows)]
+fn register_windows_background_job(pid: u32, job: Arc<WindowsBackgroundJob>) -> io::Result<()> {
+    match windows_background_jobs().lock() {
+        Ok(mut jobs) => {
+            jobs.insert(pid, job);
+            Ok(())
+        }
+        Err(error) => Err(io::Error::other(format!(
+            "windows background job registry lock poisoned for pid {pid}: {error}"
+        ))),
+    }
+}
+
+#[cfg(windows)]
+fn take_windows_background_job(pid: u32) -> Option<Arc<WindowsBackgroundJob>> {
+    match windows_background_jobs().lock() {
+        Ok(mut jobs) => jobs.remove(&pid),
+        Err(_) => None,
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn terminate_background_process_tree(pid: u32) -> io::Result<()> {
+    let mut succeeded = false;
+    let mut errors = Vec::new();
+
+    if let Some(job) = take_windows_background_job(pid) {
+        match job.terminate() {
+            Ok(()) => succeeded = true,
+            Err(error) => errors.push(format!("job object termination failed: {error}")),
+        }
+    }
+
+    match terminate_windows_process_tree(pid) {
+        Ok(()) => succeeded = true,
+        Err(error) => errors.push(format!("taskkill fallback failed: {error}")),
+    }
+
+    if succeeded {
+        return Ok(());
+    }
+
+    Err(io::Error::other(format!(
+        "failed to terminate background process tree rooted at pid {pid}: {}",
+        errors.join("; ")
+    )))
+}
+
+#[cfg(windows)]
 fn terminate_windows_process_tree(pid: u32) -> io::Result<()> {
     let pid_arg = pid.to_string();
     let system32_dir = trusted_windows_system32_dir()?;
@@ -2339,7 +2508,7 @@ fn terminate_child_process_tree(child: &mut Child) {
     #[cfg(windows)]
     {
         let pid = child.id();
-        if terminate_windows_process_tree(pid).is_ok() {
+        if terminate_background_process_tree(pid).is_ok() {
             return;
         }
     }
@@ -2353,10 +2522,15 @@ fn terminate_child_process_tree(child: &mut Child) {
     let _ = child.kill();
 }
 
-fn background_cleanup_metadata(pid: u32, lifetime_ms: u64) -> serde_json::Value {
+fn background_cleanup_metadata(
+    pid: u32,
+    lifetime_ms: u64,
+    windows_job_bound: bool,
+) -> serde_json::Value {
     json!({
         "auto_kill_after_ms": lifetime_ms,
         "process_tree": cfg!(any(unix, windows)),
+        "windows_job_object": windows_job_bound,
         "manual_command": background_cleanup_command(pid),
         "note": background_cleanup_note(),
     })
@@ -3945,6 +4119,16 @@ mod tests {
                 .and_then(serde_json::Value::as_u64),
             output.get("pid").and_then(serde_json::Value::as_u64)
         );
+        assert_eq!(
+            output
+                .pointer("/process_handle/windows_job_object")
+                .and_then(serde_json::Value::as_bool),
+            Some(cfg!(windows))
+        );
+        assert_eq!(
+            output.pointer("/cleanup/windows_job_object").and_then(serde_json::Value::as_bool),
+            Some(cfg!(windows))
+        );
         assert!(output.pointer("/cleanup/manual_command/command").is_some());
 
         let _ = fs::remove_dir_all(workspace.as_path());
@@ -4090,7 +4274,7 @@ mod tests {
 
     #[test]
     fn background_cleanup_metadata_exposes_platform_cleanup_command() {
-        let metadata = super::background_cleanup_metadata(1234, 60_000);
+        let metadata = super::background_cleanup_metadata(1234, 60_000, cfg!(windows));
 
         assert_eq!(
             metadata.get("auto_kill_after_ms").and_then(serde_json::Value::as_u64),
@@ -4114,6 +4298,10 @@ mod tests {
                 metadata.get("process_tree").and_then(serde_json::Value::as_bool),
                 Some(true)
             );
+            assert_eq!(
+                metadata.get("windows_job_object").and_then(serde_json::Value::as_bool),
+                Some(true)
+            );
         }
         #[cfg(not(windows))]
         {
@@ -4128,6 +4316,10 @@ mod tests {
             assert_eq!(
                 metadata.get("process_tree").and_then(serde_json::Value::as_bool),
                 Some(true)
+            );
+            assert_eq!(
+                metadata.get("windows_job_object").and_then(serde_json::Value::as_bool),
+                Some(false)
             );
         }
     }

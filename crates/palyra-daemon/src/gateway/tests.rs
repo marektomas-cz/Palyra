@@ -3366,14 +3366,13 @@ fn cleanup_resource_registry_deduplicates_and_drains_by_run() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn successful_run_finalization_forgets_cleanup_tracking() {
+async fn successful_run_finalization_cleans_run_owned_resource_tracking() {
     let state = build_test_runtime_state(false);
     let session_id = Ulid::new().to_string();
     let run_id = Ulid::new().to_string();
     start_tool_program_test_run(&state, session_id.as_str(), run_id.as_str()).await;
 
     state.record_run_browser_session(run_id.as_str(), "browser-session-success");
-    state.record_run_background_process(run_id.as_str(), 4242);
 
     let (sender, _receiver) = tokio::sync::mpsc::channel(4);
     let mut run_state = RunStateMachine::default();
@@ -3395,7 +3394,7 @@ async fn successful_run_finalization_forgets_cleanup_tracking() {
     assert_eq!(run_state.state(), RunLifecycleState::Done);
     assert!(
         state.take_run_cleanup_resources(run_id.as_str()).is_empty(),
-        "successful terminal path must not retain stale per-run cleanup tracking"
+        "successful terminal path must drain per-run cleanup tracking"
     );
 }
 
