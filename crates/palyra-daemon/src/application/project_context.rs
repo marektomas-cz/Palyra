@@ -550,6 +550,9 @@ fn derive_focus_paths_from_prompt(
     for focus_path in derive_absolute_workspace_focus_paths(input_text, workspace_roots) {
         reasons_by_path.entry(focus_path).or_insert_with(|| "prompt_workspace_path".to_owned());
     }
+    for focus_path in derive_relative_workspace_focus_paths(input_text, workspace_roots) {
+        reasons_by_path.entry(focus_path).or_insert_with(|| "prompt_workspace_path".to_owned());
+    }
     reasons_by_path
         .into_iter()
         .map(|(path, reason)| ProjectContextFocusPath { path, reason })
@@ -585,6 +588,47 @@ fn derive_absolute_workspace_focus_paths(
             canonical.parent().map(Path::to_path_buf).unwrap_or(canonical)
         };
         for root in &canonical_roots {
+            if !directory.starts_with(root) || directory == *root {
+                continue;
+            }
+            let relative = directory.strip_prefix(root).unwrap_or(Path::new(""));
+            let display = normalize_directory_display(relative);
+            if display != "." {
+                focus_paths.insert(display);
+            }
+        }
+    }
+    focus_paths.into_iter().collect()
+}
+
+fn derive_relative_workspace_focus_paths(
+    input_text: &str,
+    workspace_roots: &[PathBuf],
+) -> Vec<String> {
+    let canonical_roots = workspace_roots
+        .iter()
+        .filter_map(|root| root.canonicalize().ok().filter(|path| path.is_dir()))
+        .collect::<Vec<_>>();
+    if canonical_roots.is_empty() {
+        return Vec::new();
+    }
+
+    let mut focus_paths = BTreeSet::<String>::new();
+    for raw_path in extract_relative_prompt_paths(input_text) {
+        let Some(relative_path) = normalize_relative_prompt_path(raw_path.as_str()) else {
+            continue;
+        };
+        for root in &canonical_roots {
+            let candidate = root.join(relative_path.as_str());
+            let Some(existing) = nearest_existing_path(candidate.as_path()) else {
+                continue;
+            };
+            let canonical = existing.canonicalize().unwrap_or(existing);
+            let directory = if canonical.is_dir() {
+                canonical
+            } else {
+                canonical.parent().map(Path::to_path_buf).unwrap_or(canonical)
+            };
             if !directory.starts_with(root) || directory == *root {
                 continue;
             }
@@ -640,6 +684,47 @@ fn extract_absolute_prompt_paths(input_text: &str) -> Vec<String> {
     paths
 }
 
+fn extract_relative_prompt_paths(input_text: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < input_text.len() {
+        let Some((relative_start, _)) = input_text[cursor..].char_indices().find(|(index, ch)| {
+            looks_like_relative_prompt_path_start(input_text, cursor + *index, *ch)
+        }) else {
+            break;
+        };
+        let start = cursor + relative_start;
+        let quote = preceding_quote(input_text, start);
+        let mut end = start;
+        let mut saw_separator = false;
+        while end < input_text.len() {
+            let ch = input_text[end..].chars().next().unwrap_or_default();
+            if prompt_path_terminates(ch, quote) {
+                break;
+            }
+            saw_separator |= matches!(ch, '/' | '\\');
+            end = end.saturating_add(ch.len_utf8());
+        }
+        let candidate = trim_prompt_path_candidate(&input_text[start..end]);
+        if saw_separator && !candidate.is_empty() {
+            paths.push(candidate.to_owned());
+        }
+        let terminator_len = input_text[end..].chars().next().map(char::len_utf8).unwrap_or(0);
+        cursor = end.saturating_add(terminator_len);
+    }
+    paths
+}
+
+fn looks_like_relative_prompt_path_start(input_text: &str, start: usize, ch: char) -> bool {
+    if matches!(ch, '/' | '\\') {
+        return false;
+    }
+    if !matches!(ch, '.' | '_' | '-' | 'A'..='Z' | 'a'..='z' | '0'..='9') {
+        return false;
+    }
+    prompt_path_start_has_boundary(input_text, start)
+}
+
 fn looks_like_prompt_path_start(input_text: &str, start: usize, ch: char) -> bool {
     if ch == '/' {
         return prompt_path_start_has_boundary(input_text, start)
@@ -677,6 +762,34 @@ fn prompt_path_terminates(ch: char, quote: Option<char>) -> bool {
 
 fn trim_prompt_path_candidate(candidate: &str) -> &str {
     candidate.trim().trim_matches(['.', ',', ';', ':', '!', '?', ')', ']', '}'])
+}
+
+fn normalize_relative_prompt_path(path: &str) -> Option<String> {
+    let normalized = path.trim().replace('\\', "/");
+    if normalized.is_empty()
+        || normalized.contains("://")
+        || normalized.contains(':')
+        || normalized.starts_with('/')
+    {
+        return None;
+    }
+    let trimmed = normalized.trim_start_matches("./").trim_matches('/');
+    if trimmed.is_empty() || !trimmed.contains('/') {
+        return None;
+    }
+    let parsed = Path::new(trimmed);
+    if parsed.is_absolute() {
+        return None;
+    }
+    let mut components = Vec::new();
+    for component in parsed.components() {
+        match component {
+            Component::Normal(segment) => components.push(segment.to_string_lossy().into_owned()),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    (!components.is_empty()).then(|| components.join("/"))
 }
 
 fn merge_focus_paths(
@@ -1099,6 +1212,21 @@ mod tests {
 
         assert_eq!(focus.len(), 1);
         assert_eq!(focus[0].path, "scenario-s002-notes-api");
+        assert_eq!(focus[0].reason, "prompt_workspace_path");
+    }
+
+    #[test]
+    fn derives_focus_path_from_relative_workspace_prompt_path() {
+        let root = temp_project_context_root();
+        let project = root.join("fixtures").join("S016-scope-limited-replace");
+        fs::create_dir_all(project.join("src").as_path()).expect("project directory should exist");
+        let prompt = "Work only in fixtures/S016-scope-limited-replace. \
+            Update src/public/banner.txt and create reports/s016-scope-report.md.";
+
+        let focus = derive_focus_paths_from_prompt(prompt, std::slice::from_ref(&root));
+
+        assert_eq!(focus.len(), 1);
+        assert_eq!(focus[0].path, "fixtures/S016-scope-limited-replace");
         assert_eq!(focus[0].reason, "prompt_workspace_path");
     }
 
