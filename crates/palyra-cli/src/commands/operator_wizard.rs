@@ -2183,10 +2183,17 @@ fn onboarding_summary_next_step(
     auth_method: &str,
 ) -> (&'static str, Option<&'static str>, Option<&'static str>) {
     if matches!(health_status, HealthStatus::RuntimeRestartRequired) {
+        if matches!(service_install_mode, ServiceInstallMode::InstallNow) {
+            return (
+                "configured_runtime_restart_required",
+                Some("gateway_restart"),
+                Some("Restart the managed gateway service with `palyra gateway restart`, then rerun `palyra onboarding status`."),
+            );
+        }
         return (
             "configured_runtime_restart_required",
-            Some("gateway_restart"),
-            Some("Restart the already running gateway with `palyra gateway restart`, or stop the current foreground `palyra gateway run` and start it again, then rerun `palyra onboarding status`."),
+            Some("foreground_gateway_restart"),
+            Some("Stop the current foreground `palyra gateway run` process with Ctrl+C in its terminal, start it again with `palyra gateway run`, then rerun `palyra onboarding status`. Use `palyra gateway install --start` first if you want `palyra gateway restart` to manage a background service."),
         );
     }
 
@@ -4096,7 +4103,7 @@ variable = "PALYRA_MODEL_PROVIDER_ANTHROPIC_API_KEY"
     }
 
     #[test]
-    fn onboarding_summary_guides_restart_when_gateway_is_already_running() {
+    fn onboarding_summary_guides_foreground_restart_when_gateway_is_already_running() {
         let (status, recommended_step_id, next_step) = onboarding_summary_next_step(
             WizardFlowKind::Quickstart,
             ServiceInstallMode::NotNow,
@@ -4105,11 +4112,33 @@ variable = "PALYRA_MODEL_PROVIDER_ANTHROPIC_API_KEY"
         );
 
         assert_eq!(status, "configured_runtime_restart_required");
-        assert_eq!(recommended_step_id, Some("gateway_restart"));
+        assert_eq!(recommended_step_id, Some("foreground_gateway_restart"));
         let next_step = next_step.expect("restart guidance should be present");
         assert!(
-            next_step.contains("Restart the already running gateway"),
-            "next step should explain restart path: {next_step}"
+            next_step.contains("Stop the current foreground `palyra gateway run` process"),
+            "next step should explain foreground restart path: {next_step}"
+        );
+        assert!(
+            !next_step.starts_with("Restart the already running gateway with `palyra gateway restart`"),
+            "foreground guidance should not present managed restart as the primary path: {next_step}"
+        );
+    }
+
+    #[test]
+    fn onboarding_summary_guides_managed_restart_after_service_install() {
+        let (status, recommended_step_id, next_step) = onboarding_summary_next_step(
+            WizardFlowKind::Quickstart,
+            ServiceInstallMode::InstallNow,
+            HealthStatus::RuntimeRestartRequired,
+            "minimax-api-key",
+        );
+
+        assert_eq!(status, "configured_runtime_restart_required");
+        assert_eq!(recommended_step_id, Some("gateway_restart"));
+        let next_step = next_step.expect("managed restart guidance should be present");
+        assert!(
+            next_step.contains("palyra gateway restart"),
+            "next step should explain managed restart path: {next_step}"
         );
     }
 
