@@ -841,7 +841,8 @@ pub(crate) async fn execute_memory_recall_tool(
     let request = RecallRequest {
         query,
         channel: requested_channel.or_else(|| context.channel.map(str::to_owned)),
-        session_id: optional_trimmed_string(parsed.get("session_id")),
+        session_id: optional_trimmed_string(parsed.get("session_id"))
+            .or_else(|| Some(context.session_id.to_owned())),
         agent_id: optional_trimmed_string(parsed.get("agent_id")),
         memory_top_k,
         workspace_top_k,

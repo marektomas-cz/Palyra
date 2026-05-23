@@ -459,6 +459,8 @@ pub(crate) async fn console_routine_upsert_handler(
     } else {
         existing_job.as_ref().and_then(|job| job.workdir.clone())
     };
+    let execution_posture_was_requested =
+        payload.execution_posture.as_deref().is_some_and(|value| !value.trim().is_empty());
     let execution = parse_execution_config(
         payload.run_mode.as_deref(),
         default_run_mode_for_trigger_kind(trigger_kind),
@@ -488,6 +490,7 @@ pub(crate) async fn console_routine_upsert_handler(
         &execution,
         requested_approval_policy,
         approval_mode_was_requested,
+        execution_posture_was_requested,
     );
     let approval_policy = if trigger_kind == RoutineTriggerKind::FileWatch {
         approval_policy
@@ -2592,8 +2595,10 @@ fn default_approval_policy_for_execution(
     execution: &RoutineExecutionConfig,
     approval_policy: RoutineApprovalPolicy,
     approval_mode_was_requested: bool,
+    execution_posture_was_requested: bool,
 ) -> RoutineApprovalPolicy {
     if !approval_mode_was_requested
+        && !execution_posture_was_requested
         && execution.execution_posture == RoutineExecutionPosture::SensitiveTools
         && approval_policy.mode == RoutineApprovalMode::None
     {
@@ -3191,9 +3196,27 @@ mod tests {
             &execution,
             RoutineApprovalPolicy { mode: RoutineApprovalMode::None },
             false,
+            false,
         );
 
         assert_eq!(approval_policy.mode, RoutineApprovalMode::BeforeEnable);
+    }
+
+    #[test]
+    fn default_approval_policy_does_not_override_explicit_sensitive_tools() {
+        let execution = RoutineExecutionConfig {
+            run_mode: RoutineRunMode::FreshSession,
+            execution_posture: RoutineExecutionPosture::SensitiveTools,
+            ..RoutineExecutionConfig::default()
+        };
+        let approval_policy = super::default_approval_policy_for_execution(
+            &execution,
+            RoutineApprovalPolicy { mode: RoutineApprovalMode::None },
+            false,
+            true,
+        );
+
+        assert_eq!(approval_policy.mode, RoutineApprovalMode::None);
     }
 
     #[test]

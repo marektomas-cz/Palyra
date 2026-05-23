@@ -19719,7 +19719,13 @@ fn bare_token_value_looks_secret(value: &str) -> bool {
             || trimmed.starts_with("ghp_")
             || trimmed.starts_with("github_pat_")
             || trimmed.starts_with("xox")
+            || simple_token_value_looks_secret(trimmed)
             || trimmed.len() >= 16)
+}
+
+fn simple_token_value_looks_secret(value: &str) -> bool {
+    value.len() >= 6
+        && value.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
 }
 
 fn redact_secret_like_markers(input: &str) -> String {
@@ -20140,6 +20146,15 @@ mod tests {
         assert!(redacted.contains(r##""selector":"#password""##), "{redacted}");
         assert!(redacted.contains("token=a%3Db%3Dc"), "{redacted}");
         assert!(!redacted.contains("<redacted>"), "{redacted}");
+    }
+
+    #[test]
+    fn redact_payload_json_masks_short_simple_token_assignments() {
+        let redacted = super::redact_payload_json(br#"{"tool_output":"stderr token=abc123 next"}"#)
+            .expect("payload redaction should succeed");
+
+        assert!(redacted.contains("<redacted>"), "{redacted}");
+        assert!(!redacted.contains("token=abc123"), "{redacted}");
     }
 
     #[test]

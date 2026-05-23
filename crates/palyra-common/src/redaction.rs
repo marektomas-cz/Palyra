@@ -336,7 +336,13 @@ fn value_looks_like_secret_token(value: &str) -> bool {
         || lowered.starts_with("ghp_")
         || lowered.starts_with("github_pat_")
         || lowered.starts_with("xox")
+        || simple_token_value_looks_secret(trimmed)
         || trimmed.len() >= 16
+}
+
+fn simple_token_value_looks_secret(value: &str) -> bool {
+    value.len() >= 6
+        && value.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
 }
 
 fn split_assignment(token: &str) -> Option<(&str, char, &str)> {
@@ -518,6 +524,14 @@ mod tests {
 
         assert!(redacted.contains("token=a%3Db%3Dc"), "{redacted}");
         assert!(redacted.contains("selector=#password"), "{redacted}");
+    }
+
+    #[test]
+    fn auth_error_redaction_masks_simple_short_token_assignments() {
+        let redacted = redact_auth_error("stderr preview token=abc123 next");
+
+        assert!(redacted.contains("token=<redacted>"), "{redacted}");
+        assert!(!redacted.contains("token=abc123"), "{redacted}");
     }
 
     #[test]
