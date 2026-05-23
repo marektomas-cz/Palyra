@@ -508,7 +508,7 @@ fn split_provider_stream_text(input: &str, max_words_per_chunk: usize) -> Vec<St
     chunks
 }
 
-pub(super) fn provider_events_from_output(output: &ProviderTurnOutput) -> Vec<ProviderEvent> {
+pub(crate) fn provider_events_from_output(output: &ProviderTurnOutput) -> Vec<ProviderEvent> {
     let mut events = Vec::new();
     let should_mark_final_model_token =
         !matches!(output.finish_reason, ProviderFinishReason::ToolCalls)

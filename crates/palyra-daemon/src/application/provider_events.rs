@@ -70,6 +70,7 @@ pub(crate) struct RunStreamProviderEventSurface<'a> {
     pub(crate) model_token_tape_events: &'a mut usize,
     pub(crate) model_token_compaction_emitted: &'a mut bool,
     pub(crate) allow_sensitive_tools: bool,
+    pub(crate) stream_model_tokens_immediately: bool,
 }
 
 pub(crate) struct RouteMessageProviderEventSurface<'a> {
@@ -153,7 +154,9 @@ pub(crate) async fn process_provider_event_for_surface(
                 summary_tokens.push(token.clone());
             }
             match surface {
-                ProviderEventSurface::RunStream(context) => {
+                ProviderEventSurface::RunStream(context)
+                    if context.stream_model_tokens_immediately =>
+                {
                     send_model_token_with_tape(
                         context.sender,
                         runtime_state,
@@ -168,6 +171,7 @@ pub(crate) async fn process_provider_event_for_surface(
                     )
                     .await?;
                 }
+                ProviderEventSurface::RunStream(_) => {}
                 ProviderEventSurface::RouteMessage(_) => {}
             }
             Ok(RunStreamProviderEventOutcome::Continue)
@@ -252,6 +256,7 @@ pub(crate) async fn process_run_stream_provider_events(
     tape_seq: &mut i64,
     model_token_tape_events: &mut usize,
     model_token_compaction_emitted: &mut bool,
+    stream_model_tokens_immediately: bool,
 ) -> Result<RunStreamProviderEventsOutcome, Status> {
     let mut summary_tokens = Vec::new();
     let mut tool_results = Vec::new();
@@ -325,6 +330,7 @@ pub(crate) async fn process_run_stream_provider_events(
                     tape_seq,
                     model_token_tape_events,
                     model_token_compaction_emitted,
+                    stream_model_tokens_immediately,
                 )
                 .await?
                 {
@@ -549,6 +555,7 @@ async fn process_run_stream_provider_event(
     tape_seq: &mut i64,
     model_token_tape_events: &mut usize,
     model_token_compaction_emitted: &mut bool,
+    stream_model_tokens_immediately: bool,
 ) -> Result<RunStreamProviderEventOutcome, Status> {
     process_provider_event_for_surface(
         runtime_state,
@@ -569,6 +576,7 @@ async fn process_run_stream_provider_event(
             model_token_tape_events,
             model_token_compaction_emitted,
             allow_sensitive_tools,
+            stream_model_tokens_immediately,
         }),
     )
     .await

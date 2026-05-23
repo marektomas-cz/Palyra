@@ -35,8 +35,9 @@ use crate::{
         OrchestratorTapeAppendRequest, OrchestratorUsageDelta,
     },
     model_provider::{
-        bounded_provider_turn_output_for_persistence, ProviderFinishReason, ProviderMessage,
-        ProviderMessageRole, ProviderRequest, ProviderResponse, ProviderTurnOutput,
+        bounded_provider_turn_output_for_persistence, provider_events_from_output, ProviderEvent,
+        ProviderFinishReason, ProviderMessage, ProviderMessageRole, ProviderRawProviderRefs,
+        ProviderRequest, ProviderResponse, ProviderTurnOutput, ProviderUsage,
     },
     orchestrator::{is_cancel_command, RunLifecycleState, RunStateMachine, RunTransition},
     provider_leases::ProviderLeaseExecutionContext,
@@ -52,8 +53,8 @@ use super::{
     },
     cancellation::transition_run_stream_to_cancelled,
     tape::{
-        maybe_compact_context_after_tool_results, send_status_with_tape,
-        RUN_STREAM_RESPONSE_CHANNEL_CLOSED_MESSAGE,
+        maybe_compact_context_after_tool_results, send_model_token_with_tape,
+        send_status_with_tape, RUN_STREAM_RESPONSE_CHANNEL_CLOSED_MESSAGE,
     },
 };
 
@@ -83,6 +84,8 @@ pub(crate) enum RunStreamProviderResponseOutcome {
         tool_result_messages: Vec<ProviderMessage>,
         provider_trace_ref: Option<String>,
         final_reply_text: Option<String>,
+        final_provider_output: Option<ProviderTurnOutput>,
+        final_reply_tokens_deferred: bool,
     },
     Failed {
         message: String,
@@ -510,6 +513,98 @@ async fn terminate_run_stream_with_agent_loop_reason(
 
 #[allow(clippy::result_large_err)]
 #[allow(clippy::too_many_arguments)]
+async fn send_deferred_final_reply_tokens(
+    sender: &mpsc::Sender<Result<common_v1::RunStreamEvent, Status>>,
+    runtime_state: &Arc<GatewayRuntimeState>,
+    request_context: &RequestContext,
+    session_id: &str,
+    run_id: &str,
+    tape_seq: &mut i64,
+    model_token_tape_events: &mut usize,
+    model_token_compaction_emitted: &mut bool,
+    reply_text: &str,
+) -> Result<(), Status> {
+    let output = ProviderTurnOutput::text(
+        reply_text.to_owned(),
+        ProviderFinishReason::Stop,
+        ProviderUsage::new(0, 0, "run_stream_final_projection"),
+        ProviderRawProviderRefs::default(),
+    );
+    let mut emitted = false;
+    for event in provider_events_from_output(&output) {
+        let ProviderEvent::ModelToken { token, is_final } = event else {
+            continue;
+        };
+        emitted = true;
+        send_model_token_with_tape(
+            sender,
+            runtime_state,
+            request_context,
+            session_id,
+            run_id,
+            tape_seq,
+            model_token_tape_events,
+            model_token_compaction_emitted,
+            token.as_str(),
+            is_final,
+        )
+        .await?;
+    }
+    if !emitted {
+        send_model_token_with_tape(
+            sender,
+            runtime_state,
+            request_context,
+            session_id,
+            run_id,
+            tape_seq,
+            model_token_tape_events,
+            model_token_compaction_emitted,
+            "",
+            true,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::result_large_err)]
+async fn persist_accepted_final_reply(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    request_context: &RequestContext,
+    session_id_for_message: &str,
+    run_id: &str,
+    tape_seq: &mut i64,
+    reply_text: &str,
+) -> Result<(), Status> {
+    persist_run_stream_reply_text(
+        runtime_state,
+        request_context,
+        session_id_for_message,
+        run_id,
+        tape_seq,
+        reply_text,
+    )
+    .await?;
+    if !reply_text.trim().is_empty() {
+        ingest_memory_best_effort(
+            runtime_state,
+            request_context.principal.as_str(),
+            request_context.channel.as_deref(),
+            Some(session_id_for_message),
+            MemorySource::Summary,
+            reply_text,
+            vec!["summary:model_output".to_owned()],
+            Some(0.75),
+            "run_stream_model_summary",
+        )
+        .await;
+    }
+    Ok(())
+}
+
+#[allow(clippy::result_large_err)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn process_run_stream_message(
     sender: &mpsc::Sender<Result<common_v1::RunStreamEvent, Status>>,
     stream: &mut Streaming<common_v1::RunStreamRequest>,
@@ -913,7 +1008,6 @@ pub(crate) async fn process_run_stream_message(
             run_state,
             session_id.as_str(),
             run_id.as_str(),
-            session_id_for_message.as_str(),
             provider_response,
             &tool_catalog_snapshot,
             remaining_tool_budget,
@@ -931,6 +1025,8 @@ pub(crate) async fn process_run_stream_message(
                 tool_result_messages,
                 provider_trace_ref,
                 final_reply_text,
+                final_provider_output,
+                final_reply_tokens_deferred,
             } => {
                 let should_refeed_tool_results = !tool_result_messages.is_empty()
                     && provider_output.finish_reason == ProviderFinishReason::ToolCalls;
@@ -979,6 +1075,40 @@ pub(crate) async fn process_run_stream_message(
                         )
                         .await?;
                         return Ok(RunStreamMessageProcessingOutcome::Terminate);
+                    }
+                    if let Some(reply_text) = final_reply_text.as_deref() {
+                        if final_reply_tokens_deferred {
+                            send_deferred_final_reply_tokens(
+                                sender,
+                                runtime_state,
+                                request_context,
+                                session_id_for_message.as_str(),
+                                run_id.as_str(),
+                                tape_seq,
+                                model_token_tape_events,
+                                model_token_compaction_emitted,
+                                reply_text,
+                            )
+                            .await?;
+                        }
+                        if let Some(provider_output) = final_provider_output.as_ref() {
+                            persist_run_stream_provider_turn_output(
+                                runtime_state,
+                                run_id.as_str(),
+                                tape_seq,
+                                provider_output,
+                            )
+                            .await?;
+                        }
+                        persist_accepted_final_reply(
+                            runtime_state,
+                            request_context,
+                            session_id_for_message.as_str(),
+                            run_id.as_str(),
+                            tape_seq,
+                            reply_text,
+                        )
+                        .await?;
                     }
                     append_agent_loop_tape_event(
                         runtime_state,
@@ -1110,7 +1240,6 @@ async fn process_run_stream_provider_response(
     run_state: &mut RunStateMachine,
     session_id: &str,
     run_id: &str,
-    session_id_for_message: &str,
     provider_response: ProviderResponse,
     tool_catalog_snapshot: &ModelVisibleToolCatalogSnapshot,
     remaining_tool_budget: &mut u32,
@@ -1120,6 +1249,10 @@ async fn process_run_stream_provider_response(
     model_token_compaction_emitted: &mut bool,
 ) -> Result<RunStreamProviderResponseOutcome, Status> {
     let provider_output = bounded_provider_turn_output_for_persistence(&provider_response.output);
+    let stream_model_tokens_immediately = provider_response
+        .events
+        .iter()
+        .any(|event| matches!(event, ProviderEvent::ToolProposal { .. }));
     runtime_state
         .add_orchestrator_usage(OrchestratorUsageDelta {
             run_id: run_id.to_owned(),
@@ -1144,6 +1277,7 @@ async fn process_run_stream_provider_response(
         tape_seq,
         model_token_tape_events,
         model_token_compaction_emitted,
+        stream_model_tokens_immediately,
     )
     .await?
     {
@@ -1154,8 +1288,10 @@ async fn process_run_stream_provider_response(
             return Ok(RunStreamProviderResponseOutcome::Cancelled);
         }
     };
-    persist_run_stream_provider_turn_output(runtime_state, run_id, tape_seq, &provider_output)
-        .await?;
+    if stream_model_tokens_immediately {
+        persist_run_stream_provider_turn_output(runtime_state, run_id, tape_seq, &provider_output)
+            .await?;
+    }
     let terminal_tool_failure = tool_results.iter().find_map(terminal_tool_authorization_failure);
     let tool_result_messages = if terminal_tool_failure.is_some() {
         Vec::new()
@@ -1207,33 +1343,6 @@ async fn process_run_stream_provider_response(
         });
     }
 
-    if !has_pending_tool_results {
-        persist_run_stream_reply_text(
-            runtime_state,
-            request_context,
-            session_id_for_message,
-            run_id,
-            tape_seq,
-            reply_text.as_str(),
-        )
-        .await?;
-    }
-
-    if !has_pending_tool_results && !summary_tokens.is_empty() {
-        ingest_memory_best_effort(
-            runtime_state,
-            request_context.principal.as_str(),
-            request_context.channel.as_deref(),
-            Some(session_id_for_message),
-            MemorySource::Summary,
-            reply_text.as_str(),
-            vec!["summary:model_output".to_owned()],
-            Some(0.75),
-            "run_stream_model_summary",
-        )
-        .await;
-    }
-
     if let Ok(Some(run_snapshot)) =
         runtime_state.orchestrator_run_status_snapshot(run_id.to_owned()).await
     {
@@ -1257,6 +1366,9 @@ async fn process_run_stream_provider_response(
         tool_result_messages,
         provider_trace_ref: provider_output.raw_provider_refs.provider_trace_ref.clone(),
         final_reply_text: (!has_pending_tool_results).then_some(reply_text),
+        final_provider_output: (!has_pending_tool_results && !stream_model_tokens_immediately)
+            .then_some(provider_output),
+        final_reply_tokens_deferred: !has_pending_tool_results && !stream_model_tokens_immediately,
     })
 }
 

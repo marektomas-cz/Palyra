@@ -25,8 +25,10 @@ mod error_envelope;
 mod streaming;
 
 use adapters::{AnthropicCompatibleChatAdapter, OpenAiCompatibleChatAdapter, ProviderChatAdapter};
-pub(crate) use contract::bounded_provider_turn_output_for_persistence;
-use contract::{provider_events_from_output, provider_request_has_vision};
+use contract::provider_request_has_vision;
+pub(crate) use contract::{
+    bounded_provider_turn_output_for_persistence, provider_events_from_output,
+};
 #[allow(unused_imports)]
 pub use contract::{
     ProviderEvent, ProviderFinishReason, ProviderImageInput, ProviderMessage,
