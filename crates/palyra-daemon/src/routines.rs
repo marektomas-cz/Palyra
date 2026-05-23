@@ -1601,6 +1601,9 @@ pub fn natural_language_schedule_preview(
     if let Some(parsed) = parse_interval_phrase(normalized_phrase)? {
         return preview_from_schedule(normalized_phrase, timezone_mode, now_unix_ms, parsed);
     }
+    if let Some(parsed) = parse_weekly_day_phrase(normalized_phrase)? {
+        return preview_from_schedule(normalized_phrase, timezone_mode, now_unix_ms, parsed);
+    }
     if let Some(parsed) = parse_weekday_phrase(normalized_phrase)? {
         return preview_from_schedule(normalized_phrase, timezone_mode, now_unix_ms, parsed);
     }
@@ -1631,7 +1634,7 @@ pub fn natural_language_schedule_preview(
 
     Err(RoutineRegistryError::InvalidField {
         field: "phrase",
-        message: "supported phrases include 'in 30 minutes', 'za 30 minut', 'every 40 seconds', 'every 2h', 'každých 30 sekund', 'every weekday at 9', 'každý pracovní den v 9', or an RFC3339 timestamp".to_owned(),
+        message: "supported phrases include 'in 30 minutes', 'za 30 minut', 'every 40 seconds', 'every 2h', 'každých 30 sekund', 'every Monday at 09:00', 'každé pondělí v 09:00', 'every weekday at 9', 'každý pracovní den v 9', or an RFC3339 timestamp".to_owned(),
     })
 }
 
@@ -2333,6 +2336,41 @@ fn parse_weekday_phrase(
     }))
 }
 
+fn parse_weekly_day_phrase(
+    phrase: &str,
+) -> Result<Option<ParsedNaturalLanguageSchedule>, RoutineRegistryError> {
+    let normalized = normalize_phrase(phrase);
+    let tokens = normalized.split_whitespace().collect::<Vec<_>>();
+    let (weekday_token, time_raw) = match tokens.as_slice() {
+        ["every", weekday, "at", time @ ..] if !time.is_empty() => (*weekday, time.join(" ")),
+        ["každé" | "kazde" | "každý" | "kazdy", weekday, "v", time @ ..] if !time.is_empty() => {
+            (*weekday, time.join(" "))
+        }
+        _ => return Ok(None),
+    };
+    let Some(weekday) = cron_weekday_number(weekday_token) else {
+        return Ok(None);
+    };
+    let time = parse_time_components(time_raw.as_str(), "phrase")?;
+    let expression = format!("{} {} * * {}", time.minute, time.hour, weekday);
+    Ok(Some(ParsedNaturalLanguageSchedule {
+        normalized_text: format!(
+            "weekly on {} at {:02}:{:02}",
+            cron_weekday_name(weekday),
+            time.hour,
+            time.minute
+        ),
+        explanation: format!(
+            "Interpreted as every {} at a fixed local/UTC wall clock time.",
+            cron_weekday_name(weekday)
+        ),
+        schedule: cron_v1::Schedule {
+            r#type: cron_v1::ScheduleType::Cron as i32,
+            spec: Some(cron_v1::schedule::Spec::Cron(cron_v1::CronSchedule { expression })),
+        },
+    }))
+}
+
 fn parse_daily_phrase(
     phrase: &str,
 ) -> Result<Option<ParsedNaturalLanguageSchedule>, RoutineRegistryError> {
@@ -2445,6 +2483,32 @@ fn parse_time_components(
         });
     }
     Ok(ParsedTimeOfDay { hour, minute })
+}
+
+fn cron_weekday_number(value: &str) -> Option<u8> {
+    match value {
+        "sunday" | "sun" | "neděle" | "nedele" => Some(0),
+        "monday" | "mon" | "pondělí" | "pondeli" => Some(1),
+        "tuesday" | "tue" | "úterý" | "utery" => Some(2),
+        "wednesday" | "wed" | "středa" | "streda" => Some(3),
+        "thursday" | "thu" | "čtvrtek" | "ctvrtek" => Some(4),
+        "friday" | "fri" | "pátek" | "patek" => Some(5),
+        "saturday" | "sat" | "sobota" => Some(6),
+        _ => None,
+    }
+}
+
+fn cron_weekday_name(value: u8) -> &'static str {
+    match value {
+        0 => "Sunday",
+        1 => "Monday",
+        2 => "Tuesday",
+        3 => "Wednesday",
+        4 => "Thursday",
+        5 => "Friday",
+        6 => "Saturday",
+        _ => "weekday",
+    }
 }
 
 fn humanize_duration(duration_ms: u64) -> String {
@@ -2769,6 +2833,30 @@ mod tests {
                 .expect("czech weekday schedule preview should parse");
         assert_eq!(czech.schedule_type, "cron");
         assert_eq!(czech.schedule_payload["expression"], json!("0 9 * * 1-5"));
+
+        let saturday =
+            DateTime::parse_from_rfc3339("2026-05-23T12:00:00Z").unwrap().timestamp_millis();
+        let english_weekly = natural_language_schedule_preview(
+            "every Monday at 09:00",
+            CronTimezoneMode::Utc,
+            saturday,
+        )
+        .expect("english weekly schedule preview should parse");
+        assert_eq!(english_weekly.schedule_type, "cron");
+        assert_eq!(english_weekly.schedule_payload["expression"], json!("0 9 * * 1"));
+        assert_eq!(english_weekly.schedule_payload["timezone"], json!("utc"));
+        assert_eq!(
+            english_weekly.next_run_at_unix_ms,
+            Some(DateTime::parse_from_rfc3339("2026-05-25T09:00:00Z").unwrap().timestamp_millis())
+        );
+
+        let czech_weekly = natural_language_schedule_preview(
+            "každé pondělí v 09:00",
+            CronTimezoneMode::Utc,
+            saturday,
+        )
+        .expect("czech weekly schedule preview should parse");
+        assert_eq!(czech_weekly.schedule_payload["expression"], json!("0 9 * * 1"));
     }
 
     #[test]

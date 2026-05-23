@@ -1,6 +1,8 @@
 use clap::{ArgGroup, Subcommand, ValueEnum};
 
-use super::routines::{RoutineApprovalModeArg, RoutineExecutionPostureArg};
+use super::routines::{
+    RoutineApprovalModeArg, RoutineExecutionPostureArg, RoutinePreviewTimezoneArg,
+};
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum CronCommand {
@@ -60,6 +62,13 @@ pub enum CronCommand {
             help = "Schedule payload: cron expression for cron, RFC3339 timestamp for at, or milliseconds/duration such as 300000 or 5m for every"
         )]
         schedule: String,
+        #[arg(
+            long,
+            value_enum,
+            default_value_t = RoutinePreviewTimezoneArg::Local,
+            help = "Timezone used to evaluate cron expression schedules"
+        )]
+        timezone: RoutinePreviewTimezoneArg,
         #[arg(
             long,
             default_value_t = false,
@@ -126,6 +135,8 @@ pub enum CronCommand {
             help = "Schedule payload: cron expression for cron, RFC3339 timestamp for at, or milliseconds/duration such as 300000 or 5m for every"
         )]
         schedule: Option<String>,
+        #[arg(long, value_enum, help = "Timezone used to evaluate cron expression schedules")]
+        timezone: Option<RoutinePreviewTimezoneArg>,
         #[arg(long)]
         enabled: Option<bool>,
         #[arg(long, value_enum)]

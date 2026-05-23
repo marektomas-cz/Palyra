@@ -8,7 +8,7 @@ use serde_json::{json, Map, Value};
 
 use crate::cli::{
     CronConcurrencyPolicyArg, CronMisfirePolicyArg, CronScheduleTypeArg, RoutineApprovalModeArg,
-    RoutineExecutionPostureArg,
+    RoutineExecutionPostureArg, RoutinePreviewTimezoneArg,
 };
 use crate::*;
 
@@ -61,6 +61,7 @@ pub(crate) async fn run_cron_async(command: CronCommand) -> Result<()> {
             prompt_stdin,
             schedule_type,
             schedule,
+            timezone,
             enabled,
             concurrency,
             retry_max_attempts,
@@ -85,6 +86,7 @@ pub(crate) async fn run_cron_async(command: CronCommand) -> Result<()> {
                     prompt,
                     schedule_type,
                     schedule,
+                    schedule_timezone: Some(timezone),
                     enabled: Some(enabled),
                     concurrency,
                     retry_max_attempts,
@@ -110,6 +112,7 @@ pub(crate) async fn run_cron_async(command: CronCommand) -> Result<()> {
             prompt_stdin,
             schedule_type,
             schedule,
+            timezone,
             enabled,
             concurrency,
             retry_max_attempts,
@@ -130,6 +133,7 @@ pub(crate) async fn run_cron_async(command: CronCommand) -> Result<()> {
                 || prompt_stdin
                 || schedule_type.is_some()
                 || schedule.is_some()
+                || timezone.is_some()
                 || concurrency.is_some()
                 || retry_max_attempts.is_some()
                 || retry_backoff_ms.is_some()
@@ -165,6 +169,9 @@ pub(crate) async fn run_cron_async(command: CronCommand) -> Result<()> {
                     }),
                     schedule_type: schedule_type.unwrap_or_else(|| existing_schedule_type(routine)),
                     schedule: schedule.unwrap_or_else(|| existing_schedule_value(routine)),
+                    schedule_timezone: Some(
+                        timezone.unwrap_or_else(|| existing_schedule_timezone(routine)),
+                    ),
                     enabled: Some(
                         enabled
                             .unwrap_or_else(|| json_bool_at(routine, "/enabled").unwrap_or(true)),
@@ -312,6 +319,11 @@ fn build_schedule_routine_payload(
     payload.insert(
         "schedule_type".to_owned(),
         Value::String(cron_schedule_type_text(config.schedule_type).to_owned()),
+    );
+    insert_optional_string(
+        &mut payload,
+        "schedule_timezone",
+        config.schedule_timezone.map(|value| value.as_str().to_owned()),
     );
     insert_schedule_value(&mut payload, config.schedule_type, config.schedule)?;
     payload.insert(
@@ -680,6 +692,13 @@ fn existing_schedule_value(routine: &Value) -> String {
     }
 }
 
+fn existing_schedule_timezone(routine: &Value) -> RoutinePreviewTimezoneArg {
+    match json_optional_string_at(routine, "/schedule_payload/timezone").as_deref() {
+        Some("local") => RoutinePreviewTimezoneArg::Local,
+        _ => RoutinePreviewTimezoneArg::Utc,
+    }
+}
+
 fn existing_concurrency_policy(routine: &Value) -> CronConcurrencyPolicyArg {
     match json_optional_string_at(routine, "/concurrency_policy").as_deref() {
         Some("replace") => CronConcurrencyPolicyArg::Replace,
@@ -765,6 +784,7 @@ struct ScheduleRoutineConfig {
     prompt: String,
     schedule_type: CronScheduleTypeArg,
     schedule: String,
+    schedule_timezone: Option<RoutinePreviewTimezoneArg>,
     enabled: Option<bool>,
     concurrency: CronConcurrencyPolicyArg,
     retry_max_attempts: u32,
@@ -790,7 +810,7 @@ mod tests {
     };
     use crate::cli::{
         CronConcurrencyPolicyArg, CronMisfirePolicyArg, CronScheduleTypeArg,
-        RoutineApprovalModeArg, RoutineExecutionPostureArg,
+        RoutineApprovalModeArg, RoutineExecutionPostureArg, RoutinePreviewTimezoneArg,
     };
 
     #[test]
@@ -814,6 +834,7 @@ mod tests {
                 prompt: "write report".to_owned(),
                 schedule_type: CronScheduleTypeArg::Every,
                 schedule: "1m".to_owned(),
+                schedule_timezone: Some(RoutinePreviewTimezoneArg::Local),
                 enabled: Some(true),
                 concurrency: CronConcurrencyPolicyArg::Forbid,
                 retry_max_attempts: 1,
@@ -837,6 +858,10 @@ mod tests {
         );
         assert!(payload.get("execution_posture").is_none());
         assert!(payload.get("approval_mode").is_none());
+        assert_eq!(
+            payload.get("schedule_timezone").and_then(serde_json::Value::as_str),
+            Some("local")
+        );
     }
 
     #[test]
@@ -853,6 +878,7 @@ mod tests {
                 prompt: "write report".to_owned(),
                 schedule_type: CronScheduleTypeArg::Every,
                 schedule: "1m".to_owned(),
+                schedule_timezone: Some(RoutinePreviewTimezoneArg::Local),
                 enabled: Some(true),
                 concurrency: CronConcurrencyPolicyArg::Forbid,
                 retry_max_attempts: 1,
@@ -888,6 +914,7 @@ mod tests {
                     prompt: "write report".to_owned(),
                     schedule_type: CronScheduleTypeArg::Every,
                     schedule: "1m".to_owned(),
+                    schedule_timezone: Some(RoutinePreviewTimezoneArg::Local),
                     enabled: Some(true),
                     concurrency: CronConcurrencyPolicyArg::Forbid,
                     retry_max_attempts: 1,

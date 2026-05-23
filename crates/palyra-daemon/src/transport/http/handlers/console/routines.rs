@@ -83,6 +83,8 @@ pub(crate) struct ConsoleRoutineUpsertRequest {
     #[serde(default)]
     schedule_type: Option<String>,
     #[serde(default)]
+    schedule_timezone: Option<String>,
+    #[serde(default)]
     cron_expression: Option<String>,
     #[serde(default)]
     every_interval_ms: Option<u64>,
@@ -2012,6 +2014,8 @@ fn resolve_routine_schedule(
             next_run_at_unix_ms: None,
         });
     }
+    let schedule_timezone_mode =
+        parse_optional_schedule_timezone_mode(payload.schedule_timezone.as_deref(), timezone_mode)?;
     if let Some(phrase) = payload
         .natural_language_schedule
         .as_deref()
@@ -2020,7 +2024,7 @@ fn resolve_routine_schedule(
     {
         let preview = natural_language_schedule_preview(
             phrase,
-            timezone_mode,
+            schedule_timezone_mode,
             unix_ms_now().map_err(internal_console_error)?,
         )
         .map_err(routine_registry_error_response)?;
@@ -2035,7 +2039,7 @@ fn resolve_routine_schedule(
     let normalized = cron::normalize_schedule(
         Some(schedule),
         unix_ms_now().map_err(internal_console_error)?,
-        timezone_mode,
+        schedule_timezone_mode,
     )
     .map_err(runtime_status_response)?;
     Ok(ScheduleResolution {
@@ -2535,6 +2539,21 @@ fn parse_timezone_mode(value: Option<&str>) -> Result<CronTimezoneMode, Response
 }
 
 #[allow(clippy::result_large_err)]
+fn parse_optional_schedule_timezone_mode(
+    value: Option<&str>,
+    default_timezone_mode: CronTimezoneMode,
+) -> Result<CronTimezoneMode, Response> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        Some("local") => Ok(CronTimezoneMode::Local),
+        Some("utc") => Ok(CronTimezoneMode::Utc),
+        None => Ok(default_timezone_mode),
+        Some(_) => Err(runtime_status_response(tonic::Status::invalid_argument(
+            "schedule_timezone must be one of local|utc",
+        ))),
+    }
+}
+
+#[allow(clippy::result_large_err)]
 fn is_in_quiet_hours(
     quiet_hours: Option<&RoutineQuietHours>,
     now_unix_ms: i64,
@@ -2601,10 +2620,11 @@ fn internal_console_error(error: anyhow::Error) -> Response {
 mod tests {
     use super::{
         compare_optional_matchers, is_in_quiet_hours, normalize_channel, parse_delivery,
-        parse_execution_config, parse_quiet_hours, routine_automation_flag_permits_enabled_write,
-        routine_matches_trigger, routine_output_fields_from_session,
-        routine_output_text_from_tape_events,
+        parse_execution_config, parse_optional_schedule_timezone_mode, parse_quiet_hours,
+        routine_automation_flag_permits_enabled_write, routine_matches_trigger,
+        routine_output_fields_from_session, routine_output_text_from_tape_events,
     };
+    use crate::cron::CronTimezoneMode;
     use crate::journal::{OrchestratorSessionRecord, OrchestratorTapeRecord};
     use crate::routines::{
         RoutineApprovalMode, RoutineApprovalPolicy, RoutineDeliveryMode, RoutineExecutionConfig,
@@ -2662,6 +2682,51 @@ mod tests {
     }
 
     #[test]
+    fn schedule_timezone_override_defaults_to_daemon_mode_when_absent() {
+        assert_eq!(
+            parse_optional_schedule_timezone_mode(None, CronTimezoneMode::Utc)
+                .expect("missing override should use daemon default"),
+            CronTimezoneMode::Utc
+        );
+        assert_eq!(
+            parse_optional_schedule_timezone_mode(Some("local"), CronTimezoneMode::Utc)
+                .expect("local override should parse"),
+            CronTimezoneMode::Local
+        );
+        assert_eq!(
+            parse_optional_schedule_timezone_mode(Some("utc"), CronTimezoneMode::Local)
+                .expect("utc override should parse"),
+            CronTimezoneMode::Utc
+        );
+        assert_eq!(
+            parse_optional_schedule_timezone_mode(Some("Europe/Prague"), CronTimezoneMode::Utc)
+                .expect_err("named zones are not supported by the cron evaluator")
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[test]
+    fn routine_schedule_resolution_applies_explicit_timezone_override() {
+        let mut payload = schedule_upsert_payload();
+        payload.schedule_type = Some("cron".to_owned());
+        payload.cron_expression = Some("0 9 * * 1".to_owned());
+        payload.schedule_timezone = Some("local".to_owned());
+
+        let schedule = super::resolve_routine_schedule(
+            &payload,
+            RoutineTriggerKind::Schedule,
+            CronTimezoneMode::Utc,
+        )
+        .expect("explicit schedule timezone should override daemon default");
+        let schedule_payload: serde_json::Value =
+            serde_json::from_str(schedule.schedule_payload_json.as_str())
+                .expect("schedule payload should be valid json");
+        assert_eq!(schedule_payload["expression"], json!("0 9 * * 1"));
+        assert_eq!(schedule_payload["timezone"], json!("local"));
+    }
+
+    #[test]
     fn specific_channel_delivery_requires_explicit_channel() {
         let response = parse_delivery(Some("specific_channel"), None, None, None, None)
             .expect_err("channel should be required");
@@ -2677,6 +2742,49 @@ mod tests {
         assert_eq!(delivery.mode, RoutineDeliveryMode::SpecificChannel);
         assert_eq!(delivery.failure_mode, Some(RoutineDeliveryMode::LogsOnly));
         assert_eq!(delivery.silent_policy, RoutineSilentPolicy::FailureOnly);
+    }
+
+    fn schedule_upsert_payload() -> super::ConsoleRoutineUpsertRequest {
+        super::ConsoleRoutineUpsertRequest {
+            routine_id: None,
+            name: "schedule".to_owned(),
+            prompt: "run schedule".to_owned(),
+            owner_principal: None,
+            channel: None,
+            session_key: None,
+            session_label: None,
+            workdir: None,
+            enabled: None,
+            trigger_kind: "schedule".to_owned(),
+            trigger_payload: None,
+            natural_language_schedule: None,
+            schedule_type: None,
+            schedule_timezone: None,
+            cron_expression: None,
+            every_interval_ms: None,
+            at_timestamp_rfc3339: None,
+            concurrency_policy: None,
+            retry_max_attempts: None,
+            retry_backoff_ms: None,
+            misfire_policy: None,
+            jitter_ms: None,
+            delivery_mode: None,
+            delivery_channel: None,
+            delivery_failure_mode: None,
+            delivery_failure_channel: None,
+            silent_policy: None,
+            run_mode: None,
+            procedure_profile_id: None,
+            skill_profile_id: None,
+            provider_profile_id: None,
+            execution_posture: None,
+            quiet_hours_start: None,
+            quiet_hours_end: None,
+            quiet_hours_timezone: None,
+            cooldown_ms: None,
+            approval_mode: None,
+            template_id: None,
+        }
     }
 
     #[test]

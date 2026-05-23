@@ -13,6 +13,8 @@ Options:
           [possible values: cron, every, at]
       --schedule <SCHEDULE>
           Schedule payload: cron expression for cron, RFC3339 timestamp for at, or milliseconds/duration such as 300000 or 5m for every
+      --timezone <TIMEZONE>
+          Timezone used to evaluate cron expression schedules [possible values: local, utc]
       --enabled <ENABLED>
           [possible values: true, false]
       --concurrency <CONCURRENCY>
