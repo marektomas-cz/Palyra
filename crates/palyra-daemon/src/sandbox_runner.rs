@@ -1214,8 +1214,11 @@ fn token_looks_like_absolute_path(raw: &str) -> bool {
         return false;
     }
 
-    if token.starts_with("file://") || token.starts_with('/') || token.starts_with('\\') {
+    if token.starts_with("file://") || token.starts_with('/') {
         return true;
+    }
+    if token.starts_with('\\') {
+        return !token_is_escaped_string_fragment(token);
     }
 
     let bytes = token.as_bytes();
@@ -1223,6 +1226,14 @@ fn token_looks_like_absolute_path(raw: &str) -> bool {
         && bytes[0].is_ascii_alphabetic()
         && bytes[1] == b':'
         && matches!(bytes[2], b'\\' | b'/')
+}
+
+fn token_is_escaped_string_fragment(token: &str) -> bool {
+    let rest = token.trim_start_matches('\\');
+    if rest.len() == token.len() {
+        return false;
+    }
+    matches!(rest, "n" | "r" | "t" | "0" | "\"" | "'" | "`")
 }
 
 fn canonical_workspace_root(root: &Path) -> Result<PathBuf, SandboxProcessRunError> {
@@ -1317,7 +1328,7 @@ fn rewrite_arguments_to_scoped_paths(
             index = index.saturating_add(2);
             continue;
         }
-        if is_windows_taskkill_switch(command, arg.as_str()) {
+        if is_windows_command_switch(command, arg.as_str()) {
             rewritten.push(arg.clone());
             index = index.saturating_add(1);
             continue;
@@ -1486,11 +1497,19 @@ fn is_sleep_duration_literal(arg: &str) -> bool {
     saw_digit
 }
 
-fn is_windows_taskkill_switch(command: &str, arg: &str) -> bool {
-    if !cfg!(windows) || !command.trim().eq_ignore_ascii_case("taskkill") {
+fn is_windows_command_switch(command: &str, arg: &str) -> bool {
+    if !cfg!(windows) {
         return false;
     }
-    matches!(arg.trim().to_ascii_uppercase().as_str(), "/PID" | "/T" | "/F")
+    let command = normalized_process_command_name(command);
+    let arg = arg.trim().to_ascii_uppercase();
+    match command.as_str() {
+        "taskkill" => matches!(arg.as_str(), "/PID" | "/T" | "/F"),
+        "tasklist" => {
+            matches!(arg.as_str(), "/FI" | "/FO" | "/NH" | "/V" | "/SVC" | "/M" | "/APPS")
+        }
+        _ => false,
+    }
 }
 
 fn option_assignment_value(arg: &str) -> Option<&str> {
@@ -3351,6 +3370,31 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
+    fn validate_argument_workspace_scope_allows_tasklist_filter_switches() {
+        let workspace = unique_temp_dir("workspace-tasklist-switches");
+        fs::create_dir_all(workspace.as_path()).expect("workspace directory should be created");
+        let canonical_workspace = canonical_workspace_root(workspace.as_path())
+            .expect("workspace root should canonicalize");
+        let args = vec![
+            "/FI".to_owned(),
+            "IMAGENAME eq node.exe".to_owned(),
+            "/FO".to_owned(),
+            "LIST".to_owned(),
+        ];
+
+        validate_argument_workspace_scope(
+            canonical_workspace.as_path(),
+            canonical_workspace.as_path(),
+            "tasklist",
+            args.as_slice(),
+        )
+        .expect("tasklist filter switches should not be treated as absolute paths");
+
+        let _ = fs::remove_dir_all(workspace.as_path());
+    }
+
+    #[test]
     fn validate_argument_workspace_scope_does_not_skip_path_after_short_t_flag() {
         let workspace = unique_temp_dir("workspace-short-t-flag-path");
         fs::create_dir_all(workspace.as_path()).expect("workspace directory should be created");
@@ -4748,6 +4792,29 @@ mod tests {
 
         assert_eq!(error.kind, SandboxProcessRunErrorKind::WorkspaceScopeDenied);
         assert!(error.message.contains("absolute path-like substring"));
+    }
+
+    #[test]
+    fn interpreter_guardrails_allow_inline_node_code_with_relative_paths_and_newline_escape() {
+        let workspace = unique_temp_dir("workspace-node-inline-relative-paths");
+        fs::create_dir_all(workspace.join("src").as_path())
+            .expect("workspace src directory should be created");
+        let workspace_root = canonical_workspace_root(workspace.as_path())
+            .expect("workspace root should canonicalize");
+        let args = vec![
+            "-e".to_owned(),
+            "const fs = require('fs'); const lines = fs.readFileSync('src/reporting.ts', 'utf8').split('\\n'); console.log('reporting.ts line count:', lines.length);".to_owned(),
+        ];
+
+        validate_interpreter_argument_guardrails(
+            workspace_root.as_path(),
+            workspace_root.as_path(),
+            "node",
+            args.as_slice(),
+        )
+        .expect("inline node code with relative paths should not be treated as host-absolute");
+
+        let _ = fs::remove_dir_all(workspace.as_path());
     }
 
     #[test]
