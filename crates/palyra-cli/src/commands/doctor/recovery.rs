@@ -261,7 +261,7 @@ pub(crate) fn run_doctor(request: DoctorCommandRequest) -> Result<()> {
             .context("failed to serialize doctor execution report")?;
         println!("{encoded}");
     } else {
-        render_doctor_text(&execution);
+        render_doctor_text(&execution)?;
     }
     if request.strict {
         let failing_required = execution
@@ -2526,7 +2526,7 @@ fn build_default_next_steps(report: &DoctorReport) -> Vec<String> {
     dedupe_strings(next_steps)
 }
 
-fn render_doctor_text(execution: &DoctorExecutionReport) {
+fn render_doctor_text(execution: &DoctorExecutionReport) -> Result<()> {
     let checks = &execution.diagnostics.checks;
     let blocking_checks = checks
         .iter()
@@ -2541,35 +2541,44 @@ fn render_doctor_text(execution: &DoctorExecutionReport) {
         .filter(|check| check.severity == DoctorSeverity::Info && !check.ok)
         .collect::<Vec<_>>();
     for check in checks {
-        println!(
-            "doctor.check key={} ok={} required={} severity={}",
-            check.key,
-            check.ok,
-            check.required,
-            check.severity.as_str()
-        );
+        output::print_text_line(
+            format!(
+                "doctor.check key={} ok={} required={} severity={}",
+                check.key,
+                check.ok,
+                check.required,
+                check.severity.as_str()
+            )
+            .as_str(),
+        )?;
     }
-    println!(
-        "doctor.summary blocking={} warnings={} info={} required_checks_failed={}",
-        blocking_checks.len(),
-        warning_checks.len(),
-        info_checks.len(),
-        execution.diagnostics.summary.required_checks_failed
-    );
-    println!(
-        "doctor.connectivity http_ok={} grpc_ok={} admin_ok={}",
-        execution.diagnostics.connectivity.http.ok,
-        execution.diagnostics.connectivity.grpc.ok,
-        execution.diagnostics.connectivity.admin.ok
-    );
+    output::print_text_line(
+        format!(
+            "doctor.summary blocking={} warnings={} info={} required_checks_failed={}",
+            blocking_checks.len(),
+            warning_checks.len(),
+            info_checks.len(),
+            execution.diagnostics.summary.required_checks_failed
+        )
+        .as_str(),
+    )?;
+    output::print_text_line(
+        format!(
+            "doctor.connectivity http_ok={} grpc_ok={} admin_ok={}",
+            execution.diagnostics.connectivity.http.ok,
+            execution.diagnostics.connectivity.grpc.ok,
+            execution.diagnostics.connectivity.admin.ok
+        )
+        .as_str(),
+    )?;
     if let Some(message) = execution.diagnostics.connectivity.http.message.as_deref() {
-        println!("doctor.connectivity.http_message={message}");
+        output::print_text_line(format!("doctor.connectivity.http_message={message}").as_str())?;
     }
     if let Some(message) = execution.diagnostics.connectivity.grpc.message.as_deref() {
-        println!("doctor.connectivity.grpc_message={message}");
+        output::print_text_line(format!("doctor.connectivity.grpc_message={message}").as_str())?;
     }
     if let Some(message) = execution.diagnostics.connectivity.admin.message.as_deref() {
-        println!("doctor.connectivity.admin_message={message}");
+        output::print_text_line(format!("doctor.connectivity.admin_message={message}").as_str())?;
     }
     if let Some(config_ref_health) = execution.diagnostics.config_ref_health.as_ref() {
         let state = config_ref_health.get("state").and_then(JsonValue::as_str).unwrap_or("unknown");
@@ -2588,49 +2597,64 @@ fn render_doctor_text(execution: &DoctorExecutionReport) {
             .and_then(|summary| summary.get("stale"))
             .and_then(JsonValue::as_u64)
             .unwrap_or(0);
-        println!(
-            "doctor.config_ref_health state={} severity={} blocking_refs={} warning_refs={} stale_refs={}",
-            state, severity, blocking_refs, warning_refs, stale_refs
-        );
+        output::print_text_line(
+            format!(
+                "doctor.config_ref_health state={} severity={} blocking_refs={} warning_refs={} stale_refs={}",
+                state, severity, blocking_refs, warning_refs, stale_refs
+            )
+            .as_str(),
+        )?;
         if let Some(recommendations) =
             config_ref_health.get("recommendations").and_then(JsonValue::as_array)
         {
             for recommendation in recommendations.iter().filter_map(JsonValue::as_str).take(4) {
-                println!("doctor.config_ref_advice={recommendation}");
+                output::print_text_line(
+                    format!("doctor.config_ref_advice={recommendation}").as_str(),
+                )?;
             }
         }
     }
     if execution.recovery.requested {
-        println!(
-            "doctor.recovery requested=true mode={:?} dry_run={} force={}",
-            execution.mode, execution.recovery.dry_run, execution.recovery.force
-        );
+        output::print_text_line(
+            format!(
+                "doctor.recovery requested=true mode={:?} dry_run={} force={}",
+                execution.mode, execution.recovery.dry_run, execution.recovery.force
+            )
+            .as_str(),
+        )?;
         for step in execution.recovery.planned_steps.as_slice() {
-            println!(
-                "doctor.repair_step id={} severity={} apply_supported={} requires_force={} kind={}",
-                step.id,
-                step.severity.as_str(),
-                step.apply_supported,
-                step.requires_force,
-                step.kind
-            );
+            output::print_text_line(
+                format!(
+                    "doctor.repair_step id={} severity={} apply_supported={} requires_force={} kind={}",
+                    step.id,
+                    step.severity.as_str(),
+                    step.apply_supported,
+                    step.requires_force,
+                    step.kind
+                )
+                .as_str(),
+            )?;
         }
         for step in execution.recovery.applied_steps.as_slice() {
-            println!(
-                "doctor.repair_result id={} outcome={} message={}",
-                step.id, step.outcome, step.message
-            );
+            output::print_text_line(
+                format!(
+                    "doctor.repair_result id={} outcome={} message={}",
+                    step.id, step.outcome, step.message
+                )
+                .as_str(),
+            )?;
         }
         if let Some(run_id) = execution.recovery.run_id.as_deref() {
-            println!("doctor.recovery_run_id={run_id}");
+            output::print_text_line(format!("doctor.recovery_run_id={run_id}").as_str())?;
         }
-        if let Some(path) = execution.recovery.backup_manifest_path.as_deref() {
-            println!("doctor.recovery_manifest={path}");
+        if execution.recovery.backup_manifest_path.is_some() {
+            output::print_text_line("doctor.recovery_manifest_present=true")?;
         }
     }
     for next_step in execution.recovery.next_steps.as_slice() {
-        println!("doctor.next_step={next_step}");
+        output::print_text_line(format!("doctor.next_step={next_step}").as_str())?;
     }
+    Ok(())
 }
 
 fn cli_profiles_quarantine_path(path: &Path) -> PathBuf {

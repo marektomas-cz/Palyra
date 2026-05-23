@@ -884,10 +884,10 @@ fn console_chat_endpoints_require_session_and_csrf() -> Result<()> {
         "chat stream endpoint must enforce csrf token"
     );
 
-    let unknown_session_id = "01ARZ3NDEKTSV4RRFFQ69G5FB8";
+    let missing_chat_route = "01ARZ3NDEKTSV4RRFFQ69G5FB8";
     let reference_preview_unknown_session = client
         .post(format!(
-            "http://127.0.0.1:{admin_port}/console/v1/chat/sessions/{unknown_session_id}/references/preview"
+            "http://127.0.0.1:{admin_port}/console/v1/chat/sessions/{missing_chat_route}/references/preview"
         ))
         .header("Cookie", cookie.clone())
         .json(&serde_json::json!({

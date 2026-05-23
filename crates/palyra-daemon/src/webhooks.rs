@@ -1093,6 +1093,7 @@ mod tests {
     use palyra_common::CANONICAL_JSON_ENVELOPE_VERSION;
     use serde_json::json;
     use tempfile::tempdir;
+    use ulid::Ulid;
 
     use palyra_vault::{BackendPreference, VaultConfig, VaultScope};
 
@@ -1282,12 +1283,9 @@ mod tests {
     fn webhook_test_integration_accepts_valid_signature_once(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let (registry, vault, _temp) = test_registry_with_signed_webhook()?;
-        let payload_bytes = signed_test_webhook_payload(
-            "github.repo_a",
-            "push",
-            "01ARZ3NDEKTSV4RRFFQ69G5FAC",
-            b"super-secret",
-        )?;
+        let nonce = Ulid::new().to_string();
+        let payload_bytes =
+            signed_test_webhook_payload("github.repo_a", "push", nonce.as_str(), b"super-secret")?;
 
         let first = registry.test_integration("github_repo_a", payload_bytes.as_slice(), &vault)?;
         assert!(first.result.valid);

@@ -78,7 +78,7 @@ fn command_level_health_json_reports_unavailable_runtime_as_json() -> Result<()>
     let payload = parse_stderr_json(&output, "health --json failure")?;
     let stderr = String::from_utf8_lossy(&output.stderr);
     for secret in ["HTTP_PASS_123", "HTTP_KEY_456", "GRPC_PASS_ABC", "GRPC_SECRET_XYZ"] {
-        assert!(!stderr.contains(secret), "health JSON leaked {secret}: {stderr}");
+        assert!(!stderr.contains(secret));
     }
     assert!(stderr.contains("<redacted>"), "health JSON should redact URL credentials: {stderr}");
     assert_eq!(payload.get("status").and_then(Value::as_str), Some("error"));

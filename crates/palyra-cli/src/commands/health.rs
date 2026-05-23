@@ -227,7 +227,7 @@ mod tests {
         let rendered = serde_json::to_string(&payload).expect("health JSON payload encodes");
 
         for secret in ["HTTP_PASS_123", "HTTP_TOKEN_456", "GRPC_PASS_ABC", "GRPC_TOKEN_XYZ"] {
-            assert!(!rendered.contains(secret), "payload leaked {secret}: {rendered}");
+            assert!(!rendered.contains(secret));
         }
         assert!(rendered.contains("<redacted>"));
         assert_eq!(payload.pointer("/error/trace_id").and_then(Value::as_str), Some("trace-123"));

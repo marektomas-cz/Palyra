@@ -815,14 +815,8 @@ async fn run_auth_openai_async(command: AuthOpenAiCommand) -> Result<()> {
                 .context("failed to start OpenAI OAuth bootstrap")?;
             let mut payload = build_openai_oauth_launch_payload(response);
             if open {
-                open_url_in_default_browser(payload.authorization_url.as_str()).with_context(
-                    || {
-                        format!(
-                            "failed to open OpenAI OAuth authorization URL {}",
-                            payload.authorization_url
-                        )
-                    },
-                )?;
+                open_url_in_default_browser(payload.authorization_url.as_str())
+                    .with_context(|| "failed to open OpenAI OAuth authorization URL".to_owned())?;
                 payload.opened = true;
             }
             emit_openai_oauth_launch(payload, output::preferred_json(json))
@@ -1077,17 +1071,25 @@ fn emit_openai_oauth_launch(payload: OpenAiOAuthLaunchPayload, json_output: bool
     if json_output {
         output::print_json_pretty(&payload, "failed to encode OpenAI OAuth launch as JSON")?;
     } else {
-        println!(
-            "auth.openai.oauth.start attempt_id={} profile_id={} expires_at_unix_ms={} authorization_url={} opened={}",
+        for line in openai_oauth_launch_text_lines(&payload) {
+            output::print_text_line(line.as_str())?;
+        }
+    }
+    std::io::stdout().flush().context("stdout flush failed")
+}
+
+fn openai_oauth_launch_text_lines(payload: &OpenAiOAuthLaunchPayload) -> [String; 2] {
+    [
+        format!(
+            "auth.openai.oauth.start attempt_id={} profile_id={} expires_at_unix_ms={} authorization_url_present={} opened={}",
             payload.attempt_id,
             payload.profile_id.as_deref().unwrap_or("none"),
             payload.expires_at_unix_ms,
-            payload.authorization_url,
+            !payload.authorization_url.trim().is_empty(),
             payload.opened
-        );
-        println!("auth.openai.oauth.message=\"{}\"", payload.message.replace('"', "'"));
-    }
-    std::io::stdout().flush().context("stdout flush failed")
+        ),
+        format!("auth.openai.oauth.message=\"{}\"", payload.message.replace('"', "'")),
+    ]
 }
 
 fn emit_openai_oauth_state(payload: OpenAiOAuthStatePayload, json_output: bool) -> Result<()> {
@@ -1321,6 +1323,7 @@ fn load_secret_input(
 mod tests {
     use super::{
         build_auth_profiles_list_json_payload, build_openai_oauth_launch_payload,
+        openai_oauth_launch_text_lines, OpenAiOAuthLaunchPayload,
         AUTH_PROFILES_EMPTY_REGISTRY_NOTE, AUTH_PROFILES_MODEL_PROVIDER_SOURCES,
     };
     use palyra_control_plane as control_plane;
@@ -1386,5 +1389,22 @@ mod tests {
         assert_eq!(payload.profile_id.as_deref(), Some("openai-default"));
         assert!(!payload.opened);
         assert_eq!(payload.message, "Open the authorization URL to reconnect OpenAI.");
+    }
+
+    #[test]
+    fn openai_oauth_launch_text_output_omits_authorization_url() {
+        let payload = OpenAiOAuthLaunchPayload {
+            attempt_id: "attempt-1".to_owned(),
+            authorization_url: "https://auth.openai.example/authorize?state=attempt-1".to_owned(),
+            expires_at_unix_ms: 1_772_000_000_000,
+            profile_id: Some("openai-default".to_owned()),
+            opened: false,
+            message: "Open the authorization URL to reconnect OpenAI.".to_owned(),
+        };
+        let output = openai_oauth_launch_text_lines(&payload).join("\n");
+
+        assert!(output.contains("authorization_url_present=true"), "{output}");
+        assert!(!output.contains("https://auth.openai.example"), "{output}");
+        assert!(!output.contains("state=attempt-1"), "{output}");
     }
 }
