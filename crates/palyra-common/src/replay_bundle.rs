@@ -714,7 +714,7 @@ impl ReplayNormalizer {
         if key_context
             .is_some_and(|key| key_contains_any(key, &["url", "uri", "endpoint", "location"]))
         {
-            *raw = redact_url(raw);
+            *raw = redact_replay_url(raw);
             self.redaction.redacted_fields += 1;
             return;
         }
@@ -753,6 +753,62 @@ impl ReplayNormalizer {
         self.id_aliases.insert(raw.to_owned(), alias.clone());
         self.redaction.pseudonymized_identifiers += 1;
         alias
+    }
+}
+
+fn redact_replay_url(raw: &str) -> String {
+    let redacted = redact_url(raw);
+    let (base_and_query, fragment) = split_replay_once(redacted.trim(), '#');
+    let (base, query) = split_replay_once(base_and_query, '?');
+    let mut output = base.to_owned();
+
+    if let Some(query) = query {
+        let query = redact_replay_query_pairs(query);
+        if !query.is_empty() {
+            output.push('?');
+            output.push_str(query.as_str());
+        }
+    }
+
+    if let Some(fragment) = fragment {
+        output.push('#');
+        output.push_str(redact_replay_query_pairs(fragment).as_str());
+    }
+
+    output
+}
+
+fn split_replay_once(value: &str, delimiter: char) -> (&str, Option<&str>) {
+    if let Some((left, right)) = value.split_once(delimiter) {
+        (left, Some(right))
+    } else {
+        (value, None)
+    }
+}
+
+fn redact_replay_query_pairs(raw: &str) -> String {
+    let mut redacted_pairs = Vec::new();
+    for pair in raw.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        let (key, value) = split_replay_query_pair(pair);
+        if is_sensitive_key(key) {
+            redacted_pairs.push(format!("{key}={REDACTED}"));
+        } else if value.is_empty() {
+            redacted_pairs.push(key.to_owned());
+        } else {
+            redacted_pairs.push(format!("{key}={value}"));
+        }
+    }
+    redacted_pairs.join("&")
+}
+
+fn split_replay_query_pair(pair: &str) -> (&str, &str) {
+    if let Some(index) = pair.find('=') {
+        (&pair[..index], &pair[index + 1..])
+    } else {
+        (pair, "")
     }
 }
 
