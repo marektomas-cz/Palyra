@@ -118,7 +118,7 @@ pub use sandbox::{SandboxCommand, SandboxRuntimeArg};
 pub use secrets::{SecretsCommand, SecretsConfigureCommand};
 pub use security::SecurityCommand;
 pub use sessions::SessionsCommand;
-pub use skills::{SkillsCommand, SkillsPackageCommand};
+pub use skills::{SkillsCommand, SkillsPackageCommand, SkillsProcedureCommand};
 pub use support_bundle::SupportBundleCommand;
 pub use system::{SystemCommand, SystemEventCommand, SystemEventSeverityArg};
 pub use tui::TuiCommand;

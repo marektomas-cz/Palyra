@@ -23,9 +23,9 @@ use super::{
     RoutinePreviewTimezoneArg, RoutineRunModeArg, RoutineSilentPolicyArg, RoutineTriggerKindArg,
     RoutineUpsertCommand, RoutinesCommand, SandboxCommand, SandboxRuntimeArg, SecretsCommand,
     SecretsConfigureCommand, SecurityCommand, SessionsCommand, SetupWizardOverridesArg,
-    SkillsCommand, SkillsPackageCommand, SupportBundleCommand, SystemCommand, SystemEventCommand,
-    SystemEventSeverityArg, TuiCommand, UninstallCommand, UpdateCommand, WebhooksCommand,
-    WizardOverridesArg, WorkspaceRoleArg,
+    SkillsCommand, SkillsPackageCommand, SkillsProcedureCommand, SupportBundleCommand,
+    SystemCommand, SystemEventCommand, SystemEventSeverityArg, TuiCommand, UninstallCommand,
+    UpdateCommand, WebhooksCommand, WizardOverridesArg, WorkspaceRoleArg,
 };
 
 mod parser_stability_plugin_tests;
@@ -5592,6 +5592,46 @@ fn parse_skills_package_verify() {
                     trust_store: Some("state/skills-trust.json".to_owned()),
                     trusted_publishers: vec!["acme=001122".to_owned()],
                     allow_tofu: true,
+                    json: true,
+                },
+            },
+        }
+    );
+}
+
+#[test]
+fn parse_skills_procedure_save() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "skills",
+        "procedure",
+        "save",
+        "--skills-dir",
+        "state/procedure-skills",
+        "--slug",
+        "frontmatter-audit",
+        "--name",
+        "Frontmatter audit",
+        "--summary",
+        "Audit markdown frontmatter",
+        "--body",
+        "Check markdown files",
+        "--force",
+        "--json",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Skills {
+            command: SkillsCommand::Procedure {
+                command: SkillsProcedureCommand::Save {
+                    path: None,
+                    skills_dir: Some("state/procedure-skills".to_owned()),
+                    slug: Some("frontmatter-audit".to_owned()),
+                    name: "Frontmatter audit".to_owned(),
+                    summary: Some("Audit markdown frontmatter".to_owned()),
+                    body: Some("Check markdown files".to_owned()),
+                    body_file: None,
+                    force: true,
                     json: true,
                 },
             },

@@ -6,6 +6,10 @@ pub enum SkillsCommand {
         #[command(subcommand)]
         command: SkillsPackageCommand,
     },
+    Procedure {
+        #[command(subcommand)]
+        command: SkillsProcedureCommand,
+    },
     Install {
         #[arg(long, conflicts_with_all = ["registry_dir", "registry_url", "skill_id", "version"])]
         artifact: Option<String>,
@@ -176,6 +180,30 @@ pub enum SkillsCommand {
         device_id: String,
         #[arg(long)]
         channel: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand, PartialEq, Eq)]
+pub enum SkillsProcedureCommand {
+    Save {
+        #[arg(long)]
+        path: Option<String>,
+        #[arg(long)]
+        skills_dir: Option<String>,
+        #[arg(long)]
+        slug: Option<String>,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        summary: Option<String>,
+        #[arg(long, conflicts_with = "body_file")]
+        body: Option<String>,
+        #[arg(long)]
+        body_file: Option<String>,
+        #[arg(long, default_value_t = false)]
+        force: bool,
         #[arg(long, default_value_t = false)]
         json: bool,
     },

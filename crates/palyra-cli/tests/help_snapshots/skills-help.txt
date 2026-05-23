@@ -4,6 +4,7 @@ Usage: palyra skills [OPTIONS] <COMMAND>
 
 Commands:
   package
+  procedure
   install
   remove
   list

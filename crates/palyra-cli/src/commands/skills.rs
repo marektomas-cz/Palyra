@@ -1,3 +1,6 @@
+use sha2::{Digest, Sha256};
+
+use crate::cli::SkillsProcedureCommand;
 use crate::{client::skills as skills_client, output::skills as skills_output, *};
 
 pub(crate) fn run_skills(command: SkillsCommand) -> Result<()> {
@@ -147,6 +150,29 @@ pub(crate) fn run_skills(command: SkillsCommand) -> Result<()> {
                 }
                 std::io::stdout().flush().context("stdout flush failed")
             }
+        },
+        SkillsCommand::Procedure { command } => match command {
+            SkillsProcedureCommand::Save {
+                path,
+                skills_dir,
+                slug,
+                name,
+                summary,
+                body,
+                body_file,
+                force,
+                json,
+            } => run_skills_procedure_save(SkillsProcedureSaveCommand {
+                path,
+                skills_dir,
+                slug,
+                name,
+                summary,
+                body,
+                body_file,
+                force,
+                json,
+            }),
         },
         SkillsCommand::Install {
             artifact,
@@ -323,6 +349,396 @@ pub(crate) fn run_skills(command: SkillsCommand) -> Result<()> {
             json,
         }),
     }
+}
+
+#[derive(Debug)]
+struct SkillsProcedureSaveCommand {
+    path: Option<String>,
+    skills_dir: Option<String>,
+    slug: Option<String>,
+    name: String,
+    summary: Option<String>,
+    body: Option<String>,
+    body_file: Option<String>,
+    force: bool,
+    json: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProcedureUnsafeFinding {
+    pattern: &'static str,
+    line_number: usize,
+    line_sha256: String,
+}
+
+#[derive(Debug)]
+struct ProcedureSkillPaths {
+    skills_root: PathBuf,
+    target_path: PathBuf,
+    slug: String,
+}
+
+fn run_skills_procedure_save(command: SkillsProcedureSaveCommand) -> Result<()> {
+    let body = read_procedure_skill_body(command.body, command.body_file.as_deref())?;
+    let paths = resolve_procedure_skill_paths(
+        command.path.as_deref(),
+        command.skills_dir.as_deref(),
+        command.slug.as_deref(),
+        command.name.as_str(),
+    )?;
+    let summary = command.summary.as_deref().map(str::trim).filter(|value| !value.is_empty());
+    let findings = scan_procedure_skill_body(body.as_str());
+    let raw_sha256 = sha256_hex(body.as_bytes());
+    let (stored_body, quarantine_path, safety_status) = if findings.is_empty() {
+        (body.clone(), None, "active")
+    } else {
+        let quarantine_path = write_quarantined_procedure_recipe(
+            paths.skills_root.as_path(),
+            paths.slug.as_str(),
+            body.as_str(),
+            raw_sha256.as_str(),
+            findings.as_slice(),
+        )?;
+        (
+            render_safe_dry_run_procedure_body(body.as_str(), findings.as_slice()),
+            Some(quarantine_path),
+            "quarantined_raw_dry_run_saved",
+        )
+    };
+    let stored_sha256 = sha256_hex(stored_body.as_bytes());
+    let document = render_procedure_skill_markdown(ProcedureSkillDocument {
+        slug: paths.slug.as_str(),
+        name: command.name.trim(),
+        summary,
+        safety_status,
+        raw_sha256: raw_sha256.as_str(),
+        stored_sha256: stored_sha256.as_str(),
+        quarantine_path: quarantine_path.as_deref(),
+        body: stored_body.as_str(),
+    });
+    let write_status = write_procedure_skill_document(
+        paths.target_path.as_path(),
+        document.as_bytes(),
+        command.force,
+    )?;
+    append_skills_audit_event(
+        paths.skills_root.as_path(),
+        "skill.procedure_saved",
+        json!({
+            "slug": paths.slug,
+            "path": paths.target_path,
+            "status": write_status,
+            "safety_status": safety_status,
+            "unsafe_finding_count": findings.len(),
+            "unsafe_findings": findings.iter().map(|finding| json!({
+                "pattern": finding.pattern,
+                "line_number": finding.line_number,
+                "line_sha256": finding.line_sha256,
+            })).collect::<Vec<_>>(),
+            "raw_sha256": raw_sha256,
+            "stored_sha256": stored_sha256,
+            "quarantine_path": quarantine_path,
+        }),
+    )?;
+
+    if command.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "operation": "skills.procedure.save",
+                "status": write_status,
+                "safety_status": safety_status,
+                "slug": paths.slug,
+                "path": paths.target_path,
+                "skills_root": paths.skills_root,
+                "unsafe_finding_count": findings.len(),
+                "raw_sha256": raw_sha256,
+                "stored_sha256": stored_sha256,
+                "quarantine_path": quarantine_path,
+            }))?
+        );
+    } else {
+        println!(
+            "skills.procedure.save status={} safety_status={} slug={} path={} unsafe_findings={} quarantine_path={}",
+            write_status,
+            safety_status,
+            paths.slug,
+            paths.target_path.display(),
+            findings.len(),
+            quarantine_path
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "-".to_owned())
+        );
+    }
+    std::io::stdout().flush().context("stdout flush failed")
+}
+
+fn read_procedure_skill_body(body: Option<String>, body_file: Option<&str>) -> Result<String> {
+    let content = if let Some(body) = body {
+        body
+    } else if let Some(body_file) = body_file {
+        fs::read_to_string(body_file)
+            .with_context(|| format!("failed to read procedure body {}", body_file))?
+    } else {
+        anyhow::bail!("skills procedure save requires --body or --body-file");
+    };
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("procedure body cannot be empty");
+    }
+    Ok(trimmed.to_owned())
+}
+
+fn resolve_procedure_skill_paths(
+    path: Option<&str>,
+    skills_dir: Option<&str>,
+    slug: Option<&str>,
+    name: &str,
+) -> Result<ProcedureSkillPaths> {
+    let target_path = if let Some(path) = path.map(str::trim).filter(|value| !value.is_empty()) {
+        resolve_cli_path(path)?
+    } else {
+        let skills_root = resolve_procedure_skills_root(skills_dir)?;
+        let slug = normalize_procedure_skill_slug(slug.unwrap_or(name))?;
+        skills_root.join(format!("{slug}.md"))
+    };
+    if target_path.extension().and_then(|value| value.to_str()) != Some("md") {
+        anyhow::bail!("procedure skill path must use a .md extension");
+    }
+    let skills_root = if let Some(skills_dir) = skills_dir {
+        resolve_cli_path(skills_dir)?
+    } else {
+        target_path
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| anyhow!("procedure skill path must have a parent directory"))?
+    };
+    let slug = normalize_procedure_skill_slug(
+        slug.or_else(|| target_path.file_stem().and_then(|value| value.to_str())).unwrap_or(name),
+    )?;
+    Ok(ProcedureSkillPaths { skills_root, target_path, slug })
+}
+
+fn resolve_procedure_skills_root(skills_dir: Option<&str>) -> Result<PathBuf> {
+    if let Some(skills_dir) = skills_dir.map(str::trim).filter(|value| !value.is_empty()) {
+        return resolve_cli_path(skills_dir);
+    }
+    Ok(resolve_user_home_dir()?.join(".palyra").join("skills"))
+}
+
+fn resolve_user_home_dir() -> Result<PathBuf> {
+    for key in ["PALYRA_HOME", "HOME", "USERPROFILE"] {
+        if let Some(value) =
+            std::env::var_os(key).filter(|value| !value.to_string_lossy().trim().is_empty())
+        {
+            return Ok(PathBuf::from(value));
+        }
+    }
+    anyhow::bail!("could not resolve user home; set PALYRA_HOME, HOME, or USERPROFILE")
+}
+
+fn resolve_cli_path(path: &str) -> Result<PathBuf> {
+    if path.chars().any(char::is_control) {
+        anyhow::bail!("path contains unsupported control characters");
+    }
+    let path = PathBuf::from(path);
+    Ok(if path.is_absolute() { path } else { std::env::current_dir()?.join(path) })
+}
+
+fn normalize_procedure_skill_slug(value: &str) -> Result<String> {
+    let mut slug = String::new();
+    for ch in value.trim().chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+        } else if matches!(ch, '-' | '_' | '.' | ' ') {
+            slug.push('-');
+        }
+    }
+    let mut slug = slug.trim_matches('-').to_owned();
+    while slug.contains("--") {
+        slug = slug.replace("--", "-");
+    }
+    if slug.is_empty() {
+        anyhow::bail!("procedure skill slug cannot be empty");
+    }
+    if slug.len() > 96 {
+        anyhow::bail!("procedure skill slug must be at most 96 characters");
+    }
+    Ok(slug)
+}
+
+fn scan_procedure_skill_body(body: &str) -> Vec<ProcedureUnsafeFinding> {
+    body.lines()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            unsafe_procedure_pattern(line).map(|pattern| ProcedureUnsafeFinding {
+                pattern,
+                line_number: index + 1,
+                line_sha256: sha256_hex(line.trim().as_bytes()),
+            })
+        })
+        .collect()
+}
+
+fn unsafe_procedure_pattern(line: &str) -> Option<&'static str> {
+    let normalized = line.trim().to_ascii_lowercase();
+    if normalized.contains("rm -rf") || normalized.contains("rm -fr") {
+        return Some("rm_recursive_force");
+    }
+    if normalized.contains("remove-item")
+        && normalized.contains("-recurse")
+        && normalized.contains("-force")
+    {
+        return Some("powershell_recursive_force_delete");
+    }
+    if normalized.contains("del /s") || normalized.contains("rmdir /s") {
+        return Some("windows_recursive_delete");
+    }
+    if normalized.starts_with("format ") || normalized.contains(" mkfs") {
+        return Some("filesystem_format");
+    }
+    if normalized.starts_with("dd ") && normalized.contains(" of=") {
+        return Some("raw_block_write");
+    }
+    None
+}
+
+fn write_quarantined_procedure_recipe(
+    skills_root: &Path,
+    slug: &str,
+    body: &str,
+    raw_sha256: &str,
+    findings: &[ProcedureUnsafeFinding],
+) -> Result<PathBuf> {
+    let quarantine_dir = skills_root.join(".quarantine");
+    fs::create_dir_all(quarantine_dir.as_path()).with_context(|| {
+        format!("failed to create procedure quarantine directory {}", quarantine_dir.display())
+    })?;
+    let quarantine_path = quarantine_dir.join(format!("{slug}-{raw_sha256}.md"));
+    let payload = render_quarantined_procedure_recipe(body, raw_sha256, findings);
+    if quarantine_path.exists() {
+        let existing = fs::read(quarantine_path.as_path()).with_context(|| {
+            format!("failed to read quarantine recipe {}", quarantine_path.display())
+        })?;
+        if existing == payload.as_bytes() {
+            return Ok(quarantine_path);
+        }
+    }
+    write_file_atomically(quarantine_path.as_path(), payload.as_bytes())?;
+    Ok(quarantine_path)
+}
+
+fn render_quarantined_procedure_recipe(
+    body: &str,
+    raw_sha256: &str,
+    findings: &[ProcedureUnsafeFinding],
+) -> String {
+    let findings_json = serde_json::to_string(
+        &findings
+            .iter()
+            .map(|finding| {
+                json!({
+                    "pattern": finding.pattern,
+                    "line_number": finding.line_number,
+                    "line_sha256": finding.line_sha256,
+                })
+            })
+            .collect::<Vec<_>>(),
+    )
+    .unwrap_or_else(|_| "[]".to_owned());
+    format!(
+        "---\nschema: palyra.procedural_skill.quarantine.v1\nstatus: quarantined\nraw_sha256: {raw_sha256}\nfindings: {findings_json}\n---\n\n{body}\n"
+    )
+}
+
+fn render_safe_dry_run_procedure_body(body: &str, findings: &[ProcedureUnsafeFinding]) -> String {
+    let mut rendered = String::from(
+        "> Safety gate: the submitted raw recipe was quarantined. This saved variant is dry-run only; destructive commands were replaced with audit notes.\n\n",
+    );
+    for (index, line) in body.lines().enumerate() {
+        if let Some(finding) = findings.iter().find(|finding| finding.line_number == index + 1) {
+            rendered.push_str(&format!(
+                "- DRY RUN ONLY: blocked `{}` command from source line {} (line_sha256={}).\n",
+                finding.pattern, finding.line_number, finding.line_sha256
+            ));
+        } else {
+            rendered.push_str(line);
+            rendered.push('\n');
+        }
+    }
+    rendered.trim_end().to_owned()
+}
+
+struct ProcedureSkillDocument<'a> {
+    slug: &'a str,
+    name: &'a str,
+    summary: Option<&'a str>,
+    safety_status: &'a str,
+    raw_sha256: &'a str,
+    stored_sha256: &'a str,
+    quarantine_path: Option<&'a Path>,
+    body: &'a str,
+}
+
+fn render_procedure_skill_markdown(document: ProcedureSkillDocument<'_>) -> String {
+    let mut frontmatter = vec![
+        "---".to_owned(),
+        "schema: palyra.procedural_skill.v1".to_owned(),
+        format!("slug: {}", document.slug),
+        format!("name: {}", markdown_frontmatter_scalar(document.name)),
+        format!("status: {}", document.safety_status),
+        format!("raw_sha256: {}", document.raw_sha256),
+        format!("stored_sha256: {}", document.stored_sha256),
+    ];
+    if let Some(summary) = document.summary {
+        frontmatter.push(format!("summary: {}", markdown_frontmatter_scalar(summary)));
+    }
+    if let Some(quarantine_path) = document.quarantine_path {
+        frontmatter.push(format!(
+            "quarantine_path: {}",
+            markdown_frontmatter_scalar(quarantine_path.to_string_lossy().as_ref())
+        ));
+    }
+    frontmatter.push("---".to_owned());
+    format!("{}\n\n{}\n", frontmatter.join("\n"), document.body.trim())
+}
+
+fn markdown_frontmatter_scalar(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_owned())
+}
+
+fn write_procedure_skill_document(
+    path: &Path,
+    payload: &[u8],
+    force: bool,
+) -> Result<&'static str> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!("failed to create procedure skills directory {}", parent.display())
+        })?;
+    }
+    if path.exists() {
+        let existing = fs::read(path)
+            .with_context(|| format!("failed to read existing {}", path.display()))?;
+        if existing == payload {
+            return Ok("unchanged");
+        }
+        if !force {
+            anyhow::bail!(
+                "procedure skill {} already exists with different content; pass --force to update",
+                path.display()
+            );
+        }
+        write_file_atomically(path, payload)?;
+        return Ok("updated");
+    }
+    write_file_atomically(path, payload)?;
+    Ok("created")
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn run_skills_install(command: SkillsInstallCommand) -> Result<()> {
@@ -1215,4 +1631,90 @@ fn run_skills_enable(command: SkillsEnableCommand) -> Result<()> {
 
     skills_output::emit_status("skill.enabled", &response, command.json)?;
     std::io::stdout().flush().context("stdout flush failed")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_procedure_root() -> PathBuf {
+        std::env::temp_dir().join(format!("palyra-procedure-skills-{}", Ulid::new()))
+    }
+
+    #[test]
+    fn procedure_skill_save_quarantines_unsafe_raw_recipe() {
+        let root = temp_procedure_root();
+        let target = root.join("frontmatter-audit.md");
+
+        run_skills_procedure_save(SkillsProcedureSaveCommand {
+            path: Some(target.to_string_lossy().into_owned()),
+            skills_dir: Some(root.to_string_lossy().into_owned()),
+            slug: Some("frontmatter-audit".to_owned()),
+            name: "Frontmatter audit".to_owned(),
+            summary: Some("Audit markdown frontmatter".to_owned()),
+            body: Some("1. Inspect files\n2. Run `rm -rf ./tmp` if stale".to_owned()),
+            body_file: None,
+            force: false,
+            json: true,
+        })
+        .expect("unsafe recipe should save dry-run variant");
+
+        let saved = fs::read_to_string(target.as_path()).expect("procedure skill should exist");
+        assert!(saved.contains("schema: palyra.procedural_skill.v1"));
+        assert!(saved.contains("status: quarantined_raw_dry_run_saved"));
+        assert!(saved.contains("DRY RUN ONLY"));
+        assert!(!saved.contains("rm -rf"));
+
+        let quarantine_entries = fs::read_dir(root.join(".quarantine"))
+            .expect("quarantine directory should exist")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("quarantine entries should read");
+        assert_eq!(quarantine_entries.len(), 1);
+        let raw = fs::read_to_string(quarantine_entries[0].path())
+            .expect("quarantined raw recipe should be readable");
+        assert!(raw.contains("rm -rf"));
+
+        let audit = fs::read_to_string(root.join(SKILLS_AUDIT_FILE_NAME))
+            .expect("procedure save should append audit event");
+        assert!(audit.contains("skill.procedure_saved"));
+        assert!(audit.contains("rm_recursive_force"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn procedure_skill_save_is_idempotent_for_same_safe_body() {
+        let root = temp_procedure_root();
+
+        let command = || SkillsProcedureSaveCommand {
+            path: None,
+            skills_dir: Some(root.to_string_lossy().into_owned()),
+            slug: Some("frontmatter-audit".to_owned()),
+            name: "Frontmatter audit".to_owned(),
+            summary: None,
+            body: Some("Check markdown files and report missing frontmatter.".to_owned()),
+            body_file: None,
+            force: false,
+            json: false,
+        };
+
+        run_skills_procedure_save(command()).expect("first save should create skill");
+        let target = root.join("frontmatter-audit.md");
+        let first = fs::read(target.as_path()).expect("saved skill should be readable");
+        run_skills_procedure_save(command()).expect("second save should be unchanged");
+        let second = fs::read(target.as_path()).expect("saved skill should still be readable");
+
+        assert_eq!(first, second);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn unsafe_procedure_scan_detects_recursive_force_delete() {
+        let findings = scan_procedure_skill_body("review\nrm -rf /tmp/palyra-e2e");
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].pattern, "rm_recursive_force");
+        assert_eq!(findings[0].line_number, 2);
+    }
 }
