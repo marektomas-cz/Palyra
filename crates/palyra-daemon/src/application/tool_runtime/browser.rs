@@ -1378,6 +1378,7 @@ pub(crate) async fn execute_browser_tool(
                         "mime_type": response.mime_type,
                         "size_bytes": response.image_bytes.len(),
                         "sha256": image_sha256,
+                        "layout_metrics": response.layout_metrics.map(browser_layout_metrics_to_json),
                         "image_base64": STANDARD
                             .encode(response.image_bytes.as_slice()),
                         "error": response.error,
@@ -2462,6 +2463,20 @@ fn browser_action_log_to_json(entry: browser_v1::BrowserActionLogEntry) -> Value
         "completed_at_unix_ms": entry.completed_at_unix_ms,
         "attempts": entry.attempts,
         "page_url": entry.page_url,
+    })
+}
+
+fn browser_layout_metrics_to_json(metrics: browser_v1::BrowserLayoutMetrics) -> Value {
+    json!({
+        "viewport_width": metrics.viewport_width,
+        "viewport_height": metrics.viewport_height,
+        "device_scale_factor": metrics.device_scale_factor,
+        "document_scroll_width": metrics.document_scroll_width,
+        "document_scroll_height": metrics.document_scroll_height,
+        "document_client_width": metrics.document_client_width,
+        "document_client_height": metrics.document_client_height,
+        "horizontal_overflow": metrics.horizontal_overflow,
+        "vertical_overflow": metrics.vertical_overflow,
     })
 }
 

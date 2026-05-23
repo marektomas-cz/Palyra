@@ -1318,6 +1318,16 @@ async fn browser_service_chromium_engine_executes_real_dom_actions() {
         screenshot.image_bytes.starts_with(&[137, 80, 78, 71]),
         "chromium screenshot must return PNG payload"
     );
+    let layout_metrics =
+        screenshot.layout_metrics.as_ref().expect("screenshot should include layout metrics");
+    assert!(
+        layout_metrics.viewport_width > 0 && layout_metrics.viewport_height > 0,
+        "layout metrics should expose effective viewport dimensions"
+    );
+    assert!(
+        layout_metrics.document_scroll_width >= layout_metrics.document_client_width,
+        "layout metrics should expose document overflow inputs"
+    );
 
     let observed = service
         .observe(Request::new(browser_v1::ObserveRequest {

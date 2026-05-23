@@ -36,6 +36,23 @@ fn navigate_action_outcome(outcome: &NavigateOutcome) -> &'static str {
     }
 }
 
+fn browser_layout_metrics_to_proto(
+    metrics: ChromiumLayoutMetrics,
+) -> browser_v1::BrowserLayoutMetrics {
+    browser_v1::BrowserLayoutMetrics {
+        v: CANONICAL_PROTOCOL_MAJOR,
+        viewport_width: metrics.viewport_width,
+        viewport_height: metrics.viewport_height,
+        device_scale_factor: metrics.device_scale_factor,
+        document_scroll_width: metrics.document_scroll_width,
+        document_scroll_height: metrics.document_scroll_height,
+        document_client_width: metrics.document_client_width,
+        document_client_height: metrics.document_client_height,
+        horizontal_overflow: metrics.horizontal_overflow,
+        vertical_overflow: metrics.vertical_overflow,
+    }
+}
+
 fn observe_byte_limit(requested: u64, session_limit: u64) -> usize {
     let limit = if requested == 0 { session_limit } else { requested.min(session_limit) }.max(1);
     usize::try_from(limit).unwrap_or(usize::MAX)
@@ -2287,10 +2304,19 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
                     image_bytes: Vec::new(),
                     mime_type: "image/png".to_owned(),
                     error: "session_not_found".to_owned(),
+                    layout_metrics: None,
                 }));
             };
             session.last_active = Instant::now();
             payload.max_bytes.max(1).min(session.budget.max_screenshot_bytes)
+        };
+        let layout_metrics = if self.runtime.engine_mode == BrowserEngineMode::Chromium {
+            chromium_layout_metrics(self.runtime.as_ref(), session_id.as_str())
+                .await
+                .ok()
+                .map(browser_layout_metrics_to_proto)
+        } else {
+            None
         };
         let image_bytes = if self.runtime.engine_mode == BrowserEngineMode::Chromium {
             match chromium_screenshot(self.runtime.as_ref(), session_id.as_str()).await {
@@ -2302,6 +2328,7 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
                         image_bytes: Vec::new(),
                         mime_type: "image/png".to_owned(),
                         error,
+                        layout_metrics,
                     }));
                 }
             }
@@ -2315,9 +2342,10 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
                 image_bytes: Vec::new(),
                 mime_type: "image/png".to_owned(),
                 error: format!(
-                    "screenshot output exceeds max_bytes ({} > {max_bytes})",
+                    "screenshot output exceeds max_bytes ({} > {max_bytes}); reduce viewport size or device_scale_factor, or increase the browser service max_screenshot_bytes session budget",
                     image_bytes.len()
                 ),
+                layout_metrics,
             }));
         }
         Ok(Response::new(browser_v1::ScreenshotResponse {
@@ -2326,6 +2354,7 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
             image_bytes,
             mime_type: "image/png".to_owned(),
             error: String::new(),
+            layout_metrics,
         }))
     }
 

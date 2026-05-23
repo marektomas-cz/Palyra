@@ -4425,7 +4425,7 @@ mod tests {
         );
         assert_eq!(config.connect_timeout_ms, 1_500);
         assert_eq!(config.request_timeout_ms, 15_000);
-        assert_eq!(config.max_screenshot_bytes, 256 * 1024);
+        assert_eq!(config.max_screenshot_bytes, 1024 * 1024);
         assert_eq!(config.max_title_bytes, 4 * 1024);
     }
 

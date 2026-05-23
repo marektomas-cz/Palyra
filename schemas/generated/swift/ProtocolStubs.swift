@@ -89,6 +89,9 @@ public enum PalyraBrowserV1 {
     public struct BrowserHealthResponse: Equatable {
         public init() {}
     }
+    public struct BrowserLayoutMetrics: Equatable {
+        public init() {}
+    }
     public struct BrowserPageDiagnostics: Equatable {
         public init() {}
     }

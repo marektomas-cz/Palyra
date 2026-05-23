@@ -48,6 +48,19 @@ pub(crate) struct ChromiumObserveSnapshot {
     pub(crate) page_url: String,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ChromiumLayoutMetrics {
+    pub(crate) viewport_width: u32,
+    pub(crate) viewport_height: u32,
+    pub(crate) device_scale_factor: f64,
+    pub(crate) document_scroll_width: u32,
+    pub(crate) document_scroll_height: u32,
+    pub(crate) document_client_width: u32,
+    pub(crate) document_client_height: u32,
+    pub(crate) horizontal_overflow: bool,
+    pub(crate) vertical_overflow: bool,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ChromiumNavigateParams {
     pub(crate) raw_url: String,
@@ -1454,6 +1467,58 @@ fn parse_chromium_viewport_metrics(
     (actual_width, actual_height, actual_device_scale_factor)
 }
 
+fn chromium_u32_metric(value: &serde_json::Value, field: &str) -> u32 {
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .unwrap_or(0)
+}
+
+fn parse_chromium_layout_metrics(value: serde_json::Value) -> ChromiumLayoutMetrics {
+    let viewport_width = chromium_u32_metric(&value, "viewport_width");
+    let viewport_height = chromium_u32_metric(&value, "viewport_height");
+    let document_scroll_width = chromium_u32_metric(&value, "document_scroll_width");
+    let document_scroll_height = chromium_u32_metric(&value, "document_scroll_height");
+    let document_client_width = chromium_u32_metric(&value, "document_client_width");
+    let document_client_height = chromium_u32_metric(&value, "document_client_height");
+    let device_scale_factor = value
+        .get("device_scale_factor")
+        .and_then(serde_json::Value::as_f64)
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(1.0);
+    let horizontal_overflow = value
+        .get("horizontal_overflow")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or_else(|| {
+            document_scroll_width > 0
+                && document_client_width > 0
+                && document_scroll_width > document_client_width.saturating_add(1)
+        });
+    let vertical_overflow =
+        value.get("vertical_overflow").and_then(serde_json::Value::as_bool).unwrap_or_else(|| {
+            document_scroll_height > 0
+                && document_client_height > 0
+                && document_scroll_height > document_client_height.saturating_add(1)
+        });
+
+    ChromiumLayoutMetrics {
+        viewport_width,
+        viewport_height,
+        device_scale_factor,
+        document_scroll_width,
+        document_scroll_height,
+        document_client_width,
+        document_client_height,
+        horizontal_overflow,
+        vertical_overflow,
+    }
+}
+
+fn chromium_touch_emulation_max_touch_points(mobile: bool) -> Option<u32> {
+    mobile.then_some(1)
+}
+
 fn parse_chromium_console_entries(value: serde_json::Value) -> Vec<BrowserConsoleEntryInternal> {
     value
         .as_array()
@@ -1583,6 +1648,46 @@ pub(crate) async fn chromium_screenshot(
     .await?;
     enforce_chromium_remote_ip_guard(runtime, session_id).await?;
     Ok(screenshot)
+}
+
+pub(crate) async fn chromium_layout_metrics(
+    runtime: &BrowserRuntimeState,
+    session_id: &str,
+) -> Result<ChromiumLayoutMetrics, String> {
+    enforce_chromium_remote_ip_guard(runtime, session_id).await?;
+    let (_tab_id, tab) = chromium_active_tab_for_session(runtime, session_id).await?;
+    let value = run_chromium_blocking("chromium layout metrics", move || {
+        let raw_value = tab
+            .evaluate(
+                r#"JSON.stringify((() => {
+              const doc = document.documentElement || {};
+              const body = document.body || {};
+              const scrollWidth = Math.max(doc.scrollWidth || 0, body.scrollWidth || 0);
+              const scrollHeight = Math.max(doc.scrollHeight || 0, body.scrollHeight || 0);
+              const clientWidth = Math.max(doc.clientWidth || 0, window.innerWidth || 0);
+              const clientHeight = Math.max(doc.clientHeight || 0, window.innerHeight || 0);
+              return {
+                viewport_width: Math.trunc(window.innerWidth || clientWidth || 0),
+                viewport_height: Math.trunc(window.innerHeight || clientHeight || 0),
+                device_scale_factor: Number(window.devicePixelRatio || 1),
+                document_scroll_width: Math.trunc(scrollWidth),
+                document_scroll_height: Math.trunc(scrollHeight),
+                document_client_width: Math.trunc(clientWidth),
+                document_client_height: Math.trunc(clientHeight),
+                horizontal_overflow: scrollWidth > clientWidth + 1,
+                vertical_overflow: scrollHeight > clientHeight + 1
+              };
+            })())"#,
+                false,
+            )
+            .map_err(|error| format!("failed to read Chromium layout metrics: {error}"))?
+            .value
+            .unwrap_or(serde_json::Value::Null);
+        Ok(parse_chromium_layout_metrics(decode_chromium_json_script_value(raw_value)))
+    })
+    .await?;
+    enforce_chromium_remote_ip_guard(runtime, session_id).await?;
+    Ok(value)
 }
 
 pub(crate) async fn navigate_with_chromium(
@@ -2435,7 +2540,7 @@ pub(crate) async fn set_viewport_with_chromium(
         .map_err(|error| format!("failed to set Chromium viewport metrics: {error}"))?;
         tab.call_method(Emulation::SetTouchEmulationEnabled {
             enabled: mobile,
-            max_touch_points: Some(if mobile { 1 } else { 0 }),
+            max_touch_points: chromium_touch_emulation_max_touch_points(mobile),
         })
         .map_err(|error| format!("failed to set Chromium touch emulation: {error}"))?;
         let _ = tab.call_method(Emulation::SetVisibleSize { width, height });
@@ -2496,10 +2601,12 @@ pub(crate) async fn set_viewport_with_chromium(
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{
-        chromium_network_log_headers, chromium_transport_idle_timeout, clamp_chromium_snapshot,
+        chromium_network_log_headers, chromium_touch_emulation_max_touch_points,
+        chromium_transport_idle_timeout, clamp_chromium_snapshot,
         decode_chromium_console_entries_value, decode_chromium_json_script_value,
         decode_chromium_network_entries_value, parse_chromium_console_entries,
-        parse_chromium_page_network_entries, parse_chromium_viewport_metrics, parse_key_press_spec,
+        parse_chromium_layout_metrics, parse_chromium_page_network_entries,
+        parse_chromium_viewport_metrics, parse_key_press_spec, ChromiumLayoutMetrics,
         ChromiumObserveSnapshot, CHROMIUM_DRAIN_NETWORK_LOG_SCRIPT,
         CHROMIUM_PAGE_DIAGNOSTICS_SCRIPT, CHROMIUM_READ_CONSOLE_LOG_SCRIPT,
         MAX_CHROMIUM_CONSOLE_JSON_BYTES, MAX_CHROMIUM_NETWORK_JSON_BYTES,
@@ -2652,6 +2759,42 @@ mod tests {
         assert_eq!(width, 375);
         assert_eq!(height, 667);
         assert_eq!(device_scale_factor, 2.0);
+    }
+
+    #[test]
+    fn desktop_touch_emulation_omits_invalid_zero_touch_points() {
+        assert_eq!(chromium_touch_emulation_max_touch_points(false), None);
+        assert_eq!(chromium_touch_emulation_max_touch_points(true), Some(1));
+    }
+
+    #[test]
+    fn parse_chromium_layout_metrics_reports_overflow() {
+        let raw = serde_json::json!({
+            "viewport_width": 390,
+            "viewport_height": 844,
+            "device_scale_factor": 2.0,
+            "document_scroll_width": 980,
+            "document_scroll_height": 1200,
+            "document_client_width": 390,
+            "document_client_height": 844
+        });
+
+        let metrics = parse_chromium_layout_metrics(raw);
+
+        assert_eq!(
+            metrics,
+            ChromiumLayoutMetrics {
+                viewport_width: 390,
+                viewport_height: 844,
+                device_scale_factor: 2.0,
+                document_scroll_width: 980,
+                document_scroll_height: 1200,
+                document_client_width: 390,
+                document_client_height: 844,
+                horizontal_overflow: true,
+                vertical_overflow: true,
+            }
+        );
     }
 
     #[test]

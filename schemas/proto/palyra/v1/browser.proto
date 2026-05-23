@@ -542,8 +542,24 @@ message ScreenshotResponse {
   bytes image_bytes = 3;
   string mime_type = 4;
   string error = 5;
+  BrowserLayoutMetrics layout_metrics = 6;
 
-  reserved 6 to 12;
+  reserved 7 to 12;
+}
+
+message BrowserLayoutMetrics {
+  uint32 v = 1;
+  uint32 viewport_width = 2;
+  uint32 viewport_height = 3;
+  double device_scale_factor = 4;
+  uint32 document_scroll_width = 5;
+  uint32 document_scroll_height = 6;
+  uint32 document_client_width = 7;
+  uint32 document_client_height = 8;
+  bool horizontal_overflow = 9;
+  bool vertical_overflow = 10;
+
+  reserved 11 to 16;
 }
 
 message ObserveRequest {

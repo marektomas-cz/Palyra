@@ -1668,12 +1668,21 @@ mod tests {
             "success": true,
             "mime_type": "image/png",
             "size_bytes": 3072,
+            "layout_metrics": {
+                "viewport_width": 390,
+                "viewport_height": 844,
+                "document_scroll_width": 980,
+                "document_client_width": 390,
+                "horizontal_overflow": true
+            },
             "image_base64": raw,
         }))
         .expect("test payload should serialize");
 
         let preview = super::redacted_tool_result_preview(output_json.as_slice(), 1024);
 
+        assert!(preview.contains("\"horizontal_overflow\":true"), "{preview}");
+        assert!(preview.contains("\"document_scroll_width\":980"), "{preview}");
         assert!(preview.contains("\"mime_type\":\"image/png\""), "{preview}");
         assert!(preview.contains("\"size_bytes\":3072"), "{preview}");
         assert!(preview.contains("\"image_base64\":\"<redacted:base64 chars=4096>\""), "{preview}");

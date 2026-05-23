@@ -68,6 +68,8 @@ pub mod palyra_browser_v1 {
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct BrowserHealthResponse;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct BrowserLayoutMetrics;
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct BrowserPageDiagnostics;
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct BrowserProfile;
