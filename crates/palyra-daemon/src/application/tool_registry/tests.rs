@@ -226,9 +226,13 @@ fn anthropic_catalog_exposes_browser_viewport_without_exclusive_bounds() {
 }
 
 #[test]
-fn browser_session_create_returns_model_visible_handle() {
+fn browser_session_lifecycle_returns_model_visible_handles() {
     assert_eq!(
         projection_policy_for_tool("palyra.browser.session.create"),
+        ToolResultProjectionPolicy::InlineUnlessLarge
+    );
+    assert_eq!(
+        projection_policy_for_tool("palyra.browser.session.close"),
         ToolResultProjectionPolicy::InlineUnlessLarge
     );
     assert_eq!(

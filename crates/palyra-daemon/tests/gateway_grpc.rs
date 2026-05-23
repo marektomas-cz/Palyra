@@ -5271,6 +5271,108 @@ async fn grpc_run_stream_refeeds_tool_result_and_continues_model_turn() -> Resul
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn grpc_run_stream_retries_provider_overload_during_finalization() -> Result<()> {
+    let first_response = serde_json::json!({
+        "choices": [{
+            "finish_reason": "tool_calls",
+            "message": {
+                "tool_calls": [{
+                    "id": "call_echo_overload_01",
+                    "type": "function",
+                    "function": {
+                        "name": "palyra.echo",
+                        "arguments": "{\"text\":\"completed before overload\"}"
+                    }
+                }]
+            }
+        }]
+    })
+    .to_string();
+    let overload_response = serde_json::json!({
+        "error": {
+            "type": "overloaded_error",
+            "message": "provider overloaded"
+        }
+    })
+    .to_string();
+    let final_response =
+        r#"{"choices":[{"finish_reason":"stop","message":{"content":"tool work complete after provider overload retry"}}]}"#
+            .to_owned();
+    let (openai_base_url, request_count, server_handle) = spawn_scripted_openai_server(vec![
+        ScriptedOpenAiResponse::immediate(200, first_response),
+        ScriptedOpenAiResponse::immediate(529, overload_response),
+        ScriptedOpenAiResponse::immediate(200, final_response),
+    ])?;
+    let (child, admin_port, grpc_port, _journal_db_path) =
+        spawn_palyrad_with_openai_provider_and_tool_policy_with_retries(
+            openai_base_url.as_str(),
+            OPENAI_API_KEY,
+            "palyra.echo",
+            2,
+            250,
+            1,
+        )?;
+    let mut daemon = ChildGuard::new(child);
+    wait_for_health(admin_port, daemon.child_mut())?;
+
+    let endpoint = format!("http://127.0.0.1:{grpc_port}");
+    let mut client = gateway_v1::gateway_service_client::GatewayServiceClient::connect(endpoint)
+        .await
+        .context("failed to connect gRPC client")?;
+
+    let mut stream_request =
+        tonic::Request::new(tokio_stream::iter(vec![sample_run_stream_request_with_text(
+            "trigger tool work then provider overload".to_owned(),
+        )]));
+    stream_request.metadata_mut().insert("authorization", format!("Bearer {ADMIN_TOKEN}").parse()?);
+    stream_request.metadata_mut().insert("x-palyra-principal", "user:ops".parse()?);
+    stream_request.metadata_mut().insert("x-palyra-device-id", DEVICE_ID.parse()?);
+    stream_request.metadata_mut().insert("x-palyra-channel", "cli".parse()?);
+
+    let mut response_stream =
+        client.run_stream(stream_request).await.context("failed to call RunStream")?.into_inner();
+    let mut model_tokens = Vec::new();
+    let mut saw_tool_result = false;
+    let mut saw_done = false;
+    let mut failed_messages = Vec::new();
+    while let Some(event) = response_stream.next().await {
+        let event = event.context("failed to read RunStream event")?;
+        if let Some(body) = event.body {
+            match body {
+                common_v1::run_stream_event::Body::ModelToken(token) => {
+                    model_tokens.push(token.token);
+                }
+                common_v1::run_stream_event::Body::ToolResult(result) => {
+                    if result.success {
+                        saw_tool_result = true;
+                    }
+                }
+                common_v1::run_stream_event::Body::Status(status)
+                    if status.kind == common_v1::stream_status::StatusKind::Done as i32 =>
+                {
+                    saw_done = true;
+                }
+                common_v1::run_stream_event::Body::Status(status)
+                    if status.kind == common_v1::stream_status::StatusKind::Failed as i32 =>
+                {
+                    failed_messages.push(status.message);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    assert!(saw_tool_result, "first provider turn should execute the requested tool");
+    assert_eq!(model_tokens.concat(), "tool work complete after provider overload retry");
+    assert!(saw_done, "transient finalization overload should retry and finish the run");
+    assert!(failed_messages.is_empty(), "run should not emit failed status: {failed_messages:?}");
+    assert_eq!(request_count.load(Ordering::Relaxed), 3);
+
+    server_handle.join().expect("scripted openai server thread should exit");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn grpc_run_stream_parallel_safe_tool_calls_refeed_in_provider_order() -> Result<()> {
     let first_response = serde_json::json!({
         "choices": [{
@@ -10005,6 +10107,45 @@ fn spawn_palyrad_with_openai_provider_and_tool_policy_with_execution_gate_rollou
     execution_timeout_ms: u64,
     execution_gate_rollout_enabled: bool,
 ) -> Result<(Child, u16, u16, PathBuf)> {
+    spawn_palyrad_with_openai_provider_and_tool_policy_with_execution_gate_rollout_and_retries(
+        openai_base_url,
+        openai_api_key,
+        allowed_tools,
+        max_calls_per_run,
+        execution_timeout_ms,
+        execution_gate_rollout_enabled,
+        0,
+    )
+}
+
+fn spawn_palyrad_with_openai_provider_and_tool_policy_with_retries(
+    openai_base_url: &str,
+    openai_api_key: &str,
+    allowed_tools: &str,
+    max_calls_per_run: u32,
+    execution_timeout_ms: u64,
+    max_retries: u32,
+) -> Result<(Child, u16, u16, PathBuf)> {
+    spawn_palyrad_with_openai_provider_and_tool_policy_with_execution_gate_rollout_and_retries(
+        openai_base_url,
+        openai_api_key,
+        allowed_tools,
+        max_calls_per_run,
+        execution_timeout_ms,
+        false,
+        max_retries,
+    )
+}
+
+fn spawn_palyrad_with_openai_provider_and_tool_policy_with_execution_gate_rollout_and_retries(
+    openai_base_url: &str,
+    openai_api_key: &str,
+    allowed_tools: &str,
+    max_calls_per_run: u32,
+    execution_timeout_ms: u64,
+    execution_gate_rollout_enabled: bool,
+    max_retries: u32,
+) -> Result<(Child, u16, u16, PathBuf)> {
     let config_path = write_base_daemon_config()?;
     let journal_db_path = unique_temp_journal_db_path();
     let identity_store_dir = unique_temp_identity_store_dir();
@@ -10036,7 +10177,7 @@ fn spawn_palyrad_with_openai_provider_and_tool_policy_with_execution_gate_rollou
         .env("PALYRA_OFFLINE", "true")
         .env_remove("PALYRA_MODEL_PROVIDER_OPENAI_EMBEDDINGS_MODEL")
         .env_remove("PALYRA_MODEL_PROVIDER_OPENAI_EMBEDDINGS_DIMS")
-        .env("PALYRA_MODEL_PROVIDER_MAX_RETRIES", "0")
+        .env("PALYRA_MODEL_PROVIDER_MAX_RETRIES", max_retries.to_string())
         .env("PALYRA_MODEL_PROVIDER_RETRY_BACKOFF_MS", "1")
         .env("PALYRA_MODEL_PROVIDER_CIRCUIT_BREAKER_FAILURE_THRESHOLD", "1")
         .env("PALYRA_MODEL_PROVIDER_CIRCUIT_BREAKER_COOLDOWN_MS", "30000")

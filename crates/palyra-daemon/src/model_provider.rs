@@ -47,7 +47,7 @@ const OPENAI_EMBEDDINGS_PATH: &str = "/embeddings";
 const OPENAI_AUDIO_TRANSCRIPTIONS_PATH: &str = "/audio/transcriptions";
 const ANTHROPIC_MESSAGES_PATH: &str = "/v1/messages";
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
-const OPENAI_RETRYABLE_STATUS_CODES: &[u16] = &[429, 500, 502, 503, 504];
+const OPENAI_RETRYABLE_STATUS_CODES: &[u16] = &[429, 500, 502, 503, 504, 529];
 // Keep provider envelope above default wasm module quota (256KiB) including base64 and JSON overhead.
 const MAX_TOOL_ARGUMENT_BYTES: usize = 512 * 1024;
 const MAX_EMBEDDINGS_BATCH_SIZE: usize = 64;
@@ -5315,6 +5315,7 @@ mod tests {
         ProviderModelRole, ProviderOutputContentPart, ProviderRawProviderRefs,
         ProviderRegistryEntryConfig, ProviderRequest, ProviderRetryability,
         ProviderStreamAccumulator, ProviderStreamEvent, ProviderTurnOutput, ProviderUsage,
+        OPENAI_RETRYABLE_STATUS_CODES,
     };
 
     #[test]
@@ -5372,6 +5373,21 @@ mod tests {
         .snapshot("redacted safety".to_owned());
         assert_eq!(safety.recovery.category, "safety_stop");
         assert_eq!(safety.recovery.action, "abort");
+
+        assert!(
+            OPENAI_RETRYABLE_STATUS_CODES.contains(&529),
+            "provider overload HTTP 529 must be retried like other transient upstream failures"
+        );
+        let overload = classify_http_provider_failure(
+            529,
+            true,
+            "anthropic_chat_http",
+            r#"{"type":"error","error":{"type":"overloaded_error"}}"#,
+        )
+        .snapshot("redacted overload".to_owned());
+        assert_eq!(overload.class, "transient_upstream");
+        assert_eq!(overload.recovery.category, "transient");
+        assert_eq!(overload.recovery.action, "retry_same");
     }
 
     #[test]

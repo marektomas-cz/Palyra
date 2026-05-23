@@ -588,7 +588,10 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
     ];
 
     for browser_tool in browser_tool_names() {
-        let projection_policy = if *browser_tool == "palyra.browser.session.create" {
+        let projection_policy = if matches!(
+            *browser_tool,
+            "palyra.browser.session.create" | "palyra.browser.session.close"
+        ) {
             ToolResultProjectionPolicy::InlineUnlessLarge
         } else {
             ToolResultProjectionPolicy::RedactedPreviewAndArtifact
