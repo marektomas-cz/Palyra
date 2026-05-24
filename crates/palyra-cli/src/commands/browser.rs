@@ -676,12 +676,14 @@ async fn run_browser_status(
     let port_diagnostics = browser_connection_port_diagnostics(&resolved.connection);
     let control_plane = browser_status_control_plane_policy_snapshot();
     let browserd_reachable = health_response.is_some() || grpc_error.is_none();
+    let browserd_healthy = health_response.is_some() && grpc_error.is_none();
     let lifecycle_running =
         effective_browser_lifecycle_running(cli_lifecycle_running, browserd_reachable);
     let mut warnings = browser_status_warnings(
         &policy,
         &control_plane,
         browserd_reachable,
+        browserd_healthy,
         metadata.as_ref(),
         resolved.config_path.as_deref(),
     );
@@ -3403,6 +3405,7 @@ fn browser_status_warnings(
     policy: &BrowserPolicySnapshot,
     control_plane: &BrowserControlPlaneSnapshot,
     browserd_reachable: bool,
+    browserd_healthy: bool,
     metadata: Option<&BrowserServiceMetadata>,
     config_path: Option<&str>,
 ) -> Vec<String> {
@@ -3413,13 +3416,16 @@ fn browser_status_warnings(
             browser_gateway_auth_token_setup_warning(config_path)
         ));
     }
-    if browserd_reachable && metadata.is_none() {
+    if browserd_reachable && !browserd_healthy && metadata.is_none() {
         warnings.push(
             "browserd is reachable, but no CLI lifecycle metadata exists; the service may have been started outside `palyra browser start` or a previous stop failed before cleanup"
                 .to_owned(),
         );
     }
-    if browserd_reachable && metadata.is_some_and(|entry| !process_is_running(entry.pid)) {
+    if browserd_reachable
+        && !browserd_healthy
+        && metadata.is_some_and(|entry| !process_is_running(entry.pid))
+    {
         warnings.push(
             "browserd is reachable, but the CLI-managed metadata pid is not running; the endpoint may be owned by an unmanaged or stale browser service"
                 .to_owned(),
@@ -5440,6 +5446,7 @@ mod tests {
             &policy,
             &browser_status_control_plane_policy_snapshot(),
             true,
+            true,
             None,
             None,
         );
@@ -5484,6 +5491,7 @@ mod tests {
                 auth_probe_skipped: false,
             },
             true,
+            true,
             None,
             None,
         );
@@ -5519,13 +5527,35 @@ mod tests {
                 auth_probe_skipped: false,
             },
             true,
+            true,
             None,
             None,
         );
 
         assert!(
-            warnings.iter().any(|warning| warning.contains("no CLI lifecycle metadata")),
-            "reachable unmanaged browserd should produce a clear lifecycle warning: {warnings:?}"
+            warnings.iter().all(|warning| !warning.contains("no CLI lifecycle metadata")),
+            "healthy desktop-managed browserd should not warn about missing CLI lifecycle metadata: {warnings:?}"
+        );
+
+        let degraded_warnings = browser_status_warnings(
+            &policy,
+            &BrowserControlPlaneSnapshot {
+                reachable: true,
+                browser_enabled: Some(true),
+                error: None,
+                auth_probe_skipped: false,
+            },
+            true,
+            false,
+            None,
+            None,
+        );
+
+        assert!(
+            degraded_warnings
+                .iter()
+                .any(|warning| warning.contains("no CLI lifecycle metadata")),
+            "partially reachable unmanaged browserd should still produce a lifecycle warning: {degraded_warnings:?}"
         );
     }
 
@@ -5586,6 +5616,7 @@ mod tests {
                 error: None,
                 auth_probe_skipped: false,
             },
+            true,
             true,
             None,
             Some(r"C:\Palyra\palyra.toml"),
@@ -5665,6 +5696,7 @@ mod tests {
                 error: None,
                 auth_probe_skipped: false,
             },
+            true,
             true,
             Some(&metadata),
             Some(r"C:\Palyra\palyra.toml"),
