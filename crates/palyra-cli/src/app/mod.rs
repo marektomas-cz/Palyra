@@ -773,6 +773,9 @@ pub(crate) fn ensure_bootstrap_local_profile(
 ) -> Result<()> {
     let (path, mut document) = load_cli_profiles_registry()?;
     if !document.profiles.is_empty() {
+        if refresh_existing_bootstrap_local_profile(&mut document, config_path, state_root)? {
+            persist_cli_profiles_registry(path.as_path(), &document)?;
+        }
         return Ok(());
     }
 
@@ -784,10 +787,8 @@ pub(crate) fn ensure_bootstrap_local_profile(
         CliConnectionProfile {
             config_path: Some(config_path.display().to_string()),
             state_root: state_root.map(|value| value.display().to_string()),
-            daemon_url: Some(DEFAULT_DAEMON_URL.to_owned()),
-            grpc_url: Some(format!(
-                "http://{DEFAULT_GATEWAY_GRPC_BIND_ADDR}:{DEFAULT_GATEWAY_GRPC_PORT}"
-            )),
+            daemon_url: None,
+            grpc_url: None,
             admin_token: None,
             admin_token_env: None,
             principal: Some("admin:local".to_owned()),
@@ -805,6 +806,50 @@ pub(crate) fn ensure_bootstrap_local_profile(
         },
     );
     persist_cli_profiles_registry(path.as_path(), &document)
+}
+
+fn refresh_existing_bootstrap_local_profile(
+    document: &mut CliProfilesDocument,
+    config_path: &Path,
+    state_root: Option<&Path>,
+) -> Result<bool> {
+    let profile_name = document.default_profile.as_deref().unwrap_or("local").to_owned();
+    let Some(profile) = document.profiles.get_mut(profile_name.as_str()) else {
+        return Ok(false);
+    };
+    if !is_bootstrap_local_profile(profile_name.as_str(), profile) {
+        return Ok(false);
+    }
+
+    let mut changed = false;
+    let config_path = config_path.display().to_string();
+    if profile.config_path.as_deref() != Some(config_path.as_str()) {
+        profile.config_path = Some(config_path);
+        changed = true;
+    }
+    let state_root = state_root.map(|value| value.display().to_string());
+    if profile.state_root != state_root {
+        profile.state_root = state_root;
+        changed = true;
+    }
+    if profile.daemon_url.take().is_some() {
+        changed = true;
+    }
+    if profile.grpc_url.take().is_some() {
+        changed = true;
+    }
+    if changed {
+        let now = current_unix_timestamp_ms()?;
+        profile.updated_at_unix_ms = Some(now);
+        profile.last_used_at_unix_ms = Some(now);
+    }
+    Ok(changed)
+}
+
+fn is_bootstrap_local_profile(name: &str, profile: &CliConnectionProfile) -> bool {
+    name == "local"
+        || profile.mode.as_deref() == Some("local")
+        || profile.environment.as_deref() == Some("local")
 }
 
 fn resolve_active_profile_name(
@@ -1125,8 +1170,9 @@ fn read_normalized_env_var(name: &str) -> Option<String> {
 mod tests {
     use super::{
         build_active_profile_context, build_root_context, cli_profiles_registry_path, context_cell,
-        CliConnectionProfile, ConnectionDefaults, ConnectionOverrides, ExplicitConfigPathPolicy,
-        RootOptions, CLI_PROFILES_PATH_ENV, CLI_PROFILES_RELATIVE_PATH, CLI_PROFILE_ENV,
+        ensure_bootstrap_local_profile, CliConnectionProfile, ConnectionDefaults,
+        ConnectionOverrides, ExplicitConfigPathPolicy, RootOptions, CLI_PROFILES_PATH_ENV,
+        CLI_PROFILES_RELATIVE_PATH, CLI_PROFILE_ENV,
     };
     use crate::args::{LogLevelArg, OutputFormatArg};
     use anyhow::Result;
@@ -1254,6 +1300,108 @@ channel = "staging"
         assert_eq!(http.principal, "admin:staging");
         assert_eq!(grpc.device_id, "01ARZ3NDEKTSV4RRFFQ69G5FB2");
         assert_eq!(grpc.channel, "staging");
+        Ok(())
+    }
+
+    #[test]
+    fn bootstrap_local_profile_uses_config_for_runtime_endpoints() -> Result<()> {
+        let _guard = super::test_env_lock_for_tests().lock().expect("env lock");
+        clear_env();
+        let temp = tempdir()?;
+        let profile_path = temp.path().join("profiles.toml");
+        let state_root = temp.path().join("state");
+        let config_path = state_root.join("config").join("palyra.toml");
+        fs::create_dir_all(config_path.parent().expect("config parent"))?;
+        fs::write(
+            &config_path,
+            r#"
+[daemon]
+bind_addr = "127.0.0.1"
+port = 8330
+
+[gateway]
+grpc_bind_addr = "127.0.0.1"
+grpc_port = 8331
+"#,
+        )?;
+        env::set_var(CLI_PROFILES_PATH_ENV, &profile_path);
+
+        ensure_bootstrap_local_profile(&config_path, Some(state_root.as_path()))?;
+
+        let profile_raw = fs::read_to_string(&profile_path)?;
+        assert!(
+            !profile_raw.contains("daemon_url"),
+            "local bootstrap profile must not freeze daemon port"
+        );
+        assert!(
+            !profile_raw.contains("grpc_url"),
+            "local bootstrap profile must not freeze gateway gRPC port"
+        );
+
+        let context =
+            build_root_context(RootOptions::default(), ExplicitConfigPathPolicy::RequireExisting)?;
+        let http = context
+            .resolve_http_connection(ConnectionOverrides::default(), ConnectionDefaults::ADMIN)?;
+        let grpc = context
+            .resolve_grpc_connection(ConnectionOverrides::default(), ConnectionDefaults::ADMIN)?;
+
+        assert_eq!(http.base_url, "http://127.0.0.1:8330");
+        assert_eq!(grpc.grpc_url, "http://127.0.0.1:8331");
+        Ok(())
+    }
+
+    #[test]
+    fn bootstrap_local_profile_refresh_clears_stale_endpoint_overrides() -> Result<()> {
+        let _guard = super::test_env_lock_for_tests().lock().expect("env lock");
+        clear_env();
+        let temp = tempdir()?;
+        let profile_path = temp.path().join("profiles.toml");
+        let state_root = temp.path().join("state");
+        let config_path = state_root.join("config").join("palyra.toml");
+        let config_path_literal = config_path.display().to_string().replace('\\', "\\\\");
+        fs::create_dir_all(config_path.parent().expect("config parent"))?;
+        fs::write(
+            &config_path,
+            r#"
+[daemon]
+bind_addr = "127.0.0.1"
+port = 8340
+
+[gateway]
+grpc_bind_addr = "127.0.0.1"
+grpc_port = 8341
+"#,
+        )?;
+        fs::write(
+            &profile_path,
+            format!(
+                r#"
+version = 1
+default_profile = "local"
+
+[profiles.local]
+config_path = "{}"
+daemon_url = "http://127.0.0.1:7142"
+grpc_url = "http://127.0.0.1:7443"
+environment = "local"
+mode = "local"
+"#,
+                config_path_literal
+            ),
+        )?;
+        env::set_var(CLI_PROFILES_PATH_ENV, &profile_path);
+
+        ensure_bootstrap_local_profile(&config_path, Some(state_root.as_path()))?;
+
+        let context =
+            build_root_context(RootOptions::default(), ExplicitConfigPathPolicy::RequireExisting)?;
+        let http = context
+            .resolve_http_connection(ConnectionOverrides::default(), ConnectionDefaults::ADMIN)?;
+        let grpc = context
+            .resolve_grpc_connection(ConnectionOverrides::default(), ConnectionDefaults::ADMIN)?;
+
+        assert_eq!(http.base_url, "http://127.0.0.1:8340");
+        assert_eq!(grpc.grpc_url, "http://127.0.0.1:8341");
         Ok(())
     }
 
