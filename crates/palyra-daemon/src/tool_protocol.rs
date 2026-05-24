@@ -388,7 +388,7 @@ pub fn tool_metadata(tool_name: &str) -> Option<ToolMetadata> {
         "palyra.browser.click" => {
             Some(ToolMetadata { capabilities: NETWORK_TOOL_CAPABILITIES, default_sensitive: true })
         }
-        "palyra.browser.type" | "palyra.browser.fill" => {
+        "palyra.browser.type" | "palyra.browser.fill" | "palyra.browser.upload" => {
             Some(ToolMetadata { capabilities: NETWORK_TOOL_CAPABILITIES, default_sensitive: true })
         }
         "palyra.browser.press" => {
@@ -446,6 +446,9 @@ pub fn tool_metadata(tool_name: &str) -> Option<ToolMetadata> {
             Some(ToolMetadata { capabilities: NETWORK_TOOL_CAPABILITIES, default_sensitive: true })
         }
         "palyra.browser.permissions.set" => {
+            Some(ToolMetadata { capabilities: NETWORK_TOOL_CAPABILITIES, default_sensitive: true })
+        }
+        "palyra.browser.downloads.list" | "palyra.browser.downloads.get" => {
             Some(ToolMetadata { capabilities: NETWORK_TOOL_CAPABILITIES, default_sensitive: true })
         }
         "palyra.plugin.run" => {
@@ -819,6 +822,7 @@ async fn run_allowlisted_tool(
         | "palyra.browser.click"
         | "palyra.browser.type"
         | "palyra.browser.fill"
+        | "palyra.browser.upload"
         | "palyra.browser.press"
         | "palyra.browser.select"
         | "palyra.browser.viewport"
@@ -837,7 +841,9 @@ async fn run_allowlisted_tool(
         | "palyra.browser.tabs.switch"
         | "palyra.browser.tabs.close"
         | "palyra.browser.permissions.get"
-        | "palyra.browser.permissions.set" => ToolExecutionRawResult {
+        | "palyra.browser.permissions.set"
+        | "palyra.browser.downloads.list"
+        | "palyra.browser.downloads.get" => ToolExecutionRawResult {
             success: false,
             output_json: b"{}".to_vec(),
             error: "palyra.browser.* requires gateway browser broker runtime context".to_owned(),
@@ -889,6 +895,7 @@ fn is_runtime_supported_tool(tool_name: &str) -> bool {
             | "palyra.browser.click"
             | "palyra.browser.type"
             | "palyra.browser.fill"
+            | "palyra.browser.upload"
             | "palyra.browser.press"
             | "palyra.browser.select"
             | "palyra.browser.viewport"
@@ -908,6 +915,8 @@ fn is_runtime_supported_tool(tool_name: &str) -> bool {
             | "palyra.browser.tabs.close"
             | "palyra.browser.permissions.get"
             | "palyra.browser.permissions.set"
+            | "palyra.browser.downloads.list"
+            | "palyra.browser.downloads.get"
             | "palyra.plugin.run"
     )
 }
@@ -985,6 +994,7 @@ fn tool_input_limit_bytes(tool_name: &str) -> usize {
         | "palyra.browser.click"
         | "palyra.browser.type"
         | "palyra.browser.fill"
+        | "palyra.browser.upload"
         | "palyra.browser.press"
         | "palyra.browser.select"
         | "palyra.browser.viewport"
@@ -1003,7 +1013,9 @@ fn tool_input_limit_bytes(tool_name: &str) -> usize {
         | "palyra.browser.tabs.switch"
         | "palyra.browser.tabs.close"
         | "palyra.browser.permissions.get"
-        | "palyra.browser.permissions.set" => MAX_BROWSER_TOOL_INPUT_BYTES,
+        | "palyra.browser.permissions.set"
+        | "palyra.browser.downloads.list"
+        | "palyra.browser.downloads.get" => MAX_BROWSER_TOOL_INPUT_BYTES,
         "palyra.plugin.run" => MAX_WASM_PLUGIN_TOOL_INPUT_BYTES,
         _ => MAX_MEMORY_SEARCH_TOOL_INPUT_BYTES,
     }
@@ -1631,6 +1643,7 @@ mod tests {
         assert!(tool_requires_approval("palyra.browser.click"));
         assert!(tool_requires_approval("palyra.browser.type"));
         assert!(tool_requires_approval("palyra.browser.fill"));
+        assert!(tool_requires_approval("palyra.browser.upload"));
         assert!(tool_requires_approval("palyra.browser.press"));
         assert!(tool_requires_approval("palyra.browser.select"));
         assert!(tool_requires_approval("palyra.browser.viewport"));
@@ -1650,6 +1663,8 @@ mod tests {
         assert!(tool_requires_approval("palyra.browser.tabs.close"));
         assert!(tool_requires_approval("palyra.browser.permissions.get"));
         assert!(tool_requires_approval("palyra.browser.permissions.set"));
+        assert!(tool_requires_approval("palyra.browser.downloads.list"));
+        assert!(tool_requires_approval("palyra.browser.downloads.get"));
         assert!(tool_requires_approval("palyra.plugin.run"));
         assert!(
             tool_requires_approval("custom.unknown"),
@@ -1703,6 +1718,43 @@ mod tests {
         assert!(approved.allowed, "approved browser fill should pass the runtime support gate");
         assert!(approved.approval_required, "sensitive browser metadata should remain visible");
         assert_eq!(budget, 0, "approved tool should consume budget");
+    }
+
+    #[test]
+    fn browser_file_transfer_tools_expose_browser_policy_metadata() {
+        for tool_name in [
+            "palyra.browser.upload",
+            "palyra.browser.downloads.list",
+            "palyra.browser.downloads.get",
+        ] {
+            let metadata = tool_metadata(tool_name).expect("browser file transfer metadata");
+            assert_eq!(metadata.capabilities, &[ToolCapability::Network]);
+            assert!(metadata.default_sensitive, "{tool_name} should remain approval-gated");
+            assert!(tool_requires_approval(tool_name));
+
+            let config = ToolCallConfig {
+                allowed_tools: vec![tool_name.to_owned()],
+                max_calls_per_run: 1,
+                execution_timeout_ms: 250,
+                process_runner: default_process_runner_policy(),
+                wasm_runtime: default_wasm_runtime_policy(),
+            };
+            let request_context = tool_request_context("user:ops");
+            let mut budget = 1;
+
+            let denied = decide_tool_call(&config, &mut budget, &request_context, tool_name, false);
+
+            assert!(!denied.allowed, "{tool_name} should require explicit approval");
+            assert!(denied.approval_required);
+            assert_eq!(budget, 1, "denied approval must not consume budget");
+
+            let approved =
+                decide_tool_call(&config, &mut budget, &request_context, tool_name, true);
+
+            assert!(approved.allowed, "approved {tool_name} should pass the runtime support gate");
+            assert!(approved.approval_required, "sensitive browser metadata should remain visible");
+            assert_eq!(budget, 0, "approved tool should consume budget");
+        }
     }
 
     #[test]

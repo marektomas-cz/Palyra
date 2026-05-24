@@ -201,6 +201,7 @@ pub(crate) const BROWSER_NAVIGATE_TOOL_NAME: &str = "palyra.browser.navigate";
 pub(crate) const BROWSER_CLICK_TOOL_NAME: &str = "palyra.browser.click";
 pub(crate) const BROWSER_TYPE_TOOL_NAME: &str = "palyra.browser.type";
 pub(crate) const BROWSER_FILL_TOOL_NAME: &str = "palyra.browser.fill";
+pub(crate) const BROWSER_UPLOAD_TOOL_NAME: &str = "palyra.browser.upload";
 pub(crate) const BROWSER_PRESS_TOOL_NAME: &str = "palyra.browser.press";
 pub(crate) const BROWSER_SELECT_TOOL_NAME: &str = "palyra.browser.select";
 pub(crate) const BROWSER_VIEWPORT_TOOL_NAME: &str = "palyra.browser.viewport";
@@ -220,6 +221,8 @@ pub(crate) const BROWSER_TABS_SWITCH_TOOL_NAME: &str = "palyra.browser.tabs.swit
 pub(crate) const BROWSER_TABS_CLOSE_TOOL_NAME: &str = "palyra.browser.tabs.close";
 pub(crate) const BROWSER_PERMISSIONS_GET_TOOL_NAME: &str = "palyra.browser.permissions.get";
 pub(crate) const BROWSER_PERMISSIONS_SET_TOOL_NAME: &str = "palyra.browser.permissions.set";
+pub(crate) const BROWSER_DOWNLOADS_LIST_TOOL_NAME: &str = "palyra.browser.downloads.list";
+pub(crate) const BROWSER_DOWNLOADS_GET_TOOL_NAME: &str = "palyra.browser.downloads.get";
 
 mod approvals;
 mod canvas;

@@ -681,6 +681,7 @@ const LOCAL_DESKTOP_DEFAULT_ALLOWED_TOOLS: &[&str] = &[
     "palyra.browser.navigate",
     "palyra.browser.click",
     "palyra.browser.type",
+    "palyra.browser.upload",
     "palyra.browser.press",
     "palyra.browser.select",
     "palyra.browser.viewport",
@@ -700,6 +701,8 @@ const LOCAL_DESKTOP_DEFAULT_ALLOWED_TOOLS: &[&str] = &[
     "palyra.browser.tabs.close",
     "palyra.browser.permissions.get",
     "palyra.browser.permissions.set",
+    "palyra.browser.downloads.list",
+    "palyra.browser.downloads.get",
     "palyra.process.run",
 ];
 const LOCAL_DESKTOP_DEFAULT_PROCESS_EXECUTABLES: &[&str] = &["*"];
@@ -11520,8 +11523,16 @@ mod init_command_tests {
             "local init should allow gateway-mediated browser navigation when the service is enabled"
         );
         assert!(
+            allowed_tools.iter().any(|tool| tool == "palyra.browser.upload"),
+            "local init should allow gateway-mediated browser uploads when the service is enabled"
+        );
+        assert!(
             allowed_tools.iter().any(|tool| tool == "palyra.browser.screenshot"),
             "local init should allow gateway-mediated browser inspection when the service is enabled"
+        );
+        assert!(
+            allowed_tools.iter().any(|tool| tool == "palyra.browser.downloads.get"),
+            "local init should allow gateway-mediated browser download retrieval when the service is enabled"
         );
         assert_eq!(read_bool(&document, "tool_call.process_runner.enabled"), Some(true));
         assert_eq!(read_integer(&document, "tool_call.max_calls_per_run"), Some(96));

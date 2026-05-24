@@ -754,6 +754,7 @@ fn browser_tool_names() -> &'static [&'static str] {
         "palyra.browser.click",
         "palyra.browser.type",
         "palyra.browser.fill",
+        "palyra.browser.upload",
         "palyra.browser.press",
         "palyra.browser.select",
         "palyra.browser.viewport",
@@ -773,6 +774,8 @@ fn browser_tool_names() -> &'static [&'static str] {
         "palyra.browser.tabs.close",
         "palyra.browser.permissions.get",
         "palyra.browser.permissions.set",
+        "palyra.browser.downloads.list",
+        "palyra.browser.downloads.get",
     ]
 }
 
@@ -784,6 +787,7 @@ fn browser_tool_description(tool_name: &str) -> &'static str {
         "palyra.browser.click" => "Click an element in a brokered browser session.",
         "palyra.browser.type" => "Type text in a brokered browser session.",
         "palyra.browser.fill" => "Replace an element value in a brokered browser session.",
+        "palyra.browser.upload" => "Set a file input from an audited local file path.",
         "palyra.browser.press" => "Press a key in a brokered browser session.",
         "palyra.browser.select" => "Select an option in a brokered browser session.",
         "palyra.browser.viewport" => "Set the active browser viewport dimensions.",
@@ -807,6 +811,10 @@ fn browser_tool_description(tool_name: &str) -> &'static str {
         "palyra.browser.tabs.close" => "Close a browser tab.",
         "palyra.browser.permissions.get" => "Read browser permission state.",
         "palyra.browser.permissions.set" => "Update browser permission state.",
+        "palyra.browser.downloads.list" => "List browser download artifacts.",
+        "palyra.browser.downloads.get" => {
+            "Return a bounded browser download artifact payload as base64."
+        }
         _ => "Operate a brokered browser session.",
     }
 }
@@ -865,6 +873,21 @@ fn browser_tool_schema(tool_name: &str) -> Value {
                 ));
             }
             required.extend(["selector", "text"]);
+        }
+        "palyra.browser.upload" => {
+            properties.push((
+                "selector",
+                json!({"type":"string","description":"CSS selector for an <input type=file> grounded in a prior palyra.browser.observe result."}),
+            ));
+            properties.push((
+                "file_path",
+                json!({"type":"string","description":"Absolute user-owned OS path or workspace path to upload. The daemon resolves and audits the path; protected system paths are denied."}),
+            ));
+            properties
+                .push(("capture_failure_screenshot", json!({"type":"boolean","default":true})));
+            properties
+                .push(("max_failure_screenshot_bytes", json!({"type":"integer","minimum":0})));
+            required.extend(["selector", "file_path"]);
         }
         "palyra.browser.press" => {
             properties.push((
@@ -930,6 +953,17 @@ fn browser_tool_schema(tool_name: &str) -> Value {
                 "budget",
                 json!({"type":"object","properties":{},"additionalProperties":true}),
             ));
+        }
+        "palyra.browser.downloads.list" => {
+            properties.push(("limit", json!({"type":"integer","minimum":1})));
+            properties.push(("quarantined_only", json!({"type":"boolean"})));
+        }
+        "palyra.browser.downloads.get" => {
+            properties.push((
+                "artifact_id",
+                json!({"type":"string","description":"Optional artifact id returned by palyra.browser.downloads.list. If omitted, the latest non-quarantined artifact is fetched."}),
+            ));
+            properties.push(("max_bytes", json!({"type":"integer","minimum":1})));
         }
         "palyra.browser.observe" => {
             properties.push(("include_dom_snapshot", json!({"type":"boolean","default":true})));
@@ -1051,6 +1085,53 @@ mod tests {
             fill_entry.input_schema.pointer("/required/2").and_then(serde_json::Value::as_str),
             Some("text")
         );
+    }
+
+    #[test]
+    fn browser_file_transfer_tools_are_visible_to_agents() {
+        let upload = registry_entry("palyra.browser.upload").expect("upload entry exists");
+        assert!(upload.description.contains("file input"));
+        assert_eq!(
+            upload.input_schema.pointer("/required/0").and_then(serde_json::Value::as_str),
+            Some("session_id")
+        );
+        assert_eq!(
+            upload.input_schema.pointer("/required/1").and_then(serde_json::Value::as_str),
+            Some("selector")
+        );
+        assert_eq!(
+            upload.input_schema.pointer("/required/2").and_then(serde_json::Value::as_str),
+            Some("file_path")
+        );
+        let file_path_description = upload
+            .input_schema
+            .pointer("/properties/file_path/description")
+            .and_then(serde_json::Value::as_str)
+            .expect("upload file_path description should be visible to models");
+        assert!(file_path_description.contains("Absolute user-owned OS path"));
+        assert!(file_path_description.contains("workspace path"));
+
+        let downloads_list =
+            registry_entry("palyra.browser.downloads.list").expect("downloads list entry exists");
+        assert_eq!(
+            downloads_list.input_schema.pointer("/required/0").and_then(serde_json::Value::as_str),
+            Some("session_id")
+        );
+        assert!(downloads_list.input_schema.pointer("/properties/limit").is_some());
+
+        let downloads_get =
+            registry_entry("palyra.browser.downloads.get").expect("downloads get entry exists");
+        assert_eq!(
+            downloads_get.input_schema.pointer("/required/0").and_then(serde_json::Value::as_str),
+            Some("session_id")
+        );
+        let artifact_id_description = downloads_get
+            .input_schema
+            .pointer("/properties/artifact_id/description")
+            .and_then(serde_json::Value::as_str)
+            .expect("downloads get artifact_id description should be visible to models");
+        assert!(artifact_id_description.contains("If omitted"));
+        assert!(downloads_get.input_schema.pointer("/properties/max_bytes").is_some());
     }
 
     #[test]

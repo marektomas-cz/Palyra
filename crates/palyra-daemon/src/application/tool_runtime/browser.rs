@@ -1,7 +1,7 @@
 use std::{
     fs,
     net::IpAddr,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
@@ -26,15 +26,16 @@ use crate::{
     gateway::{
         current_unix_ms, truncate_with_ellipsis, BrowserServiceRuntimeConfig, GatewayRuntimeState,
         ToolRuntimeExecutionContext, BROWSER_CLICK_TOOL_NAME, BROWSER_CONSOLE_LOG_TOOL_NAME,
-        BROWSER_FILL_TOOL_NAME, BROWSER_HIGHLIGHT_TOOL_NAME, BROWSER_NAVIGATE_TOOL_NAME,
-        BROWSER_NETWORK_LOG_TOOL_NAME, BROWSER_OBSERVE_TOOL_NAME, BROWSER_PDF_TOOL_NAME,
-        BROWSER_PERMISSIONS_GET_TOOL_NAME, BROWSER_PERMISSIONS_SET_TOOL_NAME,
-        BROWSER_PRESS_TOOL_NAME, BROWSER_RESET_STATE_TOOL_NAME, BROWSER_SCREENSHOT_TOOL_NAME,
-        BROWSER_SCROLL_TOOL_NAME, BROWSER_SELECT_TOOL_NAME, BROWSER_SESSION_CLOSE_TOOL_NAME,
-        BROWSER_SESSION_CREATE_TOOL_NAME, BROWSER_TABS_CLOSE_TOOL_NAME,
-        BROWSER_TABS_LIST_TOOL_NAME, BROWSER_TABS_OPEN_TOOL_NAME, BROWSER_TABS_SWITCH_TOOL_NAME,
-        BROWSER_TITLE_TOOL_NAME, BROWSER_TYPE_TOOL_NAME, BROWSER_VIEWPORT_TOOL_NAME,
-        BROWSER_WAIT_FOR_TOOL_NAME, MAX_BROWSER_TOOL_INPUT_BYTES,
+        BROWSER_DOWNLOADS_GET_TOOL_NAME, BROWSER_DOWNLOADS_LIST_TOOL_NAME, BROWSER_FILL_TOOL_NAME,
+        BROWSER_HIGHLIGHT_TOOL_NAME, BROWSER_NAVIGATE_TOOL_NAME, BROWSER_NETWORK_LOG_TOOL_NAME,
+        BROWSER_OBSERVE_TOOL_NAME, BROWSER_PDF_TOOL_NAME, BROWSER_PERMISSIONS_GET_TOOL_NAME,
+        BROWSER_PERMISSIONS_SET_TOOL_NAME, BROWSER_PRESS_TOOL_NAME, BROWSER_RESET_STATE_TOOL_NAME,
+        BROWSER_SCREENSHOT_TOOL_NAME, BROWSER_SCROLL_TOOL_NAME, BROWSER_SELECT_TOOL_NAME,
+        BROWSER_SESSION_CLOSE_TOOL_NAME, BROWSER_SESSION_CREATE_TOOL_NAME,
+        BROWSER_TABS_CLOSE_TOOL_NAME, BROWSER_TABS_LIST_TOOL_NAME, BROWSER_TABS_OPEN_TOOL_NAME,
+        BROWSER_TABS_SWITCH_TOOL_NAME, BROWSER_TITLE_TOOL_NAME, BROWSER_TYPE_TOOL_NAME,
+        BROWSER_UPLOAD_TOOL_NAME, BROWSER_VIEWPORT_TOOL_NAME, BROWSER_WAIT_FOR_TOOL_NAME,
+        MAX_BROWSER_TOOL_INPUT_BYTES,
     },
     sandbox_runner::process_runner_allows_host_access,
     tool_protocol::{ToolAttestation, ToolExecutionOutcome},
@@ -47,6 +48,9 @@ const BROWSER_WAIT_FOR_INPUT_RECOVERY_HINT: &str =
     "wait_for_input_required: pass either selector or text; when unsure, call palyra.browser.observe first and wait for a visible text snippet or observed selector";
 const BROWSER_WAIT_FOR_TIMEOUT_RECOVERY_HINT: &str =
     "wait_for_timeout: call palyra.browser.observe to inspect the current step/state before retrying with a grounded selector or visible text";
+const BROWSER_UPLOAD_MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
+const BROWSER_DOWNLOAD_TOOL_DEFAULT_MAX_BYTES: u64 = 256 * 1024;
+const BROWSER_DOWNLOAD_TOOL_MAX_BYTES: u64 = 512 * 1024;
 
 fn browser_text_entry_action_name(tool_name: &str) -> &'static str {
     if tool_name == BROWSER_FILL_TOOL_NAME {
@@ -193,6 +197,181 @@ fn canonical_file_path_is_inside_workspace_roots(
     canonical_roots: &[PathBuf],
 ) -> bool {
     canonical_roots.iter().any(|root| canonical_target.starts_with(root))
+}
+
+async fn resolve_browser_agent_workspace_roots(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    context: ToolRuntimeExecutionContext<'_>,
+    tool_name: &str,
+) -> Result<Vec<PathBuf>, String> {
+    let agent_outcome = runtime_state
+        .resolve_agent_for_context(AgentResolveRequest {
+            principal: context.principal.to_owned(),
+            channel: context.channel.map(str::to_owned),
+            session_id: Some(context.session_id.to_owned()),
+            preferred_agent_id: None,
+            persist_session_binding: false,
+        })
+        .await
+        .map_err(|error| {
+            format!("{tool_name} failed to resolve agent workspace: {}", error.message())
+        })?;
+    canonicalize_browser_workspace_roots(agent_outcome.agent.workspace_roots.as_slice())
+}
+
+fn browser_upload_path_from_payload(
+    payload: &serde_json::Map<String, Value>,
+) -> Result<&str, String> {
+    let Some(file_path) = payload.get("file_path").and_then(Value::as_str).map(str::trim) else {
+        return Err(format!(
+            "{BROWSER_UPLOAD_TOOL_NAME} requires non-empty string field 'file_path'"
+        ));
+    };
+    if file_path.is_empty() {
+        return Err(format!(
+            "{BROWSER_UPLOAD_TOOL_NAME} requires non-empty string field 'file_path'"
+        ));
+    }
+    if file_path.chars().any(char::is_control) {
+        return Err(format!(
+            "{BROWSER_UPLOAD_TOOL_NAME} field 'file_path' contains unsupported characters"
+        ));
+    }
+    Ok(file_path)
+}
+
+async fn read_browser_upload_file(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    context: ToolRuntimeExecutionContext<'_>,
+    file_path: &str,
+) -> Result<(String, Vec<u8>), String> {
+    let workspace_roots =
+        resolve_browser_agent_workspace_roots(runtime_state, context, BROWSER_UPLOAD_TOOL_NAME)
+            .await?;
+    let requested = PathBuf::from(file_path);
+    let resolved = if requested.is_absolute() {
+        requested
+    } else {
+        let relative = validate_browser_workspace_relative_path(requested.as_path())?;
+        let Some(root) = workspace_roots.first() else {
+            return Err(format!("{BROWSER_UPLOAD_TOOL_NAME} agent has no workspace root"));
+        };
+        root.join(relative)
+    };
+    let canonical = fs::canonicalize(resolved.as_path()).map_err(|error| {
+        format!("{BROWSER_UPLOAD_TOOL_NAME} failed to resolve upload file {file_path}: {error}")
+    })?;
+    if browser_protected_os_path(canonical.as_path()) {
+        return Err(format!(
+            "{BROWSER_UPLOAD_TOOL_NAME} denied protected OS path {}",
+            canonical.display()
+        ));
+    }
+    if !canonical_file_path_is_inside_workspace_roots(canonical.as_path(), &workspace_roots)
+        && !browser_user_owned_os_roots().iter().any(|root| canonical.starts_with(root.as_path()))
+    {
+        return Err(format!(
+            "{BROWSER_UPLOAD_TOOL_NAME} upload file {} is outside agent workspace roots and approved user-owned OS roots",
+            canonical.display()
+        ));
+    }
+    let metadata = fs::metadata(canonical.as_path()).map_err(|error| {
+        format!(
+            "{BROWSER_UPLOAD_TOOL_NAME} failed to inspect upload file {}: {error}",
+            canonical.display()
+        )
+    })?;
+    if !metadata.is_file() {
+        return Err(format!(
+            "{BROWSER_UPLOAD_TOOL_NAME} upload path is not a regular file: {}",
+            canonical.display()
+        ));
+    }
+    if metadata.len() > BROWSER_UPLOAD_MAX_FILE_BYTES {
+        return Err(format!(
+            "{BROWSER_UPLOAD_TOOL_NAME} upload file exceeds max bytes ({} > {BROWSER_UPLOAD_MAX_FILE_BYTES})",
+            metadata.len()
+        ));
+    }
+    let file_name = canonical
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("{BROWSER_UPLOAD_TOOL_NAME} upload path has no file name"))?
+        .to_owned();
+    let file_bytes = fs::read(canonical.as_path()).map_err(|error| {
+        format!(
+            "{BROWSER_UPLOAD_TOOL_NAME} failed to read upload file {}: {error}",
+            canonical.display()
+        )
+    })?;
+    Ok((file_name, file_bytes))
+}
+
+fn validate_browser_workspace_relative_path(path: &Path) -> Result<PathBuf, String> {
+    if path.as_os_str().is_empty() {
+        return Err(format!("{BROWSER_UPLOAD_TOOL_NAME} relative file_path must be non-empty"));
+    }
+    for component in path.components() {
+        if matches!(
+            component,
+            Component::Prefix(_) | Component::RootDir | Component::CurDir | Component::ParentDir
+        ) {
+            return Err(format!(
+                "{BROWSER_UPLOAD_TOOL_NAME} relative file_path must not contain root, '.', or '..' components"
+            ));
+        }
+    }
+    Ok(path.to_path_buf())
+}
+
+fn browser_user_owned_os_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    for key in ["USERPROFILE", "HOME"] {
+        if let Some(value) = std::env::var_os(key) {
+            push_browser_canonical_root(&mut roots, PathBuf::from(value));
+        }
+    }
+    push_browser_canonical_root(&mut roots, std::env::temp_dir());
+    #[cfg(unix)]
+    {
+        push_browser_canonical_root(&mut roots, PathBuf::from("/var/tmp"));
+    }
+    roots
+}
+
+fn push_browser_canonical_root(roots: &mut Vec<PathBuf>, root: PathBuf) {
+    if let Ok(canonical) = fs::canonicalize(root.as_path()) {
+        if canonical.is_dir() && !roots.iter().any(|existing| existing == &canonical) {
+            roots.push(canonical);
+        }
+    }
+}
+
+fn browser_protected_os_path(path: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        let normalized = path.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+        normalized.ends_with(":/")
+            || normalized.contains(":/windows")
+            || normalized.contains(":/program files")
+            || normalized.contains(":/program files (x86)")
+            || normalized.contains(":/system volume information")
+    }
+    #[cfg(not(windows))]
+    {
+        let normalized = path.to_string_lossy().replace('\\', "/");
+        if normalized == "/" {
+            return true;
+        }
+        for prefix in ["/etc", "/bin", "/sbin", "/usr", "/lib", "/lib64", "/System", "/Library"] {
+            if normalized == prefix || normalized.starts_with(format!("{prefix}/").as_str()) {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 pub(crate) async fn execute_browser_tool(
@@ -770,6 +949,124 @@ pub(crate) async fn execute_browser_tool(
                         browser_text_entry_action_name(tool_name),
                         sanitize_status_message(&error)
                     ),
+                ),
+            }
+        }
+        BROWSER_UPLOAD_TOOL_NAME => {
+            let session_id = match parse_browser_tool_session_id(&payload) {
+                Ok(value) => value,
+                Err(error) => {
+                    return browser_tool_execution_outcome(
+                        proposal_id,
+                        input_json,
+                        false,
+                        b"{}".to_vec(),
+                        error,
+                    );
+                }
+            };
+            let Some(selector) = payload.get("selector").and_then(Value::as_str).map(str::trim)
+            else {
+                return browser_tool_execution_outcome(
+                    proposal_id,
+                    input_json,
+                    false,
+                    b"{}".to_vec(),
+                    format!(
+                        "{BROWSER_UPLOAD_TOOL_NAME} requires non-empty string field 'selector'"
+                    ),
+                );
+            };
+            if selector.is_empty() {
+                return browser_tool_execution_outcome(
+                    proposal_id,
+                    input_json,
+                    false,
+                    b"{}".to_vec(),
+                    format!(
+                        "{BROWSER_UPLOAD_TOOL_NAME} requires non-empty string field 'selector'"
+                    ),
+                );
+            }
+            let file_path = match browser_upload_path_from_payload(&payload) {
+                Ok(value) => value,
+                Err(error) => {
+                    return browser_tool_execution_outcome(
+                        proposal_id,
+                        input_json,
+                        false,
+                        b"{}".to_vec(),
+                        error,
+                    );
+                }
+            };
+            let (file_name, file_bytes) =
+                match read_browser_upload_file(runtime_state, context, file_path).await {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return browser_tool_execution_outcome(
+                            proposal_id,
+                            input_json,
+                            false,
+                            b"{}".to_vec(),
+                            error,
+                        );
+                    }
+                };
+            let mut request = Request::new(browser_v1::SetFileInputRequest {
+                v: CANONICAL_PROTOCOL_MAJOR,
+                session_id: Some(common_v1::CanonicalId { ulid: session_id }),
+                selector: selector.to_owned(),
+                file_name: file_name.clone(),
+                file_bytes,
+                timeout_ms: payload.get("timeout_ms").and_then(Value::as_u64).unwrap_or(0),
+                capture_failure_screenshot: payload
+                    .get("capture_failure_screenshot")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
+                max_failure_screenshot_bytes: payload
+                    .get("max_failure_screenshot_bytes")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(runtime_state.config.browser_service.max_screenshot_bytes as u64),
+            });
+            if let Err(error) = attach_browser_auth_metadata(
+                &mut request,
+                runtime_state.config.browser_service.auth_token.as_deref(),
+            ) {
+                return browser_tool_execution_outcome(
+                    proposal_id,
+                    input_json,
+                    false,
+                    b"{}".to_vec(),
+                    error,
+                );
+            }
+            match client.set_file_input(request).await {
+                Ok(response) => {
+                    let response = response.into_inner();
+                    let success = response.success;
+                    let error = response.error.clone();
+                    let output = json!({
+                        "success": success,
+                        "selector": selector,
+                        "file_name": response.uploaded_file_name,
+                        "uploaded_file_bytes": response.uploaded_file_bytes,
+                        "error": response.error,
+                        "action_log": response.action_log.map(browser_action_log_to_json),
+                        "failure_screenshot_mime_type": response.failure_screenshot_mime_type,
+                        "failure_screenshot_base64": STANDARD
+                            .encode(response.failure_screenshot_bytes.as_slice()),
+                    });
+                    (
+                        success,
+                        serde_json::to_vec(&output).unwrap_or_else(|_| b"{}".to_vec()),
+                        if success { String::new() } else { error },
+                    )
+                }
+                Err(error) => (
+                    false,
+                    b"{}".to_vec(),
+                    format!("palyra.browser.upload failed: {}", sanitize_status_message(&error)),
                 ),
             }
         }
@@ -2268,6 +2565,231 @@ pub(crate) async fn execute_browser_tool(
                 ),
             }
         }
+        BROWSER_DOWNLOADS_LIST_TOOL_NAME => {
+            let session_id = match parse_browser_tool_session_id(&payload) {
+                Ok(value) => value,
+                Err(error) => {
+                    return browser_tool_execution_outcome(
+                        proposal_id,
+                        input_json,
+                        false,
+                        b"{}".to_vec(),
+                        error,
+                    );
+                }
+            };
+            let mut request = Request::new(browser_v1::ListDownloadArtifactsRequest {
+                v: CANONICAL_PROTOCOL_MAJOR,
+                session_id: Some(common_v1::CanonicalId { ulid: session_id }),
+                limit: payload.get("limit").and_then(Value::as_u64).unwrap_or(20) as u32,
+                quarantined_only: payload
+                    .get("quarantined_only")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            });
+            if let Err(error) = attach_browser_auth_metadata(
+                &mut request,
+                runtime_state.config.browser_service.auth_token.as_deref(),
+            ) {
+                return browser_tool_execution_outcome(
+                    proposal_id,
+                    input_json,
+                    false,
+                    b"{}".to_vec(),
+                    error,
+                );
+            }
+            if let Err(error) = attach_browser_caller_principal_metadata(&mut request, principal) {
+                return browser_tool_execution_outcome(
+                    proposal_id,
+                    input_json,
+                    false,
+                    b"{}".to_vec(),
+                    error,
+                );
+            }
+            match client.list_download_artifacts(request).await {
+                Ok(response) => {
+                    let response = response.into_inner();
+                    let output = json!({
+                        "artifacts": response.artifacts.into_iter().map(browser_download_artifact_to_json).collect::<Vec<_>>(),
+                        "truncated": response.truncated,
+                        "error": response.error,
+                    });
+                    let success =
+                        output.get("error").and_then(Value::as_str).unwrap_or_default().is_empty();
+                    (
+                        success,
+                        serde_json::to_vec(&output).unwrap_or_else(|_| b"{}".to_vec()),
+                        if success {
+                            String::new()
+                        } else {
+                            output
+                                .get("error")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_owned()
+                        },
+                    )
+                }
+                Err(error) => (
+                    false,
+                    b"{}".to_vec(),
+                    format!(
+                        "palyra.browser.downloads.list failed: {}",
+                        sanitize_status_message(&error)
+                    ),
+                ),
+            }
+        }
+        BROWSER_DOWNLOADS_GET_TOOL_NAME => {
+            let session_id = match parse_browser_tool_session_id(&payload) {
+                Ok(value) => value,
+                Err(error) => {
+                    return browser_tool_execution_outcome(
+                        proposal_id,
+                        input_json,
+                        false,
+                        b"{}".to_vec(),
+                        error,
+                    );
+                }
+            };
+            let artifact_id = match parse_browser_download_artifact_id(&payload) {
+                Ok(Some(value)) => Some(value),
+                Ok(None) => {
+                    let mut list_request = Request::new(browser_v1::ListDownloadArtifactsRequest {
+                        v: CANONICAL_PROTOCOL_MAJOR,
+                        session_id: Some(common_v1::CanonicalId { ulid: session_id.clone() }),
+                        limit: 1,
+                        quarantined_only: false,
+                    });
+                    if let Err(error) = attach_browser_auth_metadata(
+                        &mut list_request,
+                        runtime_state.config.browser_service.auth_token.as_deref(),
+                    ) {
+                        return browser_tool_execution_outcome(
+                            proposal_id,
+                            input_json,
+                            false,
+                            b"{}".to_vec(),
+                            error,
+                        );
+                    }
+                    if let Err(error) =
+                        attach_browser_caller_principal_metadata(&mut list_request, principal)
+                    {
+                        return browser_tool_execution_outcome(
+                            proposal_id,
+                            input_json,
+                            false,
+                            b"{}".to_vec(),
+                            error,
+                        );
+                    }
+                    match client.list_download_artifacts(list_request).await {
+                        Ok(response) => response
+                            .into_inner()
+                            .artifacts
+                            .into_iter()
+                            .next()
+                            .and_then(|artifact| artifact.artifact_id),
+                        Err(error) => {
+                            return browser_tool_execution_outcome(
+                                proposal_id,
+                                input_json,
+                                false,
+                                b"{}".to_vec(),
+                                format!(
+                                    "palyra.browser.downloads.get failed to resolve latest artifact: {}",
+                                    sanitize_status_message(&error)
+                                ),
+                            );
+                        }
+                    }
+                }
+                Err(error) => {
+                    return browser_tool_execution_outcome(
+                        proposal_id,
+                        input_json,
+                        false,
+                        b"{}".to_vec(),
+                        error,
+                    );
+                }
+            };
+            let Some(artifact_id) = artifact_id else {
+                return browser_tool_execution_outcome(
+                    proposal_id,
+                    input_json,
+                    false,
+                    b"{}".to_vec(),
+                    "palyra.browser.downloads.get found no download artifacts for the session"
+                        .to_owned(),
+                );
+            };
+            let max_bytes = payload
+                .get("max_bytes")
+                .and_then(Value::as_u64)
+                .unwrap_or(BROWSER_DOWNLOAD_TOOL_DEFAULT_MAX_BYTES)
+                .clamp(1, BROWSER_DOWNLOAD_TOOL_MAX_BYTES);
+            let mut request = Request::new(browser_v1::GetDownloadArtifactRequest {
+                v: CANONICAL_PROTOCOL_MAJOR,
+                session_id: Some(common_v1::CanonicalId { ulid: session_id }),
+                artifact_id: Some(artifact_id),
+                max_bytes,
+            });
+            if let Err(error) = attach_browser_auth_metadata(
+                &mut request,
+                runtime_state.config.browser_service.auth_token.as_deref(),
+            ) {
+                return browser_tool_execution_outcome(
+                    proposal_id,
+                    input_json,
+                    false,
+                    b"{}".to_vec(),
+                    error,
+                );
+            }
+            if let Err(error) = attach_browser_caller_principal_metadata(&mut request, principal) {
+                return browser_tool_execution_outcome(
+                    proposal_id,
+                    input_json,
+                    false,
+                    b"{}".to_vec(),
+                    error,
+                );
+            }
+            match client.get_download_artifact(request).await {
+                Ok(response) => {
+                    let response = response.into_inner();
+                    let success = response.success;
+                    let error = response.error.clone();
+                    let content_sha256 = hex::encode(Sha256::digest(response.content.as_slice()));
+                    let output = json!({
+                        "success": success,
+                        "error": response.error,
+                        "artifact": response.artifact.map(browser_download_artifact_to_json),
+                        "content_base64": STANDARD.encode(response.content.as_slice()),
+                        "content_bytes": response.content.len(),
+                        "content_sha256": content_sha256,
+                    });
+                    (
+                        success,
+                        serde_json::to_vec(&output).unwrap_or_else(|_| b"{}".to_vec()),
+                        if success { String::new() } else { error },
+                    )
+                }
+                Err(error) => (
+                    false,
+                    b"{}".to_vec(),
+                    format!(
+                        "palyra.browser.downloads.get failed: {}",
+                        sanitize_status_message(&error)
+                    ),
+                ),
+            }
+        }
         _ => (false, b"{}".to_vec(), "palyra.browser.* unsupported tool name".to_owned()),
     };
 
@@ -2338,6 +2860,26 @@ fn parse_browser_tool_session_id(
     validate_canonical_id(session_id)
         .map_err(|error| format!("palyra.browser.* session_id is invalid: {error}"))?;
     Ok(session_id.to_owned())
+}
+
+fn parse_browser_download_artifact_id(
+    payload: &serde_json::Map<String, Value>,
+) -> Result<Option<common_v1::CanonicalId>, String> {
+    let Some(value) = payload.get("artifact_id") else {
+        return Ok(None);
+    };
+    let Some(artifact_id) = value.as_str().map(str::trim) else {
+        return Err(format!(
+            "{BROWSER_DOWNLOADS_GET_TOOL_NAME} field 'artifact_id' must be a string"
+        ));
+    };
+    if artifact_id.is_empty() {
+        return Ok(None);
+    }
+    validate_canonical_id(artifact_id).map_err(|error| {
+        format!("{BROWSER_DOWNLOADS_GET_TOOL_NAME} artifact_id is invalid: {error}")
+    })?;
+    Ok(Some(common_v1::CanonicalId { ulid: artifact_id.to_owned() }))
 }
 
 fn browser_observe_include_visible_text(payload: &serde_json::Map<String, Value>) -> bool {
@@ -2766,6 +3308,7 @@ mod tests {
         browser_observe_include_visible_text, browser_session_profile_id_from_payload,
         browser_tool_execution_outcome, browser_url_targets_loopback,
         canonical_file_path_is_inside_workspace_roots, normalize_browser_press_key_input,
+        parse_browser_download_artifact_id, validate_browser_workspace_relative_path,
         BROWSER_CALLER_PRINCIPAL_HEADER,
     };
     use crate::transport::grpc::proto::palyra::browser::v1 as browser_v1;
@@ -2893,6 +3436,51 @@ mod tests {
         .expect_err("non-string profile id should fail");
 
         assert!(error.contains("field 'profile_id' must be a string"));
+    }
+
+    #[test]
+    fn browser_download_artifact_id_parser_accepts_optional_canonical_id() {
+        let missing = serde_json::Map::new();
+        assert!(parse_browser_download_artifact_id(&missing)
+            .expect("missing artifact id should be optional")
+            .is_none());
+
+        let empty = json!({"artifact_id": "  "});
+        assert!(parse_browser_download_artifact_id(empty.as_object().expect("object payload"))
+            .expect("empty artifact id should request latest artifact")
+            .is_none());
+
+        let explicit = json!({"artifact_id": "01ARZ3NDEKTSV4RRFFQ69G5FAY"});
+        assert_eq!(
+            parse_browser_download_artifact_id(explicit.as_object().expect("object payload"))
+                .expect("canonical artifact id should parse")
+                .expect("artifact id should be present")
+                .ulid,
+            "01ARZ3NDEKTSV4RRFFQ69G5FAY"
+        );
+
+        let invalid = json!({"artifact_id": "downloads/latest"});
+        let error =
+            parse_browser_download_artifact_id(invalid.as_object().expect("object payload"))
+                .expect_err("non-canonical artifact id should fail");
+        assert!(error.contains("artifact_id is invalid"));
+    }
+
+    #[test]
+    fn browser_upload_relative_path_validation_confines_workspace_paths() {
+        let relative =
+            validate_browser_workspace_relative_path(std::path::Path::new("fixtures/upload.txt"))
+                .expect("plain relative upload path should be accepted");
+        assert_eq!(relative, std::path::PathBuf::from("fixtures/upload.txt"));
+
+        for denied in ["", "../secret.txt", "./upload.txt", "/secret.txt"] {
+            let error = validate_browser_workspace_relative_path(std::path::Path::new(denied))
+                .expect_err("unsafe relative upload path should be denied");
+            assert!(
+                error.contains("relative file_path"),
+                "unexpected validation error for {denied:?}: {error}"
+            );
+        }
     }
 
     #[test]
