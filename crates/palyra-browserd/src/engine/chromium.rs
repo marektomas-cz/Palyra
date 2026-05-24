@@ -401,6 +401,8 @@ const CHROMIUM_DRAIN_NETWORK_LOG_SCRIPT: &str = r#"
 
 const MAX_CHROMIUM_CONSOLE_JSON_BYTES: usize = (DEFAULT_MAX_CONSOLE_LOG_BYTES as usize) * 4;
 const MAX_CHROMIUM_NETWORK_JSON_BYTES: usize = (DEFAULT_MAX_NETWORK_LOG_BYTES as usize) * 4;
+const MAX_CHROMIUM_LOCAL_STORAGE_JSON_BYTES: usize =
+    (MAX_STORAGE_ENTRY_VALUE_BYTES * MAX_STORAGE_ENTRIES_PER_ORIGIN * 2) + 4096;
 
 pub(crate) async fn run_chromium_blocking<T, F>(operation: &str, task: F) -> Result<T, String>
 where
@@ -1340,6 +1342,27 @@ async fn chromium_read_console_log(
     Ok(parse_chromium_console_entries(value))
 }
 
+async fn chromium_read_local_storage(
+    runtime: &BrowserRuntimeState,
+    session_id: &str,
+    tab_id: &str,
+) -> Result<Option<(String, HashMap<String, String>)>, String> {
+    enforce_chromium_remote_ip_guard(runtime, session_id).await?;
+    let tab = chromium_tab_for_session(runtime, session_id, tab_id).await?;
+    let script = chromium_read_local_storage_script();
+    let value = run_chromium_blocking("chromium read localStorage", move || {
+        let value = tab
+            .evaluate(script.as_str(), false)
+            .map_err(|error| format!("failed to read Chromium localStorage: {error}"))?
+            .value
+            .unwrap_or_else(|| serde_json::Value::String("{}".to_owned()));
+        Ok(decode_chromium_json_script_value(value))
+    })
+    .await?;
+    enforce_chromium_remote_ip_guard(runtime, session_id).await?;
+    parse_chromium_local_storage_snapshot(value)
+}
+
 async fn chromium_drain_page_network_log(
     runtime: &BrowserRuntimeState,
     session_id: &str,
@@ -1389,6 +1412,155 @@ fn decode_chromium_json_script_value(value: serde_json::Value) -> serde_json::Va
             .unwrap_or(serde_json::Value::Null),
         value => value,
     }
+}
+
+fn chromium_read_local_storage_script() -> String {
+    format!(
+        r#"
+(() => {{
+  const MAX_STORAGE_ENTRIES = {max_entries};
+  const MAX_STORAGE_KEY_CHARS = 512;
+  const MAX_STORAGE_VALUE_CHARS = {max_value_chars};
+  const MAX_STORAGE_JSON_CHARS = {max_json_chars};
+  const clampScalar = (value, maxChars) => {{
+    if (typeof value === "string") {{
+      return value.length > maxChars ? value.slice(0, maxChars) : value;
+    }}
+    if (typeof value === "number" || typeof value === "boolean") {{
+      const text = String(value);
+      return text.length > maxChars ? text.slice(0, maxChars) : text;
+    }}
+    return "";
+  }};
+  try {{
+    const origin = String((window.location && window.location.origin) || "");
+    if (!origin || origin === "null") {{
+      return JSON.stringify({{ ok: true, origin: "", entries: {{}} }});
+    }}
+    const storage = window.localStorage;
+    if (!storage) {{
+      return JSON.stringify({{ ok: true, origin, entries: {{}} }});
+    }}
+    const entries = {{}};
+    let totalChars = 2;
+    let count = 0;
+    const length = Math.min(Number(storage.length || 0), MAX_STORAGE_ENTRIES * 4);
+    for (let index = 0; index < length; index += 1) {{
+      const rawKey = storage.key(index);
+      const key = clampScalar(rawKey, MAX_STORAGE_KEY_CHARS).trim();
+      if (!key || Object.prototype.hasOwnProperty.call(entries, key)) {{
+        continue;
+      }}
+      const value = clampScalar(storage.getItem(rawKey), MAX_STORAGE_VALUE_CHARS);
+      const entryChars = JSON.stringify(key).length + JSON.stringify(value).length + 4;
+      if (count > 0 && totalChars + entryChars > MAX_STORAGE_JSON_CHARS) {{
+        break;
+      }}
+      if (totalChars + entryChars > MAX_STORAGE_JSON_CHARS) {{
+        continue;
+      }}
+      entries[key] = value;
+      totalChars += entryChars;
+      count += 1;
+      if (count >= MAX_STORAGE_ENTRIES) {{
+        break;
+      }}
+    }}
+    return JSON.stringify({{ ok: true, origin, entries }});
+  }} catch (error) {{
+    return JSON.stringify({{
+      ok: false,
+      origin: "",
+      entries: {{}},
+      error: String((error && (error.message || error)) || "")
+    }});
+  }}
+}})()
+"#,
+        max_entries = MAX_STORAGE_ENTRIES_PER_ORIGIN,
+        max_value_chars = MAX_STORAGE_ENTRY_VALUE_BYTES,
+        max_json_chars = MAX_CHROMIUM_LOCAL_STORAGE_JSON_BYTES
+    )
+}
+
+fn chromium_restore_local_storage_script(
+    entries: &HashMap<String, String>,
+) -> Result<String, String> {
+    let entries_json = serde_json::to_string(entries)
+        .map_err(|error| format!("failed to encode localStorage restore entries: {error}"))?;
+    Ok(format!(
+        r#"
+(() => {{
+  const entries = {entries_json};
+  try {{
+    const storage = window.localStorage;
+    if (!storage) {{
+      return JSON.stringify({{ ok: false, error: "localStorage unavailable" }});
+    }}
+    storage.clear();
+    Object.keys(entries).forEach((key) => {{
+      const value = entries[key];
+      if (typeof value === "string") {{
+        storage.setItem(key, value);
+      }}
+    }});
+    return JSON.stringify({{ ok: true }});
+  }} catch (error) {{
+    return JSON.stringify({{
+      ok: false,
+      error: String((error && (error.message || error)) || "")
+    }});
+  }}
+}})()
+"#
+    ))
+}
+
+fn parse_chromium_local_storage_snapshot(
+    value: serde_json::Value,
+) -> Result<Option<(String, HashMap<String, String>)>, String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| "localStorage read returned non-object payload".to_owned())?;
+    if !object.get("ok").and_then(serde_json::Value::as_bool).unwrap_or(false) {
+        let error = object
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown localStorage read failure");
+        return Err(format!("localStorage read failed: {error}"));
+    }
+    let origin = object
+        .get("origin")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    if origin.is_empty() || origin == "null" {
+        return Ok(None);
+    }
+    let mut entries = HashMap::new();
+    for (key, value) in
+        object.get("entries").and_then(serde_json::Value::as_object).into_iter().flatten()
+    {
+        if let Some(value) = value.as_str() {
+            entries.insert(key.clone(), value.to_owned());
+        }
+    }
+    Ok(Some((origin, entries)))
+}
+
+fn parse_chromium_local_storage_restore_status(value: serde_json::Value) -> Result<(), String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| "localStorage restore returned non-object payload".to_owned())?;
+    if object.get("ok").and_then(serde_json::Value::as_bool).unwrap_or(false) {
+        return Ok(());
+    }
+    let error = object
+        .get("error")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown localStorage restore failure");
+    Err(format!("localStorage restore failed: {error}"))
 }
 
 fn bounded_chromium_json_string(
@@ -1612,6 +1784,18 @@ pub(crate) async fn chromium_refresh_tab_snapshot(
     let snapshot = chromium_observe_snapshot(runtime, session_id, tab_id).await?;
     let console_log =
         chromium_read_console_log(runtime, session_id, tab_id).await.unwrap_or_default();
+    let storage_snapshot = match chromium_read_local_storage(runtime, session_id, tab_id).await {
+        Ok(value) => value,
+        Err(error) => {
+            warn!(
+                session_id,
+                tab_id,
+                error = error.as_str(),
+                "failed to refresh Chromium localStorage snapshot"
+            );
+            None
+        }
+    };
     let mut network_log =
         chromium_drain_pending_network_log(runtime, session_id, tab_id).await.unwrap_or_default();
     network_log.extend(
@@ -1624,6 +1808,9 @@ pub(crate) async fn chromium_refresh_tab_snapshot(
     };
     let max_network_log_entries = session.budget.max_network_log_entries;
     let max_network_log_bytes = session.budget.max_network_log_bytes;
+    if let Some((origin, entries)) = storage_snapshot {
+        replace_storage_entries_for_origin(session, origin.as_str(), entries);
+    }
     let Some(tab) = session.tabs.get_mut(tab_id) else {
         return Err("tab_not_found".to_owned());
     };
@@ -1780,6 +1967,10 @@ pub(crate) async fn navigate_tab_with_chromium(
     } else {
         None
     };
+    let storage_entries_by_origin = {
+        let sessions = runtime.sessions.lock().await;
+        sessions.get(session_id).map(|session| session.storage_entries.clone()).unwrap_or_default()
+    };
     let target_url = outcome.final_url.clone();
     let chromium_timeout_ms = params.timeout_ms;
     let chromium_snapshot = run_chromium_blocking("chromium navigate", move || {
@@ -1801,11 +1992,36 @@ pub(crate) async fn navigate_tab_with_chromium(
             false,
         )
         .ok();
+        let mut page_url = tab.get_url();
+        if let Some(origin) = url_origin_key(page_url.as_str()) {
+            if let Some(entries) =
+                storage_entries_by_origin.get(origin.as_str()).filter(|entries| !entries.is_empty())
+            {
+                let script = chromium_restore_local_storage_script(entries)?;
+                let raw_value = tab
+                    .evaluate(script.as_str(), false)
+                    .map_err(|error| {
+                        format!("failed to restore Chromium localStorage for {origin}: {error}")
+                    })?
+                    .value
+                    .unwrap_or_else(|| serde_json::Value::String("{}".to_owned()));
+                parse_chromium_local_storage_restore_status(decode_chromium_json_script_value(
+                    raw_value,
+                ))
+                .map_err(|error| format!("{error} for {origin}"))?;
+                tab.navigate_to(page_url.as_str()).map_err(|error| {
+                    format!("failed to reload Chromium page after localStorage restore: {error}")
+                })?;
+                tab.wait_until_navigated().map_err(|error| {
+                    format!("Chromium reload after localStorage restore timed out: {error}")
+                })?;
+                page_url = tab.get_url();
+            }
+        }
         let page_body = tab.get_content().map_err(|error| {
             format!("failed to read Chromium page HTML after navigation: {error}")
         })?;
         let title = tab.get_title().unwrap_or_default();
-        let page_url = tab.get_url();
         Ok(ChromiumObserveSnapshot { page_body, title, page_url })
     })
     .await;
@@ -2790,20 +3006,24 @@ pub(crate) async fn set_viewport_with_chromium(
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{
-        chromium_network_log_headers, chromium_touch_emulation_max_touch_points,
+        chromium_network_log_headers, chromium_read_local_storage_script,
+        chromium_restore_local_storage_script, chromium_touch_emulation_max_touch_points,
         chromium_transport_idle_timeout, clamp_chromium_snapshot,
         decode_chromium_console_entries_value, decode_chromium_json_script_value,
         decode_chromium_network_entries_value, parse_chromium_console_entries,
-        parse_chromium_layout_metrics, parse_chromium_page_network_entries,
+        parse_chromium_layout_metrics, parse_chromium_local_storage_restore_status,
+        parse_chromium_local_storage_snapshot, parse_chromium_page_network_entries,
         parse_chromium_viewport_metrics, parse_key_press_spec, ChromiumLayoutMetrics,
         ChromiumObserveSnapshot, CHROMIUM_DRAIN_NETWORK_LOG_SCRIPT,
         CHROMIUM_PAGE_DIAGNOSTICS_SCRIPT, CHROMIUM_READ_CONSOLE_LOG_SCRIPT,
-        MAX_CHROMIUM_CONSOLE_JSON_BYTES, MAX_CHROMIUM_NETWORK_JSON_BYTES,
+        MAX_CHROMIUM_CONSOLE_JSON_BYTES, MAX_CHROMIUM_LOCAL_STORAGE_JSON_BYTES,
+        MAX_CHROMIUM_NETWORK_JSON_BYTES,
     };
     use crate::{
         DEFAULT_SESSION_IDLE_TTL_MS, MAX_CONSOLE_MESSAGE_BYTES, MAX_CONSOLE_SOURCE_BYTES,
         MAX_CONSOLE_STACK_BYTES, MAX_NETWORK_LOG_URL_BYTES,
     };
+    use std::collections::HashMap;
     use std::time::Duration;
 
     #[test]
@@ -2936,6 +3156,61 @@ mod tests {
 
         assert_eq!(decoded["status"], "selected");
         assert_eq!(decoded["value"], "north");
+    }
+
+    #[test]
+    fn parse_chromium_local_storage_snapshot_accepts_bounded_entries() {
+        let raw = serde_json::Value::String(
+            r#"{"ok":true,"origin":"http://127.0.0.1:49152","entries":{"cart":"1","theme":"dark"}}"#
+                .to_owned(),
+        );
+
+        let (origin, entries) =
+            parse_chromium_local_storage_snapshot(decode_chromium_json_script_value(raw))
+                .expect("snapshot payload should parse")
+                .expect("origin should be present");
+
+        assert_eq!(origin, "http://127.0.0.1:49152");
+        assert_eq!(entries.get("cart").map(String::as_str), Some("1"));
+        assert_eq!(entries.get("theme").map(String::as_str), Some("dark"));
+    }
+
+    #[test]
+    fn parse_chromium_local_storage_restore_status_surfaces_page_errors() {
+        let raw = serde_json::json!({
+            "ok": false,
+            "error": "quota exceeded"
+        });
+
+        let error = parse_chromium_local_storage_restore_status(raw)
+            .expect_err("restore failure should remain visible");
+
+        assert!(error.contains("quota exceeded"));
+    }
+
+    #[test]
+    fn chromium_local_storage_scripts_bound_and_escape_persisted_payloads() {
+        let read_script = chromium_read_local_storage_script();
+        assert!(
+            read_script.contains("MAX_STORAGE_JSON_CHARS"),
+            "localStorage reads should enforce a page-side aggregate JSON budget"
+        );
+        assert!(
+            read_script.contains(MAX_CHROMIUM_LOCAL_STORAGE_JSON_BYTES.to_string().as_str()),
+            "localStorage read script should use the Rust-side JSON budget"
+        );
+
+        let script = chromium_restore_local_storage_script(&HashMap::from([(
+            "quote'\"".to_owned(),
+            "</script><b>x</b>".to_owned(),
+        )]))
+        .expect("restore script should encode entries");
+
+        assert!(script.contains(r#""quote'\"":"</script><b>x</b>""#));
+        assert!(
+            script.contains("JSON.stringify"),
+            "restore script should return a machine-readable status payload"
+        );
     }
 
     #[test]
@@ -3104,7 +3379,7 @@ pub(crate) async fn wait_for_with_chromium(
     timeout_ms: u64,
     poll_interval_ms: u64,
 ) -> ChromiumWaitOutcome {
-    let (_tab_id, tab) = match chromium_active_tab_for_session(runtime, session_id).await {
+    let (tab_id, tab) = match chromium_active_tab_for_session(runtime, session_id).await {
         Ok(value) => value,
         Err(error) => {
             return ChromiumWaitOutcome {
@@ -3152,6 +3427,8 @@ pub(crate) async fn wait_for_with_chromium(
         match check {
             Ok((selector_hit, text_hit)) => {
                 if selector_hit {
+                    let _ =
+                        chromium_refresh_tab_snapshot(runtime, session_id, tab_id.as_str()).await;
                     return ChromiumWaitOutcome {
                         success: true,
                         matched_selector: selector_owned.clone(),
@@ -3162,6 +3439,8 @@ pub(crate) async fn wait_for_with_chromium(
                     };
                 }
                 if text_hit {
+                    let _ =
+                        chromium_refresh_tab_snapshot(runtime, session_id, tab_id.as_str()).await;
                     return ChromiumWaitOutcome {
                         success: true,
                         matched_selector: String::new(),

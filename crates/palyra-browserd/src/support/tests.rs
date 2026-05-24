@@ -1460,6 +1460,205 @@ async fn browser_service_chromium_engine_executes_real_dom_actions() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn browser_service_chromium_profile_persistence_restores_local_storage() {
+    let Some(chromium_path) = resolve_chromium_path_for_tests() else {
+        return;
+    };
+    let (url, handle) = spawn_static_http_server_with_request_budget(
+        200,
+        r#"<html><head><title>Cart Fixture</title><script>
+function render(){document.getElementById('cart').textContent='cart:'+(localStorage.getItem('cart')||'0');}
+function addCart(){localStorage.setItem('cart','1');render();}
+window.addEventListener('DOMContentLoaded',render);
+</script></head><body><button id="add" onclick="addCart()">Add</button><div id="cart">cart:loading</div></body></html>"#,
+        8,
+    );
+    let state_dir = tempfile::tempdir().expect("state temp dir should be available");
+    let mut runtime_state = BrowserRuntimeState::new(&Args {
+        bind: "127.0.0.1".to_owned(),
+        port: 7143,
+        grpc_bind: "127.0.0.1".to_owned(),
+        grpc_port: 7543,
+        auth_token: None,
+        session_idle_ttl_ms: 60_000,
+        max_sessions: 16,
+        max_navigation_timeout_ms: 10_000,
+        max_session_lifetime_ms: 60_000,
+        max_screenshot_bytes: 256 * 1024,
+        max_response_bytes: 256 * 1024,
+        max_title_bytes: 4 * 1024,
+        engine_mode: BrowserEngineMode::Chromium,
+        chromium_path: Some(chromium_path),
+        chromium_startup_timeout_ms: DEFAULT_CHROMIUM_STARTUP_TIMEOUT_MS,
+    })
+    .expect("chromium runtime should initialize");
+    runtime_state.state_store = Some(
+        PersistedStateStore::new(state_dir.path().join("state"), [9_u8; STATE_KEY_LEN])
+            .expect("state store should initialize"),
+    );
+    let runtime = std::sync::Arc::new(runtime_state);
+    let service = BrowserServiceImpl { runtime };
+
+    let profile = service
+        .create_profile(Request::new(browser_v1::CreateProfileRequest {
+            v: 1,
+            principal: "user:ops".to_owned(),
+            name: "Cart".to_owned(),
+            theme_color: "#0f766e".to_owned(),
+            persistence_enabled: true,
+            private_profile: false,
+        }))
+        .await
+        .expect("create_profile should succeed")
+        .into_inner()
+        .profile
+        .expect("profile should be present");
+    let profile_id = profile.profile_id.expect("profile id should be present");
+
+    let first = create_session_with_retry_for_chromium_test(
+        &service,
+        browser_v1::CreateSessionRequest {
+            v: 1,
+            principal: "user:ops".to_owned(),
+            idle_ttl_ms: 10_000,
+            budget: None,
+            allow_private_targets: true,
+            allow_downloads: false,
+            action_allowed_domains: Vec::new(),
+            persistence_enabled: false,
+            persistence_id: String::new(),
+            profile_id: Some(profile_id.clone()),
+            private_profile: false,
+            channel: String::new(),
+        },
+        3,
+    )
+    .await
+    .expect("first create_session should succeed");
+    let first_session_id = first.session_id.expect("first session id should be present");
+
+    let navigate = service
+        .navigate(Request::new(browser_v1::NavigateRequest {
+            v: 1,
+            session_id: Some(first_session_id.clone()),
+            url: url.clone(),
+            timeout_ms: 8_000,
+            allow_redirects: true,
+            max_redirects: 3,
+            allow_private_targets: true,
+        }))
+        .await
+        .expect("first navigate should execute")
+        .into_inner();
+    assert!(navigate.success, "first navigate should succeed: {}", navigate.error);
+
+    let click = service
+        .click(Request::new(browser_v1::ClickRequest {
+            v: 1,
+            session_id: Some(first_session_id.clone()),
+            selector: "#add".to_owned(),
+            max_retries: 2,
+            timeout_ms: 3_000,
+            capture_failure_screenshot: true,
+            max_failure_screenshot_bytes: 16 * 1024,
+        }))
+        .await
+        .expect("click should execute")
+        .into_inner();
+    assert!(click.success, "cart click should succeed: {}", click.error);
+
+    let waited = service
+        .wait_for(Request::new(browser_v1::WaitForRequest {
+            v: 1,
+            session_id: Some(first_session_id.clone()),
+            selector: "#cart".to_owned(),
+            text: "cart:1".to_owned(),
+            timeout_ms: 5_000,
+            poll_interval_ms: 50,
+            capture_failure_screenshot: true,
+            max_failure_screenshot_bytes: 16 * 1024,
+        }))
+        .await
+        .expect("wait_for should execute")
+        .into_inner();
+    assert!(waited.success, "cart state should update before close: {}", waited.error);
+
+    let closed = service
+        .close_session(Request::new(browser_v1::CloseSessionRequest {
+            v: 1,
+            session_id: Some(first_session_id),
+        }))
+        .await
+        .expect("close_session should execute")
+        .into_inner();
+    assert!(closed.closed, "first session should close cleanly");
+
+    let second = create_session_with_retry_for_chromium_test(
+        &service,
+        browser_v1::CreateSessionRequest {
+            v: 1,
+            principal: "user:ops".to_owned(),
+            idle_ttl_ms: 10_000,
+            budget: None,
+            allow_private_targets: true,
+            allow_downloads: false,
+            action_allowed_domains: Vec::new(),
+            persistence_enabled: false,
+            persistence_id: String::new(),
+            profile_id: Some(profile_id),
+            private_profile: false,
+            channel: String::new(),
+        },
+        3,
+    )
+    .await
+    .expect("second create_session should succeed");
+    assert!(second.state_restored, "second session should restore profile snapshot");
+    let second_session_id = second.session_id.expect("second session id should be present");
+
+    let restored_navigate = service
+        .navigate(Request::new(browser_v1::NavigateRequest {
+            v: 1,
+            session_id: Some(second_session_id.clone()),
+            url,
+            timeout_ms: 8_000,
+            allow_redirects: true,
+            max_redirects: 3,
+            allow_private_targets: true,
+        }))
+        .await
+        .expect("second navigate should execute")
+        .into_inner();
+    assert!(
+        restored_navigate.success,
+        "second navigate should restore localStorage before page code runs: {}",
+        restored_navigate.error
+    );
+
+    let restored = service
+        .wait_for(Request::new(browser_v1::WaitForRequest {
+            v: 1,
+            session_id: Some(second_session_id),
+            selector: "#cart".to_owned(),
+            text: "cart:1".to_owned(),
+            timeout_ms: 5_000,
+            poll_interval_ms: 50,
+            capture_failure_screenshot: true,
+            max_failure_screenshot_bytes: 16 * 1024,
+        }))
+        .await
+        .expect("wait_for restored state should execute")
+        .into_inner();
+    assert!(
+        restored.success,
+        "restored persistent profile should expose localStorage-backed cart state: {}",
+        restored.error
+    );
+
+    drop(handle);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn browser_service_click_type_and_wait_for_on_fixture_page() {
     let (url, handle) = spawn_static_http_server(
             200,
@@ -3397,6 +3596,35 @@ fn apply_storage_entry_update_enforces_origin_key_and_value_quotas() {
             .map(String::len),
         Some(super::MAX_STORAGE_ENTRY_VALUE_BYTES),
         "storage entry values should be truncated across repeated appends"
+    );
+}
+
+#[test]
+fn replace_storage_entries_for_origin_replaces_and_removes_deleted_keys() {
+    let mut session = test_session_record();
+    let origin = "https://app.example.com";
+    super::apply_storage_entry_update(&mut session, origin, "cart", "1", true);
+    super::apply_storage_entry_update(&mut session, origin, "stale", "remove", true);
+
+    super::replace_storage_entries_for_origin(
+        &mut session,
+        origin,
+        HashMap::from([("cart".to_owned(), "2".to_owned())]),
+    );
+
+    let entries =
+        session.storage_entries.get(origin).expect("origin should remain after replacement");
+    assert_eq!(entries.get("cart").map(String::as_str), Some("2"));
+    assert!(
+        !entries.contains_key("stale"),
+        "replacement should remove keys no longer present in browser localStorage"
+    );
+
+    super::replace_storage_entries_for_origin(&mut session, origin, HashMap::new());
+
+    assert!(
+        !session.storage_entries.contains_key(origin),
+        "empty browser localStorage should clear the persisted origin snapshot"
     );
 }
 

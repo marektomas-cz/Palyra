@@ -259,6 +259,47 @@ pub(crate) fn apply_storage_entry_update(
     *existing = truncate_utf8_bytes(combined.as_str(), MAX_STORAGE_ENTRY_VALUE_BYTES);
 }
 
+pub(crate) fn replace_storage_entries_for_origin(
+    session: &mut BrowserSessionRecord,
+    origin: &str,
+    entries: HashMap<String, String>,
+) {
+    let origin = origin.trim();
+    if origin.is_empty() {
+        return;
+    }
+    if entries.is_empty() {
+        session.storage_entries.remove(origin);
+        return;
+    }
+    if !session.storage_entries.contains_key(origin)
+        && session.storage_entries.len() >= MAX_STORAGE_ORIGINS_PER_SESSION
+    {
+        return;
+    }
+    let mut clamped_entries = HashMap::new();
+    for (key, value) in entries {
+        let key = key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        if !clamped_entries.contains_key(key)
+            && clamped_entries.len() >= MAX_STORAGE_ENTRIES_PER_ORIGIN
+        {
+            break;
+        }
+        clamped_entries.insert(
+            key.to_owned(),
+            truncate_utf8_bytes(value.as_str(), MAX_STORAGE_ENTRY_VALUE_BYTES),
+        );
+    }
+    if clamped_entries.is_empty() {
+        session.storage_entries.remove(origin);
+    } else {
+        session.storage_entries.insert(origin.to_owned(), clamped_entries);
+    }
+}
+
 pub(crate) fn clamp_cookie_jar(
     cookie_jar: HashMap<String, HashMap<String, String>>,
 ) -> HashMap<String, HashMap<String, String>> {
