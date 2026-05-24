@@ -162,7 +162,7 @@ fn local_profile_manifest() -> DeploymentProfileManifest {
             "Loopback-only local runtime with admin auth, local state, and no remote worker execution.",
         capabilities: vec![
             capability("gateway.loopback", true, "required"),
-            capability("browserd.local", false, "opt-in"),
+            capability("browserd.local", true, "default-on"),
             capability("networked_workers", false, "disabled"),
             capability("public_gateway", false, "blocked-by-default"),
         ],
@@ -521,6 +521,19 @@ mod tests {
             .blockers
             .iter()
             .any(|blocker| blocker.code == "worker_attestation_digest_required"));
+    }
+
+    #[test]
+    fn local_manifest_marks_browserd_enabled_by_default() {
+        let manifest = deployment_profile_manifest(DeploymentProfileId::Local);
+        let browserd = manifest
+            .capabilities
+            .iter()
+            .find(|capability| capability.id == "browserd.local")
+            .expect("local profile should declare browserd capability");
+
+        assert!(browserd.enabled_by_default);
+        assert_eq!(browserd.posture, "default-on");
     }
 
     #[test]
