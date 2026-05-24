@@ -7,6 +7,7 @@ use std::{
     sync::Arc,
 };
 
+use palyra_common::redaction::{redact_auth_error, redact_url_segments_in_text};
 use palyra_safety::{transform_text_for_prompt, SafetyContentKind, SafetySourceKind, TrustLabel};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -38,6 +39,8 @@ const SESSION_COMPACTION_MIN_CONDENSED_EVENTS: usize = 4;
 const SESSION_COMPACTION_MAX_SUMMARY_LINES: usize = 8;
 const SESSION_COMPACTION_PREVIEW_LEN: usize = 220;
 const SESSION_COMPACTION_MAX_CANDIDATES: usize = 18;
+const SESSION_COMPACTION_MAX_ACTION_ITEMS: usize = 8;
+const SESSION_COMPACTION_ACTION_ITEM_MAX_CHARS: usize = 280;
 const SESSION_COMPACTION_DEFAULT_COOLDOWN_MS: i64 = 5 * 60 * 1_000;
 const AUTO_WRITE_CONFIDENCE_THRESHOLD: f64 = 0.82;
 const CURATED_WORKSPACE_DOC_LIMIT: usize = 64;
@@ -209,6 +212,8 @@ pub(crate) struct SessionActiveTaskSummary {
     #[serde(default)]
     pub open_decisions: Vec<String>,
     #[serde(default)]
+    pub open_action_items: Vec<String>,
+    #[serde(default)]
     pub constraints: Vec<String>,
     #[serde(default)]
     pub recent_steps: Vec<String>,
@@ -221,6 +226,7 @@ impl SessionActiveTaskSummary {
         let mut sections = Vec::new();
         sections.push(format!("Active goal: {}", self.active_goal));
         sections.push(render_summary_list("Open decisions", self.open_decisions.as_slice()));
+        sections.push(render_summary_list("Open action items", self.open_action_items.as_slice()));
         sections.push(render_summary_list("Constraints", self.constraints.as_slice()));
         sections.push(render_summary_list("Recent steps", self.recent_steps.as_slice()));
         sections.push(render_summary_list("Historical notes", self.historical_notes.as_slice()));
@@ -1005,6 +1011,183 @@ fn compaction_prompt_text(raw: &str, max_chars: usize) -> String {
     }
 }
 
+fn collect_open_action_items(
+    protected_records: &[SessionCompactionRecordSnapshot],
+    condensed_records: &[SessionCompactionRecordSnapshot],
+) -> Vec<String> {
+    let mut items = Vec::new();
+    let mut seen = HashSet::new();
+    for record in condensed_records.iter().chain(protected_records.iter()) {
+        for item in extract_open_action_items(record.text.as_str()) {
+            let signature = item.to_ascii_lowercase();
+            if !seen.insert(signature) {
+                continue;
+            }
+            items.push(item);
+            if items.len() >= SESSION_COMPACTION_MAX_ACTION_ITEMS {
+                return items;
+            }
+        }
+    }
+    items
+}
+
+fn extract_open_action_items(raw: &str) -> Vec<String> {
+    let lower_text = raw.to_ascii_lowercase();
+    let record_mentions_action_items = mentions_action_item_context(lower_text.as_str());
+    let mut items = Vec::new();
+    let mut in_action_item_section = false;
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            in_action_item_section = false;
+            continue;
+        }
+
+        let lower = trimmed.to_ascii_lowercase();
+        if opens_action_item_section(lower.as_str()) {
+            in_action_item_section = true;
+            if let Some((_, inline_item)) = trimmed.split_once(':') {
+                if let Some(item) = normalize_open_action_item(inline_item) {
+                    items.push(item);
+                }
+            }
+            continue;
+        }
+
+        if let Some(item) = extract_explicit_action_item(trimmed) {
+            items.push(item);
+            continue;
+        }
+
+        if in_action_item_section {
+            if let Some(item) = normalize_open_action_item(trimmed) {
+                items.push(item);
+                continue;
+            }
+            if looks_like_section_break(trimmed) {
+                in_action_item_section = false;
+            }
+            continue;
+        }
+
+        if record_mentions_action_items {
+            if let Some(item_text) = strip_list_marker(trimmed) {
+                if let Some(item) = normalize_open_action_item(item_text) {
+                    items.push(item);
+                }
+            }
+        }
+    }
+    items
+}
+
+fn mentions_action_item_context(lower: &str) -> bool {
+    contains_any(
+        lower,
+        &["action item", "action-item", "todo", "follow up", "follow-up", "open item", "open task"],
+    )
+}
+
+fn opens_action_item_section(lower: &str) -> bool {
+    mentions_action_item_context(lower)
+        && (lower.ends_with(':') || lower.contains("following") || lower.contains("these"))
+}
+
+fn looks_like_section_break(line: &str) -> bool {
+    line.ends_with(':') && strip_list_marker(line).is_none()
+}
+
+fn extract_explicit_action_item(line: &str) -> Option<String> {
+    let lower = line.to_ascii_lowercase();
+    for prefix in ["next action", "action item", "action-item", "todo", "follow up", "follow-up"] {
+        if !lower.starts_with(prefix) {
+            continue;
+        }
+        let rest = line.get(prefix.len()..)?;
+        let rest = strip_optional_item_number(rest);
+        let rest = rest
+            .trim_start_matches(|ch: char| {
+                ch.is_whitespace() || matches!(ch, ':' | '-' | '\u{2013}' | '\u{2014}')
+            })
+            .trim();
+        return normalize_open_action_item(rest);
+    }
+    None
+}
+
+fn normalize_open_action_item(raw: &str) -> Option<String> {
+    let item = strip_list_marker(raw).unwrap_or(raw);
+    let item = strip_checkbox_marker(item);
+    let normalized = item.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.chars().filter(|ch| ch.is_alphabetic()).count() < 3 {
+        return None;
+    }
+    let redacted = redact_url_segments_in_text(redact_auth_error(normalized.as_str()).as_str());
+    let content_scan = scan_workspace_content_for_prompt_injection(redacted.as_str());
+    if content_scan.state.as_str() != "clean" {
+        return None;
+    }
+    Some(compaction_prompt_text(redacted.as_str(), SESSION_COMPACTION_ACTION_ITEM_MAX_CHARS))
+}
+
+fn strip_checkbox_marker(raw: &str) -> &str {
+    let trimmed = raw.trim_start();
+    let lower = trimmed.to_ascii_lowercase();
+    for marker in ["[ ]", "[x]"] {
+        if lower.starts_with(marker) {
+            return trimmed[marker.len()..].trim_start();
+        }
+    }
+    trimmed
+}
+
+fn strip_optional_item_number(raw: &str) -> &str {
+    let trimmed = raw.trim_start();
+    let digit_end = leading_ascii_digit_end(trimmed);
+    if digit_end == 0 {
+        return trimmed;
+    }
+    let rest = trimmed[digit_end..].trim_start();
+    let Some(marker) = rest.chars().next() else {
+        return trimmed;
+    };
+    if matches!(marker, '.' | ')' | ':' | '-') {
+        return rest[marker.len_utf8()..].trim_start();
+    }
+    trimmed
+}
+
+fn strip_list_marker(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    let first = trimmed.chars().next()?;
+    if matches!(first, '-' | '*' | '+' | '\u{2022}') {
+        return Some(trimmed[first.len_utf8()..].trim_start());
+    }
+
+    let digit_end = leading_ascii_digit_end(trimmed);
+    if digit_end == 0 || digit_end > 3 {
+        return None;
+    }
+    let rest = trimmed[digit_end..].trim_start();
+    let marker = rest.chars().next()?;
+    if matches!(marker, '.' | ')') {
+        return Some(rest[marker.len_utf8()..].trim_start());
+    }
+    None
+}
+
+fn leading_ascii_digit_end(raw: &str) -> usize {
+    let mut end = 0;
+    for (index, ch) in raw.char_indices() {
+        if !ch.is_ascii_digit() {
+            break;
+        }
+        end = index + ch.len_utf8();
+    }
+    end
+}
+
 fn build_active_task_summary(
     session: &OrchestratorSessionRecord,
     protected_records: &[SessionCompactionRecordSnapshot],
@@ -1029,6 +1212,7 @@ fn build_active_task_summary(
                 session.session_id
             )
         });
+    let open_action_items = collect_open_action_items(protected_records, condensed_records);
     let open_decisions = candidates
         .iter()
         .filter(|candidate| candidate_can_enter_trusted_compaction_summary(candidate))
@@ -1073,6 +1257,7 @@ fn build_active_task_summary(
     SessionActiveTaskSummary {
         active_goal,
         open_decisions,
+        open_action_items,
         constraints,
         recent_steps,
         historical_notes,
@@ -2165,6 +2350,52 @@ mod tests {
             plan.active_task_summary.recent_steps[3].contains("Step 9"),
             "recent steps should end with the newest retained step: {:?}",
             plan.active_task_summary.recent_steps
+        );
+    }
+
+    #[test]
+    fn active_task_summary_preserves_structured_open_action_items() {
+        let action_items_payload = serde_json::json!({
+            "reply_text": "I found these action items:\n1. Ada rotates the staging API key by 2026-05-31.\n2. Bruno publishes the regression dashboard owner map.\n3. Clara verifies the Prague weekly digest timezone setting."
+        })
+        .to_string();
+        let mut transcript =
+            vec![transcript_record(0, "message.replied", action_items_payload.as_str())];
+        transcript.extend((1..12).map(|seq| {
+            let payload = format!(r#"{{"text":"Filler context {seq} for compaction."}}"#);
+            transcript_record(seq, "message.received", payload.as_str())
+        }));
+
+        let plan = build_session_compaction_plan(
+            &session_record(),
+            transcript.as_slice(),
+            &[],
+            &[],
+            Some("test_compaction"),
+            Some("test_policy"),
+        );
+        let summary = serde_json::from_str::<serde_json::Value>(plan.summary_json.as_str())
+            .expect("summary JSON should decode");
+
+        assert!(plan.eligible);
+        assert_eq!(
+            plan.active_task_summary.open_action_items,
+            vec![
+                "Ada rotates the staging API key by 2026-05-31.",
+                "Bruno publishes the regression dashboard owner map.",
+                "Clara verifies the Prague weekly digest timezone setting.",
+            ]
+        );
+        assert!(
+            plan.summary_text.contains("Clara verifies the Prague weekly digest timezone setting."),
+            "summary text should preserve the full third action item: {}",
+            plan.summary_text
+        );
+        assert_eq!(
+            summary
+                .pointer("/active_task_summary/open_action_items/2")
+                .and_then(serde_json::Value::as_str),
+            Some("Clara verifies the Prague weekly digest timezone setting.")
         );
     }
 
