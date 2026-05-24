@@ -835,6 +835,10 @@ fn state_file_initialization_seeds_onboarding_defaults() {
     assert!(loaded.active_onboarding().recent_events.is_empty());
     assert!(loaded.active_onboarding().failure_step_counts.is_empty());
     assert_eq!(loaded.active_onboarding().support_bundle_export_attempts, 0);
+    assert!(
+        loaded.active_companion().ambient.start_on_login_enabled,
+        "clean desktop installs should keep the control center persistent across OS restarts"
+    );
 }
 
 #[test]

@@ -128,7 +128,7 @@ pub(crate) struct DesktopCompanionAmbientState {
 impl Default for DesktopCompanionAmbientState {
     fn default() -> Self {
         Self {
-            start_on_login_enabled: false,
+            start_on_login_enabled: true,
             global_hotkey_enabled: true,
             global_hotkey: "CommandOrControl+Shift+Space".to_owned(),
             hotkey_registration_error: None,
