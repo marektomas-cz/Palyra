@@ -261,6 +261,7 @@ impl RootCommandContext {
         defaults: ConnectionDefaults,
     ) -> Result<AgentConnection> {
         let endpoint = self.resolve_grpc_endpoint(overrides.grpc_url)?;
+        let explicit_token_present = normalize_optional_text(overrides.token.as_deref()).is_some();
         Ok(AgentConnection {
             grpc_url: endpoint.url.clone(),
             token: self.resolve_token(
@@ -268,7 +269,11 @@ impl RootCommandContext {
                 &endpoint,
                 ConnectionEndpointKind::GatewayGrpc,
             ),
-            principal: self.resolve_principal(overrides.principal, defaults),
+            principal: self.resolve_principal(
+                overrides.principal,
+                defaults,
+                explicit_token_present,
+            ),
             device_id: self.resolve_device_id(overrides.device_id, defaults),
             channel: self.resolve_channel(overrides.channel, defaults),
             trace_id: self.trace_id.clone(),
@@ -281,6 +286,7 @@ impl RootCommandContext {
         defaults: ConnectionDefaults,
     ) -> Result<HttpConnection> {
         let endpoint = self.resolve_daemon_endpoint(overrides.daemon_url)?;
+        let explicit_token_present = normalize_optional_text(overrides.token.as_deref()).is_some();
         Ok(HttpConnection {
             base_url: endpoint.url.clone(),
             token: self.resolve_token(
@@ -288,7 +294,11 @@ impl RootCommandContext {
                 &endpoint,
                 ConnectionEndpointKind::DaemonHttp,
             ),
-            principal: self.resolve_principal(overrides.principal, defaults),
+            principal: self.resolve_principal(
+                overrides.principal,
+                defaults,
+                explicit_token_present,
+            ),
             device_id: self.resolve_device_id(overrides.device_id, defaults),
             channel: self.resolve_channel(overrides.channel, defaults),
             trace_id: self.trace_id.clone(),
@@ -515,6 +525,7 @@ impl RootCommandContext {
         &self,
         override_principal: Option<String>,
         defaults: ConnectionDefaults,
+        explicit_token_present: bool,
     ) -> String {
         let connection_env = ConnectionEnvironment::read(self.profile.as_ref());
         normalize_owned_text(override_principal)
@@ -525,6 +536,10 @@ impl RootCommandContext {
             })
             .or_else(|| normalize_owned_text(self.config_defaults.principal.clone()))
             .or(connection_env.admin_bound_principal)
+            .or_else(|| {
+                (explicit_token_present && defaults.principal == ConnectionDefaults::USER.principal)
+                    .then(|| ConnectionDefaults::ADMIN.principal.to_owned())
+            })
             .unwrap_or_else(|| defaults.principal.to_owned())
     }
 
@@ -1531,6 +1546,35 @@ bound_principal = "admin:local"
         assert_eq!(grpc.principal, "admin:local");
         assert_eq!(http.token.as_deref(), Some("config-token"));
         assert_eq!(http.principal, "admin:local");
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_admin_token_uses_admin_principal_fallback_for_user_connections() -> Result<()> {
+        let _guard = super::test_env_lock_for_tests().lock().expect("env lock");
+        clear_env();
+        let context =
+            build_root_context(RootOptions::default(), ExplicitConfigPathPolicy::RequireExisting)?;
+
+        let grpc = context.resolve_grpc_connection(
+            ConnectionOverrides {
+                token: Some("explicit-token".to_owned()),
+                ..ConnectionOverrides::default()
+            },
+            ConnectionDefaults::USER,
+        )?;
+        let http = context.resolve_http_connection(
+            ConnectionOverrides {
+                token: Some("explicit-token".to_owned()),
+                ..ConnectionOverrides::default()
+            },
+            ConnectionDefaults::USER,
+        )?;
+
+        assert_eq!(grpc.token.as_deref(), Some("explicit-token"));
+        assert_eq!(grpc.principal, ConnectionDefaults::ADMIN.principal);
+        assert_eq!(http.token.as_deref(), Some("explicit-token"));
+        assert_eq!(http.principal, ConnectionDefaults::ADMIN.principal);
         Ok(())
     }
 

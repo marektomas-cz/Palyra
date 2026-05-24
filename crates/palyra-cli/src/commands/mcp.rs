@@ -590,7 +590,7 @@ fn handle_mcp_request(backend: &mut dyn McpBackend, request: Value) -> Result<Op
             }
             let tool_result = match backend.call_tool(name, &arguments) {
                 Ok(value) => tool_success_payload(value),
-                Err(error) => tool_error_payload(error.to_string()),
+                Err(error) => tool_error_payload(format_mcp_tool_error(&error)),
             };
             Ok(Some(json!({
                 "jsonrpc": JSONRPC_VERSION,
@@ -890,6 +890,10 @@ fn tool_error_payload(message: impl Into<String>) -> Value {
         }],
         "isError": true,
     })
+}
+
+fn format_mcp_tool_error(error: &anyhow::Error) -> String {
+    sanitize_diagnostic_error(format!("{error:#}").as_str())
 }
 
 fn is_mutating_tool(name: &str) -> bool {
@@ -1304,6 +1308,19 @@ mod tests {
         }
     }
 
+    struct ErrorBackend;
+
+    impl McpBackend for ErrorBackend {
+        fn read_only(&self) -> bool {
+            false
+        }
+
+        fn call_tool(&mut self, _name: &str, _arguments: &Value) -> Result<Value> {
+            Err(anyhow!("status: permission denied: authorization token is invalid")
+                .context("failed to call ListSessions"))
+        }
+    }
+
     #[test]
     fn tools_list_hides_mutations_in_read_only_mode() {
         let tools = registered_tools(true);
@@ -1369,6 +1386,32 @@ mod tests {
         .expect("response should be present");
         assert_eq!(backend.last_call, None);
         assert_eq!(response["result"]["isError"], Value::Bool(true));
+    }
+
+    #[test]
+    fn tools_call_error_includes_sanitized_error_chain() {
+        let mut backend = ErrorBackend;
+        let response = handle_mcp_request(
+            &mut backend,
+            json!({
+                "jsonrpc": JSONRPC_VERSION,
+                "id": 8,
+                "method": "tools/call",
+                "params": {
+                    "name": TOOL_SESSIONS_LIST,
+                    "arguments": { "limit": 1 }
+                }
+            }),
+        )
+        .expect("request should succeed")
+        .expect("response should be present");
+        let message = response["result"]["content"][0]["text"]
+            .as_str()
+            .expect("tool error text should be a string");
+
+        assert_eq!(response["result"]["isError"], Value::Bool(true));
+        assert!(message.contains("failed to call ListSessions"), "{message}");
+        assert!(message.contains("authorization token is invalid"), "{message}");
     }
 
     #[test]
