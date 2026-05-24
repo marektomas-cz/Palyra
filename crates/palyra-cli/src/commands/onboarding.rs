@@ -1107,11 +1107,8 @@ where
 {
     let runtime = client::grpc::build_runtime()?;
     match runtime.block_on(async {
-        tokio::time::timeout(
-            Duration::from_millis(AUTHENTICATED_RUNTIME_PROBE_TIMEOUT_MS),
-            probe,
-        )
-        .await
+        tokio::time::timeout(Duration::from_millis(AUTHENTICATED_RUNTIME_PROBE_TIMEOUT_MS), probe)
+            .await
     }) {
         Ok(result) => result,
         Err(_) => anyhow::bail!(
@@ -1359,8 +1356,8 @@ mod tests {
         browser_runtime_status, build_onboarding_counts, build_onboarding_steps,
         collect_onboarding_signals, default_agent_create_command, derive_posture_status,
         diagnostic_endpoint_url, load_onboarding_document, onboarding_prerequisites_ready,
-        quote_cli_arg, recommended_onboarding_step_id, record_cli_first_success,
-        OnboardingSignals, OnboardingVariant,
+        quote_cli_arg, recommended_onboarding_step_id, record_cli_first_success, OnboardingSignals,
+        OnboardingVariant,
     };
     use crate::{app, args::RootOptions};
 
