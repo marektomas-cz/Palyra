@@ -864,6 +864,51 @@ fn cli_first_success_marker_path(state_root: &Path) -> PathBuf {
 }
 
 fn default_agent_status() -> Result<(bool, String)> {
+    match default_agent_status_from_gateway_runtime() {
+        Ok(Some(status)) => return Ok(status),
+        Ok(None) => {}
+        Err(error) => {
+            let local_status = default_agent_status_from_local_registry()?;
+            if local_status.0 {
+                return Ok(local_status);
+            }
+            return Ok((
+                false,
+                format!(
+                    "gateway agent registry probe failed: {}; {}",
+                    sanitize_diagnostic_error(error.to_string().as_str()),
+                    local_status.1
+                ),
+            ));
+        }
+    }
+    default_agent_status_from_local_registry()
+}
+
+fn default_agent_status_from_gateway_runtime() -> Result<Option<(bool, String)>> {
+    let Some(context) = app::current_root_context() else {
+        return Ok(None);
+    };
+    let connection = match context
+        .resolve_grpc_connection(app::ConnectionOverrides::default(), app::ConnectionDefaults::USER)
+    {
+        Ok(connection) => connection,
+        Err(_) => return Ok(None),
+    };
+    run_blocking_probe(gateway_default_agent_status_probe(connection)).map(Some)
+}
+
+async fn gateway_default_agent_status_probe(connection: AgentConnection) -> Result<(bool, String)> {
+    let mut client = client::runtime::GatewayRuntimeClient::connect(connection).await?;
+    let response = client.list_agents(None, Some(500)).await?;
+    Ok(default_agent_status_from_agent_ids(
+        normalize_optional_text(response.default_agent_id.as_str()),
+        response.agents.iter().map(|agent| agent.agent_id.as_str()),
+        "gateway runtime",
+    ))
+}
+
+fn default_agent_status_from_local_registry() -> Result<(bool, String)> {
     let Some(context) = app::current_root_context() else {
         return Ok((false, "CLI state root is unavailable; run setup first".to_owned()));
     };
@@ -881,22 +926,29 @@ fn default_agent_status() -> Result<(bool, String)> {
         .with_context(|| format!("failed to read agent registry {}", registry_path.display()))?;
     let document: AgentRegistryStatusDocument = toml::from_str(raw.as_str())
         .with_context(|| format!("failed to parse agent registry {}", registry_path.display()))?;
-    let Some(default_agent_id) = document.default_agent_id.as_deref().map(str::trim) else {
-        return Ok((false, "agent registry does not define a default agent".to_owned()));
+    Ok(default_agent_status_from_agent_ids(
+        document.default_agent_id.as_deref().and_then(normalize_optional_text),
+        document.agents.iter().map(|agent| agent.agent_id.as_str()),
+        "local agent registry",
+    ))
+}
+
+fn default_agent_status_from_agent_ids<'a>(
+    default_agent_id: Option<&str>,
+    agent_ids: impl IntoIterator<Item = &'a str>,
+    source: &str,
+) -> (bool, String) {
+    let Some(default_agent_id) = default_agent_id else {
+        return (false, format!("{source} does not define a default agent"));
     };
-    if default_agent_id.is_empty() {
-        return Ok((false, "agent registry default agent is empty".to_owned()));
-    }
-    let found = document.agents.iter().any(|agent| agent.agent_id.trim() == default_agent_id);
+    let found = agent_ids.into_iter().any(|agent_id| agent_id.trim() == default_agent_id);
     if found {
-        Ok((true, format!("default agent `{default_agent_id}` is configured")))
+        (true, format!("default agent `{default_agent_id}` is configured in {source}"))
     } else {
-        Ok((
+        (
             false,
-            format!(
-                "agent registry default `{default_agent_id}` does not match any configured agent"
-            ),
-        ))
+            format!("{source} default `{default_agent_id}` does not match any configured agent"),
+        )
     }
 }
 
@@ -1104,6 +1156,13 @@ async fn gateway_runtime_auth_probe(connection: AgentConnection) -> Result<()> {
 fn run_blocking_auth_probe<F>(probe: F) -> Result<()>
 where
     F: std::future::Future<Output = Result<()>>,
+{
+    run_blocking_probe(probe)
+}
+
+fn run_blocking_probe<F, T>(probe: F) -> Result<T>
+where
+    F: std::future::Future<Output = Result<T>>,
 {
     let runtime = client::grpc::build_runtime()?;
     match runtime.block_on(async {
@@ -1354,12 +1413,26 @@ mod tests {
 
     use super::{
         browser_runtime_status, build_onboarding_counts, build_onboarding_steps,
-        collect_onboarding_signals, default_agent_create_command, derive_posture_status,
-        diagnostic_endpoint_url, load_onboarding_document, onboarding_prerequisites_ready,
-        quote_cli_arg, recommended_onboarding_step_id, record_cli_first_success, OnboardingSignals,
+        collect_onboarding_signals, default_agent_create_command,
+        default_agent_status_from_agent_ids, derive_posture_status, diagnostic_endpoint_url,
+        load_onboarding_document, onboarding_prerequisites_ready, quote_cli_arg,
+        recommended_onboarding_step_id, record_cli_first_success, OnboardingSignals,
         OnboardingVariant,
     };
     use crate::{app, args::RootOptions};
+
+    #[test]
+    fn default_agent_status_accepts_runtime_registry_default() {
+        let (configured, message) = default_agent_status_from_agent_ids(
+            Some("local-default"),
+            ["local-default", "other-agent"],
+            "gateway runtime",
+        );
+
+        assert!(configured);
+        assert!(message.contains("gateway runtime"));
+        assert!(message.contains("local-default"));
+    }
 
     #[test]
     fn onboarding_status_uses_active_root_context_config_path() -> Result<()> {
