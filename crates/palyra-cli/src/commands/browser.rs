@@ -27,7 +27,10 @@ use crate::*;
 
 const DEFAULT_BROWSER_GRPC_URL: &str = "http://127.0.0.1:7543";
 const DEFAULT_BROWSER_HEALTH_BASE_URL: &str = DEFAULT_BROWSER_URL;
-const DEFAULT_BROWSER_HEALTH_PORT: u16 = 7143;
+const DEFAULT_BROWSER_GRPC_PORT: u16 =
+    palyra_common::local_runtime_ports::DEFAULT_BROWSER_GRPC_PORT;
+const DEFAULT_BROWSER_HEALTH_PORT: u16 =
+    palyra_common::local_runtime_ports::DEFAULT_BROWSER_HEALTH_PORT;
 const BROWSER_SERVICE_METADATA_SCHEMA_VERSION: u32 = 1;
 const BROWSER_SERVICE_START_POLL_MS: u64 = 250;
 const BROWSER_SERVICE_STOP_TIMEOUT_MS: u64 = 5_000;
@@ -158,6 +161,7 @@ struct BrowserStatusPayload {
     service: &'static str,
     grpc_url: String,
     health_base_url: String,
+    port_diagnostics: Vec<BrowserPortDiagnostic>,
     health_ok: bool,
     health_response: Option<Value>,
     grpc_ok: bool,
@@ -168,6 +172,16 @@ struct BrowserStatusPayload {
     policy: BrowserPolicySnapshot,
     control_plane: BrowserControlPlaneSnapshot,
     warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BrowserPortDiagnostic {
+    label: &'static str,
+    url: String,
+    host: String,
+    port: u16,
+    bind_available: bool,
+    bind_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -659,6 +673,7 @@ async fn run_browser_status(
         fetch_browser_health(resolved.connection.health_base_url.as_str()).await.ok();
     let grpc_error =
         probe_browser_grpc(&resolved.connection).await.err().map(|error| error.to_string());
+    let port_diagnostics = browser_connection_port_diagnostics(&resolved.connection);
     let control_plane = browser_status_control_plane_policy_snapshot();
     let browserd_reachable = health_response.is_some() || grpc_error.is_none();
     let lifecycle_running =
@@ -676,10 +691,16 @@ async fn run_browser_status(
         cli_lifecycle_running,
         resolved.config_path.as_deref(),
     ));
+    warnings.extend(browser_port_diagnostic_warnings(
+        port_diagnostics.as_slice(),
+        health_response.is_some(),
+        grpc_error.is_none(),
+    ));
     let payload = BrowserStatusPayload {
         service: "palyra-browserd",
         grpc_url: resolved.connection.grpc_url,
         health_base_url: resolved.connection.health_base_url,
+        port_diagnostics,
         health_ok: health_response.is_some(),
         health_response,
         grpc_ok: grpc_error.is_none(),
@@ -733,11 +754,41 @@ fn configure_browser_setup(
         "tool_call.browser_service.enabled",
         toml::Value::Boolean(true),
     )?;
-    if document_string(Some(&document), "tool_call.browser_service.endpoint").is_none() {
+    let existing_endpoint = document_string(Some(&document), "tool_call.browser_service.endpoint");
+    let existing_health_base_url =
+        document_string(Some(&document), "tool_call.browser_service.health_base_url");
+    if existing_endpoint.is_none() {
+        let ports = palyra_common::local_runtime_ports::select_available_browser_runtime_ports(
+            palyra_common::local_runtime_ports::LOCAL_RUNTIME_LOOPBACK_HOST,
+        )
+        .map_err(anyhow::Error::msg)?;
         set_value_at_path(
             &mut document,
             "tool_call.browser_service.endpoint",
-            toml::Value::String(DEFAULT_BROWSER_GRPC_URL.to_owned()),
+            toml::Value::String(format!(
+                "http://{}:{}",
+                palyra_common::local_runtime_ports::LOCAL_RUNTIME_LOOPBACK_HOST,
+                ports.grpc
+            )),
+        )?;
+        if existing_health_base_url.is_none() {
+            set_value_at_path(
+                &mut document,
+                "tool_call.browser_service.health_base_url",
+                toml::Value::String(format!(
+                    "http://{}:{}",
+                    palyra_common::local_runtime_ports::LOCAL_RUNTIME_LOOPBACK_HOST,
+                    ports.health
+                )),
+            )?;
+        }
+    } else if existing_health_base_url.is_none() {
+        set_value_at_path(
+            &mut document,
+            "tool_call.browser_service.health_base_url",
+            toml::Value::String(derive_browser_health_base_url(
+                existing_endpoint.as_deref().unwrap_or(DEFAULT_BROWSER_GRPC_URL),
+            )),
         )?;
     }
 
@@ -878,7 +929,9 @@ async fn run_browser_start(
     let setup_warning = setup_payload
         .as_ref()
         .map(|payload| browser_setup_gateway_reload_warning(payload.config_path.as_str()));
-    let resolved = resolve_browser_config(endpoint, health_url, token)?;
+    let endpoint_overridden = endpoint.as_deref().and_then(normalize_optional_text).is_some();
+    let health_url_overridden = health_url.as_deref().and_then(normalize_optional_text).is_some();
+    let mut resolved = resolve_browser_config(endpoint, health_url, token)?;
     ensure_browser_start_preflight(&resolved)?;
     let browserd_state_encryption_key = resolve_browserd_state_encryption_key_for_start(&resolved)?;
     let state_encryption_key_configured = browserd_state_encryption_key.is_some()
@@ -925,6 +978,31 @@ async fn run_browser_start(
     }
 
     let binary = resolve_browser_bin_path(bin_path)?;
+    let port_diagnostics = browser_connection_port_diagnostics(&resolved.connection);
+    let unavailable =
+        port_diagnostics.iter().filter(|diagnostic| !diagnostic.bind_available).collect::<Vec<_>>();
+    if !unavailable.is_empty() {
+        if endpoint_overridden || health_url_overridden {
+            anyhow::bail!(
+                "browser service cannot bind the requested endpoint(s): {}. Choose free `--endpoint`/`--health-url` values or remove the overrides and rerun `palyra browser start --setup` so Palyra can select free loopback ports.",
+                format_browser_port_diagnostic_summary(unavailable.as_slice())
+            );
+        }
+        let fallback = select_browser_start_fallback_connection(&resolved).with_context(|| {
+            format!(
+                "configured browser port(s) are unavailable: {}",
+                format_browser_port_diagnostic_summary(unavailable.as_slice())
+            )
+        })?;
+        let config_updated =
+            persist_browser_service_connection_urls(resolved.config_path.as_deref(), &fallback)?;
+        lifecycle_warnings.push(browser_port_fallback_warning(
+            &resolved.connection,
+            &fallback,
+            config_updated,
+        ));
+        resolved.connection = fallback;
+    }
     let (health_host, health_port) =
         parse_http_bind_parts(resolved.connection.health_base_url.as_str(), "browser health URL")?;
     let (grpc_host, grpc_port) =
@@ -1107,7 +1185,8 @@ async fn wait_for_browser_service_stop(
         let process_running = process_is_running(metadata.pid);
         let health_reachable =
             fetch_browser_health(metadata.health_base_url.as_str()).await.is_ok();
-        if browser_service_stop_complete(process_running, health_reachable) {
+        let ports_released = browser_service_metadata_ports_released(metadata);
+        if browser_service_stop_complete(process_running, health_reachable, ports_released) {
             return Ok(());
         }
 
@@ -1116,7 +1195,9 @@ async fn wait_for_browser_service_stop(
                 metadata.pid,
                 process_running,
                 health_reachable,
+                ports_released,
                 metadata.health_base_url.as_str(),
+                metadata.grpc_url.as_str(),
             );
             anyhow::bail!(
                 "browser service did not stop within {} ms; {}; lifecycle metadata was preserved",
@@ -1129,15 +1210,21 @@ async fn wait_for_browser_service_stop(
     }
 }
 
-fn browser_service_stop_complete(process_running: bool, health_reachable: bool) -> bool {
-    !process_running && !health_reachable
+fn browser_service_stop_complete(
+    process_running: bool,
+    health_reachable: bool,
+    ports_released: bool,
+) -> bool {
+    !process_running && !health_reachable && ports_released
 }
 
 fn browser_service_stop_pending_reasons(
     pid: u32,
     process_running: bool,
     health_reachable: bool,
+    ports_released: bool,
     health_base_url: &str,
+    grpc_url: &str,
 ) -> Vec<String> {
     let mut reasons = Vec::new();
     if process_running {
@@ -1149,10 +1236,28 @@ fn browser_service_stop_pending_reasons(
             health_base_url.trim_end_matches('/')
         ));
     }
+    if !ports_released {
+        reasons.push(format!(
+            "configured browser ports are still occupied for health endpoint {} and gRPC endpoint {}; another process or stale socket is holding the listener",
+            health_base_url.trim_end_matches('/'),
+            grpc_url.trim_end_matches('/')
+        ));
+    }
     if reasons.is_empty() {
         reasons.push("stop state could not be confirmed".to_owned());
     }
     reasons
+}
+
+fn browser_service_metadata_ports_released(metadata: &BrowserServiceMetadata) -> bool {
+    let connection = BrowserServiceConnection {
+        grpc_url: metadata.grpc_url.clone(),
+        health_base_url: metadata.health_base_url.clone(),
+        auth_token: None,
+    };
+    browser_connection_port_diagnostics(&connection)
+        .iter()
+        .all(|diagnostic| diagnostic.bind_available)
 }
 
 async fn run_browser_open(args: BrowserOpenArgs) -> Result<()> {
@@ -3056,6 +3161,8 @@ fn resolve_browser_config(
     let config_path = current_config_path();
     let document = load_optional_config_document(config_path.as_deref())?;
     let file_endpoint = document_string(document.as_ref(), "tool_call.browser_service.endpoint");
+    let file_health_base_url =
+        document_string(document.as_ref(), "tool_call.browser_service.health_base_url");
     let file_enabled = document_bool(document.as_ref(), "tool_call.browser_service.enabled");
     let file_auth_token =
         document_string(document.as_ref(), "tool_call.browser_service.auth_token");
@@ -3095,7 +3202,9 @@ fn resolve_browser_config(
         "browser gRPC URL",
     )?;
     let health_base_url = normalize_browser_base_url(
-        health_url.unwrap_or_else(|| derive_browser_health_base_url(grpc_url.as_str())),
+        health_url
+            .or(file_health_base_url)
+            .unwrap_or_else(|| derive_browser_health_base_url(grpc_url.as_str())),
         "browser health URL",
     )?;
     let cli_token = token.as_deref().and_then(normalize_optional_text).map(ToOwned::to_owned);
@@ -3342,6 +3451,31 @@ fn browser_status_warnings(
         ));
     }
     warnings
+}
+
+fn browser_port_diagnostic_warnings(
+    diagnostics: &[BrowserPortDiagnostic],
+    health_ok: bool,
+    grpc_ok: bool,
+) -> Vec<String> {
+    diagnostics
+        .iter()
+        .filter(|diagnostic| {
+            !diagnostic.bind_available
+                && ((diagnostic.label == "health" && !health_ok)
+                    || (diagnostic.label == "grpc" && !grpc_ok))
+        })
+        .map(|diagnostic| {
+            format!(
+                "browser {} port {} on {} is occupied while {} is not reachable; `palyra browser start --setup` can select and persist free loopback ports. Bind error: {}",
+                diagnostic.label,
+                diagnostic.port,
+                diagnostic.host,
+                diagnostic.url,
+                diagnostic.bind_error.as_deref().unwrap_or("unknown bind failure")
+            )
+        })
+        .collect()
 }
 
 fn effective_browser_lifecycle_running(
@@ -3625,7 +3759,13 @@ fn derive_browser_health_base_url(grpc_url: &str) -> String {
     Url::parse(grpc_url)
         .ok()
         .and_then(|mut url| {
-            url.set_port(Some(DEFAULT_BROWSER_HEALTH_PORT)).ok()?;
+            let grpc_port = url.port_or_known_default().unwrap_or(DEFAULT_BROWSER_GRPC_PORT);
+            let health_port = if grpc_port == DEFAULT_BROWSER_GRPC_PORT {
+                DEFAULT_BROWSER_HEALTH_PORT
+            } else {
+                grpc_port.saturating_sub(1).max(1)
+            };
+            url.set_port(Some(health_port)).ok()?;
             url.set_path("");
             Some(url.to_string().trim_end_matches('/').to_owned())
         })
@@ -3637,6 +3777,126 @@ fn parse_http_bind_parts(url: &str, label: &str) -> Result<(String, u16)> {
     let host = parsed.host_str().context(format!("{label} missing host"))?.to_owned();
     let port = parsed.port_or_known_default().context(format!("{label} missing port"))?;
     Ok((host, port))
+}
+
+fn browser_connection_port_diagnostics(
+    connection: &BrowserServiceConnection,
+) -> Vec<BrowserPortDiagnostic> {
+    [("health", connection.health_base_url.as_str()), ("grpc", connection.grpc_url.as_str())]
+        .into_iter()
+        .filter_map(|(label, url)| browser_port_diagnostic(label, url))
+        .collect()
+}
+
+fn browser_port_diagnostic(label: &'static str, url: &str) -> Option<BrowserPortDiagnostic> {
+    let (host, port) = parse_http_bind_parts(url, "browser diagnostic URL").ok()?;
+    let availability = palyra_common::local_runtime_ports::port_availability(host.as_str(), port);
+    Some(BrowserPortDiagnostic {
+        label,
+        url: url.to_owned(),
+        host,
+        port,
+        bind_available: availability.available,
+        bind_error: availability.error,
+    })
+}
+
+fn select_browser_start_fallback_connection(
+    resolved: &BrowserResolvedConfig,
+) -> Result<BrowserServiceConnection> {
+    let (health_host, _) =
+        parse_http_bind_parts(resolved.connection.health_base_url.as_str(), "browser health URL")?;
+    let (grpc_host, _) =
+        parse_http_bind_parts(resolved.connection.grpc_url.as_str(), "browser gRPC URL")?;
+    if !palyra_common::local_runtime_ports::is_loopback_host(health_host.as_str())
+        || !palyra_common::local_runtime_ports::is_loopback_host(grpc_host.as_str())
+    {
+        anyhow::bail!(
+            "browser port recovery only auto-selects loopback ports, got health host `{health_host}` and gRPC host `{grpc_host}`"
+        );
+    }
+    let ports = palyra_common::local_runtime_ports::select_available_browser_runtime_ports(
+        palyra_common::local_runtime_ports::LOCAL_RUNTIME_LOOPBACK_HOST,
+    )
+    .map_err(anyhow::Error::msg)?;
+    Ok(BrowserServiceConnection {
+        grpc_url: format!(
+            "http://{}:{}",
+            palyra_common::local_runtime_ports::LOCAL_RUNTIME_LOOPBACK_HOST,
+            ports.grpc
+        ),
+        health_base_url: format!(
+            "http://{}:{}",
+            palyra_common::local_runtime_ports::LOCAL_RUNTIME_LOOPBACK_HOST,
+            ports.health
+        ),
+        auth_token: resolved.connection.auth_token.clone(),
+    })
+}
+
+fn persist_browser_service_connection_urls(
+    config_path: Option<&str>,
+    connection: &BrowserServiceConnection,
+) -> Result<bool> {
+    let Some(config_path) = config_path.and_then(normalize_optional_text) else {
+        return Ok(false);
+    };
+    let path = Path::new(config_path);
+    if !path.exists() {
+        return Ok(false);
+    }
+    let (mut document, _) = load_document_for_mutation(path)
+        .with_context(|| format!("failed to parse {}", path.display()))?;
+    set_value_at_path(
+        &mut document,
+        "tool_call.browser_service.endpoint",
+        toml::Value::String(connection.grpc_url.clone()),
+    )?;
+    set_value_at_path(
+        &mut document,
+        "tool_call.browser_service.health_base_url",
+        toml::Value::String(connection.health_base_url.clone()),
+    )?;
+    validate_daemon_compatible_document(&document).with_context(|| {
+        format!("mutated config {} does not match daemon schema", path.display())
+    })?;
+    write_document_with_backups(path, &document, 1)
+        .with_context(|| format!("failed to persist config {}", path.display()))?;
+    Ok(true)
+}
+
+fn browser_port_fallback_warning(
+    previous: &BrowserServiceConnection,
+    fallback: &BrowserServiceConnection,
+    config_updated: bool,
+) -> String {
+    let persistence = if config_updated {
+        "updated the active config so gateway hot reload can use the same endpoint"
+    } else {
+        "could not update an active config path; pass --setup with PALYRA_CONFIG set so gateway-mediated browser tools use the same endpoint"
+    };
+    format!(
+        "configured browser ports were unavailable (health={}, grpc={}); selected free loopback ports (health={}, grpc={}) and {persistence}",
+        previous.health_base_url,
+        previous.grpc_url,
+        fallback.health_base_url,
+        fallback.grpc_url
+    )
+}
+
+fn format_browser_port_diagnostic_summary(diagnostics: &[&BrowserPortDiagnostic]) -> String {
+    diagnostics
+        .iter()
+        .map(|diagnostic| {
+            format!(
+                "{} {} is unavailable ({})",
+                diagnostic.label,
+                diagnostic.url,
+                diagnostic.bind_error.as_deref().unwrap_or("port is not bindable")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 fn resolve_browser_bin_path(bin_path: Option<String>) -> Result<PathBuf> {
@@ -5293,14 +5553,22 @@ mod tests {
 
     #[test]
     fn browser_stop_wait_requires_process_exit_and_unreachable_health() {
-        assert!(browser_service_stop_complete(false, false));
-        assert!(!browser_service_stop_complete(true, false));
-        assert!(!browser_service_stop_complete(false, true));
+        assert!(browser_service_stop_complete(false, false, true));
+        assert!(!browser_service_stop_complete(true, false, true));
+        assert!(!browser_service_stop_complete(false, true, true));
+        assert!(!browser_service_stop_complete(false, false, false));
 
-        let reasons =
-            browser_service_stop_pending_reasons(42, true, true, "http://127.0.0.1:7143/");
+        let reasons = browser_service_stop_pending_reasons(
+            42,
+            true,
+            true,
+            false,
+            "http://127.0.0.1:7143/",
+            "http://127.0.0.1:7543/",
+        );
         assert!(reasons.iter().any(|reason| reason.contains("pid 42")));
         assert!(reasons.iter().any(|reason| { reason.contains("http://127.0.0.1:7143/healthz") }));
+        assert!(reasons.iter().any(|reason| { reason.contains("configured browser ports") }));
     }
 
     #[test]

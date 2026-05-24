@@ -794,6 +794,8 @@ mod tests {
                 configured_enabled: false,
                 auth_token_configured: false,
                 endpoint: "http://127.0.0.1:7543".to_owned(),
+                health_base_url: "http://127.0.0.1:7143".to_owned(),
+                port_diagnostics: Vec::new(),
                 connect_timeout_ms: Some(1500),
                 request_timeout_ms: Some(15000),
                 max_screenshot_bytes: Some(262_144),

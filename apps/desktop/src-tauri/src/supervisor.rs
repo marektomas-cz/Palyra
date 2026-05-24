@@ -12,6 +12,7 @@ use std::{
 };
 
 use anyhow::{bail, Context, Result};
+use palyra_common::config_system::{get_value_at_path, set_value_at_path};
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -177,13 +178,23 @@ impl ManagedService {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RuntimeConfig {
     pub(crate) gateway_admin_port: u16,
     pub(crate) gateway_grpc_port: u16,
     pub(crate) gateway_quic_port: u16,
     pub(crate) browser_health_port: u16,
     pub(crate) browser_grpc_port: u16,
+}
+
+impl RuntimeConfig {
+    fn gateway_bound_ports(&self) -> Vec<u16> {
+        vec![self.gateway_admin_port, self.gateway_grpc_port, self.gateway_quic_port]
+    }
+
+    fn browser_bound_ports(&self) -> Vec<u16> {
+        vec![self.browser_health_port, self.browser_grpc_port]
+    }
 }
 
 impl Default for RuntimeConfig {
@@ -316,6 +327,15 @@ struct ConfigRuntimeTokenOverrides {
     config_file_present: bool,
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ConfigRuntimePortOverrides {
+    gateway_admin_port: Option<u16>,
+    gateway_grpc_port: Option<u16>,
+    gateway_quic_port: Option<u16>,
+    browser_health_port: Option<u16>,
+    browser_grpc_port: Option<u16>,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct DesktopRuntimeAuthConfig {
     admin_token: String,
@@ -340,6 +360,20 @@ fn runtime_auth_with_config_overrides(
     })
 }
 
+fn runtime_config_with_config_overrides(
+    fallback: RuntimeConfig,
+    config_path: Option<&Path>,
+) -> Result<RuntimeConfig> {
+    let overrides = config_runtime_port_overrides(config_path)?;
+    Ok(RuntimeConfig {
+        gateway_admin_port: overrides.gateway_admin_port.unwrap_or(fallback.gateway_admin_port),
+        gateway_grpc_port: overrides.gateway_grpc_port.unwrap_or(fallback.gateway_grpc_port),
+        gateway_quic_port: overrides.gateway_quic_port.unwrap_or(fallback.gateway_quic_port),
+        browser_health_port: overrides.browser_health_port.unwrap_or(fallback.browser_health_port),
+        browser_grpc_port: overrides.browser_grpc_port.unwrap_or(fallback.browser_grpc_port),
+    })
+}
+
 #[cfg(test)]
 fn runtime_secrets_with_config_overrides(
     fallback: &DesktopRuntimeSecrets,
@@ -349,6 +383,35 @@ fn runtime_secrets_with_config_overrides(
     Ok(DesktopRuntimeSecrets {
         admin_token: auth.admin_token,
         browser_auth_token: auth.browser_auth_token,
+    })
+}
+
+fn config_runtime_port_overrides(
+    config_path: Option<&Path>,
+) -> Result<ConfigRuntimePortOverrides> {
+    let Some(config_path) = config_path else {
+        return Ok(ConfigRuntimePortOverrides::default());
+    };
+    if !config_path.is_file() {
+        return Ok(ConfigRuntimePortOverrides::default());
+    }
+
+    let raw = fs::read_to_string(config_path)
+        .with_context(|| format!("failed to read daemon config {}", config_path.display()))?;
+    let document: toml::Value = toml::from_str(raw.as_str())
+        .with_context(|| format!("failed to parse daemon config {}", config_path.display()))?;
+    let browser_grpc_port =
+        toml_url_port_at_path(&document, "tool_call.browser_service.endpoint");
+    let browser_health_port =
+        toml_url_port_at_path(&document, "tool_call.browser_service.health_base_url").or_else(
+            || browser_grpc_port.map(derive_browser_health_port_from_grpc_port),
+        );
+    Ok(ConfigRuntimePortOverrides {
+        gateway_admin_port: toml_u16_at_path(&document, "daemon.port"),
+        gateway_grpc_port: toml_u16_at_path(&document, "gateway.grpc_port"),
+        gateway_quic_port: toml_u16_at_path(&document, "gateway.quic_port"),
+        browser_health_port,
+        browser_grpc_port,
     })
 }
 
@@ -380,6 +443,43 @@ fn toml_string_at_path(document: &toml::Value, path: &str) -> Option<String> {
         current = current.get(segment)?;
     }
     normalize_optional_text(current.as_str().unwrap_or_default()).map(str::to_owned)
+}
+
+fn toml_u16_at_path(document: &toml::Value, path: &str) -> Option<u16> {
+    get_value_at_path(document, path)
+        .ok()
+        .flatten()
+        .and_then(toml::Value::as_integer)
+        .and_then(|value| u16::try_from(value).ok())
+}
+
+fn toml_url_port_at_path(document: &toml::Value, path: &str) -> Option<u16> {
+    let url = toml_string_at_path(document, path)?;
+    Url::parse(url.as_str()).ok().and_then(|parsed| parsed.port_or_known_default())
+}
+
+fn derive_browser_health_port_from_grpc_port(grpc_port: u16) -> u16 {
+    if grpc_port == palyra_common::local_runtime_ports::DEFAULT_BROWSER_GRPC_PORT {
+        palyra_common::local_runtime_ports::DEFAULT_BROWSER_HEALTH_PORT
+    } else {
+        grpc_port.saturating_sub(1).max(1)
+    }
+}
+
+fn format_port_availability_summary(
+    unavailable: &[palyra_common::local_runtime_ports::PortAvailability],
+) -> String {
+    unavailable
+        .iter()
+        .map(|port| {
+            format!(
+                "{}: {}",
+                port.port,
+                port.error.as_deref().unwrap_or("port is not bindable")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 fn config_file_signature(path: &Path) -> Result<ConfigFileSignature> {
@@ -429,14 +529,12 @@ impl ControlCenter {
         })?;
         apply_profile_process_env(&active_profile);
 
-        let runtime = RuntimeConfig::default();
-        let gateway = ManagedService::new(vec![
-            runtime.gateway_admin_port,
-            runtime.gateway_grpc_port,
-            runtime.gateway_quic_port,
-        ]);
-        let browserd =
-            ManagedService::new(vec![runtime.browser_health_port, runtime.browser_grpc_port]);
+        let runtime = runtime_config_with_config_overrides(
+            RuntimeConfig::default(),
+            active_profile.config_path.as_deref(),
+        )?;
+        let gateway = ManagedService::new(runtime.gateway_bound_ports());
+        let browserd = ManagedService::new(runtime.browser_bound_ports());
         let node_host = ManagedService::new(Vec::new());
         let config_reload_watch = DesktopConfigReloadWatchState::from_profile(&active_profile);
 
@@ -914,13 +1012,13 @@ impl ControlCenter {
         match self.refresh_runtime_tokens_from_config_path(Some(path.as_path())) {
             Ok(true) => self.append_supervisor_log(
                 ServiceKind::Gateway,
-                "watched config auth tokens refreshed for supervised runtime",
+                "watched config runtime settings refreshed for supervised runtime",
             ),
             Ok(false) => {}
             Err(error) => self.append_supervisor_log(
                 ServiceKind::Gateway,
                 format!(
-                    "watched config auth token refresh failed: {}",
+                    "watched config runtime refresh failed: {}",
                     sanitize_log_line(error.to_string().as_str())
                 )
                 .as_str(),
@@ -1039,7 +1137,138 @@ impl ControlCenter {
         }
     }
 
+    fn ensure_service_ports_available_before_spawn(&mut self, kind: ServiceKind) -> Result<()> {
+        match kind {
+            ServiceKind::Gateway => {
+                let unavailable = palyra_common::local_runtime_ports::unavailable_ports(
+                    LOOPBACK_HOST,
+                    self.runtime.gateway_bound_ports().as_slice(),
+                );
+                if unavailable.is_empty() {
+                    return Ok(());
+                }
+                let ports =
+                    palyra_common::local_runtime_ports::select_available_gateway_runtime_ports(
+                        LOOPBACK_HOST,
+                    )
+                    .map_err(anyhow::Error::msg)?;
+                self.runtime.gateway_admin_port = ports.admin;
+                self.runtime.gateway_grpc_port = ports.grpc;
+                self.runtime.gateway_quic_port = ports.quic;
+                self.persist_runtime_port_selection(ServiceKind::Gateway)?;
+                self.sync_service_bound_ports();
+                self.append_supervisor_log(
+                    ServiceKind::Gateway,
+                    format!(
+                        "gateway port collision detected ({}); selected free loopback ports admin={} grpc={} quic={}",
+                        format_port_availability_summary(unavailable.as_slice()),
+                        ports.admin,
+                        ports.grpc,
+                        ports.quic
+                    )
+                    .as_str(),
+                );
+                Ok(())
+            }
+            ServiceKind::Browserd => {
+                let unavailable = palyra_common::local_runtime_ports::unavailable_ports(
+                    LOOPBACK_HOST,
+                    self.runtime.browser_bound_ports().as_slice(),
+                );
+                if unavailable.is_empty() {
+                    return Ok(());
+                }
+                let ports =
+                    palyra_common::local_runtime_ports::select_available_browser_runtime_ports(
+                        LOOPBACK_HOST,
+                    )
+                    .map_err(anyhow::Error::msg)?;
+                self.runtime.browser_health_port = ports.health;
+                self.runtime.browser_grpc_port = ports.grpc;
+                self.persist_runtime_port_selection(ServiceKind::Browserd)?;
+                self.sync_service_bound_ports();
+                self.append_supervisor_log(
+                    ServiceKind::Browserd,
+                    format!(
+                        "browserd port collision detected ({}); selected free loopback ports health={} grpc={}",
+                        format_port_availability_summary(unavailable.as_slice()),
+                        ports.health,
+                        ports.grpc
+                    )
+                    .as_str(),
+                );
+                Ok(())
+            }
+            ServiceKind::NodeHost => Ok(()),
+        }
+    }
+
+    fn persist_runtime_port_selection(&self, kind: ServiceKind) -> Result<()> {
+        let Some(config_path) = self.active_profile.config_path.as_deref() else {
+            return Ok(());
+        };
+        if !config_path.is_file() {
+            return Ok(());
+        }
+
+        let raw = fs::read_to_string(config_path)
+            .with_context(|| format!("failed to read daemon config {}", config_path.display()))?;
+        let mut document: toml::Value = toml::from_str(raw.as_str())
+            .with_context(|| format!("failed to parse daemon config {}", config_path.display()))?;
+        match kind {
+            ServiceKind::Gateway => {
+                set_value_at_path(
+                    &mut document,
+                    "daemon.port",
+                    toml::Value::Integer(i64::from(self.runtime.gateway_admin_port)),
+                )?;
+                set_value_at_path(
+                    &mut document,
+                    "gateway.grpc_port",
+                    toml::Value::Integer(i64::from(self.runtime.gateway_grpc_port)),
+                )?;
+                set_value_at_path(
+                    &mut document,
+                    "gateway.quic_port",
+                    toml::Value::Integer(i64::from(self.runtime.gateway_quic_port)),
+                )?;
+                set_value_at_path(
+                    &mut document,
+                    "canvas_host.public_base_url",
+                    toml::Value::String(format!(
+                        "http://{LOOPBACK_HOST}:{}",
+                        self.runtime.gateway_admin_port
+                    )),
+                )?;
+            }
+            ServiceKind::Browserd => {
+                set_value_at_path(
+                    &mut document,
+                    "tool_call.browser_service.endpoint",
+                    toml::Value::String(format!(
+                        "http://{LOOPBACK_HOST}:{}",
+                        self.runtime.browser_grpc_port
+                    )),
+                )?;
+                set_value_at_path(
+                    &mut document,
+                    "tool_call.browser_service.health_base_url",
+                    toml::Value::String(format!(
+                        "http://{LOOPBACK_HOST}:{}",
+                        self.runtime.browser_health_port
+                    )),
+                )?;
+            }
+            ServiceKind::NodeHost => {}
+        }
+        let rendered =
+            toml::to_string_pretty(&document).context("failed to serialize daemon config")?;
+        fs::write(config_path, rendered)
+            .with_context(|| format!("failed to persist daemon config {}", config_path.display()))
+    }
+
     fn spawn_service(&mut self, kind: ServiceKind) -> Result<()> {
+        self.ensure_service_ports_available_before_spawn(kind)?;
         let binary_path = resolve_binary_path(kind.binary_name(), kind.env_override())?;
         let mut command = Command::new(binary_path.as_path());
         super::configure_background_command(&mut command);
@@ -1177,10 +1406,13 @@ impl ControlCenter {
     ) -> Result<bool> {
         let runtime_auth =
             runtime_auth_with_config_overrides(&self.runtime_secret_fallbacks, config_path)?;
-        let changed = self.admin_token != runtime_auth.admin_token
+        let runtime_config =
+            runtime_config_with_config_overrides(RuntimeConfig::default(), config_path)?;
+        let auth_changed = self.admin_token != runtime_auth.admin_token
             || self.admin_bound_principal != runtime_auth.admin_bound_principal
             || self.browser_auth_token != runtime_auth.browser_auth_token;
-        if changed {
+        let runtime_changed = self.runtime != runtime_config;
+        if auth_changed {
             self.admin_token = runtime_auth.admin_token;
             self.admin_bound_principal = runtime_auth.admin_bound_principal;
             self.browser_auth_token = runtime_auth.browser_auth_token;
@@ -1191,7 +1423,16 @@ impl ControlCenter {
                 *payload_cache = ConsolePayloadCache::default();
             }
         }
-        Ok(changed)
+        if runtime_changed {
+            self.runtime = runtime_config;
+            self.sync_service_bound_ports();
+        }
+        Ok(auth_changed || runtime_changed)
+    }
+
+    fn sync_service_bound_ports(&mut self) {
+        self.gateway.bound_ports = self.runtime.gateway_bound_ports();
+        self.browserd.bound_ports = self.runtime.browser_bound_ports();
     }
 
     fn reset_profile_bound_runtime_state(&mut self) -> Result<()> {
@@ -1609,9 +1850,11 @@ mod tests {
 
     use super::{
         normalize_browser_open_url, runtime_auth_with_config_overrides,
-        runtime_secrets_with_config_overrides, ConfigReloadWatchOutcome,
+        runtime_config_with_config_overrides, runtime_secrets_with_config_overrides,
+        ConfigReloadWatchOutcome,
         DesktopConfigReloadWatchState,
     };
+    use crate::RuntimeConfig;
     use crate::desktop_state::DesktopRuntimeSecrets;
     use crate::profile_registry::implicit_profile;
 
@@ -1689,6 +1932,43 @@ auth_token = "config-browser-token"
 
         assert_eq!(effective.admin_token, "desktop-admin-token");
         assert_eq!(effective.browser_auth_token, "desktop-browser-token");
+        let _ = fs::remove_dir_all(fixture.as_path());
+    }
+
+    #[test]
+    fn runtime_config_with_config_overrides_uses_configured_ports() {
+        let fixture =
+            env::temp_dir().join(format!("palyra-desktop-port-test-{}", ulid::Ulid::new()));
+        fs::create_dir_all(fixture.as_path()).expect("fixture dir should be created");
+        let config_path = fixture.join("palyra.toml");
+        fs::write(
+            config_path.as_path(),
+            r#"
+version = 1
+
+[daemon]
+port = 7310
+
+[gateway]
+grpc_port = 7311
+quic_port = 7312
+
+[tool_call.browser_service]
+endpoint = "http://127.0.0.1:7314"
+health_base_url = "http://127.0.0.1:7313"
+"#,
+        )
+        .expect("config fixture should be written");
+
+        let effective =
+            runtime_config_with_config_overrides(RuntimeConfig::default(), Some(config_path.as_path()))
+                .expect("config port overrides should load");
+
+        assert_eq!(effective.gateway_admin_port, 7310);
+        assert_eq!(effective.gateway_grpc_port, 7311);
+        assert_eq!(effective.gateway_quic_port, 7312);
+        assert_eq!(effective.browser_health_port, 7313);
+        assert_eq!(effective.browser_grpc_port, 7314);
         let _ = fs::remove_dir_all(fixture.as_path());
     }
 

@@ -164,11 +164,13 @@ const MAX_GRPC_ATTEMPTS: usize = 3;
 const BASE_GRPC_BACKOFF_MS: u64 = 100;
 const RUN_STREAM_REQUEST_VERSION: u32 = 1;
 const DEFAULT_DAEMON_BIND_ADDR: &str = "127.0.0.1";
-const DEFAULT_DAEMON_PORT: u16 = 7142;
+const DEFAULT_DAEMON_PORT: u16 = palyra_common::local_runtime_ports::DEFAULT_GATEWAY_ADMIN_PORT;
 const DEFAULT_GATEWAY_GRPC_BIND_ADDR: &str = "127.0.0.1";
-const DEFAULT_GATEWAY_GRPC_PORT: u16 = 7443;
+const DEFAULT_GATEWAY_GRPC_PORT: u16 =
+    palyra_common::local_runtime_ports::DEFAULT_GATEWAY_GRPC_PORT;
 const DEFAULT_GATEWAY_QUIC_BIND_ADDR: &str = "127.0.0.1";
-const DEFAULT_GATEWAY_QUIC_PORT: u16 = 7444;
+const DEFAULT_GATEWAY_QUIC_PORT: u16 =
+    palyra_common::local_runtime_ports::DEFAULT_GATEWAY_QUIC_PORT;
 const DEFAULT_GATEWAY_QUIC_ENABLED: bool = true;
 const DEFAULT_GATEWAY_BIND_PROFILE: &str = "loopback_only";
 const DEFAULT_DEPLOYMENT_MODE: &str = "local_desktop";
@@ -715,6 +717,23 @@ fn build_init_config_document(
     admin_token: &str,
     tls_paths: Option<&(PathBuf, PathBuf)>,
 ) -> Result<toml::Value> {
+    let local_runtime_ports = if mode == InitMode::LocalDesktop {
+        Some(
+            palyra_common::local_runtime_ports::select_available_local_runtime_ports(
+                DEFAULT_DAEMON_BIND_ADDR,
+            )
+            .map_err(anyhow::Error::msg)?,
+        )
+    } else {
+        None
+    };
+    let daemon_port =
+        local_runtime_ports.map(|ports| ports.gateway_admin).unwrap_or(DEFAULT_DAEMON_PORT);
+    let gateway_grpc_port =
+        local_runtime_ports.map(|ports| ports.gateway_grpc).unwrap_or(DEFAULT_GATEWAY_GRPC_PORT);
+    let gateway_quic_port =
+        local_runtime_ports.map(|ports| ports.gateway_quic).unwrap_or(DEFAULT_GATEWAY_QUIC_PORT);
+
     let (mut document, _) =
         parse_document_with_migration("").context("failed to initialize config document")?;
     set_value_at_path(
@@ -738,11 +757,7 @@ fn build_init_config_document(
         "daemon.bind_addr",
         toml::Value::String(DEFAULT_DAEMON_BIND_ADDR.to_owned()),
     )?;
-    set_value_at_path(
-        &mut document,
-        "daemon.port",
-        toml::Value::Integer(i64::from(DEFAULT_DAEMON_PORT)),
-    )?;
+    set_value_at_path(&mut document, "daemon.port", toml::Value::Integer(i64::from(daemon_port)))?;
     set_value_at_path(
         &mut document,
         "gateway.grpc_bind_addr",
@@ -751,7 +766,7 @@ fn build_init_config_document(
     set_value_at_path(
         &mut document,
         "gateway.grpc_port",
-        toml::Value::Integer(i64::from(DEFAULT_GATEWAY_GRPC_PORT)),
+        toml::Value::Integer(i64::from(gateway_grpc_port)),
     )?;
     set_value_at_path(
         &mut document,
@@ -761,7 +776,7 @@ fn build_init_config_document(
     set_value_at_path(
         &mut document,
         "gateway.quic_port",
-        toml::Value::Integer(i64::from(DEFAULT_GATEWAY_QUIC_PORT)),
+        toml::Value::Integer(i64::from(gateway_quic_port)),
     )?;
     set_value_at_path(
         &mut document,
@@ -803,6 +818,29 @@ fn build_init_config_document(
 
     if mode == InitMode::LocalDesktop {
         apply_local_desktop_tool_defaults(&mut document, identity_store_dir)?;
+        if let Some(ports) = local_runtime_ports {
+            set_value_at_path(
+                &mut document,
+                "tool_call.browser_service.endpoint",
+                toml::Value::String(format!(
+                    "http://{DEFAULT_DAEMON_BIND_ADDR}:{}",
+                    ports.browser_grpc
+                )),
+            )?;
+            set_value_at_path(
+                &mut document,
+                "tool_call.browser_service.health_base_url",
+                toml::Value::String(format!(
+                    "http://{DEFAULT_DAEMON_BIND_ADDR}:{}",
+                    ports.browser_health
+                )),
+            )?;
+            set_value_at_path(
+                &mut document,
+                "canvas_host.public_base_url",
+                toml::Value::String(format!("http://{DEFAULT_DAEMON_BIND_ADDR}:{daemon_port}")),
+            )?;
+        }
     }
 
     if let Some((cert_path, key_path)) = tls_paths {
@@ -1437,6 +1475,13 @@ fn collect_doctor_browser_snapshot(
             endpoint = trimmed.to_owned();
         }
     }
+    let health_base_url = browser_service
+        .and_then(|config| config.health_base_url.as_ref())
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| derive_browser_health_base_url_from_endpoint(endpoint.as_str()));
+    let port_diagnostics =
+        doctor_browser_port_diagnostics(endpoint.as_str(), health_base_url.as_str());
 
     let mut auth_token_configured = browser_service
         .and_then(|config| config.auth_token.as_ref())
@@ -1517,6 +1562,8 @@ fn collect_doctor_browser_snapshot(
         configured_enabled,
         auth_token_configured,
         endpoint,
+        health_base_url,
+        port_diagnostics,
         connect_timeout_ms,
         request_timeout_ms,
         max_screenshot_bytes,
@@ -1540,6 +1587,50 @@ fn doctor_browser_diagnostics_unavailable_message(admin_error: Option<&str>) -> 
         None => "gateway admin status payload did not include browserd diagnostics; doctor reports browser state surfaced by the gateway only. Run `palyra browser status --json` to check browserd directly, and restart the gateway if browser service configuration changed."
             .to_owned(),
     }
+}
+
+fn doctor_browser_port_diagnostics(
+    endpoint: &str,
+    health_base_url: &str,
+) -> Vec<DoctorBrowserPortDiagnostic> {
+    [("health", health_base_url), ("grpc", endpoint)]
+        .into_iter()
+        .filter_map(|(label, url)| {
+            let parsed = Url::parse(url).ok()?;
+            let host = parsed.host_str()?.to_owned();
+            let port = parsed.port_or_known_default()?;
+            let availability =
+                palyra_common::local_runtime_ports::port_availability(host.as_str(), port);
+            Some(DoctorBrowserPortDiagnostic {
+                label: label.to_owned(),
+                url: url.to_owned(),
+                host,
+                port,
+                bind_available: availability.available,
+                bind_error: availability.error,
+            })
+        })
+        .collect()
+}
+
+fn derive_browser_health_base_url_from_endpoint(endpoint: &str) -> String {
+    Url::parse(endpoint)
+        .ok()
+        .and_then(|mut url| {
+            let grpc_port = url
+                .port_or_known_default()
+                .unwrap_or(palyra_common::local_runtime_ports::DEFAULT_BROWSER_GRPC_PORT);
+            let health_port =
+                if grpc_port == palyra_common::local_runtime_ports::DEFAULT_BROWSER_GRPC_PORT {
+                    palyra_common::local_runtime_ports::DEFAULT_BROWSER_HEALTH_PORT
+                } else {
+                    grpc_port.saturating_sub(1).max(1)
+                };
+            url.set_port(Some(health_port)).ok()?;
+            url.set_path("");
+            Some(url.to_string().trim_end_matches('/').to_owned())
+        })
+        .unwrap_or_else(|| DEFAULT_BROWSER_URL.to_owned())
 }
 
 fn collect_doctor_config_ref_health_snapshot(admin_payload: Option<&Value>) -> Option<Value> {
@@ -9700,6 +9791,8 @@ struct DoctorBrowserSnapshot {
     configured_enabled: bool,
     auth_token_configured: bool,
     endpoint: String,
+    health_base_url: String,
+    port_diagnostics: Vec<DoctorBrowserPortDiagnostic>,
     #[serde(skip_serializing_if = "Option::is_none")]
     connect_timeout_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -9721,6 +9814,17 @@ struct DoctorBrowserSnapshot {
     recent_health_failures: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct DoctorBrowserPortDiagnostic {
+    label: String,
+    url: String,
+    host: String,
+    port: u16,
+    bind_available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bind_error: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -11663,6 +11767,8 @@ mod diagnostics_bundle_tests {
                 configured_enabled: true,
                 auth_token_configured: true,
                 endpoint: "http://127.0.0.1:7543".to_owned(),
+                health_base_url: "http://127.0.0.1:7143".to_owned(),
+                port_diagnostics: Vec::new(),
                 connect_timeout_ms: Some(1500),
                 request_timeout_ms: Some(15000),
                 max_screenshot_bytes: Some(262_144),

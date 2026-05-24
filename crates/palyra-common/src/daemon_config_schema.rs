@@ -488,6 +488,7 @@ pub struct FileHttpFetchConfig {
 pub struct FileBrowserServiceConfig {
     pub enabled: Option<bool>,
     pub endpoint: Option<String>,
+    pub health_base_url: Option<String>,
     pub auth_token: Option<String>,
     pub auth_token_secret_ref: Option<SecretRef>,
     pub state_dir: Option<String>,

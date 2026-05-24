@@ -13,11 +13,11 @@ const DESKTOP_SECRET_KEY_BROWSER_AUTH_TOKEN: &str = "desktop_browser_auth_token"
 
 use tokio::process::Command;
 
-const GATEWAY_ADMIN_PORT: u16 = 7142;
-const GATEWAY_GRPC_PORT: u16 = 7443;
-const GATEWAY_QUIC_PORT: u16 = 7444;
-const BROWSER_HEALTH_PORT: u16 = 7143;
-const BROWSER_GRPC_PORT: u16 = 7543;
+const GATEWAY_ADMIN_PORT: u16 = palyra_common::local_runtime_ports::DEFAULT_GATEWAY_ADMIN_PORT;
+const GATEWAY_GRPC_PORT: u16 = palyra_common::local_runtime_ports::DEFAULT_GATEWAY_GRPC_PORT;
+const GATEWAY_QUIC_PORT: u16 = palyra_common::local_runtime_ports::DEFAULT_GATEWAY_QUIC_PORT;
+const BROWSER_HEALTH_PORT: u16 = palyra_common::local_runtime_ports::DEFAULT_BROWSER_HEALTH_PORT;
+const BROWSER_GRPC_PORT: u16 = palyra_common::local_runtime_ports::DEFAULT_BROWSER_GRPC_PORT;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
