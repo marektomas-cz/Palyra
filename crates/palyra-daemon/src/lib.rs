@@ -5213,21 +5213,28 @@ mod tests {
         );
     }
 
+    fn admin_rate_limit_window_budgets_for_test() -> (u32, u32) {
+        (
+            ADMIN_RATE_LIMIT_LOOPBACK_MAX_REQUESTS_PER_WINDOW,
+            ADMIN_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW,
+        )
+    }
+
     #[test]
     fn admin_rate_limit_keeps_remote_budget_tighter_than_loopback() {
         let buckets = Mutex::new(HashMap::new());
         let ip = IpAddr::from_str("203.0.113.10").expect("IP literal should parse");
         let now = Instant::now();
+        let (loopback_budget, remote_budget) = admin_rate_limit_window_budgets_for_test();
         assert!(
-            ADMIN_RATE_LIMIT_LOOPBACK_MAX_REQUESTS_PER_WINDOW
-                > ADMIN_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW,
+            loopback_budget > remote_budget,
             "loopback budget should preserve local desktop/CLI bursts while remote exposure remains tighter"
         );
         assert!(
-            ADMIN_RATE_LIMIT_LOOPBACK_MAX_REQUESTS_PER_WINDOW >= 1_000,
+            loopback_budget >= 1_000,
             "loopback budget should not throttle normal local desktop plus CLI automation bursts"
         );
-        for attempt in 0..ADMIN_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW {
+        for attempt in 0..remote_budget {
             let allowed = consume_admin_rate_limit_with_now(&buckets, ip, now);
             assert!(allowed, "remote attempt {attempt} should remain within the request budget");
         }
