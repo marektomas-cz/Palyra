@@ -2078,11 +2078,11 @@ async fn memory_auto_inject_searches_current_scope_without_cross_session_or_chan
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn default_memory_auto_inject_does_not_add_manual_preference_to_fresh_session_prompt() {
+async fn default_memory_auto_inject_adds_manual_preference_to_fresh_session_prompt() {
     let state = build_test_runtime_state(false);
     assert!(
-        !state.memory_config_snapshot().auto_inject_enabled,
-        "manual/import memory auto-inject must require explicit opt-in"
+        state.memory_config_snapshot().auto_inject_enabled,
+        "manual/import memory auto-inject should be enabled by default for cross-session recall"
     );
 
     let context = RequestContext {
@@ -2143,23 +2143,23 @@ async fn default_memory_auto_inject_does_not_add_manual_preference_to_fresh_sess
         },
     )
     .await
-    .expect("provider input preparation should succeed with auto-inject disabled by default");
+    .expect("provider input preparation should succeed with auto-inject enabled by default");
 
     assert!(
-        !prepared.provider_input_text.contains("<memory_context"),
-        "fresh-session provider input should not include automatic memory context by default: {}",
+        prepared.provider_input_text.contains("<memory_context"),
+        "fresh-session provider input should include automatic memory context by default: {}",
         prepared.provider_input_text
     );
     assert!(
-        !prepared.provider_input_text.contains("TypeScript, Playwright, and concise Czech reports"),
-        "stored preference should require explicit recall or opt-in auto-inject: {}",
+        prepared.provider_input_text.contains("TypeScript, Playwright, and concise Czech reports"),
+        "stored preference should be available to the next session through default auto-inject: {}",
         prepared.provider_input_text
     );
     let tape =
         state.journal_store.orchestrator_tape(current_run_id).expect("test tape should load");
     assert!(
-        tape.iter().all(|event| event.event_type != "memory_auto_inject"),
-        "default-disabled auto-inject must not append a memory_auto_inject tape event"
+        tape.iter().any(|event| event.event_type == "memory_auto_inject"),
+        "default-enabled auto-inject must append a memory_auto_inject tape event"
     );
 }
 
