@@ -4529,11 +4529,7 @@ fn prompt_tool_approval_decision_with_mode_state(
     approval: &common_v1::ToolApprovalRequest,
     mode: &mut AgentApprovalMode,
 ) -> Result<ToolApprovalDecision> {
-    let decision = prompt_tool_approval_decision(approval, *mode)?;
-    if *mode == AgentApprovalMode::AllowOnce && decision.approved {
-        *mode = AgentApprovalMode::Deny;
-    }
-    Ok(decision)
+    prompt_tool_approval_decision(approval, *mode)
 }
 
 fn prompt_tool_approval_decision_from_terminal(
@@ -5648,17 +5644,18 @@ mod agent_stream_output_tests {
     }
 
     #[test]
-    fn approval_mode_allow_once_is_consumed_after_first_approval() {
+    fn approval_mode_allow_once_approves_all_requests_in_current_run() {
         let mut mode = AgentApprovalMode::AllowOnce;
         let first = prompt_tool_approval_decision_with_mode_state(&approval_request(), &mut mode)
             .expect("allow-once should approve the first request");
         let second = prompt_tool_approval_decision_with_mode_state(&approval_request(), &mut mode)
-            .expect("consumed allow-once should deny without prompting");
+            .expect("allow-once should keep approving requests in this run");
 
         assert!(first.approved);
-        assert_eq!(mode, AgentApprovalMode::Deny);
-        assert!(!second.approved);
-        assert_eq!(second.reason, "denied_by_cli_approval_mode_deny");
+        assert!(second.approved);
+        assert_eq!(mode, AgentApprovalMode::AllowOnce);
+        assert_eq!(first.reason, "approved_by_cli_approval_mode_allow_once");
+        assert_eq!(second.reason, "approved_by_cli_approval_mode_allow_once");
     }
 
     #[test]
