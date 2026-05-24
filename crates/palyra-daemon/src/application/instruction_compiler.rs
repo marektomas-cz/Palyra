@@ -236,6 +236,9 @@ fn tool_specific_contract(tool_names: &[String]) -> String {
     if tool_names.iter().any(|tool| tool == "palyra.memory.delete") {
         contracts.push("palyra.memory.delete contract: when the user asks to forget, remove, erase, or delete a stored preference/fact, first use palyra.memory.search or palyra.memory.recall to identify exact memory_id values, then call palyra.memory.delete for each matching obsolete item. Do not call palyra.memory.retain as a substitute for deletion. Only claim a memory was removed when the delete output has deleted=true; if deleted=false, say no matching stored item was deleted.".to_owned());
     }
+    if tool_names.iter().any(|tool| tool == "palyra.memory.replace") {
+        contracts.push("palyra.memory.replace contract: when the user corrects an obsolete stored preference/fact and asks to update, replace, supersede, or stop using the old value, first use palyra.memory.search or palyra.memory.recall to identify the exact stale memory_id, then call palyra.memory.replace with the corrected content_text. Prefer replace over adding corrective duplicate memories. Only claim the durable value changed when the replace output status is replaced and durable_memory_write=true.".to_owned());
+    }
     if tool_names.iter().any(|tool| tool == "palyra.memory.search")
         || tool_names.iter().any(|tool| tool == "palyra.memory.recall")
         || tool_names.iter().any(|tool| tool == "palyra.memory.session_search")
@@ -646,6 +649,17 @@ mod tests {
         assert!(contract.contains("Do not call palyra.memory.retain as a substitute"));
         assert!(contract.contains("deleted=true"));
         assert!(contract.contains("deleted=false"));
+    }
+
+    #[test]
+    fn tool_specific_contract_explains_memory_replace_lifecycle() {
+        let contract = super::tool_specific_contract(&["palyra.memory.replace".to_owned()]);
+
+        assert!(contract.contains("corrects an obsolete stored preference"));
+        assert!(contract.contains("exact stale memory_id"));
+        assert!(contract.contains("content_text"));
+        assert!(contract.contains("Prefer replace over adding corrective duplicate memories"));
+        assert!(contract.contains("durable_memory_write=true"));
     }
 
     #[test]

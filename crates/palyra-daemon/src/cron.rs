@@ -2809,6 +2809,7 @@ fn cron_successful_completion_tool(tool_name: &str) -> bool {
             | "palyra.fs.os_file"
             | "palyra.memory.retain"
             | "palyra.memory.delete"
+            | "palyra.memory.replace"
             | "palyra.routines.control"
             | "palyra.secrets.put"
     )

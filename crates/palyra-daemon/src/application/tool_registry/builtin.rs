@@ -176,6 +176,30 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
             ToolResultProjectionPolicy::InlineUnlessLarge,
         ),
         entry(
+            "palyra.memory.replace",
+            "Replace the content of an existing scoped memory item by memory_id when the user corrects an obsolete preference or fact.",
+            object_schema(
+                &["memory_id", "content_text"],
+                vec![
+                    (
+                        "memory_id",
+                        json!({"type":"string","description":"Canonical memory_id returned by palyra.memory.search or palyra.memory.recall."}),
+                    ),
+                    (
+                        "content_text",
+                        json!({"type":"string","maxLength":8192,"description":"Correct replacement memory content. Include the new durable preference/fact, not both stale and corrected values."}),
+                    ),
+                    ("tags", json!({"type":"array","items":{"type":"string"},"maxItems":16})),
+                    ("confidence", json!({"type":"number","minimum":0.0,"maximum":1.0})),
+                    ("ttl_ms", json!({"type":"integer","minimum":0})),
+                    ("ttl_unix_ms", json!({"type":"integer","minimum":0})),
+                ],
+                false,
+            ),
+            ToolParallelismPolicy::Exclusive,
+            ToolResultProjectionPolicy::InlineUnlessLarge,
+        ),
+        entry(
             "palyra.memory.reflect",
             "Extract bounded memory reflection candidates from run context.",
             object_schema(

@@ -388,6 +388,23 @@ fn memory_delete_schema_uses_search_memory_id() {
 }
 
 #[test]
+fn memory_replace_schema_requires_id_and_corrected_content() {
+    let entry = registry_entry("palyra.memory.replace").expect("replace tool entry");
+
+    assert!(entry.description.contains("corrects"));
+    assert_eq!(entry.input_schema["required"], serde_json::json!(["memory_id", "content_text"]));
+    assert!(entry.input_schema["properties"]["memory_id"]["description"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("palyra.memory.search"));
+    assert!(entry.input_schema["properties"]["content_text"]["description"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("not both stale and corrected values"));
+    assert_eq!(entry.parallelism_policy, ToolParallelismPolicy::Exclusive);
+}
+
+#[test]
 fn sleep_schema_allows_short_heartbeat_waits() {
     let entry = registry_entry("palyra.sleep").expect("sleep should be registered");
     assert_eq!(entry.input_schema["properties"]["duration_ms"]["maximum"], 30_000);

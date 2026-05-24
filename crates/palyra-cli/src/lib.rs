@@ -664,6 +664,7 @@ const LOCAL_DESKTOP_DEFAULT_ALLOWED_TOOLS: &[&str] = &[
     "palyra.memory.session_search",
     "palyra.memory.retain",
     "palyra.memory.delete",
+    "palyra.memory.replace",
     "palyra.memory.reflect",
     "palyra.artifact.read",
     "palyra.delegation.query",

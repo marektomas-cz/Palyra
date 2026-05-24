@@ -23,8 +23,8 @@ use crate::{
         MAX_MEMORY_TOOL_QUERY_BYTES, MAX_MEMORY_TOOL_TAGS,
     },
     journal::{
-        MemorySearchHit, MemorySearchRequest, MemorySource, SessionSearchOutcome,
-        SessionSearchRequest, WorkspaceSearchHit,
+        MemoryItemLifecycleUpdateRequest, MemoryItemRecord, MemorySearchHit, MemorySearchRequest,
+        MemorySource, SessionSearchOutcome, SessionSearchRequest, WorkspaceSearchHit,
     },
     tool_protocol::{ToolAttestation, ToolExecutionOutcome},
     transport::grpc::auth::RequestContext,
@@ -478,6 +478,240 @@ pub(crate) async fn execute_memory_delete_tool(
             false,
             b"{}".to_vec(),
             format!("palyra.memory.delete failed to serialize output: {error}"),
+        ),
+    }
+}
+
+pub(crate) async fn execute_memory_replace_tool(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    context: ToolRuntimeExecutionContext<'_>,
+    proposal_id: &str,
+    input_json: &[u8],
+) -> ToolExecutionOutcome {
+    let namespace = b"palyra.memory.replace.attestation.v1";
+    let parsed = match parse_memory_tool_object(input_json) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return memory_tool_execution_outcome(
+                namespace,
+                proposal_id,
+                input_json,
+                false,
+                b"{}".to_vec(),
+                format!("palyra.memory.replace {error}"),
+            );
+        }
+    };
+    let memory_id = match required_string_field(&parsed, "memory_id") {
+        Ok(value) => value,
+        Err(error) => {
+            return memory_tool_execution_outcome(
+                namespace,
+                proposal_id,
+                input_json,
+                false,
+                b"{}".to_vec(),
+                format!("palyra.memory.replace {error}"),
+            );
+        }
+    };
+    if let Err(error) = validate_canonical_id(memory_id.as_str()) {
+        return memory_tool_execution_outcome(
+            namespace,
+            proposal_id,
+            input_json,
+            false,
+            b"{}".to_vec(),
+            format!("palyra.memory.replace memory_id must be a canonical ULID: {error}"),
+        );
+    }
+    let content_text = match required_string_field(&parsed, "content_text") {
+        Ok(value) => normalize_lifecycle_content(value.as_str()),
+        Err(error) => {
+            return memory_tool_execution_outcome(
+                namespace,
+                proposal_id,
+                input_json,
+                false,
+                b"{}".to_vec(),
+                format!("palyra.memory.replace {error}"),
+            );
+        }
+    };
+    if content_text.len() > MAX_MEMORY_TOOL_QUERY_BYTES {
+        return memory_tool_execution_outcome(
+            namespace,
+            proposal_id,
+            input_json,
+            false,
+            b"{}".to_vec(),
+            format!(
+                "palyra.memory.replace content_text exceeds {MAX_MEMORY_TOOL_QUERY_BYTES} bytes"
+            ),
+        );
+    }
+    if content_text.is_empty() {
+        return memory_tool_execution_outcome(
+            namespace,
+            proposal_id,
+            input_json,
+            false,
+            b"{}".to_vec(),
+            "palyra.memory.replace content_text is empty after normalization".to_owned(),
+        );
+    }
+    let parsed_tags =
+        match parse_string_array_field(parsed.get("tags"), "tags", MAX_MEMORY_TOOL_TAGS) {
+            Ok(tags) => tags,
+            Err(error) => {
+                return memory_tool_execution_outcome(
+                    namespace,
+                    proposal_id,
+                    input_json,
+                    false,
+                    b"{}".to_vec(),
+                    error.replace("palyra.memory.retain", "palyra.memory.replace"),
+                );
+            }
+        };
+    let confidence = match parsed.get("confidence").and_then(Value::as_f64) {
+        Some(value) if value.is_finite() && (0.0..=1.0).contains(&value) => Some(value),
+        Some(_) => {
+            return memory_tool_execution_outcome(
+                namespace,
+                proposal_id,
+                input_json,
+                false,
+                b"{}".to_vec(),
+                "palyra.memory.replace confidence must be in range 0.0..=1.0".to_owned(),
+            );
+        }
+        None => None,
+    };
+    let ttl_unix_ms = match ttl_unix_ms_from_input(
+        parsed.get("ttl_ms").and_then(Value::as_i64),
+        parsed.get("ttl_unix_ms").and_then(Value::as_i64),
+    ) {
+        Ok(value) => value,
+        Err(error) => {
+            return memory_tool_execution_outcome(
+                namespace,
+                proposal_id,
+                input_json,
+                false,
+                b"{}".to_vec(),
+                format!("palyra.memory.replace {}", error.message()),
+            );
+        }
+    };
+    let existing_item = match runtime_state.memory_item(memory_id.clone()).await {
+        Ok(Some(item)) => item,
+        Ok(None) => {
+            return memory_tool_execution_outcome(
+                namespace,
+                proposal_id,
+                input_json,
+                false,
+                b"{}".to_vec(),
+                format!("palyra.memory.replace memory item not found: {memory_id}"),
+            );
+        }
+        Err(error) => {
+            return memory_tool_execution_outcome(
+                namespace,
+                proposal_id,
+                input_json,
+                false,
+                b"{}".to_vec(),
+                format!("palyra.memory.replace failed: {}", error.message()),
+            );
+        }
+    };
+    if let Err(error) =
+        enforce_memory_item_scope(&existing_item, context.principal, context.channel)
+    {
+        return memory_tool_execution_outcome(
+            namespace,
+            proposal_id,
+            input_json,
+            false,
+            b"{}".to_vec(),
+            format!("palyra.memory.replace {}", error.message()),
+        );
+    }
+    let resource = memory_item_write_resource(&existing_item);
+    if let Err(error) =
+        authorize_memory_action(context.principal, "memory.ingest", resource.as_str())
+    {
+        return memory_tool_execution_outcome(
+            namespace,
+            proposal_id,
+            input_json,
+            false,
+            b"{}".to_vec(),
+            format!("palyra.memory.replace {}", error.message()),
+        );
+    }
+    let tags = if parsed_tags.is_empty() { existing_item.tags.clone() } else { parsed_tags };
+    let updated = match runtime_state
+        .update_memory_item_lifecycle(MemoryItemLifecycleUpdateRequest {
+            memory_id: memory_id.clone(),
+            principal: context.principal.to_owned(),
+            channel: existing_item.channel.clone(),
+            session_id: existing_item.session_id.clone(),
+            content_text: Some(content_text),
+            tags,
+            confidence,
+            ttl_unix_ms,
+        })
+        .await
+    {
+        Ok(Some(item)) => item,
+        Ok(None) => {
+            return memory_tool_execution_outcome(
+                namespace,
+                proposal_id,
+                input_json,
+                false,
+                b"{}".to_vec(),
+                format!("palyra.memory.replace memory item not found: {memory_id}"),
+            );
+        }
+        Err(error) => {
+            return memory_tool_execution_outcome(
+                namespace,
+                proposal_id,
+                input_json,
+                false,
+                b"{}".to_vec(),
+                format!("palyra.memory.replace failed: {}", error.message()),
+            );
+        }
+    };
+    let payload = json!({
+        "memory_id": memory_id,
+        "status": "replaced",
+        "durable_memory_write": true,
+        "previous_content_hash": existing_item.content_hash,
+        "item": memory_item_output_payload(&updated),
+        "claim_boundary": "memory item content was replaced in place; use the returned item as the current durable value",
+    });
+    match serde_json::to_vec(&payload) {
+        Ok(output_json) => memory_tool_execution_outcome(
+            namespace,
+            proposal_id,
+            input_json,
+            true,
+            output_json,
+            String::new(),
+        ),
+        Err(error) => memory_tool_execution_outcome(
+            namespace,
+            proposal_id,
+            input_json,
+            false,
+            b"{}".to_vec(),
+            format!("palyra.memory.replace failed to serialize output: {error}"),
         ),
     }
 }
@@ -1427,6 +1661,16 @@ fn memory_item_scope_label(item: &crate::journal::MemoryItemRecord) -> &'static 
         "channel"
     } else {
         "principal"
+    }
+}
+
+fn memory_item_write_resource(item: &MemoryItemRecord) -> String {
+    if let Some(session_id) = item.session_id.as_deref() {
+        format!("memory:session:{session_id}")
+    } else if let Some(channel) = item.channel.as_deref() {
+        format!("memory:channel:{channel}")
+    } else {
+        "memory:principal".to_owned()
     }
 }
 
