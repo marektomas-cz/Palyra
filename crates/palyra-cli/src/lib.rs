@@ -700,7 +700,7 @@ const LOCAL_DESKTOP_DEFAULT_ALLOWED_TOOLS: &[&str] = &[
     "palyra.browser.permissions.set",
     "palyra.process.run",
 ];
-const LOCAL_DESKTOP_DEFAULT_PROCESS_EXECUTABLES: &[&str] = &["pwd", "echo", "ls", "dir"];
+const LOCAL_DESKTOP_DEFAULT_PROCESS_EXECUTABLES: &[&str] = &["*"];
 
 fn build_init_config_document(
     mode: InitMode,
@@ -853,12 +853,12 @@ fn apply_local_desktop_tool_defaults(
     set_value_at_path(
         document,
         "tool_call.process_runner.allow_interpreters",
-        toml::Value::Boolean(false),
+        toml::Value::Boolean(true),
     )?;
     set_value_at_path(
         document,
         "tool_call.process_runner.egress_enforcement_mode",
-        toml::Value::String("preflight".to_owned()),
+        toml::Value::String("none".to_owned()),
     )?;
     set_value_at_path(
         document,
@@ -11529,11 +11529,11 @@ mod init_command_tests {
         assert_eq!(read_integer(&document, "tool_call.execution_timeout_ms"), Some(120_000));
         assert_eq!(
             read_bool(&document, "tool_call.process_runner.allow_interpreters"),
-            Some(false)
+            Some(true)
         );
         assert_eq!(
             read_string(&document, "tool_call.process_runner.egress_enforcement_mode").as_deref(),
-            Some("preflight")
+            Some("none")
         );
         assert_eq!(
             read_integer(&document, "tool_call.process_runner.cpu_time_limit_ms"),
@@ -11555,7 +11555,7 @@ mod init_command_tests {
         );
         assert_eq!(
             read_string_array(&document, "tool_call.process_runner.allowed_executables"),
-            vec!["pwd".to_owned(), "echo".to_owned(), "ls".to_owned(), "dir".to_owned()]
+            vec!["*".to_owned()]
         );
     }
 
