@@ -157,6 +157,7 @@ export function App() {
   const recordingSessionIdRef = useRef<string | null>(null);
   const speechUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
   const silenceMonitorRef = useRef<VoiceSilenceMonitor | null>(null);
+  const lastOpenedSurfaceTelemetryRef = useRef<string | null>(null);
 
   const attentionItems = useMemo(
     () => collectAttentionItems(snapshot.control_center),
@@ -414,12 +415,17 @@ export function App() {
   }, [locale]);
 
   useEffect(() => {
+    const telemetryKey = `${activeSection}:${locale}`;
+    if (lastOpenedSurfaceTelemetryRef.current === telemetryKey) {
+      return;
+    }
+    lastOpenedSurfaceTelemetryRef.current = telemetryKey;
     void emitUxEvent({
       name: "ux.surface.opened",
       section: activeSection,
       summary: `Desktop companion opened ${activeSection}`,
     });
-  }, [activeSection, emitUxEvent]);
+  }, [activeSection, emitUxEvent, locale]);
 
   useEffect(() => {
     if (activeSessionId.trim().length === 0) {
