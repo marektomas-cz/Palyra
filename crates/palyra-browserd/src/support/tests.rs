@@ -1460,6 +1460,136 @@ async fn browser_service_chromium_engine_executes_real_dom_actions() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn browser_service_chromium_captures_blob_download_artifacts() {
+    let Some(chromium_path) = resolve_chromium_path_for_tests() else {
+        return;
+    };
+    let (url, handle) = spawn_static_http_server_with_request_budget(
+        200,
+        r#"<html><head><title>Blob Download Fixture</title><script>
+function exportCsv(){
+  const blob = new Blob(['id,name\n1001,Ada Lovelace\n1002,Grace Hopper\n'], { type: 'text/csv;charset=utf-8' });
+  const objectUrl = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = objectUrl;
+  anchor.download = 'upload-export.csv';
+  anchor.click();
+  URL.revokeObjectURL(objectUrl);
+  document.getElementById('status').textContent = 'Export ready: upload-export.csv';
+}
+</script></head><body><button id="export" onclick="exportCsv()">Export</button><div id="status">idle</div></body></html>"#,
+        8,
+    );
+    let runtime = std::sync::Arc::new(
+        BrowserRuntimeState::new(&Args {
+            bind: "127.0.0.1".to_owned(),
+            port: 7143,
+            grpc_bind: "127.0.0.1".to_owned(),
+            grpc_port: 7543,
+            auth_token: None,
+            session_idle_ttl_ms: 60_000,
+            max_sessions: 16,
+            max_navigation_timeout_ms: 10_000,
+            max_session_lifetime_ms: 60_000,
+            max_screenshot_bytes: 256 * 1024,
+            max_response_bytes: 256 * 1024,
+            max_title_bytes: 4 * 1024,
+            engine_mode: BrowserEngineMode::Chromium,
+            chromium_path: Some(chromium_path),
+            chromium_startup_timeout_ms: DEFAULT_CHROMIUM_STARTUP_TIMEOUT_MS,
+        })
+        .expect("chromium runtime should initialize"),
+    );
+    let service = BrowserServiceImpl { runtime };
+    let created = create_session_with_retry_for_chromium_test(
+        &service,
+        browser_v1::CreateSessionRequest {
+            v: 1,
+            principal: "user:ops".to_owned(),
+            idle_ttl_ms: 10_000,
+            budget: None,
+            allow_private_targets: true,
+            allow_downloads: true,
+            action_allowed_domains: Vec::new(),
+            persistence_enabled: false,
+            persistence_id: String::new(),
+            profile_id: None,
+            private_profile: false,
+            channel: String::new(),
+        },
+        3,
+    )
+    .await
+    .expect("create_session should succeed for chromium blob download mode");
+    let session_id = created.session_id.expect("session id should exist");
+
+    let navigate = service
+        .navigate(Request::new(browser_v1::NavigateRequest {
+            v: 1,
+            session_id: Some(session_id.clone()),
+            url,
+            timeout_ms: 8_000,
+            allow_redirects: true,
+            max_redirects: 3,
+            allow_private_targets: true,
+        }))
+        .await
+        .expect("navigate should execute")
+        .into_inner();
+    assert!(navigate.success, "chromium navigate should succeed: {}", navigate.error);
+
+    let click = service
+        .click(Request::new(browser_v1::ClickRequest {
+            v: 1,
+            session_id: Some(session_id.clone()),
+            selector: "#export".to_owned(),
+            max_retries: 1,
+            timeout_ms: 3_000,
+            capture_failure_screenshot: true,
+            max_failure_screenshot_bytes: 16 * 1024,
+        }))
+        .await
+        .expect("click should execute")
+        .into_inner();
+    assert!(click.success, "blob download click should succeed: {}", click.error);
+    let click_artifact = click.artifact.expect("blob download should return artifact metadata");
+    assert_eq!(click_artifact.file_name, "upload-export.csv");
+    assert_eq!(click_artifact.mime_type, "text/csv");
+    assert!(!click_artifact.quarantined);
+
+    let mut list_request = Request::new(browser_v1::ListDownloadArtifactsRequest {
+        v: 1,
+        session_id: Some(session_id.clone()),
+        limit: 10,
+        quarantined_only: false,
+    });
+    insert_principal(&mut list_request, "user:ops");
+    let listed = service
+        .list_download_artifacts(list_request)
+        .await
+        .expect("list_download_artifacts should execute")
+        .into_inner();
+    assert_eq!(listed.artifacts.len(), 1, "blob artifact should be registered");
+
+    let mut get_request = Request::new(browser_v1::GetDownloadArtifactRequest {
+        v: 1,
+        session_id: Some(session_id),
+        artifact_id: click_artifact.artifact_id,
+        max_bytes: DOWNLOAD_MAX_FILE_BYTES,
+    });
+    insert_principal(&mut get_request, "user:ops");
+    let fetched = service
+        .get_download_artifact(get_request)
+        .await
+        .expect("get_download_artifact should execute")
+        .into_inner();
+    assert!(fetched.success, "blob artifact fetch should succeed: {}", fetched.error);
+    assert!(String::from_utf8_lossy(fetched.content.as_slice()).contains("Grace Hopper"));
+
+    drop(handle);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn browser_service_chromium_profile_persistence_restores_local_storage() {
     let Some(chromium_path) = resolve_chromium_path_for_tests() else {
         return;

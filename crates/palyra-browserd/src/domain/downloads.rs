@@ -154,6 +154,14 @@ pub(crate) async fn store_generated_artifact(
     let quarantined = quarantine_reason.is_some();
     let quarantine_reason = quarantine_reason.unwrap_or_default();
 
+    if body.len() as u64 > DOWNLOAD_MAX_FILE_BYTES {
+        return Err(format!(
+            "download exceeds max file bytes ({} > {})",
+            body.len(),
+            DOWNLOAD_MAX_FILE_BYTES
+        ));
+    }
+
     let artifact_id = Ulid::new().to_string();
     let sanitized_name = sanitize_download_file_name(file_name);
     let stored_name = format!("{}-{}", artifact_id, sanitized_name);

@@ -61,6 +61,14 @@ pub(crate) struct ChromiumLayoutMetrics {
     pub(crate) vertical_overflow: bool,
 }
 
+#[derive(Debug)]
+pub(crate) struct ChromiumClientDownload {
+    pub(crate) source_url: String,
+    pub(crate) file_name: String,
+    pub(crate) mime_type: String,
+    pub(crate) content: Vec<u8>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ChromiumNavigateParams {
     pub(crate) raw_url: String,
@@ -196,6 +204,11 @@ const CHROMIUM_PAGE_DIAGNOSTICS_SCRIPT: &str = r#"
     );
   });
   state.network_entries = Array.isArray(state.network_entries) ? state.network_entries : [];
+  state.client_download_entries = Array.isArray(state.client_download_entries) ? state.client_download_entries : [];
+  state.object_urls = state.object_urls || {};
+  state.pending_client_downloads = Number(state.pending_client_downloads || 0);
+  const MAX_CLIENT_DOWNLOAD_ENTRIES = 32;
+  const MAX_CLIENT_DOWNLOAD_BYTES = 8 * 1024 * 1024;
   const normalizeNetworkUrl = (raw) => {
     try {
       return new URL(String(raw || ""), window.location.href).href;
@@ -217,6 +230,121 @@ const CHROMIUM_PAGE_DIAGNOSTICS_SCRIPT: &str = r#"
       }
     } catch (_) {}
   };
+  const normalizeDownloadUrl = (raw) => {
+    try {
+      return new URL(String(raw || ""), window.location.href).href;
+    } catch (_) {
+      return String(raw || "");
+    }
+  };
+  const clampDownloadFileName = (raw) => {
+    const text = String(raw || "download.bin").replace(/[^A-Za-z0-9._-]/g, "_").replace(/^[._]+|[._]+$/g, "");
+    return (text || "download.bin").slice(0, 96);
+  };
+  const blobToBase64 = async (blob) => {
+    const buffer = await blob.arrayBuffer();
+    if (buffer.byteLength > MAX_CLIENT_DOWNLOAD_BYTES) {
+      throw new Error(`client-side download exceeds max bytes (${buffer.byteLength} > ${MAX_CLIENT_DOWNLOAD_BYTES})`);
+    }
+    const bytes = new Uint8Array(buffer);
+    let binary = "";
+    for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+      binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+    }
+    return btoa(binary);
+  };
+  const trimClientDownloads = () => {
+    while (state.client_download_entries.length > MAX_CLIENT_DOWNLOAD_ENTRIES) {
+      state.client_download_entries.shift();
+    }
+  };
+  const captureClientDownload = (anchor, source) => {
+    try {
+      const href = normalizeDownloadUrl(anchor && anchor.getAttribute ? anchor.getAttribute("href") : "");
+      if (!href || !href.startsWith("blob:")) {
+        return;
+      }
+      const now = Date.now();
+      if (anchor.__palyraLastDownloadCaptureUrl === href && now - Number(anchor.__palyraLastDownloadCaptureAt || 0) < 500) {
+        return;
+      }
+      anchor.__palyraLastDownloadCaptureUrl = href;
+      anchor.__palyraLastDownloadCaptureAt = now;
+      const blob = state.object_urls[href];
+      if (!blob || typeof blob.arrayBuffer !== "function") {
+        return;
+      }
+      const fileName = clampDownloadFileName(anchor.getAttribute("download") || "");
+      state.pending_client_downloads += 1;
+      Promise.resolve()
+        .then(() => blobToBase64(blob))
+        .then((contentBase64) => {
+          state.client_download_entries.push({
+            source_url: href,
+            file_name: fileName,
+            mime_type: String(blob.type || ""),
+            content_base64: contentBase64,
+            size_bytes: Number(blob.size || 0),
+            captured_at_unix_ms: Date.now(),
+            source: String(source || "browser")
+          });
+          trimClientDownloads();
+        })
+        .catch((error) => {
+          push("warn", "client_download_capture_failed", error && error.message ? error.message : "client-side download capture failed", "palyra.downloads", "");
+        })
+        .finally(() => {
+          state.pending_client_downloads = Math.max(0, Number(state.pending_client_downloads || 0) - 1);
+        });
+    } catch (_) {}
+  };
+  const anchorFromEventTarget = (target) => {
+    let node = target;
+    while (node && node !== document) {
+      if (node.tagName && String(node.tagName).toLowerCase() === "a") {
+        return node;
+      }
+      node = node.parentElement;
+    }
+    return null;
+  };
+  if (window.URL && typeof window.URL.createObjectURL === "function" && !state.original_create_object_url) {
+    state.original_create_object_url = window.URL.createObjectURL.bind(window.URL);
+    window.URL.createObjectURL = (object) => {
+      const objectUrl = state.original_create_object_url(object);
+      try {
+        if (object && typeof Blob !== "undefined" && object instanceof Blob) {
+          state.object_urls[objectUrl] = object;
+        }
+      } catch (_) {}
+      return objectUrl;
+    };
+  }
+  if (window.URL && typeof window.URL.revokeObjectURL === "function" && !state.original_revoke_object_url) {
+    state.original_revoke_object_url = window.URL.revokeObjectURL.bind(window.URL);
+    window.URL.revokeObjectURL = (objectUrl) => {
+      try {
+        delete state.object_urls[String(objectUrl || "")];
+      } catch (_) {}
+      return state.original_revoke_object_url(objectUrl);
+    };
+  }
+  if (typeof window.HTMLAnchorElement === "function" && !state.original_anchor_click) {
+    state.original_anchor_click = window.HTMLAnchorElement.prototype.click;
+    window.HTMLAnchorElement.prototype.click = function(...args) {
+      captureClientDownload(this, "anchor.click");
+      return state.original_anchor_click.apply(this, args);
+    };
+  }
+  if (!state.client_download_listener_installed) {
+    state.client_download_listener_installed = true;
+    document.addEventListener("click", (event) => {
+      const anchor = anchorFromEventTarget(event && event.target);
+      if (anchor) {
+        captureClientDownload(anchor, "click");
+      }
+    }, true);
+  }
   const responseHeaders = (headers) => {
     const output = [];
     try {
@@ -399,8 +527,77 @@ const CHROMIUM_DRAIN_NETWORK_LOG_SCRIPT: &str = r#"
 })()
 "#;
 
+const CHROMIUM_DRAIN_CLIENT_DOWNLOADS_SCRIPT: &str = r#"
+(async () => {
+  const state = window.__palyraDiagnostics;
+  if (!state || !Array.isArray(state.client_download_entries)) {
+    return "[]";
+  }
+  const deadline = Date.now() + 750;
+  while (Number(state.pending_client_downloads || 0) > 0 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  const MAX_CLIENT_DOWNLOAD_ENTRIES = 32;
+  const MAX_CLIENT_DOWNLOAD_JSON_CHARS = 18 * 1024 * 1024;
+  const MAX_URL_CHARS = 2048;
+  const MAX_FILE_NAME_CHARS = 96;
+  const MAX_MIME_CHARS = 128;
+  const MAX_BASE64_CHARS = 12 * 1024 * 1024;
+  const clampScalar = (value, maxChars) => {
+    if (typeof value === "string") {
+      return value.length > maxChars ? value.slice(0, maxChars) : value;
+    }
+    if (typeof value === "number" || typeof value === "boolean") {
+      const text = String(value);
+      return text.length > maxChars ? text.slice(0, maxChars) : text;
+    }
+    return "";
+  };
+  const normalizeEntry = (entry) => {
+    const object = entry && typeof entry === "object" ? entry : {};
+    const sizeBytes = typeof object.size_bytes === "number" && Number.isFinite(object.size_bytes)
+      ? Math.max(0, object.size_bytes)
+      : 0;
+    const capturedAt = typeof object.captured_at_unix_ms === "number" && Number.isFinite(object.captured_at_unix_ms)
+      ? Math.max(0, object.captured_at_unix_ms)
+      : 0;
+    return {
+      source_url: clampScalar(object.source_url, MAX_URL_CHARS),
+      file_name: clampScalar(object.file_name, MAX_FILE_NAME_CHARS),
+      mime_type: clampScalar(object.mime_type, MAX_MIME_CHARS),
+      content_base64: clampScalar(object.content_base64, MAX_BASE64_CHARS),
+      size_bytes: sizeBytes,
+      captured_at_unix_ms: capturedAt,
+      source: clampScalar(object.source, 64)
+    };
+  };
+  const source = Array.prototype.slice.call(
+    state.client_download_entries,
+    Math.max(0, state.client_download_entries.length - MAX_CLIENT_DOWNLOAD_ENTRIES)
+  );
+  state.client_download_entries.length = 0;
+  const entries = [];
+  let totalChars = 2;
+  for (let index = source.length - 1; index >= 0; index -= 1) {
+    const entry = normalizeEntry(source[index]);
+    const entryChars = JSON.stringify(entry).length + (entries.length > 0 ? 1 : 0);
+    if (entries.length > 0 && totalChars + entryChars > MAX_CLIENT_DOWNLOAD_JSON_CHARS) {
+      break;
+    }
+    if (totalChars + entryChars > MAX_CLIENT_DOWNLOAD_JSON_CHARS) {
+      continue;
+    }
+    entries.unshift(entry);
+    totalChars += entryChars;
+  }
+  return JSON.stringify(entries);
+})()
+"#;
+
 const MAX_CHROMIUM_CONSOLE_JSON_BYTES: usize = (DEFAULT_MAX_CONSOLE_LOG_BYTES as usize) * 4;
 const MAX_CHROMIUM_NETWORK_JSON_BYTES: usize = (DEFAULT_MAX_NETWORK_LOG_BYTES as usize) * 4;
+const MAX_CHROMIUM_CLIENT_DOWNLOAD_JSON_BYTES: usize =
+    (DOWNLOAD_MAX_FILE_BYTES as usize * 2) + 16 * 1024;
 const MAX_CHROMIUM_LOCAL_STORAGE_JSON_BYTES: usize =
     (MAX_STORAGE_ENTRY_VALUE_BYTES * MAX_STORAGE_ENTRIES_PER_ORIGIN * 2) + 4096;
 
@@ -1383,12 +1580,36 @@ async fn chromium_drain_page_network_log(
     Ok(parse_chromium_page_network_entries(value))
 }
 
+pub(crate) async fn chromium_drain_client_downloads(
+    runtime: &BrowserRuntimeState,
+    session_id: &str,
+    tab_id: &str,
+) -> Result<Vec<ChromiumClientDownload>, String> {
+    enforce_chromium_remote_ip_guard(runtime, session_id).await?;
+    let tab = chromium_tab_for_session(runtime, session_id, tab_id).await?;
+    let value = run_chromium_blocking("chromium drain client downloads", move || {
+        let value = tab
+            .evaluate(CHROMIUM_DRAIN_CLIENT_DOWNLOADS_SCRIPT, true)
+            .map_err(|error| format!("failed to read Chromium client downloads: {error}"))?
+            .value
+            .unwrap_or_else(|| serde_json::Value::String("[]".to_owned()));
+        Ok(decode_chromium_client_download_entries_value(value))
+    })
+    .await?;
+    enforce_chromium_remote_ip_guard(runtime, session_id).await?;
+    Ok(parse_chromium_client_download_entries(value))
+}
+
 fn decode_chromium_console_entries_value(value: serde_json::Value) -> serde_json::Value {
     decode_chromium_json_array_string_value(value, MAX_CHROMIUM_CONSOLE_JSON_BYTES)
 }
 
 fn decode_chromium_network_entries_value(value: serde_json::Value) -> serde_json::Value {
     decode_chromium_json_array_string_value(value, MAX_CHROMIUM_NETWORK_JSON_BYTES)
+}
+
+fn decode_chromium_client_download_entries_value(value: serde_json::Value) -> serde_json::Value {
+    decode_chromium_json_array_string_value(value, MAX_CHROMIUM_CLIENT_DOWNLOAD_JSON_BYTES)
 }
 
 fn decode_chromium_json_array_string_value(
@@ -1604,6 +1825,33 @@ fn parse_chromium_page_network_entries(value: serde_json::Value) -> Vec<NetworkL
                     .unwrap_or_else(current_unix_ms),
                 headers: parse_chromium_page_network_headers(object.get("headers")),
             })
+        })
+        .collect()
+}
+
+fn parse_chromium_client_download_entries(value: serde_json::Value) -> Vec<ChromiumClientDownload> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let object = entry.as_object()?;
+            let source_url = bounded_chromium_json_string(object, "source_url", "", 2048);
+            if !source_url.starts_with("blob:") {
+                return None;
+            }
+            let file_name = sanitize_download_file_name(
+                bounded_chromium_json_string(object, "file_name", DOWNLOAD_FILE_NAME_FALLBACK, 256)
+                    .as_str(),
+            );
+            let content_base64 =
+                object.get("content_base64").and_then(serde_json::Value::as_str).unwrap_or("");
+            let content = base64::engine::general_purpose::STANDARD.decode(content_base64).ok()?;
+            if content.is_empty() || content.len() as u64 > DOWNLOAD_MAX_FILE_BYTES {
+                return None;
+            }
+            let mime_type = bounded_chromium_json_string(object, "mime_type", "", 128);
+            Some(ChromiumClientDownload { source_url, file_name, mime_type, content })
         })
         .collect()
 }
@@ -3010,11 +3258,11 @@ mod tests {
         chromium_restore_local_storage_script, chromium_touch_emulation_max_touch_points,
         chromium_transport_idle_timeout, clamp_chromium_snapshot,
         decode_chromium_console_entries_value, decode_chromium_json_script_value,
-        decode_chromium_network_entries_value, parse_chromium_console_entries,
-        parse_chromium_layout_metrics, parse_chromium_local_storage_restore_status,
-        parse_chromium_local_storage_snapshot, parse_chromium_page_network_entries,
-        parse_chromium_viewport_metrics, parse_key_press_spec, ChromiumLayoutMetrics,
-        ChromiumObserveSnapshot, CHROMIUM_DRAIN_NETWORK_LOG_SCRIPT,
+        decode_chromium_network_entries_value, parse_chromium_client_download_entries,
+        parse_chromium_console_entries, parse_chromium_layout_metrics,
+        parse_chromium_local_storage_restore_status, parse_chromium_local_storage_snapshot,
+        parse_chromium_page_network_entries, parse_chromium_viewport_metrics, parse_key_press_spec,
+        ChromiumLayoutMetrics, ChromiumObserveSnapshot, CHROMIUM_DRAIN_NETWORK_LOG_SCRIPT,
         CHROMIUM_PAGE_DIAGNOSTICS_SCRIPT, CHROMIUM_READ_CONSOLE_LOG_SCRIPT,
         MAX_CHROMIUM_CONSOLE_JSON_BYTES, MAX_CHROMIUM_LOCAL_STORAGE_JSON_BYTES,
         MAX_CHROMIUM_NETWORK_JSON_BYTES,
@@ -3023,6 +3271,7 @@ mod tests {
         DEFAULT_SESSION_IDLE_TTL_MS, MAX_CONSOLE_MESSAGE_BYTES, MAX_CONSOLE_SOURCE_BYTES,
         MAX_CONSOLE_STACK_BYTES, MAX_NETWORK_LOG_URL_BYTES,
     };
+    use base64::Engine as _;
     use std::collections::HashMap;
     use std::time::Duration;
 
@@ -3326,6 +3575,31 @@ mod tests {
             .headers
             .iter()
             .any(|header| header.name == "set-cookie" && header.value == "<redacted>"));
+    }
+
+    #[test]
+    fn parse_chromium_client_download_entries_decodes_blob_payloads() {
+        let raw = serde_json::json!([
+            {
+                "source_url": "blob:http://127.0.0.1:4338/01234567-89ab-cdef-0123-456789abcdef",
+                "file_name": "upload export.csv",
+                "mime_type": "text/csv;charset=utf-8",
+                "content_base64": base64::engine::general_purpose::STANDARD.encode("id,name\n1,Ada\n")
+            },
+            {
+                "source_url": "https://example.test/report.csv",
+                "file_name": "ignored.csv",
+                "mime_type": "text/csv",
+                "content_base64": "aWdub3JlZA=="
+            }
+        ]);
+
+        let entries = parse_chromium_client_download_entries(raw);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].file_name, "upload_export.csv");
+        assert_eq!(entries[0].mime_type, "text/csv;charset=utf-8");
+        assert_eq!(entries[0].content, b"id,name\n1,Ada\n");
     }
 }
 

@@ -1286,7 +1286,73 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
         let mut outcome = outcome;
         let mut error = error;
         let mut artifact = None;
-        if success && outcome == "download_allowed" {
+        if success
+            && context.allow_downloads
+            && matches!(self.runtime.engine_mode, BrowserEngineMode::Chromium)
+        {
+            let active_tab_id = {
+                let sessions = self.runtime.sessions.lock().await;
+                sessions.get(session_id.as_str()).map(|session| session.active_tab_id.clone())
+            };
+            if let Some(active_tab_id) = active_tab_id {
+                match chromium_drain_client_downloads(
+                    self.runtime.as_ref(),
+                    session_id.as_str(),
+                    active_tab_id.as_str(),
+                )
+                .await
+                {
+                    Ok(downloads) => {
+                        for download in downloads {
+                            let mime_type = sniff_download_mime_type(
+                                (!download.mime_type.trim().is_empty())
+                                    .then_some(download.mime_type.as_str()),
+                                download.file_name.as_str(),
+                                download.content.as_slice(),
+                            );
+                            match store_generated_artifact(
+                                self.runtime.as_ref(),
+                                session_id.as_str(),
+                                if context.private_profile {
+                                    None
+                                } else {
+                                    context.profile_id.as_deref()
+                                },
+                                download.source_url.as_str(),
+                                download.file_name.as_str(),
+                                mime_type.as_str(),
+                                download.content.as_slice(),
+                            )
+                            .await
+                            {
+                                Ok(record) => {
+                                    if record.quarantined {
+                                        outcome = "download_quarantined".to_owned();
+                                    } else {
+                                        outcome = "download_allowed".to_owned();
+                                    }
+                                    if artifact.is_none() {
+                                        artifact = Some(download_artifact_to_proto(&record));
+                                    }
+                                }
+                                Err(download_error) => {
+                                    success = false;
+                                    outcome = "download_failed".to_owned();
+                                    error = download_error;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    Err(download_error) => {
+                        success = false;
+                        outcome = "download_failed".to_owned();
+                        error = download_error;
+                    }
+                }
+            }
+        }
+        if success && outcome == "download_allowed" && artifact.is_none() {
             match capture_download_artifact_for_click(
                 self.runtime.as_ref(),
                 session_id.as_str(),
