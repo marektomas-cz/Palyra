@@ -1286,13 +1286,8 @@ fn collect_doctor_identity_snapshot() -> DoctorIdentitySnapshot {
 
 fn collect_doctor_connectivity_snapshot(
 ) -> (DoctorConnectivitySnapshot, Option<Value>, Option<String>) {
-    let daemon_url = env::var("PALYRA_DAEMON_URL")
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| DEFAULT_DAEMON_URL.to_owned());
+    let (daemon_url, grpc_url) = resolve_doctor_connectivity_targets();
     let status_url = format!("{}/healthz", daemon_url.trim_end_matches('/'));
-    let grpc_url = resolve_grpc_url(None).unwrap_or_else(|error| format!("unresolved:{error}"));
 
     let mut http_probe = DoctorConnectivityProbe { ok: false, message: None };
     let mut grpc_probe = DoctorConnectivityProbe { ok: false, message: None };
@@ -1390,6 +1385,43 @@ fn collect_doctor_connectivity_snapshot(
         admin_payload,
         admin_error,
     )
+}
+
+fn resolve_doctor_connectivity_targets() -> (String, String) {
+    let context = app::current_root_context();
+    let daemon_url = context
+        .as_ref()
+        .and_then(|context| {
+            context
+                .resolve_http_connection(
+                    app::ConnectionOverrides::default(),
+                    app::ConnectionDefaults::ADMIN,
+                )
+                .ok()
+        })
+        .map(|connection| connection.base_url)
+        .or_else(|| {
+            env::var("PALYRA_DAEMON_URL")
+                .ok()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+        })
+        .unwrap_or_else(|| DEFAULT_DAEMON_URL.to_owned());
+    let grpc_url = context
+        .as_ref()
+        .and_then(|context| {
+            context
+                .resolve_grpc_connection(
+                    app::ConnectionOverrides::default(),
+                    app::ConnectionDefaults::ADMIN,
+                )
+                .ok()
+        })
+        .map(|connection| connection.grpc_url)
+        .unwrap_or_else(|| {
+            resolve_grpc_url(None).unwrap_or_else(|error| format!("unresolved:{error}"))
+        });
+    (daemon_url, grpc_url)
 }
 
 fn doctor_admin_connection(daemon_url: &str) -> Result<Option<app::HttpConnection>> {
@@ -10241,14 +10273,14 @@ mod cli_v1_tests {
         parse_support_bundle_daemon_url, process_runner_tier_b_allowlist_preflight_only,
         process_runner_tier_c_strict_offline_allowlists_empty,
         process_runner_tier_c_windows_backend_supported, registry_key_id_for,
-        resolve_dashboard_access_target, sha256_hex, trust_store_integrity_vault_key,
-        validate_daemon_compatible_document, validate_registry_index,
-        verify_or_initialize_trust_store_integrity, write_file_atomically, BrowserOpenCommand,
-        DashboardAccessMode, DashboardAccessSource, InstalledSkillRecord, InstalledSkillSource,
-        InstalledSkillsIndex, JournalCheckpointAttestationRequest, JournalCheckpointModeArg,
-        RegistrySignature, RootFileConfig, SignedSkillRegistryIndex, SkillRegistryEntry,
-        SkillRegistryIndex, REGISTRY_INDEX_SCHEMA_VERSION, REGISTRY_SIGNATURE_ALGORITHM,
-        REGISTRY_SIGNED_INDEX_SCHEMA_VERSION,
+        resolve_dashboard_access_target, resolve_doctor_connectivity_targets, sha256_hex,
+        trust_store_integrity_vault_key, validate_daemon_compatible_document,
+        validate_registry_index, verify_or_initialize_trust_store_integrity, write_file_atomically,
+        BrowserOpenCommand, DashboardAccessMode, DashboardAccessSource, InstalledSkillRecord,
+        InstalledSkillSource, InstalledSkillsIndex, JournalCheckpointAttestationRequest,
+        JournalCheckpointModeArg, RegistrySignature, RootFileConfig, SignedSkillRegistryIndex,
+        SkillRegistryEntry, SkillRegistryIndex, REGISTRY_INDEX_SCHEMA_VERSION,
+        REGISTRY_SIGNATURE_ALGORITHM, REGISTRY_SIGNED_INDEX_SCHEMA_VERSION,
     };
     use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
     use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
@@ -10576,6 +10608,43 @@ mod cli_v1_tests {
             !report.checks.iter().any(|check| check.key == "gateway_runtime_reachable"),
             "offline doctor report must not add live gateway reachability checks"
         );
+    }
+
+    #[test]
+    fn doctor_connectivity_targets_follow_root_context_config() -> anyhow::Result<()> {
+        let _lock = env_lock().lock().expect("env lock should be available");
+        crate::app::clear_root_context_for_tests();
+        let tempdir = tempfile::tempdir()?;
+        let state_root = tempdir.path().join("state");
+        let config_path = tempdir.path().join("palyra.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[daemon]
+bind_addr = "127.0.0.1"
+port = 8450
+
+[gateway]
+grpc_bind_addr = "127.0.0.1"
+grpc_port = 8451
+"#,
+        )?;
+
+        crate::app::install_root_context_with_policy(
+            crate::args::RootOptions {
+                config_path: Some(config_path.display().to_string()),
+                state_root: Some(state_root.display().to_string()),
+                ..crate::args::RootOptions::default()
+            },
+            crate::app::ExplicitConfigPathPolicy::RequireExisting,
+        )?;
+
+        let (daemon_url, grpc_url) = resolve_doctor_connectivity_targets();
+
+        assert_eq!(daemon_url, "http://127.0.0.1:8450");
+        assert_eq!(grpc_url, "http://127.0.0.1:8451");
+        crate::app::clear_root_context_for_tests();
+        Ok(())
     }
 
     #[test]
