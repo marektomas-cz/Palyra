@@ -254,7 +254,7 @@ const GRPC_MAX_DECODING_MESSAGE_SIZE_BYTES: usize = 4 * 1024 * 1024;
 const GRPC_MAX_ENCODING_MESSAGE_SIZE_BYTES: usize = 4 * 1024 * 1024;
 pub(crate) const ADMIN_RATE_LIMIT_WINDOW_MS: u64 = 1_000;
 pub(crate) const ADMIN_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW: u32 = 30;
-pub(crate) const ADMIN_RATE_LIMIT_LOOPBACK_MAX_REQUESTS_PER_WINDOW: u32 = 120;
+pub(crate) const ADMIN_RATE_LIMIT_LOOPBACK_MAX_REQUESTS_PER_WINDOW: u32 = 1_000;
 pub(crate) const ADMIN_RATE_LIMIT_MAX_IP_BUCKETS: usize = 4_096;
 pub(crate) const CANVAS_RATE_LIMIT_WINDOW_MS: u64 = 1_000;
 pub(crate) const CANVAS_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW: u32 = 90;
@@ -5218,6 +5218,15 @@ mod tests {
         let buckets = Mutex::new(HashMap::new());
         let ip = IpAddr::from_str("203.0.113.10").expect("IP literal should parse");
         let now = Instant::now();
+        assert!(
+            ADMIN_RATE_LIMIT_LOOPBACK_MAX_REQUESTS_PER_WINDOW
+                > ADMIN_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW,
+            "loopback budget should preserve local desktop/CLI bursts while remote exposure remains tighter"
+        );
+        assert!(
+            ADMIN_RATE_LIMIT_LOOPBACK_MAX_REQUESTS_PER_WINDOW >= 1_000,
+            "loopback budget should not throttle normal local desktop plus CLI automation bursts"
+        );
         for attempt in 0..ADMIN_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW {
             let allowed = consume_admin_rate_limit_with_now(&buckets, ip, now);
             assert!(allowed, "remote attempt {attempt} should remain within the request budget");
