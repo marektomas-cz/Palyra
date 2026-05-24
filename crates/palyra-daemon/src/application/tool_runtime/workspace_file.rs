@@ -21,7 +21,7 @@ use sha2::{Digest, Sha256};
 use crate::{
     agents::AgentResolveRequest,
     application::tool_runtime::workspace_scope::{
-        relative_path_already_targets_active_root, session_active_workspace_root,
+        relative_path_should_use_active_root, session_active_workspace_root,
     },
     gateway::{
         GatewayRuntimeState, ToolRuntimeExecutionContext, MAX_WORKSPACE_LIST_DIR_TOOL_INPUT_BYTES,
@@ -548,7 +548,7 @@ async fn resolve_workspace_file_roots(
             session_active_workspace_root(runtime_state, session_id, agent_workspace_roots).await?
         {
             if requested_path.is_empty()
-                || !relative_path_already_targets_active_root(requested_path, &active_root)
+                || relative_path_should_use_active_root(requested_path, &active_root)
             {
                 return Ok(vec![active_root.root]);
             }

@@ -77,6 +77,30 @@ pub(crate) fn relative_path_already_targets_active_root(
     path == active.relative_path || path.starts_with(format!("{}/", active.relative_path).as_str())
 }
 
+pub(crate) fn relative_path_should_use_active_root(
+    path: &str,
+    active: &ActiveWorkspaceRoot,
+) -> bool {
+    let Some(path) = normalize_relative_workspace_path(path) else {
+        return false;
+    };
+    if path == "." || relative_path_already_targets_active_root(path.as_str(), active) {
+        return false;
+    }
+
+    let parsed = Path::new(path.as_str());
+    let parent = parsed.parent().filter(|path| !path.as_os_str().is_empty());
+    let candidate_parent =
+        parent.map_or_else(|| active.root.clone(), |parent| active.root.join(parent));
+    let Ok(canonical_active_root) = fs::canonicalize(active.root.as_path()) else {
+        return false;
+    };
+    let Ok(canonical_parent) = fs::canonicalize(candidate_parent.as_path()) else {
+        return false;
+    };
+    canonical_parent.is_dir() && canonical_parent.starts_with(canonical_active_root.as_path())
+}
+
 fn canonicalize_workspace_roots(workspace_roots: &[PathBuf]) -> Vec<PathBuf> {
     workspace_roots
         .iter()
@@ -133,6 +157,7 @@ fn normalize_relative_workspace_path(path: &str) -> Option<String> {
 mod tests {
     use super::{
         active_workspace_root_from_focus_paths, relative_path_already_targets_active_root,
+        relative_path_should_use_active_root, ActiveWorkspaceRoot,
     };
     use std::fs;
 
@@ -155,6 +180,26 @@ mod tests {
             &active
         ));
         assert!(!relative_path_already_targets_active_root("package.json", &active));
+    }
+
+    #[test]
+    fn active_workspace_root_only_handles_paths_with_existing_active_parent() {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let workspace = tempdir.path().join("workspace");
+        let reports = workspace.join("reports");
+        let scoped_parent = reports.join("daily");
+        let top_level_fixture = workspace.join("audit-fixture");
+        fs::create_dir_all(scoped_parent.as_path()).expect("scoped parent should exist");
+        fs::create_dir_all(top_level_fixture.as_path()).expect("top-level fixture should exist");
+        let active = ActiveWorkspaceRoot {
+            root: fs::canonicalize(reports.as_path()).expect("reports should canonicalize"),
+            relative_path: "reports".to_owned(),
+        };
+
+        assert!(relative_path_should_use_active_root("summary.md", &active));
+        assert!(relative_path_should_use_active_root("daily/report.md", &active));
+        assert!(!relative_path_should_use_active_root("audit-fixture/alpha.txt", &active));
+        assert!(!relative_path_should_use_active_root("reports/journal-replay.md", &active));
     }
 
     #[cfg(unix)]

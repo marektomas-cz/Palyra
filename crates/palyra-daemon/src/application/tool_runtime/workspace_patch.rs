@@ -19,7 +19,7 @@ use ulid::Ulid;
 use crate::{
     agents::AgentResolveRequest,
     application::tool_runtime::workspace_scope::{
-        relative_path_already_targets_active_root, session_active_workspace_root,
+        relative_path_should_use_active_root, session_active_workspace_root,
     },
     gateway::{
         current_unix_ms, GatewayRuntimeState, MAX_PATCH_TOOL_MARKER_BYTES,
@@ -329,7 +329,7 @@ async fn resolve_workspace_patch_roots(
     if let Some(active_root) =
         session_active_workspace_root(runtime_state, session_id, agent_workspace_roots).await?
     {
-        if !patch_already_targets_active_root(patch, &active_root) {
+        if patch_should_use_active_root(patch, &active_root) {
             let canonical_constraint_roots =
                 canonicalize_agent_workspace_roots(agent_workspace_roots)?;
             let risk_path_prefixes = workspace_root_risk_path_prefixes_from_canonical(
@@ -354,7 +354,7 @@ async fn resolve_workspace_patch_roots(
     })
 }
 
-fn patch_already_targets_active_root(
+fn patch_should_use_active_root(
     patch: &str,
     active_root: &crate::application::tool_runtime::workspace_scope::ActiveWorkspaceRoot,
 ) -> bool {
@@ -362,7 +362,7 @@ fn patch_already_targets_active_root(
     !operation_paths.is_empty()
         && operation_paths
             .iter()
-            .all(|path| relative_path_already_targets_active_root(path, active_root))
+            .all(|path| relative_path_should_use_active_root(path, active_root))
 }
 
 fn patch_operation_paths(patch: &str) -> Vec<String> {
@@ -771,9 +771,10 @@ fn workspace_patch_tool_execution_outcome(
 #[cfg(test)]
 mod tests {
     use super::{
-        patch_operation_paths, resolve_workspace_root_override, workspace_patch_error_outcome,
-        workspace_patch_recovery_hint, WORKSPACE_PATCH_GRAMMAR_HINT,
+        patch_operation_paths, patch_should_use_active_root, resolve_workspace_root_override,
+        workspace_patch_error_outcome, workspace_patch_recovery_hint, WORKSPACE_PATCH_GRAMMAR_HINT,
     };
+    use crate::application::tool_runtime::workspace_scope::ActiveWorkspaceRoot;
     use palyra_common::workspace_patch::{
         apply_workspace_patch, apply_workspace_patch_with_canonical_root_constraints,
         WorkspacePatchError, WorkspacePatchLimits, WorkspacePatchRequest,
@@ -912,6 +913,42 @@ mod tests {
         assert_eq!(
             patch_operation_paths(patch),
             vec!["package.json", "src/index.js", "README.md", "tmp.txt"]
+        );
+    }
+
+    #[test]
+    fn active_workspace_patch_scope_requires_existing_active_parent() {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let workspace = tempdir.path().join("workspace");
+        let reports = workspace.join("reports");
+        let audit_fixture = workspace.join("audit-fixture");
+        std::fs::create_dir_all(reports.as_path()).expect("reports should exist");
+        std::fs::create_dir_all(audit_fixture.as_path()).expect("fixture should exist");
+        let active = ActiveWorkspaceRoot {
+            root: std::fs::canonicalize(reports.as_path()).expect("reports should canonicalize"),
+            relative_path: "reports".to_owned(),
+        };
+
+        let audit_patch = concat!(
+            "*** Begin Patch\n",
+            "*** Add File: audit-fixture/alpha.txt\n",
+            "+alpha\n",
+            "*** End Patch\n",
+        );
+        let report_patch = concat!(
+            "*** Begin Patch\n",
+            "*** Add File: summary.md\n",
+            "+summary\n",
+            "*** End Patch\n",
+        );
+
+        assert!(
+            !patch_should_use_active_root(audit_patch, &active),
+            "top-level workspace paths must not be silently nested under the active focus"
+        );
+        assert!(
+            patch_should_use_active_root(report_patch, &active),
+            "single-file writes without an explicit prefix should still target the active focus"
         );
     }
 
