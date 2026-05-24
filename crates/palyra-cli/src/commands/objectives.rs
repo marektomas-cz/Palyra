@@ -270,11 +270,20 @@ fn build_objective_upsert_payload(args: ObjectiveUpsertArgs) -> Result<Map<Strin
     insert_optional_string(&mut payload, "next_recommended_step", args.next_recommended_step);
     insert_optional_string(&mut payload, "standing_order", args.standing_order);
     insert_optional_bool(&mut payload, "enabled", args.enabled);
-    insert_optional_string(
-        &mut payload,
-        "natural_language_schedule",
-        args.natural_language_schedule,
-    );
+    let mut natural_language_schedule = args.natural_language_schedule;
+    if args.schedule_type.is_none() {
+        if let Some(schedule) =
+            args.schedule.as_deref().map(str::trim).filter(|value| !value.is_empty())
+        {
+            if natural_language_schedule.is_some() {
+                anyhow::bail!(
+                    "--schedule cannot be combined with --natural-language-schedule unless --schedule-type is set"
+                );
+            }
+            natural_language_schedule = Some(schedule.to_owned());
+        }
+    }
+    insert_optional_string(&mut payload, "natural_language_schedule", natural_language_schedule);
     insert_optional_string(
         &mut payload,
         "schedule_type",
@@ -435,9 +444,12 @@ fn insert_optional_bool(payload: &mut Map<String, Value>, key: &str, value: Opti
 mod tests {
     use super::*;
 
-    #[test]
-    fn objective_every_schedule_accepts_duration_syntax() {
-        let payload = build_objective_upsert_payload(ObjectiveUpsertArgs {
+    fn objective_upsert_args(
+        schedule_type: Option<ObjectiveScheduleTypeArg>,
+        schedule: Option<&str>,
+        natural_language_schedule: Option<&str>,
+    ) -> ObjectiveUpsertArgs {
+        ObjectiveUpsertArgs {
             id: None,
             kind: ObjectiveKindArg::Objective,
             name: "Check queue".to_owned(),
@@ -456,9 +468,9 @@ mod tests {
             next_recommended_step: None,
             standing_order: None,
             enabled: Some(true),
-            natural_language_schedule: None,
-            schedule_type: Some(ObjectiveScheduleTypeArg::Every),
-            schedule: Some("15m".to_owned()),
+            natural_language_schedule: natural_language_schedule.map(ToOwned::to_owned),
+            schedule_type,
+            schedule: schedule.map(ToOwned::to_owned),
             delivery_mode: RoutineDeliveryModeArg::SameChannel,
             delivery_channel: None,
             execution_posture: Some(RoutineExecutionPostureArg::SensitiveTools),
@@ -467,7 +479,16 @@ mod tests {
             quiet_hours_timezone: None,
             cooldown_ms: 0,
             approval_mode: RoutineApprovalModeArg::None,
-        })
+        }
+    }
+
+    #[test]
+    fn objective_every_schedule_accepts_duration_syntax() {
+        let payload = build_objective_upsert_payload(objective_upsert_args(
+            Some(ObjectiveScheduleTypeArg::Every),
+            Some("15m"),
+            None,
+        ))
         .expect("duration schedule should be accepted");
 
         assert_eq!(payload.get("every_interval_ms").and_then(Value::as_u64), Some(900_000));
@@ -475,6 +496,35 @@ mod tests {
             payload.get("execution_posture").and_then(Value::as_str),
             Some("sensitive_tools")
         );
+    }
+
+    #[test]
+    fn objective_schedule_without_type_uses_natural_language_parser() {
+        let payload = build_objective_upsert_payload(objective_upsert_args(
+            None,
+            Some("every 1 minute"),
+            None,
+        ))
+        .expect("natural-language schedule should be accepted");
+
+        assert_eq!(
+            payload.get("natural_language_schedule").and_then(Value::as_str),
+            Some("every 1 minute")
+        );
+        assert!(payload.get("schedule_type").is_none());
+        assert!(payload.get("every_interval_ms").is_none());
+    }
+
+    #[test]
+    fn objective_rejects_ambiguous_schedule_without_type() {
+        let error = build_objective_upsert_payload(objective_upsert_args(
+            None,
+            Some("every 1 minute"),
+            Some("every 5 minutes"),
+        ))
+        .expect_err("ambiguous natural-language schedule inputs should be rejected");
+
+        assert!(error.to_string().contains("--schedule cannot be combined"));
     }
 
     #[test]
