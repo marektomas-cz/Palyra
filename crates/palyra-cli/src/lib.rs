@@ -11527,10 +11527,7 @@ mod init_command_tests {
         assert_eq!(read_bool(&document, "tool_call.process_runner.enabled"), Some(true));
         assert_eq!(read_integer(&document, "tool_call.max_calls_per_run"), Some(96));
         assert_eq!(read_integer(&document, "tool_call.execution_timeout_ms"), Some(120_000));
-        assert_eq!(
-            read_bool(&document, "tool_call.process_runner.allow_interpreters"),
-            Some(true)
-        );
+        assert_eq!(read_bool(&document, "tool_call.process_runner.allow_interpreters"), Some(true));
         assert_eq!(
             read_string(&document, "tool_call.process_runner.egress_enforcement_mode").as_deref(),
             Some("none")
