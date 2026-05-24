@@ -660,17 +660,26 @@ pub(crate) async fn navigate_with_guards(
             };
             let projected_len = (body.len() as u64).saturating_add(chunk.len() as u64);
             if projected_len > max_response_bytes {
+                let remaining = max_response_bytes.saturating_sub(body.len() as u64) as usize;
+                if remaining > 0 {
+                    body.extend_from_slice(&chunk[..remaining.min(chunk.len())]);
+                }
+                let page_body = String::from_utf8_lossy(body.as_slice()).to_string();
                 return NavigateOutcome {
-                    success: false,
+                    success: (200..400).contains(&status_code),
                     final_url: current_url.to_string(),
                     status_code,
-                    title: String::new(),
-                    page_body: String::new(),
+                    title: extract_html_title(page_body.as_str()).unwrap_or_default().to_owned(),
+                    page_body,
                     body_bytes: projected_len,
                     latency_ms: started_at.elapsed().as_millis() as u64,
-                    error: format!(
-                        "response exceeds max_response_bytes ({projected_len} > {max_response_bytes})"
-                    ),
+                    error: if status_code >= 400 {
+                        format!("navigation returned HTTP {status_code}")
+                    } else {
+                        format!(
+                            "response exceeds max_response_bytes ({projected_len} > {max_response_bytes}); page_body truncated"
+                        )
+                    },
                     network_log,
                     cookie_updates,
                 };

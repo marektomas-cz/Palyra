@@ -1823,20 +1823,20 @@ pub(crate) async fn navigate_tab_with_chromium(
         return outcome;
     }
     let body_bytes = snapshot.page_body.len() as u64;
-    if body_bytes > params.max_response_bytes {
-        outcome.success = false;
-        outcome.error = format!(
-            "response exceeds max_response_bytes ({} > {})",
-            body_bytes, params.max_response_bytes
-        );
-        outcome.body_bytes = body_bytes;
-        outcome.page_body.clear();
-        outcome.title.clear();
-        return outcome;
-    }
+    let page_body = if body_bytes > params.max_response_bytes {
+        if outcome.error.is_empty() {
+            outcome.error = format!(
+                "response exceeds max_response_bytes ({} > {}); page_body truncated",
+                body_bytes, params.max_response_bytes
+            );
+        }
+        truncate_utf8_bytes(snapshot.page_body.as_str(), params.max_response_bytes as usize)
+    } else {
+        snapshot.page_body
+    };
     outcome.final_url = snapshot.page_url;
     outcome.title = snapshot.title;
-    outcome.page_body = snapshot.page_body;
+    outcome.page_body = page_body;
     outcome.body_bytes = body_bytes;
     if params.allow_private_targets {
         if let Err(error) = private_target_policy.retain_url_allowance(outcome.final_url.as_str()) {

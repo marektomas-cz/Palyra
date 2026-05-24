@@ -687,18 +687,20 @@ async fn navigate_with_guards_blocks_http_redirect_to_local_file() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn navigate_with_guards_enforces_response_size_limit() {
+async fn navigate_with_guards_truncates_oversized_successful_response() {
     let (url, handle) = spawn_chunked_http_server(
         200,
         &["<html><head><title>Oversized</title></head>", "<body>very ", "large</body></html>"],
     );
     let outcome = navigate_with_guards(url.as_str(), 2_000, true, 3, true, 16, None).await;
-    assert!(!outcome.success, "oversized payload must fail");
+    assert!(outcome.success, "oversized successful page should still navigate");
     assert!(
         outcome.error.contains("max_response_bytes"),
-        "size limit error should be explicit: {}",
+        "size limit warning should be explicit: {}",
         outcome.error
     );
+    assert!(outcome.error.contains("truncated"), "warning should say the body was bounded");
+    assert!(outcome.page_body.len() <= 16, "page body should stay bounded");
     assert!(
         outcome.body_bytes > 16,
         "reported body bytes should reflect the first oversized chunk boundary"
