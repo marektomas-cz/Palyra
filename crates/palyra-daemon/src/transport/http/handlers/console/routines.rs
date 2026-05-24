@@ -1602,6 +1602,7 @@ async fn apply_before_first_run_routine_approval(
     routine_approval_apply_outcome(state, "scheduled_first_run", &updated)
 }
 
+#[allow(clippy::result_large_err)]
 fn routine_approval_apply_outcome(
     state: &AppState,
     action: &str,

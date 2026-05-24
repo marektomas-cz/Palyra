@@ -69,6 +69,8 @@ pub(crate) struct ChromiumClientDownload {
     pub(crate) content: Vec<u8>,
 }
 
+type ChromiumLocalStorageSnapshot = Option<(String, HashMap<String, String>)>;
+
 #[derive(Debug, Clone)]
 pub(crate) struct ChromiumNavigateParams {
     pub(crate) raw_url: String,
@@ -1739,7 +1741,7 @@ fn chromium_restore_local_storage_script(
 
 fn parse_chromium_local_storage_snapshot(
     value: serde_json::Value,
-) -> Result<Option<(String, HashMap<String, String>)>, String> {
+) -> Result<ChromiumLocalStorageSnapshot, String> {
     let object = value
         .as_object()
         .ok_or_else(|| "localStorage read returned non-object payload".to_owned())?;
