@@ -2544,15 +2544,25 @@ fn parse_quiet_hours(
     })?;
     let start_minute_of_day = parse_time_of_day_to_minutes(start)?;
     let end_minute_of_day = parse_time_of_day_to_minutes(end)?;
-    let timezone = timezone.and_then(|value| {
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_ascii_lowercase())
-        }
-    });
+    let timezone = normalize_quiet_hours_timezone(timezone)?;
     Ok(Some(RoutineQuietHours { start_minute_of_day, end_minute_of_day, timezone }))
+}
+
+#[allow(clippy::result_large_err)]
+fn normalize_quiet_hours_timezone(timezone: Option<String>) -> Result<Option<String>, Response> {
+    let Some(raw) = timezone else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let mode = CronTimezoneMode::from_str(trimmed).ok_or_else(|| {
+        runtime_status_response(tonic::Status::invalid_argument(
+            "quiet_hours timezone must be local, utc, or an IANA timezone",
+        ))
+    })?;
+    Ok(Some(mode.as_str().to_owned()))
 }
 
 #[allow(clippy::result_large_err)]
@@ -2701,12 +2711,12 @@ fn parse_optional_schedule_timezone_mode(
     default_timezone_mode: CronTimezoneMode,
 ) -> Result<CronTimezoneMode, Response> {
     match value.map(str::trim).filter(|value| !value.is_empty()) {
-        Some("local") => Ok(CronTimezoneMode::Local),
-        Some("utc") => Ok(CronTimezoneMode::Utc),
+        Some(value) => CronTimezoneMode::from_str(value).ok_or_else(|| {
+            runtime_status_response(tonic::Status::invalid_argument(
+                "schedule_timezone must be local, utc, or an IANA timezone",
+            ))
+        }),
         None => Ok(default_timezone_mode),
-        Some(_) => Err(runtime_status_response(tonic::Status::invalid_argument(
-            "schedule_timezone must be one of local|utc",
-        ))),
     }
 }
 
@@ -2718,8 +2728,16 @@ fn is_in_quiet_hours(
     let Some(quiet_hours) = quiet_hours else {
         return Ok(false);
     };
-    let minute_of_day = match quiet_hours.timezone.as_deref().unwrap_or("local") {
-        "utc" => {
+    let timezone_mode = CronTimezoneMode::from_str(
+        quiet_hours.timezone.as_deref().unwrap_or("local"),
+    )
+    .ok_or_else(|| {
+        runtime_status_response(tonic::Status::invalid_argument(
+            "quiet_hours timezone must be local, utc, or an IANA timezone",
+        ))
+    })?;
+    let minute_of_day = match timezone_mode {
+        CronTimezoneMode::Utc => {
             let value =
                 chrono::Utc.timestamp_millis_opt(now_unix_ms).single().ok_or_else(|| {
                     runtime_status_response(tonic::Status::internal(
@@ -2728,7 +2746,7 @@ fn is_in_quiet_hours(
                 })?;
             value.hour() as u16 * 60 + value.minute() as u16
         }
-        "local" => {
+        CronTimezoneMode::Local => {
             let value =
                 chrono::Local.timestamp_millis_opt(now_unix_ms).single().ok_or_else(|| {
                     runtime_status_response(tonic::Status::internal(
@@ -2737,10 +2755,13 @@ fn is_in_quiet_hours(
                 })?;
             value.hour() as u16 * 60 + value.minute() as u16
         }
-        _ => {
-            return Err(runtime_status_response(tonic::Status::invalid_argument(
-                "quiet_hours timezone must be one of local|utc",
-            )))
+        CronTimezoneMode::Named(timezone) => {
+            let value = timezone.timestamp_millis_opt(now_unix_ms).single().ok_or_else(|| {
+                runtime_status_response(tonic::Status::internal(
+                    "failed to resolve named quiet-hour timestamp",
+                ))
+            })?;
+            value.hour() as u16 * 60 + value.minute() as u16
         }
     };
     let start = quiet_hours.start_minute_of_day;
@@ -2873,9 +2894,9 @@ mod tests {
         );
         assert_eq!(
             parse_optional_schedule_timezone_mode(Some("Europe/Prague"), CronTimezoneMode::Utc)
-                .expect_err("named zones are not supported by the cron evaluator")
-                .status(),
-            StatusCode::BAD_REQUEST
+                .expect("IANA timezone override should parse")
+                .as_str(),
+            "Europe/Prague"
         );
     }
 
@@ -3259,6 +3280,23 @@ mod tests {
             is_in_quiet_hours(Some(&quiet_hours), morning).expect("quiet hours should evaluate")
         );
         assert!(!is_in_quiet_hours(Some(&quiet_hours), noon).expect("quiet hours should evaluate"));
+    }
+
+    #[test]
+    fn quiet_hours_accept_named_iana_timezone() {
+        let quiet_hours =
+            parse_quiet_hours(Some("09:00"), Some("10:00"), Some("Europe/Prague".to_owned()))
+                .expect("named quiet hours timezone should parse")
+                .expect("quiet hours should exist");
+        assert_eq!(quiet_hours.timezone.as_deref(), Some("Europe/Prague"));
+        let prague_morning = Utc
+            .with_ymd_and_hms(2026, 5, 24, 7, 30, 0)
+            .single()
+            .expect("timestamp should build")
+            .timestamp_millis();
+
+        assert!(is_in_quiet_hours(Some(&quiet_hours), prague_morning)
+            .expect("named quiet hours should evaluate"));
     }
 
     #[test]
