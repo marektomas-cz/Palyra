@@ -144,7 +144,8 @@ top of the same local supervisor and `/console/v1` control-plane APIs.
   portable archive layout matches the runtime contract.
 - The canonical packaging smoke is `pwsh -NoLogo -File ../../scripts/test/run-release-smoke.ps1`.
 - Windows clean-install manual testing can use:
-  - `pwsh -NoLogo -File ../../scripts/test/install-clean-desktop.ps1 -Launch`
+  - `pwsh -NoLogo -File ../../scripts/test/install-clean-desktop.ps1`
+  - pass `-NoLaunch` when the install should not start the desktop sidecars
   - `pwsh -NoLogo -File ../../scripts/test/uninstall-clean-desktop.ps1`
   - default harness root: `%LOCALAPPDATA%\Palyra-TestHarness`
 - Installer metadata is written to `install-metadata.json` inside the install root and is consumed

@@ -1,7 +1,8 @@
 param(
     [string]$WorkspaceRoot,
     [switch]$SkipBuild,
-    [switch]$Launch
+    [switch]$Launch,
+    [switch]$NoLaunch
 )
 
 Set-StrictMode -Version Latest
@@ -11,6 +12,10 @@ $ProgressPreference = "SilentlyContinue"
 $InformationPreference = "SilentlyContinue"
 
 . (Join-Path $PSScriptRoot "../release/common.ps1")
+
+if ($Launch -and $NoLaunch) {
+    throw "Pass either -Launch or -NoLaunch, not both."
+}
 
 function Get-DefaultHarnessRoot {
     $localAppData = [Environment]::GetFolderPath("LocalApplicationData")
@@ -236,6 +241,7 @@ if ($IsWindows) {
 }
 
 $launcherPath = Join-Path $resolvedInstallRoot "Launch-Palyra-Test.ps1"
+$shouldLaunch = $Launch -or -not $NoLaunch
 
 $launcherBody =
 @"
@@ -297,12 +303,13 @@ $installSummary = [ordered]@{
     cli_path_preflight_matches_command_root = $cliPathPreflightMatchesCommandRoot
     cli_path_preflight_matches_harness = $cliPathPreflightMatchesCommandRoot
     launcher_path = $launcherPath
+    launched = $shouldLaunch
 }
 $installSummary |
     ConvertTo-Json -Depth 4 |
     Set-Content -LiteralPath (Join-Path $workspaceRoot "clean-install-metadata.json")
 
-if ($Launch) {
+if ($shouldLaunch) {
     & $launcherPath
 }
 
@@ -323,3 +330,4 @@ Write-Output "cli_path_preflight_source=$cliPathPreflightSource"
 Write-Output "cli_path_preflight_matches_command_root=$cliPathPreflightMatchesCommandRoot"
 Write-Output "cli_path_preflight_matches_harness=$cliPathPreflightMatchesCommandRoot"
 Write-Output "launcher_path=$launcherPath"
+Write-Output "launched=$shouldLaunch"
