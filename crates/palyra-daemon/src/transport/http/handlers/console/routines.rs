@@ -15,10 +15,11 @@ use crate::{
     cron::{self, CronTimezoneMode},
     gateway::{proto::palyra::cron::v1 as cron_v1, validate_cron_job_channel_context},
     journal::{
-        ApprovalCreateRequest, ApprovalPolicySnapshot, ApprovalPromptOption, ApprovalPromptRecord,
-        ApprovalRiskLevel, CronConcurrencyPolicy, CronJobCreateRequest, CronJobRecord,
-        CronJobUpdatePatch, CronMisfirePolicy, CronRetryPolicy, CronRunFinalizeRequest,
-        CronRunStartRequest, CronRunStatus, CronScheduleType,
+        ApprovalCreateRequest, ApprovalDecision, ApprovalPolicySnapshot, ApprovalPromptOption,
+        ApprovalPromptRecord, ApprovalRecord, ApprovalRiskLevel, ApprovalSubjectType,
+        CronConcurrencyPolicy, CronJobCreateRequest, CronJobRecord, CronJobUpdatePatch,
+        CronMisfirePolicy, CronRetryPolicy, CronRunFinalizeRequest, CronRunStartRequest,
+        CronRunStatus, CronScheduleType,
     },
     routines::{
         build_routine_export_bundle, default_outcome_from_cron_status, join_run_metadata,
@@ -1357,6 +1358,14 @@ fn routine_approval_subject_id(routine_id: &str, mode: RoutineApprovalMode) -> S
     format!("routine:{routine_id}:{}", mode.as_str())
 }
 
+fn parse_routine_approval_subject(subject_id: &str) -> Option<(String, RoutineApprovalMode)> {
+    let (routine_id, mode) = subject_id.strip_prefix("routine:")?.rsplit_once(':')?;
+    if routine_id.trim().is_empty() {
+        return None;
+    }
+    Some((routine_id.to_owned(), RoutineApprovalMode::from_str(mode)?))
+}
+
 async fn routine_approval_granted(state: &AppState, subject_id: String) -> Result<bool, Response> {
     let (approvals, _) = state
         .runtime
@@ -1494,6 +1503,124 @@ async fn ensure_routine_approval_requested(
             "failed to serialize routine approval record: {error}"
         )))
     })
+}
+
+pub(crate) async fn apply_routine_approval_decision(
+    state: &AppState,
+    approval: &ApprovalRecord,
+) -> Result<Option<Value>, Response> {
+    if !matches!(approval.decision, Some(ApprovalDecision::Allow))
+        || approval.subject_type != ApprovalSubjectType::Tool
+    {
+        return Ok(None);
+    }
+    let Some((routine_id, mode)) = parse_routine_approval_subject(approval.subject_id.as_str())
+    else {
+        return Ok(None);
+    };
+    match mode {
+        RoutineApprovalMode::BeforeEnable => {
+            apply_before_enable_routine_approval(state, routine_id.as_str()).await
+        }
+        RoutineApprovalMode::BeforeFirstRun => {
+            apply_before_first_run_routine_approval(state, routine_id.as_str()).await
+        }
+        RoutineApprovalMode::None => Ok(None),
+    }
+}
+
+async fn apply_before_enable_routine_approval(
+    state: &AppState,
+    routine_id: &str,
+) -> Result<Option<Value>, Response> {
+    let Some(job) =
+        state.runtime.cron_job(routine_id.to_owned()).await.map_err(runtime_status_response)?
+    else {
+        return Ok(Some(json!({
+            "action": "missing_routine",
+            "routine_id": routine_id,
+        })));
+    };
+    require_routines_automation_enabled_for_write(state, true)?;
+    let next_run_at_unix_ms = cron::next_run_at_for_enabled_state(
+        &job,
+        true,
+        crate::gateway::current_unix_ms_status().map_err(runtime_status_response)?,
+    )
+    .map_err(runtime_status_response)?;
+    let updated = state
+        .runtime
+        .update_cron_job(
+            job.job_id.clone(),
+            CronJobUpdatePatch {
+                enabled: Some(true),
+                next_run_at_unix_ms: Some(next_run_at_unix_ms),
+                queued_run: Some(false),
+                ..CronJobUpdatePatch::default()
+            },
+        )
+        .await
+        .map_err(runtime_status_response)?;
+    state.scheduler_wake.notify_one();
+    routine_approval_apply_outcome(state, "enabled", &updated)
+}
+
+async fn apply_before_first_run_routine_approval(
+    state: &AppState,
+    routine_id: &str,
+) -> Result<Option<Value>, Response> {
+    let Some(job) =
+        state.runtime.cron_job(routine_id.to_owned()).await.map_err(runtime_status_response)?
+    else {
+        return Ok(Some(json!({
+            "action": "missing_routine",
+            "routine_id": routine_id,
+        })));
+    };
+    if !job.enabled {
+        return routine_approval_apply_outcome(state, "routine_disabled", &job);
+    }
+    if job.next_run_at_unix_ms.is_some() {
+        return routine_approval_apply_outcome(state, "already_scheduled", &job);
+    }
+    require_routines_automation_enabled_for_write(state, true)?;
+    let updated = state
+        .runtime
+        .update_cron_job(
+            job.job_id.clone(),
+            CronJobUpdatePatch {
+                next_run_at_unix_ms: Some(Some(
+                    crate::gateway::current_unix_ms_status().map_err(runtime_status_response)?,
+                )),
+                queued_run: Some(false),
+                ..CronJobUpdatePatch::default()
+            },
+        )
+        .await
+        .map_err(runtime_status_response)?;
+    state.scheduler_wake.notify_one();
+    routine_approval_apply_outcome(state, "scheduled_first_run", &updated)
+}
+
+fn routine_approval_apply_outcome(
+    state: &AppState,
+    action: &str,
+    job: &CronJobRecord,
+) -> Result<Option<Value>, Response> {
+    let metadata =
+        state.routines.get_routine(job.job_id.as_str()).map_err(routine_registry_error_response)?;
+    Ok(Some(match metadata {
+        Some(metadata) => json!({
+            "action": action,
+            "routine": routine_view_from_parts(job, &metadata),
+        }),
+        None => json!({
+            "action": action,
+            "routine_id": job.job_id,
+            "enabled": job.enabled,
+            "next_run_at_unix_ms": job.next_run_at_unix_ms,
+        }),
+    }))
 }
 
 #[derive(Debug, Clone)]
@@ -2801,6 +2928,7 @@ mod tests {
     use super::{
         compare_optional_matchers, is_in_quiet_hours, normalize_channel, parse_delivery,
         parse_execution_config, parse_optional_schedule_timezone_mode, parse_quiet_hours,
+        parse_routine_approval_subject, routine_approval_subject_id,
         routine_automation_flag_permits_enabled_write, routine_matches_trigger,
         routine_output_fields_from_session, routine_output_text_from_tape_events,
         routine_troubleshooting_recommended_action,
@@ -2873,6 +3001,25 @@ mod tests {
             routine_troubleshooting_recommended_action(true, 0, 0, 1),
             "Review cooldown, quiet hours, or trigger dedupe rules that may be suppressing execution."
         );
+    }
+
+    #[test]
+    fn routine_approval_subject_round_trips_enable_and_first_run_modes() {
+        let routine_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        assert_eq!(
+            parse_routine_approval_subject(
+                routine_approval_subject_id(routine_id, RoutineApprovalMode::BeforeEnable).as_str()
+            ),
+            Some((routine_id.to_owned(), RoutineApprovalMode::BeforeEnable))
+        );
+        assert_eq!(
+            parse_routine_approval_subject(
+                routine_approval_subject_id(routine_id, RoutineApprovalMode::BeforeFirstRun)
+                    .as_str()
+            ),
+            Some((routine_id.to_owned(), RoutineApprovalMode::BeforeFirstRun))
+        );
+        assert_eq!(parse_routine_approval_subject("tool:other"), None);
     }
 
     #[test]

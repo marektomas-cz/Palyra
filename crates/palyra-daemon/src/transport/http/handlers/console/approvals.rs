@@ -131,6 +131,8 @@ pub(crate) async fn console_approval_decision_handler(
     } else {
         None
     };
+    let routine_outcome =
+        super::routines::apply_routine_approval_decision(&state, &resolved).await?;
     let forwarded_to_console_chat = sync_console_chat_approval_to_stream(&state, &resolved).await;
     if !forwarded_to_console_chat {
         crate::application::approvals::record_approval_resolved_journal_event(
@@ -148,10 +150,14 @@ pub(crate) async fn console_approval_decision_handler(
         .await
         .map_err(runtime_status_response)?;
     }
-    Ok(Json(json!({
+    let mut response = json!({
         "approval": resolved,
         "dm_pairing": pairing_outcome,
-    })))
+    });
+    if let Some(routine_outcome) = routine_outcome {
+        response["routine"] = routine_outcome;
+    }
+    Ok(Json(response))
 }
 
 #[allow(clippy::result_large_err)]

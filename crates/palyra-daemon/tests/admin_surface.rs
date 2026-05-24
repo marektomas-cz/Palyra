@@ -1910,6 +1910,113 @@ fn console_routine_import_rejects_existing_job_owned_by_another_principal() -> R
 }
 
 #[test]
+fn console_routine_approval_allow_enables_pending_routine() -> Result<()> {
+    let (child, admin_port) =
+        spawn_palyrad_with_dynamic_ports_with_env(&[("PALYRA_ADMIN_REQUIRE_AUTH", "false")])?;
+    let mut daemon = ChildGuard::new(child);
+    wait_for_health(admin_port, daemon.child_mut())?;
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(4))
+        .build()
+        .context("failed to build HTTP client")?;
+    let (cookie, csrf_token) = login_console_session(&client, admin_port, CONSOLE_ADMIN_PRINCIPAL)?;
+    client
+        .post(format!(
+            "http://127.0.0.1:{admin_port}/console/v1/access/features/routines_automation"
+        ))
+        .header("Cookie", cookie.clone())
+        .header("x-palyra-csrf-token", csrf_token.clone())
+        .json(&serde_json::json!({
+            "enabled": true,
+            "stage": "test",
+        }))
+        .send()
+        .context("failed to enable routines automation for approval test")?
+        .error_for_status()
+        .context("routines automation feature enable returned non-success status")?;
+
+    let created = client
+        .post(format!("http://127.0.0.1:{admin_port}/console/v1/routines"))
+        .header("Cookie", cookie.clone())
+        .header("x-palyra-csrf-token", csrf_token.clone())
+        .json(&serde_json::json!({
+            "name": "approval-enable-routine",
+            "prompt": "approval enable routine validation",
+            "trigger_kind": "schedule",
+            "schedule_type": "every",
+            "every_interval_ms": 60000,
+            "enabled": true,
+            "channel": "web",
+        }))
+        .send()
+        .context("failed to create approval-gated routine")?
+        .error_for_status()
+        .context("approval-gated routine create returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse approval-gated routine create response json")?;
+    let routine_id = created
+        .pointer("/routine/routine_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("approval-gated routine create missing routine id"))?;
+    assert_eq!(
+        created.pointer("/routine/enabled").and_then(Value::as_bool),
+        Some(false),
+        "auto-enable guard should keep high-frequency routine disabled until approval"
+    );
+    let approval_id = created
+        .pointer("/approval/approval_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("approval-gated routine create missing approval id"))?;
+
+    let approved = client
+        .post(format!("http://127.0.0.1:{admin_port}/console/v1/approvals/{approval_id}/decision"))
+        .header("Cookie", cookie.clone())
+        .header("x-palyra-csrf-token", csrf_token.clone())
+        .json(&serde_json::json!({
+            "approved": true,
+            "decision_scope": "once",
+        }))
+        .send()
+        .context("failed to approve routine enable request")?
+        .error_for_status()
+        .context("routine enable approval returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse routine enable approval response json")?;
+    assert_eq!(
+        approved.pointer("/routine/action").and_then(Value::as_str),
+        Some("enabled"),
+        "approval decision should carry the applied routine action"
+    );
+    assert_eq!(
+        approved.pointer("/routine/routine/enabled").and_then(Value::as_bool),
+        Some(true),
+        "approved routine should be enabled in the decision response"
+    );
+    assert!(
+        approved.pointer("/routine/routine/next_run_at_unix_ms").and_then(Value::as_i64).is_some(),
+        "approved routine should receive a next run timestamp"
+    );
+
+    let fetched = client
+        .get(format!("http://127.0.0.1:{admin_port}/console/v1/routines/{routine_id}"))
+        .header("Cookie", cookie)
+        .send()
+        .context("failed to fetch approved routine")?
+        .error_for_status()
+        .context("approved routine fetch returned non-success status")?
+        .json::<Value>()
+        .context("failed to parse approved routine response json")?;
+    assert_eq!(
+        fetched.pointer("/routine/enabled").and_then(Value::as_bool),
+        Some(true),
+        "approved routine should stay enabled after refetch"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn console_routine_test_run_preserves_disabled_and_before_first_run_gates() -> Result<()> {
     let (child, admin_port) =
         spawn_palyrad_with_dynamic_ports_with_env(&[("PALYRA_ADMIN_REQUIRE_AUTH", "false")])?;
