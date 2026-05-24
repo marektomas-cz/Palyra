@@ -894,6 +894,14 @@ async fn run_browser_start(
     }
     lifecycle_warnings.extend(browser_start_auth_token_warnings(&resolved));
     if fetch_browser_health(resolved.connection.health_base_url.as_str()).await.is_ok() {
+        if let Err(error) = probe_browser_grpc(&resolved.connection).await {
+            anyhow::bail!(
+                "browser health endpoint is reachable at {}, but authenticated gRPC readiness failed at {}: {}. This usually means another browserd is running with a different token; stop that process or restart the desktop supervisor, then rerun `palyra browser start --setup`.",
+                resolved.connection.health_base_url,
+                resolved.connection.grpc_url,
+                error
+            );
+        }
         let metadata = read_browser_service_metadata()?;
         let payload = BrowserLifecyclePayload {
             action: "start".to_owned(),
@@ -971,37 +979,67 @@ async fn run_browser_start(
 
     let deadline = Duration::from_millis(wait_ms.max(BROWSER_SERVICE_START_POLL_MS));
     let started = SystemTime::now();
+    let mut last_health_error: Option<String> = None;
+    let mut last_grpc_error: Option<String> = None;
     loop {
-        if fetch_browser_health(resolved.connection.health_base_url.as_str()).await.is_ok() {
-            let payload = BrowserLifecyclePayload {
-                action: "start".to_owned(),
-                running: true,
-                pid: Some(metadata.pid),
-                grpc_url: resolved.connection.grpc_url,
-                health_base_url: resolved.connection.health_base_url,
-                stdout_log_path: Some(metadata.stdout_log_path),
-                stderr_log_path: Some(metadata.stderr_log_path),
-                detail: "browser service started and passed health check".to_owned(),
-                warnings: lifecycle_warnings,
-            };
-            let value = serde_json::to_value(&payload)
-                .context("failed to encode browser lifecycle payload")?;
-            return emit_browser_value_with_json(
-                &value,
-                format_browser_lifecycle_text(&payload),
-                "failed to encode browser lifecycle output",
-                json,
-            );
+        match fetch_browser_health(resolved.connection.health_base_url.as_str()).await {
+            Ok(_) => match probe_browser_grpc(&resolved.connection).await {
+                Ok(()) => {
+                    let payload = BrowserLifecyclePayload {
+                        action: "start".to_owned(),
+                        running: true,
+                        pid: Some(metadata.pid),
+                        grpc_url: resolved.connection.grpc_url,
+                        health_base_url: resolved.connection.health_base_url,
+                        stdout_log_path: Some(metadata.stdout_log_path),
+                        stderr_log_path: Some(metadata.stderr_log_path),
+                        detail: "browser service started and passed authenticated readiness checks"
+                            .to_owned(),
+                        warnings: lifecycle_warnings,
+                    };
+                    let value = serde_json::to_value(&payload)
+                        .context("failed to encode browser lifecycle payload")?;
+                    return emit_browser_value_with_json(
+                        &value,
+                        format_browser_lifecycle_text(&payload),
+                        "failed to encode browser lifecycle output",
+                        json,
+                    );
+                }
+                Err(error) => {
+                    last_grpc_error = Some(error.to_string());
+                }
+            },
+            Err(error) => {
+                last_health_error = Some(error.to_string());
+            }
         }
         if started.elapsed().unwrap_or_default() >= deadline {
+            let readiness_detail = browser_start_readiness_timeout_detail(
+                last_health_error.as_deref(),
+                last_grpc_error.as_deref(),
+            );
             anyhow::bail!(
-                "browser service did not become healthy within {} ms; inspect {} and {}",
+                "browser service did not become ready within {} ms ({readiness_detail}); inspect {} and {}",
                 wait_ms.max(BROWSER_SERVICE_START_POLL_MS),
                 stdout_log_path.display(),
                 stderr_log_path.display()
             );
         }
         sleep(Duration::from_millis(BROWSER_SERVICE_START_POLL_MS)).await;
+    }
+}
+
+fn browser_start_readiness_timeout_detail(
+    last_health_error: Option<&str>,
+    last_grpc_error: Option<&str>,
+) -> String {
+    match (last_health_error, last_grpc_error) {
+        (_, Some(grpc_error)) => {
+            format!("authenticated gRPC readiness failed: {grpc_error}")
+        }
+        (Some(health_error), None) => format!("health check failed: {health_error}"),
+        (None, None) => "no readiness response was observed".to_owned(),
     }
 }
 
@@ -4471,14 +4509,14 @@ mod tests {
         browser_service_stop_complete, browser_service_stop_pending_reasons,
         browser_session_handle_text, browser_setup_gateway_reload_warning,
         browser_snapshot_emits_json_to_stdout, browser_start_auth_token_warnings,
-        browser_status_control_plane_policy_snapshot, browser_status_warnings,
-        effective_browser_lifecycle_running, ensure_browser_command_success,
-        ensure_browser_gateway_auth_token_alignment, ensure_browser_service_enabled,
-        ensure_browser_start_preflight, format_browser_console_text,
-        format_browser_session_summary_text, normalize_session_scoped_output,
-        redact_browser_output_value, session_summary_value, BrowserControlPlaneSnapshot,
-        BrowserOutputMode, BrowserPolicySnapshot, BrowserResolvedConfig, BrowserServiceConnection,
-        BrowserServiceMetadata,
+        browser_start_readiness_timeout_detail, browser_status_control_plane_policy_snapshot,
+        browser_status_warnings, effective_browser_lifecycle_running,
+        ensure_browser_command_success, ensure_browser_gateway_auth_token_alignment,
+        ensure_browser_service_enabled, ensure_browser_start_preflight,
+        format_browser_console_text, format_browser_session_summary_text,
+        normalize_session_scoped_output, redact_browser_output_value, session_summary_value,
+        BrowserControlPlaneSnapshot, BrowserOutputMode, BrowserPolicySnapshot,
+        BrowserResolvedConfig, BrowserServiceConnection, BrowserServiceMetadata,
     };
     use crate::{args::BrowserCommand, browser_v1, common_v1};
     use palyra_control_plane as control_plane;
@@ -5229,6 +5267,28 @@ mod tests {
             warnings.iter().any(|warning| warning.contains("no CLI lifecycle metadata")),
             "reachable unmanaged browserd should produce a clear lifecycle warning: {warnings:?}"
         );
+    }
+
+    #[test]
+    fn browser_start_timeout_detail_prefers_authenticated_grpc_failure() {
+        let detail = browser_start_readiness_timeout_detail(
+            Some("health endpoint refused connection"),
+            Some("failed to call browser ListSessions: unauthenticated"),
+        );
+
+        assert!(detail.contains("authenticated gRPC readiness failed"));
+        assert!(detail.contains("failed to call browser ListSessions"));
+        assert!(!detail.contains("health endpoint refused connection"));
+    }
+
+    #[test]
+    fn browser_start_timeout_detail_reports_health_failure_without_grpc_probe() {
+        let detail = browser_start_readiness_timeout_detail(
+            Some("failed to reach browser health endpoint"),
+            None,
+        );
+
+        assert_eq!(detail, "health check failed: failed to reach browser health endpoint");
     }
 
     #[test]
