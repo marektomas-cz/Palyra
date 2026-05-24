@@ -162,6 +162,20 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
             ToolResultProjectionPolicy::InlineUnlessLarge,
         ),
         entry(
+            "palyra.memory.delete",
+            "Delete a scoped memory item by memory_id after the user asks to forget or remove it.",
+            object_schema(
+                &["memory_id"],
+                vec![(
+                    "memory_id",
+                    json!({"type":"string","description":"Canonical memory_id returned by palyra.memory.search or palyra.memory.recall."}),
+                )],
+                false,
+            ),
+            ToolParallelismPolicy::Exclusive,
+            ToolResultProjectionPolicy::InlineUnlessLarge,
+        ),
+        entry(
             "palyra.memory.reflect",
             "Extract bounded memory reflection candidates from run context.",
             object_schema(

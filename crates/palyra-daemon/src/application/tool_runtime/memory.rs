@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use palyra_common::validate_canonical_id;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use ulid::Ulid;
@@ -7,11 +8,11 @@ use ulid::Ulid;
 use crate::{
     application::{
         memory::{
-            normalize_lifecycle_content, redact_memory_text_for_output, reflect_memory_candidates,
-            ttl_unix_ms_from_input, MemoryLifecycleProvider, MemoryLifecycleRetainOutcome,
-            MemoryLifecycleRetainRequest, MemoryLifecycleScope, MemoryLifecycleStatus,
-            MemoryReflectionCategory, MemoryReflectionOutcome, MemoryReflectionRequest,
-            MEMORY_CONTEXT_FENCE_VERSION, MEMORY_TRUST_LABEL_RETRIEVED,
+            enforce_memory_item_scope, normalize_lifecycle_content, redact_memory_text_for_output,
+            reflect_memory_candidates, ttl_unix_ms_from_input, MemoryLifecycleProvider,
+            MemoryLifecycleRetainOutcome, MemoryLifecycleRetainRequest, MemoryLifecycleScope,
+            MemoryLifecycleStatus, MemoryReflectionCategory, MemoryReflectionOutcome,
+            MemoryReflectionRequest, MEMORY_CONTEXT_FENCE_VERSION, MEMORY_TRUST_LABEL_RETRIEVED,
         },
         recall::{preview_recall, RecallPreviewEnvelope, RecallRequest},
         service_authorization::authorize_memory_action,
@@ -346,6 +347,139 @@ pub(crate) async fn execute_memory_retain_tool(
         &outcome,
         source_normalization,
     )
+}
+
+pub(crate) async fn execute_memory_delete_tool(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    context: ToolRuntimeExecutionContext<'_>,
+    proposal_id: &str,
+    input_json: &[u8],
+) -> ToolExecutionOutcome {
+    let namespace = b"palyra.memory.delete.attestation.v1";
+    let parsed = match parse_memory_tool_object(input_json) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return memory_tool_execution_outcome(
+                namespace,
+                proposal_id,
+                input_json,
+                false,
+                b"{}".to_vec(),
+                format!("palyra.memory.delete {error}"),
+            );
+        }
+    };
+    let memory_id = match required_string_field(&parsed, "memory_id") {
+        Ok(value) => value,
+        Err(error) => {
+            return memory_tool_execution_outcome(
+                namespace,
+                proposal_id,
+                input_json,
+                false,
+                b"{}".to_vec(),
+                format!("palyra.memory.delete {error}"),
+            );
+        }
+    };
+    if let Err(error) = validate_canonical_id(memory_id.as_str()) {
+        return memory_tool_execution_outcome(
+            namespace,
+            proposal_id,
+            input_json,
+            false,
+            b"{}".to_vec(),
+            format!("palyra.memory.delete memory_id must be a canonical ULID: {error}"),
+        );
+    }
+    if let Err(error) = authorize_memory_action(
+        context.principal,
+        "memory.delete",
+        format!("memory:{memory_id}").as_str(),
+    ) {
+        return memory_tool_execution_outcome(
+            namespace,
+            proposal_id,
+            input_json,
+            false,
+            b"{}".to_vec(),
+            format!("palyra.memory.delete {}", error.message()),
+        );
+    }
+    match runtime_state.memory_item(memory_id.clone()).await {
+        Ok(Some(item)) => {
+            if let Err(error) = enforce_memory_item_scope(&item, context.principal, context.channel)
+            {
+                return memory_tool_execution_outcome(
+                    namespace,
+                    proposal_id,
+                    input_json,
+                    false,
+                    b"{}".to_vec(),
+                    format!("palyra.memory.delete {}", error.message()),
+                );
+            }
+        }
+        Ok(None) => {}
+        Err(error) => {
+            return memory_tool_execution_outcome(
+                namespace,
+                proposal_id,
+                input_json,
+                false,
+                b"{}".to_vec(),
+                format!("palyra.memory.delete failed: {}", error.message()),
+            );
+        }
+    }
+    let deleted = match runtime_state
+        .delete_memory_item(
+            memory_id.clone(),
+            context.principal.to_owned(),
+            context.channel.map(str::to_owned),
+        )
+        .await
+    {
+        Ok(deleted) => deleted,
+        Err(error) => {
+            return memory_tool_execution_outcome(
+                namespace,
+                proposal_id,
+                input_json,
+                false,
+                b"{}".to_vec(),
+                format!("palyra.memory.delete failed: {}", error.message()),
+            );
+        }
+    };
+    let payload = json!({
+        "memory_id": memory_id,
+        "deleted": deleted,
+        "status": if deleted { "deleted" } else { "not_found_or_already_deleted" },
+        "claim_boundary": if deleted {
+            "memory item was deleted and should not be claimed as retained"
+        } else {
+            "no matching memory item was deleted; do not claim the memory was removed"
+        },
+    });
+    match serde_json::to_vec(&payload) {
+        Ok(output_json) => memory_tool_execution_outcome(
+            namespace,
+            proposal_id,
+            input_json,
+            true,
+            output_json,
+            String::new(),
+        ),
+        Err(error) => memory_tool_execution_outcome(
+            namespace,
+            proposal_id,
+            input_json,
+            false,
+            b"{}".to_vec(),
+            format!("palyra.memory.delete failed to serialize output: {error}"),
+        ),
+    }
 }
 
 pub(crate) async fn execute_memory_reflect_tool(

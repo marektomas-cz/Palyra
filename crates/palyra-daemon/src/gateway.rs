@@ -179,6 +179,7 @@ pub(crate) const MEMORY_RECALL_TOOL_NAME: &str = "palyra.memory.recall";
 pub(crate) const MEMORY_SESSION_SEARCH_TOOL_NAME: &str = "palyra.memory.session_search";
 pub(crate) const MEMORY_SESSION_SEARCH_ALIAS_TOOL_NAME: &str = "palyra.session_search";
 pub(crate) const MEMORY_RETAIN_TOOL_NAME: &str = "palyra.memory.retain";
+pub(crate) const MEMORY_DELETE_TOOL_NAME: &str = "palyra.memory.delete";
 pub(crate) const MEMORY_REFLECT_TOOL_NAME: &str = "palyra.memory.reflect";
 pub(crate) const ROUTINES_QUERY_TOOL_NAME: &str = "palyra.routines.query";
 pub(crate) const ROUTINES_CONTROL_TOOL_NAME: &str = "palyra.routines.control";
@@ -628,6 +629,14 @@ pub(crate) async fn execute_tool_with_runtime_dispatch(
         .await
     } else if tool_name == MEMORY_RETAIN_TOOL_NAME {
         crate::application::tool_runtime::memory::execute_memory_retain_tool(
+            runtime_state,
+            context,
+            proposal_id,
+            input_json,
+        )
+        .await
+    } else if tool_name == MEMORY_DELETE_TOOL_NAME {
+        crate::application::tool_runtime::memory::execute_memory_delete_tool(
             runtime_state,
             context,
             proposal_id,

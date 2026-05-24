@@ -1,5 +1,5 @@
 use super::builtin::registry_entry;
-use super::types::ToolCallRejectionKind;
+use super::types::{ToolCallRejectionKind, ToolParallelismPolicy};
 use super::{
     build_model_visible_tool_catalog_snapshot, projection_policy_for_tool,
     provider_tools_from_catalog_snapshot, snapshot_to_provider_request_value,
@@ -372,6 +372,19 @@ fn memory_retain_schema_explains_principal_scope_for_corrections() {
         .as_str()
         .unwrap_or_default()
         .contains("old value"));
+}
+
+#[test]
+fn memory_delete_schema_uses_search_memory_id() {
+    let entry = registry_entry("palyra.memory.delete").expect("delete tool entry");
+
+    assert!(entry.description.contains("forget"));
+    assert_eq!(entry.input_schema["required"][0], "memory_id");
+    assert!(entry.input_schema["properties"]["memory_id"]["description"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("palyra.memory.search"));
+    assert_eq!(entry.parallelism_policy, ToolParallelismPolicy::Exclusive);
 }
 
 #[test]

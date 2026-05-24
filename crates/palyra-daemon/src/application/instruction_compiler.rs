@@ -233,6 +233,9 @@ fn tool_specific_contract(tool_names: &[String]) -> String {
     if tool_names.iter().any(|tool| tool == "palyra.memory.retain") {
         contracts.push("palyra.memory.retain lifecycle contract: source must be one of manual, summary, import, tape:user_message, or tape:tool_result; use manual for user-stated preferences, corrections, and directives. When the user asks to remember, save, store, retain, or consolidate information present in the current request, call palyra.memory.retain with that current request content; do not search memory first for content that is already in the prompt, and do not claim the current request content is unavailable. For preferences, corrections, replacements, or facts that should affect later or future sessions, set scope=principal; scope=session is only for current-session scratch memory. For corrections, include the corrected durable statement and the old value being replaced. A successful retain output is authoritative: if durable_memory_write=true and review_state=written, the memory is stored at the returned scope; only claim future-session availability when visibility.cross_session=true or scope=principal. If durable_memory_write=false, say it was not written and needs review only when review_state says so. If the output includes review.completion_commands, surface those commands as the manual operator completion path. Do not claim an approval is queued or pending unless a tool output includes an explicit approval or review identifier.".to_owned());
     }
+    if tool_names.iter().any(|tool| tool == "palyra.memory.delete") {
+        contracts.push("palyra.memory.delete contract: when the user asks to forget, remove, erase, or delete a stored preference/fact, first use palyra.memory.search or palyra.memory.recall to identify exact memory_id values, then call palyra.memory.delete for each matching obsolete item. Do not call palyra.memory.retain as a substitute for deletion. Only claim a memory was removed when the delete output has deleted=true; if deleted=false, say no matching stored item was deleted.".to_owned());
+    }
     if tool_names.iter().any(|tool| tool == "palyra.memory.search")
         || tool_names.iter().any(|tool| tool == "palyra.memory.recall")
         || tool_names.iter().any(|tool| tool == "palyra.memory.session_search")
@@ -631,6 +634,18 @@ mod tests {
         assert!(contract.contains("visibility.cross_session=true"));
         assert!(contract.contains("review.completion_commands"));
         assert!(contract.contains("approval is queued or pending"));
+    }
+
+    #[test]
+    fn tool_specific_contract_explains_memory_delete_lifecycle() {
+        let contract = super::tool_specific_contract(&["palyra.memory.delete".to_owned()]);
+
+        assert!(contract.contains("forget"));
+        assert!(contract.contains("first use palyra.memory.search"));
+        assert!(contract.contains("memory_id"));
+        assert!(contract.contains("Do not call palyra.memory.retain as a substitute"));
+        assert!(contract.contains("deleted=true"));
+        assert!(contract.contains("deleted=false"));
     }
 
     #[test]

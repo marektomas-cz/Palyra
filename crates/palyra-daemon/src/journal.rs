@@ -13085,7 +13085,7 @@ impl JournalStore {
                 DELETE FROM memory_items
                 WHERE memory_ulid = ?1
                   AND principal = ?2
-                  AND (?3 IS NULL OR channel = ?3)
+                  AND (channel IS NULL OR ?3 IS NULL OR channel = ?3)
             "#,
             params![memory_id, principal, channel],
         )?;
@@ -24344,7 +24344,7 @@ mod tests {
     }
 
     #[test]
-    fn memory_delete_with_channel_filter_does_not_widen_to_channel_agnostic_items() {
+    fn memory_delete_with_channel_filter_can_remove_principal_scoped_items() {
         let db_path = temp_db_path();
         let store = JournalStore::open(test_journal_config(db_path, false))
             .expect("journal store should open");
@@ -24363,13 +24363,13 @@ mod tests {
         let deleted = store
             .delete_memory_item("01ARZ3NDEKTSV4RRFFQ69G5FDE", "user:ops", Some("cli"))
             .expect("channel-filtered delete should complete without storage error");
-        assert!(!deleted, "channel-filtered delete must not remove channel-agnostic memory");
+        assert!(deleted, "channel-filtered delete should still remove principal-scoped memory");
 
         let remaining =
             store.memory_item("01ARZ3NDEKTSV4RRFFQ69G5FDE").expect("memory lookup should succeed");
         assert!(
-            remaining.is_some(),
-            "channel-agnostic memory should remain after mismatched channel-filtered delete"
+            remaining.is_none(),
+            "principal-scoped memory should be removed after channel-filtered delete"
         );
     }
 
