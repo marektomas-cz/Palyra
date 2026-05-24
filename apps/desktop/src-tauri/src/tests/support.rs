@@ -11,7 +11,7 @@ use super::super::profile_registry::{implicit_profile, DesktopProfileCatalog};
 use super::super::supervisor::{ConsolePayloadCache, DesktopConfigReloadWatchState};
 use super::super::{
     mpsc, Client, ControlCenter, DesktopInstanceLock, DesktopRuntimeSecrets, DesktopStateFile,
-    ManagedService, RuntimeConfig, Ulid, LOG_EVENT_CHANNEL_CAPACITY,
+    ManagedService, RuntimeConfig, Ulid, CONSOLE_PRINCIPAL, LOG_EVENT_CHANNEL_CAPACITY,
 };
 
 pub(super) struct TempFixtureDir {
@@ -99,6 +99,7 @@ pub(super) fn build_test_control_center(root: &Path) -> ControlCenter {
         active_profile,
         profile_catalog,
         admin_token: runtime_secret_fallbacks.admin_token.clone(),
+        admin_bound_principal: Some(CONSOLE_PRINCIPAL.to_owned()),
         browser_auth_token: runtime_secret_fallbacks.browser_auth_token.clone(),
         runtime_secret_fallbacks,
         runtime,
