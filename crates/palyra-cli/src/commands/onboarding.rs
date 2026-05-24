@@ -12,9 +12,10 @@ use serde_json::{json, Value};
 use crate::*;
 
 const CLI_FIRST_SUCCESS_MARKER_RELATIVE_PATH: &str = "onboarding/first-success.json";
-const GATEWAY_RUNTIME_CONNECT_TIMEOUT_MS: u64 = 350;
 const BROWSER_RUNTIME_CONNECT_TIMEOUT_MS: u64 = 350;
+const AUTHENTICATED_RUNTIME_PROBE_TIMEOUT_MS: u64 = 1_000;
 const DEFAULT_BROWSER_SERVICE_ENDPOINT: &str = "http://127.0.0.1:7543";
+const BROWSER_AUTH_PROBE_PRINCIPAL: &str = "admin:onboarding-browser-probe";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OnboardingVariant {
@@ -968,12 +969,20 @@ fn browser_runtime_status(document: &toml::Value) -> (bool, String) {
     let endpoint = get_string_at_path(document, "tool_call.browser_service.endpoint")
         .unwrap_or_else(|| DEFAULT_BROWSER_SERVICE_ENDPOINT.to_owned());
     let display_endpoint = diagnostic_endpoint_url(endpoint.as_str());
+    if let Some(auth_token) = get_string_at_path(document, "tool_call.browser_service.auth_token") {
+        return authenticated_browser_runtime_status(endpoint, auth_token, display_endpoint);
+    }
     match tcp_url_reachable(
         endpoint.as_str(),
         Duration::from_millis(BROWSER_RUNTIME_CONNECT_TIMEOUT_MS),
         "browser service gRPC",
     ) {
-        Ok(()) => (true, format!("browserd gRPC endpoint {display_endpoint} is reachable.")),
+        Ok(()) => (
+            true,
+            format!(
+                "browserd gRPC endpoint {display_endpoint} is reachable; authenticated browser probe was skipped because the browser service token is not available inline to onboarding status."
+            ),
+        ),
         Err(error) => (
             false,
             format!(
@@ -982,6 +991,54 @@ fn browser_runtime_status(document: &toml::Value) -> (bool, String) {
             ),
         ),
     }
+}
+
+fn authenticated_browser_runtime_status(
+    endpoint: String,
+    auth_token: String,
+    display_endpoint: String,
+) -> (bool, String) {
+    match run_blocking_auth_probe(browser_runtime_auth_probe(endpoint, auth_token)) {
+        Ok(()) => (
+            true,
+            format!("browserd gRPC endpoint {display_endpoint} accepted the configured browser service token."),
+        ),
+        Err(error) => (
+            false,
+            format!(
+                "browserd gRPC endpoint {display_endpoint} failed authenticated readiness probe: {}",
+                sanitize_diagnostic_error(error.to_string().as_str())
+            ),
+        ),
+    }
+}
+
+async fn browser_runtime_auth_probe(endpoint: String, auth_token: String) -> Result<()> {
+    let channel = tonic::transport::Endpoint::from_shared(endpoint.clone())
+        .with_context(|| format!("invalid browser gRPC URL {endpoint}"))?
+        .connect()
+        .await
+        .with_context(|| format!("failed to connect browser service {endpoint}"))?;
+    let mut client = browser_v1::browser_service_client::BrowserServiceClient::new(channel);
+    let mut request = tonic::Request::new(browser_v1::ListSessionsRequest {
+        v: CANONICAL_PROTOCOL_MAJOR,
+        principal: String::new(),
+        limit: 1,
+    });
+    request.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {auth_token}")
+            .parse()
+            .context("invalid browser service authorization metadata")?,
+    );
+    request.metadata_mut().insert(
+        "x-palyra-principal",
+        BROWSER_AUTH_PROBE_PRINCIPAL
+            .parse()
+            .context("invalid browser caller principal metadata")?,
+    );
+    client.list_sessions(request).await.context("failed to call browser ListSessions")?;
+    Ok(())
 }
 
 fn minimax_chat_provider_configured(
@@ -1022,18 +1079,44 @@ fn gateway_runtime_status() -> (bool, String) {
         }
     };
     let display_grpc_url = diagnostic_endpoint_url(connection.grpc_url.as_str());
-    match tcp_url_reachable(
-        connection.grpc_url.as_str(),
-        Duration::from_millis(GATEWAY_RUNTIME_CONNECT_TIMEOUT_MS),
-        "gateway gRPC",
-    ) {
-        Ok(()) => (true, format!("gateway gRPC endpoint {display_grpc_url} is reachable")),
+    match run_blocking_auth_probe(gateway_runtime_auth_probe(connection)) {
+        Ok(()) => (
+            true,
+            format!(
+                "gateway gRPC endpoint {display_grpc_url} accepted the configured authorization token"
+            ),
+        ),
         Err(error) => (
             false,
             format!(
-                "gateway gRPC endpoint {display_grpc_url} is not reachable: {}",
+                "gateway gRPC endpoint {display_grpc_url} failed authenticated readiness probe: {}",
                 sanitize_diagnostic_error(error.to_string().as_str())
             ),
+        ),
+    }
+}
+
+async fn gateway_runtime_auth_probe(connection: AgentConnection) -> Result<()> {
+    let mut client = client::runtime::GatewayRuntimeClient::connect(connection).await?;
+    client.list_agents(None, Some(1)).await.map(|_| ())
+}
+
+fn run_blocking_auth_probe<F>(probe: F) -> Result<()>
+where
+    F: std::future::Future<Output = Result<()>>,
+{
+    let runtime = client::grpc::build_runtime()?;
+    match runtime.block_on(async {
+        tokio::time::timeout(
+            Duration::from_millis(AUTHENTICATED_RUNTIME_PROBE_TIMEOUT_MS),
+            probe,
+        )
+        .await
+    }) {
+        Ok(result) => result,
+        Err(_) => anyhow::bail!(
+            "authenticated readiness probe timed out after {} ms",
+            AUTHENTICATED_RUNTIME_PROBE_TIMEOUT_MS
         ),
     }
 }
@@ -1273,11 +1356,11 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        build_onboarding_counts, build_onboarding_steps, collect_onboarding_signals,
-        default_agent_create_command, derive_posture_status, diagnostic_endpoint_url,
-        load_onboarding_document, onboarding_prerequisites_ready, quote_cli_arg,
-        recommended_onboarding_step_id, record_cli_first_success, OnboardingSignals,
-        OnboardingVariant,
+        browser_runtime_status, build_onboarding_counts, build_onboarding_steps,
+        collect_onboarding_signals, default_agent_create_command, derive_posture_status,
+        diagnostic_endpoint_url, load_onboarding_document, onboarding_prerequisites_ready,
+        quote_cli_arg, recommended_onboarding_step_id, record_cli_first_success,
+        OnboardingSignals, OnboardingVariant,
     };
     use crate::{app, args::RootOptions};
 
@@ -1594,6 +1677,23 @@ kind = "anthropic"
         );
         assert_eq!(browser_step.verification_state.as_deref(), Some("browserd_not_running"));
         assert_eq!(recommended_onboarding_step_id(&steps).as_deref(), Some("browser_harness"));
+    }
+
+    #[test]
+    fn browser_runtime_status_uses_authenticated_probe_for_inline_token() -> Result<()> {
+        let document: toml::Value = toml::from_str(
+            r#"
+[tool_call.browser_service]
+endpoint = "not-a-url"
+auth_token = "browser-token"
+"#,
+        )?;
+
+        let (reachable, message) = browser_runtime_status(&document);
+
+        assert!(!reachable);
+        assert!(message.contains("failed authenticated readiness probe"));
+        Ok(())
     }
 
     #[test]
