@@ -1403,14 +1403,14 @@ async fn run_browser_profiles_command(command: BrowserProfilesCommand) -> Result
                 "browser.profiles.list principal={} count={} active_profile_id={}",
                 envelope.principal,
                 envelope.profiles.len(),
-                redacted_browser_identifier_text(envelope.active_profile_id.as_deref(), "profile",),
+                browser_session_handle_text(envelope.active_profile_id.as_deref()),
             );
             for profile in &envelope.profiles {
                 text.push('\n');
                 text.push_str(
                     format!(
                         "profile id={} name={} private={} persistence={} active={}",
-                        redacted_browser_identifier_text(profile.profile_id.as_deref(), "profile",),
+                        browser_session_handle_text(profile.profile_id.as_deref()),
                         profile.name,
                         profile.private_profile,
                         profile.persistence_enabled,
@@ -1432,6 +1432,7 @@ async fn run_browser_profiles_command(command: BrowserProfilesCommand) -> Result
             theme_color,
             persistence_enabled,
             private_profile,
+            json,
         } => {
             let envelope = context
                 .client
@@ -1446,19 +1447,17 @@ async fn run_browser_profiles_command(command: BrowserProfilesCommand) -> Result
                 .context("failed to create browser profile")?;
             let value = serde_json::to_value(&envelope)
                 .context("failed to encode browser profile create output")?;
-            emit_browser_value(
+            emit_browser_value_with_json(
                 &value,
                 format!(
                     "browser.profiles.create profile_id={} name={} private={} active={}",
-                    redacted_browser_identifier_text(
-                        envelope.profile.profile_id.as_deref(),
-                        "profile",
-                    ),
+                    browser_session_handle_text(envelope.profile.profile_id.as_deref()),
                     envelope.profile.name,
                     envelope.profile.private_profile,
                     envelope.profile.active,
                 ),
                 "failed to encode browser profile create output",
+                json,
             )
         }
         BrowserProfilesCommand::Rename { profile_id, principal, name } => {
@@ -1476,10 +1475,7 @@ async fn run_browser_profiles_command(command: BrowserProfilesCommand) -> Result
                 &value,
                 format!(
                     "browser.profiles.rename profile_id={} name={}",
-                    redacted_browser_identifier_text(
-                        envelope.profile.profile_id.as_deref(),
-                        "profile",
-                    ),
+                    browser_session_handle_text(envelope.profile.profile_id.as_deref()),
                     envelope.profile.name,
                 ),
                 "failed to encode browser profile rename output",
@@ -1500,12 +1496,9 @@ async fn run_browser_profiles_command(command: BrowserProfilesCommand) -> Result
                 &value,
                 format!(
                     "browser.profiles.delete profile_id={} deleted={} active_profile_id={}",
-                    redacted_browser_identifier_text(Some(envelope.profile_id.as_str()), "profile"),
+                    browser_session_handle_text(Some(envelope.profile_id.as_str())),
                     envelope.deleted,
-                    redacted_browser_identifier_text(
-                        envelope.active_profile_id.as_deref(),
-                        "profile",
-                    ),
+                    browser_session_handle_text(envelope.active_profile_id.as_deref()),
                 ),
                 "failed to encode browser profile delete output",
             )
@@ -1525,10 +1518,7 @@ async fn run_browser_profiles_command(command: BrowserProfilesCommand) -> Result
                 &value,
                 format!(
                     "browser.profiles.activate profile_id={} name={} active={}",
-                    redacted_browser_identifier_text(
-                        envelope.profile.profile_id.as_deref(),
-                        "profile",
-                    ),
+                    browser_session_handle_text(envelope.profile.profile_id.as_deref()),
                     envelope.profile.name,
                     envelope.profile.active,
                 ),

@@ -133,9 +133,13 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
         let mut private_profile = payload.private_profile;
         let mut persistence_enabled = payload.persistence_enabled;
         let mut persistence_id = if payload.persistence_enabled {
-            let Some(value) = sanitize_persistence_id(payload.persistence_id.as_str()) else {
+            let fallback_profile_persistence_id =
+                profile.as_ref().map(|profile| profile.profile_id.as_str()).unwrap_or_default();
+            let Some(value) = sanitize_persistence_id(payload.persistence_id.as_str())
+                .or_else(|| sanitize_persistence_id(fallback_profile_persistence_id))
+            else {
                 return Err(Status::invalid_argument(
-                    "persistence_enabled=true requires non-empty persistence_id",
+                    "persistence_enabled=true requires non-empty persistence_id or profile_id",
                 ));
             };
             Some(value)

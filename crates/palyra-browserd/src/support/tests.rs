@@ -3383,6 +3383,103 @@ async fn browser_service_profile_persistence_roundtrip_restores_state() {
     handle.join().expect("test server thread should exit");
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn browser_service_profile_session_create_uses_profile_id_as_persistence_id() {
+    let state_dir = tempfile::tempdir().expect("state temp dir should be available");
+    let mut runtime_state = BrowserRuntimeState::new(&Args {
+        bind: "127.0.0.1".to_owned(),
+        port: 7143,
+        grpc_bind: "127.0.0.1".to_owned(),
+        grpc_port: 7543,
+        auth_token: None,
+        session_idle_ttl_ms: 60_000,
+        max_sessions: 16,
+        max_navigation_timeout_ms: 10_000,
+        max_session_lifetime_ms: 60_000,
+        max_screenshot_bytes: 128 * 1024,
+        max_response_bytes: 128 * 1024,
+        max_title_bytes: 4 * 1024,
+        engine_mode: BrowserEngineMode::Simulated,
+        chromium_path: None,
+        chromium_startup_timeout_ms: DEFAULT_CHROMIUM_STARTUP_TIMEOUT_MS,
+    })
+    .expect("runtime should initialize");
+    runtime_state.state_store = Some(
+        PersistedStateStore::new(state_dir.path().join("state"), [17_u8; STATE_KEY_LEN])
+            .expect("state store should initialize"),
+    );
+    let runtime = std::sync::Arc::new(runtime_state);
+    let service = BrowserServiceImpl { runtime };
+
+    let profile = service
+        .create_profile(Request::new(browser_v1::CreateProfileRequest {
+            v: 1,
+            principal: "user:ops".to_owned(),
+            name: "Ops".to_owned(),
+            theme_color: "#1f2937".to_owned(),
+            persistence_enabled: true,
+            private_profile: false,
+        }))
+        .await
+        .expect("create_profile should succeed")
+        .into_inner()
+        .profile
+        .expect("profile should be present");
+    let profile_id = profile.profile_id.expect("profile id should be present");
+
+    let created = service
+        .create_session(Request::new(browser_v1::CreateSessionRequest {
+            v: 1,
+            principal: "user:ops".to_owned(),
+            idle_ttl_ms: 10_000,
+            budget: None,
+            allow_private_targets: true,
+            allow_downloads: false,
+            action_allowed_domains: Vec::new(),
+            persistence_enabled: true,
+            persistence_id: String::new(),
+            profile_id: Some(profile_id.clone()),
+            private_profile: false,
+            channel: String::new(),
+        }))
+        .await
+        .expect("create_session should accept profile persistence without persistence_id")
+        .into_inner();
+
+    assert!(created.persistence_enabled, "persistent profile should enable session persistence");
+    assert_eq!(
+        created.persistence_id, profile_id.ulid,
+        "profile-backed persistence should use the canonical profile id as the state id"
+    );
+    assert_eq!(
+        created.profile_id.as_ref().map(|value| value.ulid.as_str()),
+        Some(created.persistence_id.as_str())
+    );
+
+    let active_profile_created = service
+        .create_session(Request::new(browser_v1::CreateSessionRequest {
+            v: 1,
+            principal: "user:ops".to_owned(),
+            idle_ttl_ms: 10_000,
+            budget: None,
+            allow_private_targets: true,
+            allow_downloads: false,
+            action_allowed_domains: Vec::new(),
+            persistence_enabled: true,
+            persistence_id: String::new(),
+            profile_id: None,
+            private_profile: false,
+            channel: String::new(),
+        }))
+        .await
+        .expect("active persistent profile should also supply the persistence id")
+        .into_inner();
+    assert_eq!(
+        active_profile_created.persistence_id, created.persistence_id,
+        "active profile fallback should use the same canonical profile state id"
+    );
+}
+
 #[test]
 fn validate_restored_snapshot_against_profile_accepts_legacy_hash_for_revision_zero() {
     let snapshot = PersistedSessionSnapshot {

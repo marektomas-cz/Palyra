@@ -3930,6 +3930,35 @@ fn parse_browser_profiles_list_json_flag() {
 }
 
 #[test]
+fn parse_browser_profiles_create_json_flag() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "browser",
+        "profiles",
+        "create",
+        "--name",
+        "e2e-persist",
+        "--persistence-enabled",
+        "--json",
+    ]);
+    assert_eq!(
+        parsed.command,
+        Command::Browser {
+            command: BrowserCommand::Profiles {
+                command: BrowserProfilesCommand::Create {
+                    principal: None,
+                    name: "e2e-persist".to_owned(),
+                    theme_color: None,
+                    persistence_enabled: true,
+                    private_profile: false,
+                    json: true,
+                },
+            }
+        }
+    );
+}
+
+#[test]
 fn parse_browser_session_create() {
     let parsed = Cli::parse_from([
         "palyra",

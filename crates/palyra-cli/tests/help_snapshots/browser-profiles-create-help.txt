@@ -8,6 +8,7 @@ Options:
       --theme-color <THEME_COLOR>
       --persistence-enabled
       --private-profile
+      --json
   -h, --help                       Print help
 
 Global Options:
