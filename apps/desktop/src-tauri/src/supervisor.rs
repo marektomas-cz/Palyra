@@ -34,6 +34,7 @@ use super::{
 
 const NODE_HOST_STATE_DIR: &str = "node-host";
 const NODE_HOST_CONFIG_FILE_NAME: &str = "node-host.json";
+const DESKTOP_CONFIG_RELOAD_MODE_ENV: &str = "PALYRA_DESKTOP_CONFIG_RELOAD_MODE";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -118,6 +119,31 @@ pub(crate) struct ManagedService {
     pub(crate) last_exit: Option<String>,
     pub(crate) logs: VecDeque<LogLine>,
     pub(crate) bound_ports: Vec<u16>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DesktopConfigReloadMode {
+    Auto,
+    Manual,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ConfigFileSignature {
+    modified_unix_ms: i64,
+    len: u64,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DesktopConfigReloadWatchState {
+    mode: DesktopConfigReloadMode,
+    path: Option<PathBuf>,
+    last_signature: Option<ConfigFileSignature>,
+    last_error: Option<String>,
+}
+
+enum ConfigReloadWatchOutcome {
+    Changed { path: PathBuf },
+    Idle,
 }
 
 impl ManagedService {
@@ -211,12 +237,76 @@ pub(crate) struct ControlCenter {
     pub(crate) gateway: ManagedService,
     pub(crate) browserd: ManagedService,
     pub(crate) node_host: ManagedService,
+    pub(crate) config_reload_watch: DesktopConfigReloadWatchState,
     pub(crate) http_client: Client,
     pub(crate) console_session_cache: Arc<Mutex<Option<ConsoleSessionCache>>>,
     pub(crate) console_payload_cache: Arc<Mutex<ConsolePayloadCache>>,
     pub(crate) log_tx: mpsc::Sender<LogEvent>,
     pub(crate) log_rx: mpsc::Receiver<LogEvent>,
     pub(crate) dropped_log_events: Arc<AtomicU64>,
+}
+
+impl DesktopConfigReloadWatchState {
+    pub(crate) fn from_profile(profile: &DesktopResolvedProfile) -> Self {
+        Self {
+            mode: desktop_config_reload_mode_from_env(),
+            path: profile.config_path.clone(),
+            last_signature: None,
+            last_error: None,
+        }
+    }
+
+    fn observe(&mut self) -> ConfigReloadWatchOutcome {
+        if self.mode == DesktopConfigReloadMode::Manual {
+            return ConfigReloadWatchOutcome::Idle;
+        }
+        let Some(path) = self.path.clone() else {
+            return ConfigReloadWatchOutcome::Idle;
+        };
+        let signature = match config_file_signature(path.as_path()) {
+            Ok(signature) => {
+                self.last_error = None;
+                signature
+            }
+            Err(error) => {
+                let sanitized = sanitize_log_line(error.to_string().as_str());
+                if self.last_error.as_deref() != Some(sanitized.as_str()) {
+                    self.last_error = Some(sanitized);
+                }
+                return ConfigReloadWatchOutcome::Idle;
+            }
+        };
+        let changed = self.last_signature.is_some_and(|previous| previous != signature);
+        self.last_signature = Some(signature);
+        if changed {
+            ConfigReloadWatchOutcome::Changed { path }
+        } else {
+            ConfigReloadWatchOutcome::Idle
+        }
+    }
+}
+
+fn desktop_config_reload_mode_from_env() -> DesktopConfigReloadMode {
+    match env::var(DESKTOP_CONFIG_RELOAD_MODE_ENV)
+        .ok()
+        .as_deref()
+        .and_then(normalize_optional_text)
+        .map(|value| value.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("manual" | "off" | "disabled" | "false" | "0") => DesktopConfigReloadMode::Manual,
+        _ => DesktopConfigReloadMode::Auto,
+    }
+}
+
+fn config_file_signature(path: &Path) -> Result<ConfigFileSignature> {
+    let metadata = fs::metadata(path)
+        .with_context(|| format!("failed to stat watched config file {}", path.display()))?;
+    let modified = metadata.modified().with_context(|| {
+        format!("failed to read modified timestamp for watched config file {}", path.display())
+    })?;
+    let modified_unix_ms = system_time_to_unix_ms(modified);
+    Ok(ConfigFileSignature { modified_unix_ms, len: metadata.len() })
 }
 
 impl ControlCenter {
@@ -261,6 +351,7 @@ impl ControlCenter {
         let browserd =
             ManagedService::new(vec![runtime.browser_health_port, runtime.browser_grpc_port]);
         let node_host = ManagedService::new(Vec::new());
+        let config_reload_watch = DesktopConfigReloadWatchState::from_profile(&active_profile);
 
         let http_client = build_http_client()?;
 
@@ -284,6 +375,7 @@ impl ControlCenter {
             gateway,
             browserd,
             node_host,
+            config_reload_watch,
             http_client,
             console_session_cache: Arc::new(Mutex::new(None)),
             console_payload_cache: Arc::new(Mutex::new(ConsolePayloadCache::default())),
@@ -597,6 +689,7 @@ impl ControlCenter {
 
         self.persisted.activate_profile(next_profile.context.name.as_str());
         self.active_profile = next_profile;
+        self.config_reload_watch = DesktopConfigReloadWatchState::from_profile(&self.active_profile);
         self.default_runtime_root = default_runtime_root_for_profile(
             self.desktop_state_root.as_path(),
             self.state_dir.as_path(),
@@ -701,9 +794,36 @@ impl ControlCenter {
         self.check_process_exit(ServiceKind::Gateway);
         self.check_process_exit(ServiceKind::Browserd);
         self.check_process_exit(ServiceKind::NodeHost);
+        self.reconcile_config_reload_watch();
         self.reconcile_service(ServiceKind::Gateway);
         self.reconcile_service(ServiceKind::Browserd);
         self.reconcile_service(ServiceKind::NodeHost);
+    }
+
+    pub(crate) fn reconcile_config_reload_watch(&mut self) {
+        let ConfigReloadWatchOutcome::Changed { path } = self.config_reload_watch.observe() else {
+            return;
+        };
+        if !self.gateway.desired_running && !self.browserd.desired_running {
+            self.append_supervisor_log(
+                ServiceKind::Gateway,
+                format!(
+                    "watched config changed at {}, but runtime is in manual stopped mode",
+                    path.display()
+                )
+                .as_str(),
+            );
+            return;
+        }
+        self.append_supervisor_log(
+            ServiceKind::Gateway,
+            format!(
+                "watched config changed at {}; restarting supervised runtime",
+                path.display()
+            )
+            .as_str(),
+        );
+        self.restart_all();
     }
 
     fn drain_log_events(&mut self) {
@@ -1446,7 +1566,11 @@ pub(crate) fn executable_file_name(base: &str) -> String {
 }
 
 pub(crate) fn unix_ms_now() -> i64 {
-    SystemTime::now()
+    system_time_to_unix_ms(SystemTime::now())
+}
+
+fn system_time_to_unix_ms(value: SystemTime) -> i64 {
+    value
         .duration_since(UNIX_EPOCH)
         .map(|value| value.as_millis().try_into().unwrap_or(i64::MAX))
         .unwrap_or_default()

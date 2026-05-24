@@ -44,6 +44,7 @@ use super::openai_auth::{
 };
 use super::profile_registry::DesktopProfileCatalog;
 use super::snapshot::resolve_dashboard_access_target;
+use super::supervisor::DesktopConfigReloadWatchState;
 use super::{
     bootstrap_portable_install_environment_for_executable, build_desktop_refresh_payload,
     build_onboarding_status, build_snapshot_from_inputs, collect_redacted_errors,
@@ -143,6 +144,36 @@ fn launch_preparation_requests_gateway_and_enabled_browser_start() {
 
     assert!(control_center.gateway.desired_running, "launch should request gateway start");
     assert!(control_center.browserd.desired_running, "launch should request browserd start");
+}
+
+#[test]
+fn config_reload_watch_restarts_desired_runtime_on_config_change() {
+    let fixture = TempFixtureDir::new();
+    let config_path = write_config_file(fixture.path(), "version = 1\n");
+    let mut control_center = build_test_control_center(fixture.path());
+    control_center.active_profile.config_path = Some(config_path.clone());
+    control_center.config_reload_watch =
+        DesktopConfigReloadWatchState::from_profile(&control_center.active_profile);
+    control_center.gateway.desired_running = true;
+    control_center.browserd.desired_running = true;
+    control_center.gateway.next_restart_unix_ms = Some(i64::MAX);
+    control_center.browserd.next_restart_unix_ms = Some(i64::MAX);
+
+    control_center.reconcile_config_reload_watch();
+    assert_eq!(control_center.gateway.next_restart_unix_ms, Some(i64::MAX));
+
+    std::thread::sleep(Duration::from_millis(100));
+    write_file(
+        config_path.as_path(),
+        "version = 1\n[memory]\nauto_inject_enabled = true\n",
+    );
+    control_center.reconcile_config_reload_watch();
+
+    assert_ne!(control_center.gateway.next_restart_unix_ms, Some(i64::MAX));
+    assert_ne!(control_center.browserd.next_restart_unix_ms, Some(i64::MAX));
+    assert!(control_center.gateway.logs.iter().any(|line| {
+        line.line.contains("watched config changed") && line.line.contains("restarting")
+    }));
 }
 
 #[test]

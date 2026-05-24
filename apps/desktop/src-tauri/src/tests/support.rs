@@ -8,7 +8,7 @@ use std::{
 use super::super::features::onboarding::connectors::discord::DiscordControlPlaneInputs;
 use super::super::openai_auth::OpenAiControlPlaneInputs;
 use super::super::profile_registry::{implicit_profile, DesktopProfileCatalog};
-use super::super::supervisor::ConsolePayloadCache;
+use super::super::supervisor::{ConsolePayloadCache, DesktopConfigReloadWatchState};
 use super::super::{
     mpsc, Client, ControlCenter, DesktopInstanceLock, DesktopStateFile, ManagedService,
     RuntimeConfig, Ulid, LOG_EVENT_CHANNEL_CAPACITY,
@@ -80,6 +80,7 @@ pub(super) fn build_test_control_center(root: &Path) -> ControlCenter {
     let (log_tx, log_rx) = mpsc::channel(LOG_EVENT_CHANNEL_CAPACITY);
     let persisted = DesktopStateFile::new_default();
     let active_profile = implicit_profile(persisted.active_profile_name());
+    let config_reload_watch = DesktopConfigReloadWatchState::from_profile(&active_profile);
     let profile_catalog = DesktopProfileCatalog::load(root).expect("profile catalog should load");
     ControlCenter {
         desktop_state_root: root.to_path_buf(),
@@ -99,6 +100,7 @@ pub(super) fn build_test_control_center(root: &Path) -> ControlCenter {
         gateway,
         browserd,
         node_host,
+        config_reload_watch,
         http_client,
         console_session_cache: Arc::new(Mutex::new(None)),
         console_payload_cache: Arc::new(Mutex::new(ConsolePayloadCache::default())),

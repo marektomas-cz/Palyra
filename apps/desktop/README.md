@@ -142,6 +142,9 @@ top of the same local supervisor and `/console/v1` control-plane APIs.
   macOS/Linux, or an explicit test root when `-CliCommandRoot` is provided.
 - Sidecar resolution already prefers colocated binaries next to the desktop executable, so the
   portable archive layout matches the runtime contract.
+- While the desktop app supervises sidecars, active config-file changes restart the local runtime
+  automatically by default. Set `PALYRA_DESKTOP_CONFIG_RELOAD_MODE=manual` before launch to require
+  explicit restarts.
 - The canonical packaging smoke is `pwsh -NoLogo -File ../../scripts/test/run-release-smoke.ps1`.
 - Windows clean-install manual testing can use:
   - `pwsh -NoLogo -File ../../scripts/test/install-clean-desktop.ps1`
