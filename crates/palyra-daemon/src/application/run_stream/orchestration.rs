@@ -1739,18 +1739,26 @@ fn normalize_final_answer_text(text: &str) -> String {
 }
 
 fn final_answer_is_minimal_ack(text: &str) -> bool {
-    matches!(
-        normalize_final_answer_text(text).as_str(),
-        "ack" | "ok" | "okay" | "done" | "complete" | "completed"
-    )
+    let normalized = normalize_final_answer_text(text);
+    matches!(normalized.as_str(), "ack" | "ok" | "okay" | "done" | "complete" | "completed")
+        || is_ack_sentinel_token(normalized.as_str())
+}
+
+fn is_ack_sentinel_token(normalized: &str) -> bool {
+    if normalized.len() > 64 || normalized.split_whitespace().count() != 1 {
+        return false;
+    }
+    let Some((prefix, suffix)) = normalized.split_once('-') else {
+        return false;
+    };
+    matches!(prefix, "ack" | "ok")
+        && !suffix.is_empty()
+        && suffix.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
 }
 
 fn user_requested_exact_minimal_answer(answer: &str, messages: &[ProviderMessage]) -> bool {
     let normalized_answer = normalize_final_answer_text(answer);
-    if !matches!(
-        normalized_answer.as_str(),
-        "ack" | "ok" | "okay" | "done" | "complete" | "completed"
-    ) {
+    if !final_answer_is_minimal_ack(normalized_answer.as_str()) {
         return false;
     }
 
@@ -1785,7 +1793,7 @@ fn user_message_requests_exact_answer(text: &str, normalized_answer: &str) -> bo
         "say exactly",
     ];
 
-    EXACT_ANSWER_MARKERS.iter().any(|marker| {
+    if EXACT_ANSWER_MARKERS.iter().any(|marker| {
         let Some(marker_index) = normalized.find(marker) else {
             return false;
         };
@@ -1800,27 +1808,61 @@ fn user_message_requests_exact_answer(text: &str, normalized_answer: &str) -> bo
             .split_whitespace()
             .next()
             .unwrap_or_default()
-            .trim_matches(|character: char| {
-                matches!(
-                    character,
-                    '.' | ','
-                        | ';'
-                        | ':'
-                        | '!'
-                        | '?'
-                        | '"'
-                        | '\''
-                        | '`'
-                        | '\u{201c}'
-                        | '\u{201d}'
-                        | '('
-                        | ')'
-                        | '['
-                        | ']'
-                )
-            });
+            .trim_matches(trim_exact_answer_token_character);
         requested == normalized_answer
-    })
+    }) {
+        return true;
+    }
+
+    user_message_requests_reply_only_answer(normalized.as_str(), normalized_answer)
+}
+
+fn user_message_requests_reply_only_answer(normalized: &str, normalized_answer: &str) -> bool {
+    const REPLY_ONLY_MARKERS: &[&str] =
+        &["reply", "respond", "answer", "return", "print", "output", "say"];
+
+    for marker in REPLY_ONLY_MARKERS {
+        let Some(marker_index) = normalized.find(marker) else {
+            continue;
+        };
+        if exact_answer_marker_is_negated(normalized[..marker_index].trim_end()) {
+            continue;
+        }
+        let mut tokens = normalized[marker_index + marker.len()..]
+            .trim_start_matches(|character: char| {
+                character.is_whitespace()
+                    || matches!(character, ':' | '-' | '"' | '\'' | '`' | '\u{201c}' | '\u{201d}')
+            })
+            .split_whitespace();
+        let requested =
+            tokens.next().unwrap_or_default().trim_matches(trim_exact_answer_token_character);
+        let limiter =
+            tokens.next().unwrap_or_default().trim_matches(trim_exact_answer_token_character);
+        if requested == normalized_answer && matches!(limiter, "only" | "exactly") {
+            return true;
+        }
+    }
+    false
+}
+
+fn trim_exact_answer_token_character(character: char) -> bool {
+    matches!(
+        character,
+        '.' | ','
+            | ';'
+            | ':'
+            | '!'
+            | '?'
+            | '"'
+            | '\''
+            | '`'
+            | '\u{201c}'
+            | '\u{201d}'
+            | '('
+            | ')'
+            | '['
+            | ']'
+    )
 }
 
 fn exact_answer_marker_is_negated(prefix: &str) -> bool {
@@ -2375,6 +2417,22 @@ mod tests {
         let messages = vec![ProviderMessage::user_text("Acknowledge exactly OK.".to_owned())];
 
         assert!(incomplete_final_answer_without_tools(Some("OK"), messages.as_slice()).is_none());
+    }
+
+    #[test]
+    fn incomplete_final_answer_without_tools_allows_requested_reply_only_ack_sentinel() {
+        let messages = vec![ProviderMessage::user_text("Reply ACK-S086-4 only.".to_owned())];
+
+        assert!(incomplete_final_answer_without_tools(Some("ACK-S086-4"), messages.as_slice())
+            .is_none());
+    }
+
+    #[test]
+    fn incomplete_final_answer_without_tools_rejects_unrequested_ack_sentinel() {
+        let message = incomplete_final_answer_without_tools(Some("ACK-S086-4"), &[])
+            .expect("unrequested ACK sentinel must not be accepted as a final answer");
+
+        assert!(message.contains("bare acknowledgement"));
     }
 
     #[test]
