@@ -103,10 +103,10 @@ pub(crate) fn validate_secret_key(raw: &str) -> Result<(), VaultError> {
     }
     if !key
         .chars()
-        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '.' | '_' | '-'))
+        .all(|ch| ch.is_ascii_alphabetic() || ch.is_ascii_digit() || matches!(ch, '.' | '_' | '-'))
     {
         return Err(VaultError::InvalidKey(
-            "secret key can only contain lowercase letters, digits, '.', '_' or '-'".to_owned(),
+            "secret key can only contain ASCII letters, digits, '.', '_' or '-'".to_owned(),
         ));
     }
     Ok(())

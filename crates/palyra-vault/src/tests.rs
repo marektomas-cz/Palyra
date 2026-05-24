@@ -151,6 +151,35 @@ fn vault_put_get_list_delete_roundtrip() -> Result<()> {
 }
 
 #[test]
+fn vault_accepts_env_style_uppercase_secret_keys() -> Result<()> {
+    let temp = tempdir()?;
+    let identity_root = temp.path().join("identity");
+    let vault_root = temp.path().join("vault");
+    let vault = Vault::open_with_config(VaultConfig {
+        root: Some(vault_root),
+        identity_store_root: Some(identity_root),
+        backend_preference: BackendPreference::EncryptedFile,
+        max_secret_bytes: 1024,
+    })?;
+    let scope = VaultScope::Global;
+    let key = "PALYRA_E2E_API_KEY";
+    let value = b"sk-test-secret";
+
+    vault.put_secret(&scope, key, value)?;
+    assert_eq!(vault.get_secret(&scope, key)?, value);
+
+    let listed = vault.list_secrets(&scope)?;
+    assert_eq!(listed.len(), 1, "uppercase env-style key should be listed exactly once");
+    assert_eq!(listed[0].key, key);
+    assert_eq!(
+        VaultRef::parse("global/PALYRA_E2E_API_KEY")?.key,
+        key,
+        "vault references should preserve env-style key casing"
+    );
+    Ok(())
+}
+
+#[test]
 fn vault_list_all_secrets_returns_all_scopes_sorted() -> Result<()> {
     let temp = tempdir()?;
     let identity_root = temp.path().join("identity");

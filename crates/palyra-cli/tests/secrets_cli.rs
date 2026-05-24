@@ -94,6 +94,38 @@ fn secrets_set_then_get_reveal_returns_exact_bytes() -> Result<()> {
 }
 
 #[test]
+fn secrets_set_accepts_env_style_uppercase_keys() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+    let secret_value = b"sk-e2e-uppercase-key";
+
+    let set_output = run_cli_with_stdin(
+        &workdir,
+        &["secrets", "set", "global", "PALYRA_E2E_API_KEY", "--value-stdin"],
+        secret_value,
+    )?;
+    assert!(
+        set_output.status.success(),
+        "secrets set should accept env-style uppercase keys: {}",
+        String::from_utf8_lossy(&set_output.stderr)
+    );
+    let set_stdout = String::from_utf8(set_output.stdout).context("stdout was not UTF-8")?;
+    assert!(
+        set_stdout.contains("secrets.set scope=global key=PALYRA_E2E_API_KEY"),
+        "unexpected secrets set output: {set_stdout}"
+    );
+
+    let get_output =
+        run_cli(&workdir, &["secrets", "get", "global", "PALYRA_E2E_API_KEY", "--reveal"])?;
+    assert!(
+        get_output.status.success(),
+        "secrets get --reveal should read env-style uppercase keys: {}",
+        String::from_utf8_lossy(&get_output.stderr)
+    );
+    assert_eq!(get_output.stdout, secret_value);
+    Ok(())
+}
+
+#[test]
 fn secrets_set_help_documents_scope_syntax() -> Result<()> {
     let workdir = TempDir::new().context("failed to create temporary workdir")?;
     let output = run_cli(&workdir, &["secrets", "set", "--help"])?;
