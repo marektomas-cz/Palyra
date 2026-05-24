@@ -41,7 +41,7 @@ pub(crate) use desktop_state::{
     bootstrap_portable_install_environment, load_or_initialize_state_file, load_runtime_secrets,
     migrate_legacy_runtime_secrets_from_state_file, resolve_desktop_state_root,
     validate_runtime_state_root_override, DesktopCompanionSection, DesktopCompanionSurfaceMode,
-    DesktopOnboardingStep, DesktopSecretStore, DesktopStateFile,
+    DesktopOnboardingStep, DesktopRuntimeSecrets, DesktopSecretStore, DesktopStateFile,
 };
 #[cfg(test)]
 pub(crate) use desktop_state::bootstrap_portable_install_environment_for_executable;

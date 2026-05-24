@@ -18,18 +18,18 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 
+use super::companion::DesktopCompanionProfileRecord;
 pub(crate) use super::console_cache::{
     CachedConsolePayload, ConsolePayloadCache, ConsoleSessionCache,
 };
-use super::companion::DesktopCompanionProfileRecord;
 use super::profile_registry::{DesktopProfileCatalog, DesktopResolvedProfile};
 use super::{
     load_or_initialize_state_file, load_runtime_secrets,
     migrate_legacy_runtime_secrets_from_state_file, sanitize_log_line,
-    validate_runtime_state_root_override, DesktopOnboardingStep, DesktopSecretStore,
-    DesktopStateFile, BROWSER_GRPC_PORT, BROWSER_HEALTH_PORT, CONSOLE_PRINCIPAL,
-    GATEWAY_ADMIN_PORT, GATEWAY_GRPC_PORT, GATEWAY_QUIC_PORT, LOG_EVENT_CHANNEL_CAPACITY,
-    LOOPBACK_HOST, MAX_LOG_LINES_PER_SERVICE,
+    validate_runtime_state_root_override, DesktopOnboardingStep, DesktopRuntimeSecrets,
+    DesktopSecretStore, DesktopStateFile, BROWSER_GRPC_PORT, BROWSER_HEALTH_PORT,
+    CONSOLE_PRINCIPAL, GATEWAY_ADMIN_PORT, GATEWAY_GRPC_PORT, GATEWAY_QUIC_PORT,
+    LOG_EVENT_CHANNEL_CAPACITY, LOOPBACK_HOST, MAX_LOG_LINES_PER_SERVICE,
 };
 
 const NODE_HOST_STATE_DIR: &str = "node-host";
@@ -137,6 +137,7 @@ struct ConfigFileSignature {
 pub(crate) struct DesktopConfigReloadWatchState {
     mode: DesktopConfigReloadMode,
     path: Option<PathBuf>,
+    observed_once: bool,
     last_signature: Option<ConfigFileSignature>,
     last_error: Option<String>,
 }
@@ -231,6 +232,7 @@ pub(crate) struct ControlCenter {
     pub(crate) persisted: DesktopStateFile,
     pub(crate) active_profile: DesktopResolvedProfile,
     pub(crate) profile_catalog: DesktopProfileCatalog,
+    pub(crate) runtime_secret_fallbacks: DesktopRuntimeSecrets,
     pub(crate) admin_token: String,
     pub(crate) browser_auth_token: String,
     pub(crate) runtime: RuntimeConfig,
@@ -248,10 +250,13 @@ pub(crate) struct ControlCenter {
 
 impl DesktopConfigReloadWatchState {
     pub(crate) fn from_profile(profile: &DesktopResolvedProfile) -> Self {
+        let last_signature =
+            profile.config_path.as_ref().and_then(|path| config_file_signature(path).ok());
         Self {
             mode: desktop_config_reload_mode_from_env(),
             path: profile.config_path.clone(),
-            last_signature: None,
+            observed_once: profile.config_path.is_some(),
+            last_signature,
             last_error: None,
         }
     }
@@ -273,10 +278,15 @@ impl DesktopConfigReloadWatchState {
                 if self.last_error.as_deref() != Some(sanitized.as_str()) {
                     self.last_error = Some(sanitized);
                 }
+                self.observed_once = true;
                 return ConfigReloadWatchOutcome::Idle;
             }
         };
-        let changed = self.last_signature.is_some_and(|previous| previous != signature);
+        let changed = self
+            .last_signature
+            .map(|previous| previous != signature)
+            .unwrap_or(self.observed_once);
+        self.observed_once = true;
         self.last_signature = Some(signature);
         if changed {
             ConfigReloadWatchOutcome::Changed { path }
@@ -297,6 +307,53 @@ fn desktop_config_reload_mode_from_env() -> DesktopConfigReloadMode {
         Some("manual" | "off" | "disabled" | "false" | "0") => DesktopConfigReloadMode::Manual,
         _ => DesktopConfigReloadMode::Auto,
     }
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ConfigRuntimeTokenOverrides {
+    admin_token: Option<String>,
+    browser_auth_token: Option<String>,
+}
+
+fn runtime_secrets_with_config_overrides(
+    fallback: &DesktopRuntimeSecrets,
+    config_path: Option<&Path>,
+) -> Result<DesktopRuntimeSecrets> {
+    let overrides = config_runtime_token_overrides(config_path)?;
+    Ok(DesktopRuntimeSecrets {
+        admin_token: overrides.admin_token.unwrap_or_else(|| fallback.admin_token.clone()),
+        browser_auth_token: overrides
+            .browser_auth_token
+            .unwrap_or_else(|| fallback.browser_auth_token.clone()),
+    })
+}
+
+fn config_runtime_token_overrides(
+    config_path: Option<&Path>,
+) -> Result<ConfigRuntimeTokenOverrides> {
+    let Some(config_path) = config_path else {
+        return Ok(ConfigRuntimeTokenOverrides::default());
+    };
+    if !config_path.is_file() {
+        return Ok(ConfigRuntimeTokenOverrides::default());
+    }
+
+    let raw = fs::read_to_string(config_path)
+        .with_context(|| format!("failed to read daemon config {}", config_path.display()))?;
+    let document: toml::Value = toml::from_str(raw.as_str())
+        .with_context(|| format!("failed to parse daemon config {}", config_path.display()))?;
+    Ok(ConfigRuntimeTokenOverrides {
+        admin_token: toml_string_at_path(&document, "admin.auth_token"),
+        browser_auth_token: toml_string_at_path(&document, "tool_call.browser_service.auth_token"),
+    })
+}
+
+fn toml_string_at_path(document: &toml::Value, path: &str) -> Option<String> {
+    let mut current = document;
+    for segment in path.split('.') {
+        current = current.get(segment)?;
+    }
+    normalize_optional_text(current.as_str().unwrap_or_default()).map(str::to_owned)
 }
 
 fn config_file_signature(path: &Path) -> Result<ConfigFileSignature> {
@@ -323,10 +380,14 @@ impl ControlCenter {
         let secret_store = DesktopSecretStore::open(state_dir.as_path())?;
         migrate_legacy_runtime_secrets_from_state_file(state_file_path.as_path(), &secret_store)?;
         let mut persisted = load_or_initialize_state_file(state_file_path.as_path())?;
-        let runtime_secrets = load_runtime_secrets(&secret_store)?;
         let profile_catalog = DesktopProfileCatalog::load(state_root.as_path())?;
         let active_profile = resolve_active_profile(&persisted, &profile_catalog);
         persisted.activate_profile(active_profile.context.name.as_str());
+        let runtime_secret_fallbacks = load_runtime_secrets(&secret_store)?;
+        let runtime_secrets = runtime_secrets_with_config_overrides(
+            &runtime_secret_fallbacks,
+            active_profile.config_path.as_deref(),
+        )?;
         let default_runtime_root = default_runtime_root_for_profile(
             state_root.as_path(),
             state_dir.as_path(),
@@ -369,6 +430,7 @@ impl ControlCenter {
             persisted,
             active_profile,
             profile_catalog,
+            runtime_secret_fallbacks,
             admin_token: runtime_secrets.admin_token,
             browser_auth_token: runtime_secrets.browser_auth_token,
             runtime,
@@ -689,7 +751,8 @@ impl ControlCenter {
 
         self.persisted.activate_profile(next_profile.context.name.as_str());
         self.active_profile = next_profile;
-        self.config_reload_watch = DesktopConfigReloadWatchState::from_profile(&self.active_profile);
+        self.config_reload_watch =
+            DesktopConfigReloadWatchState::from_profile(&self.active_profile);
         self.default_runtime_root = default_runtime_root_for_profile(
             self.desktop_state_root.as_path(),
             self.state_dir.as_path(),
@@ -704,6 +767,7 @@ impl ControlCenter {
             format!("failed to create desktop runtime dir {}", self.runtime_root.display())
         })?;
         apply_profile_process_env(&self.active_profile);
+        self.refresh_runtime_tokens_from_active_config()?;
         self.record_onboarding_event(
             "profile_switched",
             Some(self.active_profile.context.name.clone()),
@@ -817,12 +881,24 @@ impl ControlCenter {
         }
         self.append_supervisor_log(
             ServiceKind::Gateway,
-            format!(
-                "watched config changed at {}; restarting supervised runtime",
-                path.display()
-            )
-            .as_str(),
+            format!("watched config changed at {}; restarting supervised runtime", path.display())
+                .as_str(),
         );
+        match self.refresh_runtime_tokens_from_config_path(Some(path.as_path())) {
+            Ok(true) => self.append_supervisor_log(
+                ServiceKind::Gateway,
+                "watched config auth tokens refreshed for supervised runtime",
+            ),
+            Ok(false) => {}
+            Err(error) => self.append_supervisor_log(
+                ServiceKind::Gateway,
+                format!(
+                    "watched config auth token refresh failed: {}",
+                    sanitize_log_line(error.to_string().as_str())
+                )
+                .as_str(),
+            ),
+        }
         self.restart_all();
     }
 
@@ -1055,6 +1131,35 @@ impl ControlCenter {
             ("PALYRA_STATE_ROOT".to_owned(), self.runtime_root.to_string_lossy().into_owned()),
             ("PALYRA_BROWSERD_AUTH_TOKEN".to_owned(), self.browser_auth_token.clone()),
         ]
+    }
+
+    fn refresh_runtime_tokens_from_active_config(&mut self) -> Result<bool> {
+        let config_path = self.active_profile.config_path.clone();
+        match config_path {
+            Some(path) => self.refresh_runtime_tokens_from_config_path(Some(path.as_path())),
+            None => self.refresh_runtime_tokens_from_config_path(None),
+        }
+    }
+
+    fn refresh_runtime_tokens_from_config_path(
+        &mut self,
+        config_path: Option<&Path>,
+    ) -> Result<bool> {
+        let runtime_secrets =
+            runtime_secrets_with_config_overrides(&self.runtime_secret_fallbacks, config_path)?;
+        let changed = self.admin_token != runtime_secrets.admin_token
+            || self.browser_auth_token != runtime_secrets.browser_auth_token;
+        if changed {
+            self.admin_token = runtime_secrets.admin_token;
+            self.browser_auth_token = runtime_secrets.browser_auth_token;
+            if let Ok(mut session_cache) = self.console_session_cache.lock() {
+                *session_cache = None;
+            }
+            if let Ok(mut payload_cache) = self.console_payload_cache.lock() {
+                *payload_cache = ConsolePayloadCache::default();
+            }
+        }
+        Ok(changed)
     }
 
     fn reset_profile_bound_runtime_state(&mut self) -> Result<()> {
@@ -1468,7 +1573,14 @@ fn apply_profile_process_env(profile: &DesktopResolvedProfile) {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_browser_open_url;
+    use std::{env, fs};
+
+    use super::{
+        normalize_browser_open_url, runtime_secrets_with_config_overrides,
+        ConfigReloadWatchOutcome, DesktopConfigReloadWatchState,
+    };
+    use crate::desktop_state::DesktopRuntimeSecrets;
+    use crate::profile_registry::implicit_profile;
 
     #[test]
     fn normalize_browser_open_url_accepts_http_and_https_urls() {
@@ -1490,6 +1602,98 @@ mod tests {
             error.to_string().contains("must not include embedded credentials"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn runtime_secrets_with_config_overrides_prefers_cli_visible_tokens() {
+        let fixture =
+            env::temp_dir().join(format!("palyra-desktop-token-test-{}", ulid::Ulid::new()));
+        fs::create_dir_all(fixture.as_path()).expect("fixture dir should be created");
+        let config_path = fixture.join("palyra.toml");
+        fs::write(
+            config_path.as_path(),
+            r#"
+version = 1
+
+[admin]
+auth_token = "config-admin-token"
+
+[tool_call.browser_service]
+auth_token = "config-browser-token"
+"#,
+        )
+        .expect("config fixture should be written");
+
+        let fallback = DesktopRuntimeSecrets {
+            admin_token: "desktop-admin-token".to_owned(),
+            browser_auth_token: "desktop-browser-token".to_owned(),
+        };
+        let effective =
+            runtime_secrets_with_config_overrides(&fallback, Some(config_path.as_path()))
+                .expect("config token overrides should load");
+
+        assert_eq!(effective.admin_token, "config-admin-token");
+        assert_eq!(effective.browser_auth_token, "config-browser-token");
+        let _ = fs::remove_dir_all(fixture.as_path());
+    }
+
+    #[test]
+    fn runtime_secrets_with_config_overrides_falls_back_when_tokens_are_missing() {
+        let fixture =
+            env::temp_dir().join(format!("palyra-desktop-token-test-{}", ulid::Ulid::new()));
+        fs::create_dir_all(fixture.as_path()).expect("fixture dir should be created");
+        let config_path = fixture.join("palyra.toml");
+        fs::write(config_path.as_path(), "version = 1\n")
+            .expect("config fixture should be written");
+
+        let fallback = DesktopRuntimeSecrets {
+            admin_token: "desktop-admin-token".to_owned(),
+            browser_auth_token: "desktop-browser-token".to_owned(),
+        };
+        let effective =
+            runtime_secrets_with_config_overrides(&fallback, Some(config_path.as_path()))
+                .expect("fallback token resolution should load");
+
+        assert_eq!(effective.admin_token, "desktop-admin-token");
+        assert_eq!(effective.browser_auth_token, "desktop-browser-token");
+        let _ = fs::remove_dir_all(fixture.as_path());
+    }
+
+    #[test]
+    fn config_reload_watch_treats_first_config_creation_as_change() {
+        let fixture =
+            env::temp_dir().join(format!("palyra-desktop-config-watch-test-{}", ulid::Ulid::new()));
+        fs::create_dir_all(fixture.as_path()).expect("fixture dir should be created");
+        let config_path = fixture.join("palyra.toml");
+        let mut profile = implicit_profile("desktop-local");
+        profile.config_path = Some(config_path.clone());
+        let mut watch = DesktopConfigReloadWatchState::from_profile(&profile);
+
+        fs::write(config_path.as_path(), "version = 1\n")
+            .expect("config fixture should be written");
+
+        match watch.observe() {
+            ConfigReloadWatchOutcome::Changed { path } => assert_eq!(path, config_path),
+            ConfigReloadWatchOutcome::Idle => panic!("first config creation should trigger reload"),
+        }
+        assert!(matches!(watch.observe(), ConfigReloadWatchOutcome::Idle));
+        let _ = fs::remove_dir_all(fixture.as_path());
+    }
+
+    #[test]
+    fn config_reload_watch_uses_existing_config_as_startup_baseline() {
+        let fixture =
+            env::temp_dir().join(format!("palyra-desktop-config-watch-test-{}", ulid::Ulid::new()));
+        fs::create_dir_all(fixture.as_path()).expect("fixture dir should be created");
+        let config_path = fixture.join("palyra.toml");
+        fs::write(config_path.as_path(), "version = 1\n")
+            .expect("config fixture should be written");
+        let mut profile = implicit_profile("desktop-local");
+        profile.config_path = Some(config_path);
+        let mut watch = DesktopConfigReloadWatchState::from_profile(&profile);
+
+        assert!(matches!(watch.observe(), ConfigReloadWatchOutcome::Idle));
+        let _ = fs::remove_dir_all(fixture.as_path());
     }
 }
 

@@ -10,8 +10,8 @@ use super::super::openai_auth::OpenAiControlPlaneInputs;
 use super::super::profile_registry::{implicit_profile, DesktopProfileCatalog};
 use super::super::supervisor::{ConsolePayloadCache, DesktopConfigReloadWatchState};
 use super::super::{
-    mpsc, Client, ControlCenter, DesktopInstanceLock, DesktopStateFile, ManagedService,
-    RuntimeConfig, Ulid, LOG_EVENT_CHANNEL_CAPACITY,
+    mpsc, Client, ControlCenter, DesktopInstanceLock, DesktopRuntimeSecrets, DesktopStateFile,
+    ManagedService, RuntimeConfig, Ulid, LOG_EVENT_CHANNEL_CAPACITY,
 };
 
 pub(super) struct TempFixtureDir {
@@ -82,6 +82,10 @@ pub(super) fn build_test_control_center(root: &Path) -> ControlCenter {
     let active_profile = implicit_profile(persisted.active_profile_name());
     let config_reload_watch = DesktopConfigReloadWatchState::from_profile(&active_profile);
     let profile_catalog = DesktopProfileCatalog::load(root).expect("profile catalog should load");
+    let runtime_secret_fallbacks = DesktopRuntimeSecrets {
+        admin_token: format!("test-admin-{}", Ulid::new()),
+        browser_auth_token: format!("test-browser-{}", Ulid::new()),
+    };
     ControlCenter {
         desktop_state_root: root.to_path_buf(),
         state_dir: state_dir.clone(),
@@ -94,8 +98,9 @@ pub(super) fn build_test_control_center(root: &Path) -> ControlCenter {
         persisted,
         active_profile,
         profile_catalog,
-        admin_token: format!("test-admin-{}", Ulid::new()),
-        browser_auth_token: format!("test-browser-{}", Ulid::new()),
+        admin_token: runtime_secret_fallbacks.admin_token.clone(),
+        browser_auth_token: runtime_secret_fallbacks.browser_auth_token.clone(),
+        runtime_secret_fallbacks,
         runtime,
         gateway,
         browserd,

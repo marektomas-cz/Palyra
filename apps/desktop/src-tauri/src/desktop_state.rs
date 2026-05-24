@@ -847,9 +847,20 @@ impl PersistedDesktopStateEnvelope {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct DesktopRuntimeSecrets {
     pub(crate) admin_token: String,
     pub(crate) browser_auth_token: String,
+}
+
+impl std::fmt::Debug for DesktopRuntimeSecrets {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DesktopRuntimeSecrets")
+            .field("admin_token", &"<redacted>")
+            .field("browser_auth_token", &"<redacted>")
+            .finish()
+    }
 }
 
 pub(crate) struct DesktopSecretStore {
