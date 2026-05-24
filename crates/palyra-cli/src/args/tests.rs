@@ -1542,7 +1542,7 @@ fn parse_cron_add() {
                 prompt_stdin: false,
                 schedule_type: CronScheduleTypeArg::Cron,
                 schedule: "*/5 * * * *".to_owned(),
-                timezone: RoutinePreviewTimezoneArg::Utc,
+                timezone: RoutinePreviewTimezoneArg::utc(),
                 enabled: true,
                 concurrency: CronConcurrencyPolicyArg::Forbid,
                 retry_max_attempts: 3,
@@ -1587,7 +1587,7 @@ fn parse_cron_add_defaults_to_disabled() {
                 prompt_stdin: false,
                 schedule_type: CronScheduleTypeArg::Every,
                 schedule: "1h".to_owned(),
-                timezone: RoutinePreviewTimezoneArg::Local,
+                timezone: RoutinePreviewTimezoneArg::local(),
                 enabled: false,
                 concurrency: CronConcurrencyPolicyArg::Forbid,
                 retry_max_attempts: 1,
@@ -1606,6 +1606,32 @@ fn parse_cron_add_defaults_to_disabled() {
             }
         }
     );
+}
+
+#[test]
+fn parse_cron_add_accepts_iana_timezone() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "cron",
+        "add",
+        "--name",
+        "Prague digest",
+        "--prompt",
+        "Summarize weekly work",
+        "--schedule-type",
+        "cron",
+        "--schedule",
+        "0 9 * * 1",
+        "--timezone",
+        "Europe/Prague",
+    ]);
+
+    match parsed.command {
+        Command::Cron { command: CronCommand::Add { timezone, .. } } => {
+            assert_eq!(timezone.as_str(), "Europe/Prague");
+        }
+        other => panic!("unexpected command: {other:?}"),
+    }
 }
 
 #[test]
@@ -1631,7 +1657,7 @@ fn parse_cron_add_with_prompt_stdin() {
                 prompt_stdin: true,
                 schedule_type: CronScheduleTypeArg::Every,
                 schedule: "1h".to_owned(),
-                timezone: RoutinePreviewTimezoneArg::Local,
+                timezone: RoutinePreviewTimezoneArg::local(),
                 enabled: false,
                 concurrency: CronConcurrencyPolicyArg::Forbid,
                 retry_max_attempts: 1,
@@ -1701,7 +1727,7 @@ fn parse_cron_update() {
                 prompt_stdin: false,
                 schedule_type: Some(CronScheduleTypeArg::Every),
                 schedule: Some("60000".to_owned()),
-                timezone: Some(RoutinePreviewTimezoneArg::Local),
+                timezone: Some(RoutinePreviewTimezoneArg::local()),
                 enabled: Some(true),
                 concurrency: Some(CronConcurrencyPolicyArg::Replace),
                 retry_max_attempts: Some(4),
@@ -1916,7 +1942,7 @@ fn parse_routines_upsert() {
                 execution_posture: RoutineExecutionPostureArg::SensitiveTools,
                 quiet_hours_start: Some("22:00".to_owned()),
                 quiet_hours_end: Some("06:00".to_owned()),
-                quiet_hours_timezone: Some(RoutinePreviewTimezoneArg::Utc),
+                quiet_hours_timezone: Some(RoutinePreviewTimezoneArg::utc()),
                 cooldown_ms: 120000,
                 approval_mode: RoutineApprovalModeArg::BeforeFirstRun,
                 template_id: Some("daily-report".to_owned()),
@@ -2194,7 +2220,7 @@ fn parse_objectives_upsert_with_schedule_and_budget() {
                 execution_posture: Some(RoutineExecutionPostureArg::SensitiveTools),
                 quiet_hours_start: Some("22:00".to_owned()),
                 quiet_hours_end: Some("06:00".to_owned()),
-                quiet_hours_timezone: Some(RoutinePreviewTimezoneArg::Utc),
+                quiet_hours_timezone: Some(RoutinePreviewTimezoneArg::utc()),
                 cooldown_ms: 300000,
                 approval_mode: RoutineApprovalModeArg::BeforeFirstRun,
                 json: true,

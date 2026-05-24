@@ -5453,11 +5453,17 @@ state_dir = "browserd-state"
             parse_cron_timezone_mode("local", "cron.timezone").expect("local should parse"),
             crate::cron::CronTimezoneMode::Local
         );
+        assert_eq!(
+            parse_cron_timezone_mode("Europe/Prague", "cron.timezone")
+                .expect("IANA timezone should parse")
+                .as_str(),
+            "Europe/Prague"
+        );
     }
 
     #[test]
     fn parse_cron_timezone_mode_rejects_unknown_values() {
-        let result = parse_cron_timezone_mode("Europe/Prague", "cron.timezone");
+        let result = parse_cron_timezone_mode("Mars/Phobos", "cron.timezone");
         assert!(result.is_err(), "unsupported cron timezone mode must be rejected");
     }
 

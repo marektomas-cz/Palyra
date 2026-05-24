@@ -1,3 +1,5 @@
+use std::{fmt, str::FromStr};
+
 use clap::{ArgGroup, Args, Subcommand, ValueEnum};
 
 use super::cron::{CronConcurrencyPolicyArg, CronMisfirePolicyArg, CronScheduleTypeArg};
@@ -151,7 +153,7 @@ pub enum RoutinesCommand {
     },
     SchedulePreview {
         phrase: String,
-        #[arg(long, value_enum, default_value_t = RoutinePreviewTimezoneArg::Local)]
+        #[arg(long, default_value = "local")]
         timezone: RoutinePreviewTimezoneArg,
         #[arg(long, default_value_t = false)]
         json: bool,
@@ -281,7 +283,7 @@ pub struct RoutineUpsertCommand {
     pub quiet_hours_start: Option<String>,
     #[arg(long)]
     pub quiet_hours_end: Option<String>,
-    #[arg(long, value_enum)]
+    #[arg(long)]
     pub quiet_hours_timezone: Option<RoutinePreviewTimezoneArg>,
     #[arg(long, default_value_t = 0)]
     pub cooldown_ms: u64,
@@ -405,18 +407,43 @@ impl RoutineApprovalModeArg {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum RoutinePreviewTimezoneArg {
-    Local,
-    Utc,
-}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutinePreviewTimezoneArg(String);
 
 impl RoutinePreviewTimezoneArg {
     #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Local => "local",
-            Self::Utc => "utc",
+    pub fn local() -> Self {
+        Self("local".to_owned())
+    }
+
+    #[must_use]
+    pub fn utc() -> Self {
+        Self("utc".to_owned())
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl FromStr for RoutinePreviewTimezoneArg {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return Err("timezone cannot be empty".to_owned());
         }
+        if trimmed.chars().any(char::is_control) {
+            return Err("timezone contains unsupported control characters".to_owned());
+        }
+        Ok(Self(trimmed.to_owned()))
+    }
+}
+
+impl fmt::Display for RoutinePreviewTimezoneArg {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
     }
 }

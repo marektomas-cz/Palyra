@@ -10,6 +10,7 @@ use std::{
 };
 
 use chrono::{DateTime, Datelike, Local, TimeZone, Timelike, Utc};
+use chrono_tz::Tz;
 use palyra_common::{
     default_identity_store_root, default_state_root,
     versioned_json::{
@@ -88,6 +89,7 @@ pub enum CronTimezoneMode {
     #[default]
     Utc,
     Local,
+    Named(Tz),
 }
 
 impl CronTimezoneMode {
@@ -96,14 +98,16 @@ impl CronTimezoneMode {
         match self {
             Self::Utc => "utc",
             Self::Local => "local",
+            Self::Named(timezone) => timezone.name(),
         }
     }
 
     pub fn from_str(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
+        let trimmed = value.trim();
+        match trimmed.to_ascii_lowercase().as_str() {
             "utc" => Some(Self::Utc),
             "local" => Some(Self::Local),
-            _ => None,
+            _ => trimmed.parse::<Tz>().ok().map(Self::Named),
         }
     }
 }
@@ -290,6 +294,9 @@ impl CronMatcher {
             let matches = match timezone {
                 CronTimezoneMode::Utc => self.matches(cursor),
                 CronTimezoneMode::Local => self.matches_local(cursor.with_timezone(&Local)),
+                CronTimezoneMode::Named(timezone) => {
+                    self.matches_named(cursor.with_timezone(&timezone))
+                }
             };
             if matches {
                 return Some(cursor.timestamp_millis());
@@ -310,6 +317,16 @@ impl CronMatcher {
     }
 
     fn matches_local(&self, value: DateTime<Local>) -> bool {
+        self.matches_components(
+            value.minute() as usize,
+            value.hour() as usize,
+            value.day() as usize,
+            value.month() as usize,
+            value.weekday().num_days_from_sunday() as usize,
+        )
+    }
+
+    fn matches_named(&self, value: DateTime<Tz>) -> bool {
         self.matches_components(
             value.minute() as usize,
             value.hour() as usize,
@@ -3044,6 +3061,7 @@ mod tests {
         sync::{Arc, Mutex},
     };
 
+    use chrono::{Datelike, TimeZone, Timelike, Utc};
     use tempfile::tempdir;
 
     use super::{
@@ -3072,7 +3090,6 @@ mod tests {
         RoutineApprovalMode, RoutineApprovalPolicy, RoutineDeliveryConfig, RoutineDeliveryMode,
         RoutineExecutionConfig, RoutineMetadataRecord, RoutineSilentPolicy, RoutineTriggerKind,
     };
-    use chrono::TimeZone;
     use serde_json::json;
     use tonic::{Code, Status};
 
@@ -3651,6 +3668,28 @@ mod tests {
     }
 
     #[test]
+    fn cron_matcher_accepts_named_iana_timezone() {
+        let matcher = CronMatcher::parse("0 9 * * 1").expect("weekly cron should parse");
+        let after = Utc
+            .with_ymd_and_hms(2026, 5, 24, 0, 0, 0)
+            .single()
+            .expect("valid reference timestamp")
+            .timestamp_millis();
+        let next = matcher
+            .next_after(after, CronTimezoneMode::Named(chrono_tz::Europe::Prague))
+            .expect("next run should resolve in named timezone");
+        let local = Utc
+            .timestamp_millis_opt(next)
+            .single()
+            .expect("next run timestamp should be valid")
+            .with_timezone(&chrono_tz::Europe::Prague);
+
+        assert_eq!(local.weekday().num_days_from_sunday(), 1);
+        assert_eq!(local.hour(), 9);
+        assert_eq!(local.minute(), 0);
+    }
+
+    #[test]
     fn compute_next_run_after_accepts_legacy_cron_payload_without_timezone() {
         let job = CronJobRecord {
             job_id: "01ARZ3NDEKTSV4RRFFQ69G5FB0".to_owned(),
@@ -3694,7 +3733,7 @@ mod tests {
             schedule_type: CronScheduleType::Cron,
             schedule_payload_json: json!({
                 "expression": "0 * * * *",
-                "timezone": "europe/prague"
+                "timezone": "Mars/Phobos"
             })
             .to_string(),
             enabled: true,

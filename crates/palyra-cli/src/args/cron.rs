@@ -64,8 +64,7 @@ pub enum CronCommand {
         schedule: String,
         #[arg(
             long,
-            value_enum,
-            default_value_t = RoutinePreviewTimezoneArg::Local,
+            default_value = "local",
             help = "Timezone used to evaluate cron expression schedules"
         )]
         timezone: RoutinePreviewTimezoneArg,
@@ -141,7 +140,7 @@ pub enum CronCommand {
             help = "Schedule payload: cron expression for cron, RFC3339 timestamp for at, or milliseconds/duration such as 300000 or 5m for every"
         )]
         schedule: Option<String>,
-        #[arg(long, value_enum, help = "Timezone used to evaluate cron expression schedules")]
+        #[arg(long, help = "Timezone used to evaluate cron expression schedules")]
         timezone: Option<RoutinePreviewTimezoneArg>,
         #[arg(long)]
         enabled: Option<bool>,

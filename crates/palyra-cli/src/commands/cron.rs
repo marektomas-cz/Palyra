@@ -702,10 +702,9 @@ fn existing_schedule_value(routine: &Value) -> String {
 }
 
 fn existing_schedule_timezone(routine: &Value) -> RoutinePreviewTimezoneArg {
-    match json_optional_string_at(routine, "/schedule_payload/timezone").as_deref() {
-        Some("local") => RoutinePreviewTimezoneArg::Local,
-        _ => RoutinePreviewTimezoneArg::Utc,
-    }
+    json_optional_string_at(routine, "/schedule_payload/timezone")
+        .and_then(|value| value.parse::<RoutinePreviewTimezoneArg>().ok())
+        .unwrap_or_else(RoutinePreviewTimezoneArg::utc)
 }
 
 fn existing_concurrency_policy(routine: &Value) -> CronConcurrencyPolicyArg {
@@ -858,7 +857,7 @@ mod tests {
                 prompt: "write report".to_owned(),
                 schedule_type: CronScheduleTypeArg::Every,
                 schedule: "1m".to_owned(),
-                schedule_timezone: Some(RoutinePreviewTimezoneArg::Local),
+                schedule_timezone: Some(RoutinePreviewTimezoneArg::local()),
                 enabled: Some(true),
                 concurrency: CronConcurrencyPolicyArg::Forbid,
                 retry_max_attempts: 1,
@@ -891,6 +890,42 @@ mod tests {
     }
 
     #[test]
+    fn cron_add_payload_preserves_named_timezone() {
+        let payload = build_schedule_routine_payload(
+            None,
+            ScheduleRoutineConfig {
+                name: "weekly digest".to_owned(),
+                prompt: "write digest".to_owned(),
+                schedule_type: CronScheduleTypeArg::Cron,
+                schedule: "0 9 * * 1".to_owned(),
+                schedule_timezone: Some(
+                    "Europe/Prague".parse().expect("named timezone arg should parse"),
+                ),
+                enabled: Some(false),
+                concurrency: CronConcurrencyPolicyArg::Forbid,
+                retry_max_attempts: 1,
+                retry_backoff_ms: 1_000,
+                misfire: CronMisfirePolicyArg::Skip,
+                jitter_ms: 0,
+                max_runs: None,
+                owner: None,
+                channel: None,
+                session_key: None,
+                session_label: None,
+                workdir: None,
+                execution_posture: None,
+                approval_mode: None,
+            },
+        )
+        .expect("cron payload should build");
+
+        assert_eq!(
+            payload.get("schedule_timezone").and_then(serde_json::Value::as_str),
+            Some("Europe/Prague")
+        );
+    }
+
+    #[test]
     fn cron_update_payload_preserves_or_overrides_execution_controls() {
         let existing = json!({
             "routine_id": "01TEST",
@@ -904,7 +939,7 @@ mod tests {
                 prompt: "write report".to_owned(),
                 schedule_type: CronScheduleTypeArg::Every,
                 schedule: "1m".to_owned(),
-                schedule_timezone: Some(RoutinePreviewTimezoneArg::Local),
+                schedule_timezone: Some(RoutinePreviewTimezoneArg::local()),
                 enabled: Some(true),
                 concurrency: CronConcurrencyPolicyArg::Forbid,
                 retry_max_attempts: 1,
@@ -941,7 +976,7 @@ mod tests {
                     prompt: "write report".to_owned(),
                     schedule_type: CronScheduleTypeArg::Every,
                     schedule: "1m".to_owned(),
-                    schedule_timezone: Some(RoutinePreviewTimezoneArg::Local),
+                    schedule_timezone: Some(RoutinePreviewTimezoneArg::local()),
                     enabled: Some(true),
                     concurrency: CronConcurrencyPolicyArg::Forbid,
                     retry_max_attempts: 1,

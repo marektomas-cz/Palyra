@@ -54,7 +54,7 @@ Options:
       --quiet-hours-end <QUIET_HOURS_END>
 
       --quiet-hours-timezone <QUIET_HOURS_TIMEZONE>
-          [possible values: local, utc]
+
       --cooldown-ms <COOLDOWN_MS>
           [default: 0]
       --approval-mode <APPROVAL_MODE>
