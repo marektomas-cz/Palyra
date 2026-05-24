@@ -23,6 +23,13 @@ use crate::{
 const MAX_OS_FILE_READ_BYTES: u64 = 128 * 1024;
 const MAX_OS_FILE_TOOL_INPUT_BYTES: usize = 384 * 1024;
 const MAX_OS_FILE_WRITE_BYTES: usize = 256 * 1024;
+const MAX_OS_FILE_LIST_ENTRIES: usize = 200;
+const MAX_OS_FILE_SEARCH_QUERY_BYTES: usize = 512;
+const MAX_OS_FILE_SEARCH_MATCHES: usize = 100;
+const MAX_OS_FILE_SEARCH_FILES: usize = 1_000;
+const MAX_OS_FILE_SEARCH_DEPTH: usize = 8;
+const MAX_OS_FILE_SEARCH_FILE_BYTES: u64 = 128 * 1024;
+const MAX_OS_FILE_SEARCH_EXCERPT_CHARS: usize = 240;
 
 #[derive(Debug, Deserialize)]
 struct OsFileInput {
@@ -44,6 +51,14 @@ struct OsFileInput {
     offset_bytes: Option<u64>,
     #[serde(default)]
     max_bytes: Option<u64>,
+    #[serde(default)]
+    query: Option<String>,
+    #[serde(default)]
+    case_sensitive: Option<bool>,
+    #[serde(default)]
+    max_entries: Option<usize>,
+    #[serde(default)]
+    max_matches: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -56,6 +71,8 @@ enum OsFileOperation {
     Move,
     DeleteFile,
     Mkdir,
+    ListDir,
+    Search,
 }
 
 #[derive(Debug, Clone)]
@@ -162,6 +179,8 @@ fn execute_os_file_operation(policy: &OsFilePolicy, input: &OsFileInput) -> Resu
         OsFileOperation::Move => move_path(policy, input),
         OsFileOperation::DeleteFile => delete_file_path(policy, input),
         OsFileOperation::Mkdir => mkdir_path(policy, input),
+        OsFileOperation::ListDir => list_dir_path(policy, input),
+        OsFileOperation::Search => search_path(policy, input),
     }
 }
 
@@ -392,6 +411,329 @@ fn mkdir_path(policy: &OsFilePolicy, input: &OsFileInput) -> Result<Value, Strin
         "existed_before": path.existed,
         "dry_run": dry_run,
     }))
+}
+
+fn list_dir_path(policy: &OsFilePolicy, input: &OsFileInput) -> Result<Value, String> {
+    let path = resolve_existing_os_path(input.path.as_str())?;
+    ensure_os_path_allowed(policy, &path)?;
+    let metadata = fs::metadata(path.resolved_path.as_path()).map_err(|error| {
+        format!("{OS_FILE_TOOL_NAME} failed to inspect {}: {error}", input.path.trim())
+    })?;
+    if !metadata.is_dir() {
+        return Err(format!("{OS_FILE_TOOL_NAME} list_dir requires a directory path"));
+    }
+    let max_entries =
+        input.max_entries.unwrap_or(MAX_OS_FILE_LIST_ENTRIES).clamp(1, MAX_OS_FILE_LIST_ENTRIES);
+    let mut entries = Vec::new();
+    let mut skipped_entries = 0usize;
+    let read_dir = fs::read_dir(path.resolved_path.as_path()).map_err(|error| {
+        format!("{OS_FILE_TOOL_NAME} failed to list directory {}: {error}", input.path.trim())
+    })?;
+    for entry in read_dir {
+        if entries.len() >= max_entries {
+            skipped_entries = skipped_entries.saturating_add(1);
+            continue;
+        }
+        let Ok(entry) = entry else {
+            skipped_entries = skipped_entries.saturating_add(1);
+            continue;
+        };
+        let entry_path = entry.path();
+        let Ok(canonical_entry) = fs::canonicalize(entry_path.as_path()) else {
+            skipped_entries = skipped_entries.saturating_add(1);
+            continue;
+        };
+        if !path_starts_with(canonical_entry.as_path(), path.resolved_path.as_path()) {
+            skipped_entries = skipped_entries.saturating_add(1);
+            continue;
+        }
+        let Ok(metadata) = fs::metadata(canonical_entry.as_path()) else {
+            skipped_entries = skipped_entries.saturating_add(1);
+            continue;
+        };
+        entries.push(json!({
+            "name": entry.file_name().to_string_lossy(),
+            "path": display_path(entry_path.as_path()),
+            "resolved_path": display_path(canonical_entry.as_path()),
+            "kind": metadata_kind(&metadata),
+            "size_bytes": metadata.len(),
+            "readonly": metadata.permissions().readonly(),
+            "modified_unix_ms": metadata_modified_unix_ms(&metadata),
+        }));
+    }
+    entries.sort_by(|left, right| {
+        left.get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .cmp(right.get("name").and_then(Value::as_str).unwrap_or_default())
+    });
+    let entry_count = entries.len();
+    Ok(json!({
+        "operation": "list_dir",
+        "path": display_path(path.requested_path.as_path()),
+        "resolved_path": display_path(path.resolved_path.as_path()),
+        "entries": entries,
+        "entry_count": entry_count,
+        "skipped_entries": skipped_entries,
+        "truncated": skipped_entries > 0,
+        "dry_run": false,
+    }))
+}
+
+#[derive(Debug)]
+struct OsFileSearchState {
+    query: String,
+    normalized_query: String,
+    case_sensitive: bool,
+    max_matches: usize,
+    matches: Vec<Value>,
+    files_scanned: usize,
+    dirs_scanned: usize,
+    skipped_files: usize,
+    skipped_dirs: usize,
+    truncated: bool,
+}
+
+impl OsFileSearchState {
+    fn new(query: String, case_sensitive: bool, max_matches: usize) -> Self {
+        let normalized_query = normalize_search_text(query.as_str(), case_sensitive);
+        Self {
+            query,
+            normalized_query,
+            case_sensitive,
+            max_matches,
+            matches: Vec::new(),
+            files_scanned: 0,
+            dirs_scanned: 0,
+            skipped_files: 0,
+            skipped_dirs: 0,
+            truncated: false,
+        }
+    }
+
+    fn has_capacity(&self) -> bool {
+        self.matches.len() < self.max_matches
+    }
+
+    fn push_match(&mut self, value: Value) {
+        if self.has_capacity() {
+            self.matches.push(value);
+        } else {
+            self.truncated = true;
+        }
+    }
+}
+
+fn search_path(policy: &OsFilePolicy, input: &OsFileInput) -> Result<Value, String> {
+    let path = resolve_existing_os_path(input.path.as_str())?;
+    ensure_os_path_allowed(policy, &path)?;
+    let query = input
+        .query
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("{OS_FILE_TOOL_NAME} search requires non-empty query"))?;
+    if query.len() > MAX_OS_FILE_SEARCH_QUERY_BYTES {
+        return Err(format!(
+            "{OS_FILE_TOOL_NAME} search query exceeds {MAX_OS_FILE_SEARCH_QUERY_BYTES} bytes"
+        ));
+    }
+    let max_matches = input
+        .max_matches
+        .unwrap_or(MAX_OS_FILE_SEARCH_MATCHES)
+        .clamp(1, MAX_OS_FILE_SEARCH_MATCHES);
+    let mut state = OsFileSearchState::new(
+        query.to_owned(),
+        input.case_sensitive.unwrap_or(false),
+        max_matches,
+    );
+    search_path_recursive(
+        path.resolved_path.as_path(),
+        path.resolved_path.as_path(),
+        &mut state,
+        0,
+    )?;
+    let OsFileSearchState {
+        matches,
+        files_scanned,
+        dirs_scanned,
+        skipped_files,
+        skipped_dirs,
+        truncated,
+        ..
+    } = state;
+    let match_count = matches.len();
+    Ok(json!({
+        "operation": "search",
+        "path": display_path(path.requested_path.as_path()),
+        "resolved_path": display_path(path.resolved_path.as_path()),
+        "query": query,
+        "case_sensitive": input.case_sensitive.unwrap_or(false),
+        "matches": matches,
+        "match_count": match_count,
+        "files_scanned": files_scanned,
+        "dirs_scanned": dirs_scanned,
+        "skipped_files": skipped_files,
+        "skipped_dirs": skipped_dirs,
+        "truncated": truncated,
+        "dry_run": false,
+    }))
+}
+
+fn search_path_recursive(
+    root: &Path,
+    path: &Path,
+    state: &mut OsFileSearchState,
+    depth: usize,
+) -> Result<(), String> {
+    if !state.has_capacity() {
+        state.truncated = true;
+        return Ok(());
+    }
+    if depth > MAX_OS_FILE_SEARCH_DEPTH {
+        state.truncated = true;
+        state.skipped_dirs = state.skipped_dirs.saturating_add(1);
+        return Ok(());
+    }
+    let canonical = fs::canonicalize(path).map_err(|error| {
+        format!("{OS_FILE_TOOL_NAME} failed to resolve search path {}: {error}", display_path(path))
+    })?;
+    if !path_starts_with(canonical.as_path(), root) {
+        state.skipped_files = state.skipped_files.saturating_add(1);
+        return Ok(());
+    }
+    let metadata = fs::metadata(canonical.as_path()).map_err(|error| {
+        format!(
+            "{OS_FILE_TOOL_NAME} failed to inspect search path {}: {error}",
+            display_path(canonical.as_path())
+        )
+    })?;
+    if metadata.is_dir() {
+        search_directory(root, canonical.as_path(), state, depth)?;
+    } else if metadata.is_file() {
+        search_file(canonical.as_path(), metadata.len(), state)?;
+    } else {
+        state.skipped_files = state.skipped_files.saturating_add(1);
+    }
+    Ok(())
+}
+
+fn search_directory(
+    root: &Path,
+    path: &Path,
+    state: &mut OsFileSearchState,
+    depth: usize,
+) -> Result<(), String> {
+    state.dirs_scanned = state.dirs_scanned.saturating_add(1);
+    let entries = fs::read_dir(path).map_err(|error| {
+        format!("{OS_FILE_TOOL_NAME} failed to search directory {}: {error}", display_path(path))
+    })?;
+    for entry in entries {
+        if !state.has_capacity() {
+            state.truncated = true;
+            break;
+        }
+        let Ok(entry) = entry else {
+            state.skipped_files = state.skipped_files.saturating_add(1);
+            continue;
+        };
+        search_path_recursive(root, entry.path().as_path(), state, depth + 1)?;
+        if state.files_scanned >= MAX_OS_FILE_SEARCH_FILES {
+            state.truncated = true;
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn search_file(path: &Path, size_bytes: u64, state: &mut OsFileSearchState) -> Result<(), String> {
+    if state.files_scanned >= MAX_OS_FILE_SEARCH_FILES {
+        state.truncated = true;
+        return Ok(());
+    }
+    state.files_scanned = state.files_scanned.saturating_add(1);
+    let display = display_path(path);
+    let normalized_path = normalize_search_text(display.as_str(), state.case_sensitive);
+    if normalized_path.contains(state.normalized_query.as_str()) {
+        state.push_match(json!({
+            "path": display,
+            "kind": "path",
+            "size_bytes": size_bytes,
+        }));
+    }
+    if size_bytes > MAX_OS_FILE_SEARCH_FILE_BYTES || !state.has_capacity() {
+        if size_bytes > MAX_OS_FILE_SEARCH_FILE_BYTES {
+            state.skipped_files = state.skipped_files.saturating_add(1);
+        }
+        return Ok(());
+    }
+    let bytes = fs::read(path).map_err(|error| {
+        format!("{OS_FILE_TOOL_NAME} failed to read search file {display}: {error}")
+    })?;
+    let Ok(text) = String::from_utf8(bytes) else {
+        state.skipped_files = state.skipped_files.saturating_add(1);
+        return Ok(());
+    };
+    for (line_index, line) in text.lines().enumerate() {
+        if !state.has_capacity() {
+            state.truncated = true;
+            break;
+        }
+        let normalized_line = normalize_search_text(line, state.case_sensitive);
+        let Some(match_index) = normalized_line.find(state.normalized_query.as_str()) else {
+            continue;
+        };
+        let excerpt = search_excerpt(line, match_index, state.query.len());
+        let redaction = redact_text_for_export(
+            excerpt.as_str(),
+            SafetySourceKind::Workspace,
+            SafetyContentKind::WorkspaceDocument,
+            TrustLabel::TrustedLocal,
+        );
+        let redacted = redaction.scan.has_category(SafetyFindingCategory::SecretLeak);
+        state.push_match(json!({
+            "path": display,
+            "kind": "content",
+            "line_number": line_index + 1,
+            "excerpt": if redacted { redaction.redacted_text } else { excerpt },
+            "redacted": redacted,
+            "size_bytes": size_bytes,
+        }));
+    }
+    Ok(())
+}
+
+fn normalize_search_text(value: &str, case_sensitive: bool) -> String {
+    if case_sensitive {
+        value.to_owned()
+    } else {
+        value.to_ascii_lowercase()
+    }
+}
+
+fn search_excerpt(line: &str, match_start: usize, query_len: usize) -> String {
+    let match_start = floor_char_boundary(line, match_start.min(line.len()));
+    let start = line[..match_start]
+        .char_indices()
+        .rev()
+        .nth(MAX_OS_FILE_SEARCH_EXCERPT_CHARS / 2)
+        .map(|(index, _)| index)
+        .unwrap_or(0);
+    let raw_end = floor_char_boundary(line, match_start.saturating_add(query_len).min(line.len()));
+    let end = line[raw_end..]
+        .char_indices()
+        .nth(MAX_OS_FILE_SEARCH_EXCERPT_CHARS / 2)
+        .map(|(index, _)| raw_end.saturating_add(index))
+        .unwrap_or_else(|| line.len());
+    line[start.min(line.len())..end.min(line.len())].to_owned()
+}
+
+fn floor_char_boundary(value: &str, mut index: usize) -> usize {
+    index = index.min(value.len());
+    while index > 0 && !value.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
 }
 
 fn prepare_target_parent(
@@ -728,6 +1070,10 @@ mod tests {
                 dry_run: Some(false),
                 offset_bytes: None,
                 max_bytes: None,
+                query: None,
+                case_sensitive: None,
+                max_entries: None,
+                max_matches: None,
             },
         )
         .expect("absolute user path write should succeed");
@@ -748,6 +1094,10 @@ mod tests {
                 dry_run: None,
                 offset_bytes: None,
                 max_bytes: None,
+                query: None,
+                case_sensitive: None,
+                max_entries: None,
+                max_matches: None,
             },
         )
         .expect("absolute user path read should succeed");
@@ -784,6 +1134,10 @@ mod tests {
                 dry_run: Some(false),
                 offset_bytes: None,
                 max_bytes: None,
+                query: None,
+                case_sensitive: None,
+                max_entries: None,
+                max_matches: None,
             },
         )
         .expect_err("outside path should require an approved root");
@@ -810,10 +1164,86 @@ mod tests {
                 dry_run: Some(true),
                 offset_bytes: None,
                 max_bytes: None,
+                query: None,
+                case_sensitive: None,
+                max_entries: None,
+                max_matches: None,
             },
         )
         .expect("dry-run write should validate");
 
         assert!(!target.exists());
+    }
+
+    #[test]
+    fn os_file_lists_and_searches_user_cache_paths() {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let policy = test_policy(tempdir.path());
+        let cache_dir = tempdir.path().join(".cache").join("palyra").join("memory");
+        fs::create_dir_all(cache_dir.as_path()).expect("cache dir should be created");
+        let token_file = cache_dir.join("palyra_e2e_delete_me.cache");
+        let other_file = cache_dir.join("keep.cache");
+        fs::write(token_file.as_path(), "token=palyra_e2e_delete_me\n")
+            .expect("token cache fixture should be written");
+        fs::write(other_file.as_path(), "token=keep\n").expect("other cache fixture");
+
+        let listed = execute_os_file_operation(
+            &policy,
+            &OsFileInput {
+                operation: OsFileOperation::ListDir,
+                path: cache_dir.to_string_lossy().into_owned(),
+                target_path: None,
+                content_text: None,
+                bytes_base64: None,
+                create_parent_dirs: None,
+                overwrite: None,
+                dry_run: None,
+                offset_bytes: None,
+                max_bytes: None,
+                query: None,
+                case_sensitive: None,
+                max_entries: Some(10),
+                max_matches: None,
+            },
+        )
+        .expect("OS cache dir list should succeed");
+
+        assert_eq!(listed.get("entry_count").and_then(Value::as_u64), Some(2));
+
+        let searched = execute_os_file_operation(
+            &policy,
+            &OsFileInput {
+                operation: OsFileOperation::Search,
+                path: cache_dir.to_string_lossy().into_owned(),
+                target_path: None,
+                content_text: None,
+                bytes_base64: None,
+                create_parent_dirs: None,
+                overwrite: None,
+                dry_run: None,
+                offset_bytes: None,
+                max_bytes: None,
+                query: Some("palyra_e2e_delete_me".to_owned()),
+                case_sensitive: Some(false),
+                max_entries: None,
+                max_matches: Some(10),
+            },
+        )
+        .expect("OS cache search should succeed");
+
+        let matches = searched
+            .get("matches")
+            .and_then(Value::as_array)
+            .expect("search matches should be an array");
+        assert!(
+            matches.iter().any(|value| value.get("kind").and_then(Value::as_str) == Some("path")),
+            "search should find matching file names: {searched}"
+        );
+        assert!(
+            matches
+                .iter()
+                .any(|value| value.get("kind").and_then(Value::as_str) == Some("content")),
+            "search should find matching cache contents: {searched}"
+        );
     }
 }

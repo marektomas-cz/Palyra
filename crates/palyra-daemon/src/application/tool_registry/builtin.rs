@@ -383,7 +383,7 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
                 vec![
                     (
                         "operation",
-                        json!({"type":"string","enum":["stat","read","write","copy","move","delete_file","mkdir"],"description":"Operation to perform. Prefer read/write for ordinary OS-level files; use copy/move/delete_file/mkdir only when explicitly requested."}),
+                        json!({"type":"string","enum":["stat","read","write","copy","move","delete_file","mkdir","list_dir","search"],"description":"Operation to perform. Prefer list_dir/search/read/write for ordinary OS-level files; use copy/move/delete_file/mkdir only when explicitly requested. For privacy cleanup, use search to find exact matching cache files before delete_file."}),
                     ),
                     (
                         "path",
@@ -412,6 +412,13 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
                     ("dry_run", json!({"type":"boolean"})),
                     ("offset_bytes", json!({"type":"integer","minimum":0})),
                     ("max_bytes", json!({"type":"integer","minimum":1,"maximum":131072})),
+                    (
+                        "query",
+                        json!({"type":"string","maxLength":512,"description":"Literal filename/path/content text to search for when operation=search."}),
+                    ),
+                    ("case_sensitive", json!({"type":"boolean","default":false})),
+                    ("max_entries", json!({"type":"integer","minimum":1,"maximum":200})),
+                    ("max_matches", json!({"type":"integer","minimum":1,"maximum":100})),
                 ],
                 false,
             ),
@@ -1042,6 +1049,27 @@ mod tests {
         assert!(patch_description.contains("[REDACTED_SECRET]"));
         assert!(patch_description.contains("reports/report.md"));
         assert!(patch_description.contains("never use host absolute paths"));
+    }
+
+    #[test]
+    fn os_file_registry_exposes_cache_discovery_operations() {
+        let entry = registry_entry("palyra.fs.os_file").expect("os_file entry exists");
+        let operation_values = entry
+            .input_schema
+            .pointer("/properties/operation/enum")
+            .and_then(serde_json::Value::as_array)
+            .expect("os_file operation enum should be visible to models");
+        assert!(operation_values.iter().any(|value| value.as_str() == Some("list_dir")));
+        assert!(operation_values.iter().any(|value| value.as_str() == Some("search")));
+
+        let query_description = entry
+            .input_schema
+            .pointer("/properties/query/description")
+            .and_then(serde_json::Value::as_str)
+            .expect("os_file query description should be visible to models");
+        assert!(query_description.contains("filename/path/content"));
+        assert!(entry.input_schema.pointer("/properties/max_entries").is_some());
+        assert!(entry.input_schema.pointer("/properties/max_matches").is_some());
     }
 
     #[test]
