@@ -380,7 +380,16 @@ impl SelfHealingState {
 
     pub(crate) fn clear_heartbeat(&self, kind: WorkHeartbeatKind, object_id: &str) {
         let mut inner = self.inner.lock().expect("self-healing mutex poisoned");
-        inner.heartbeats.remove(heartbeat_key(kind, object_id).as_str());
+        let Some(heartbeat) = inner.heartbeats.remove(heartbeat_key(kind, object_id).as_str())
+        else {
+            return;
+        };
+        resolve_incident_locked(
+            &mut inner,
+            IncidentDomain::Watchdog,
+            heartbeat_dedupe_key(&heartbeat).as_str(),
+            "heartbeat cleared",
+        );
     }
 
     #[must_use]
@@ -431,30 +440,7 @@ impl SelfHealingState {
 
     pub(crate) fn resolve_incident(&self, domain: IncidentDomain, dedupe_key: &str, summary: &str) {
         let mut inner = self.inner.lock().expect("self-healing mutex poisoned");
-        let index_key = incident_index_key(domain, dedupe_key);
-        let Some(incident_id) = inner.incident_index.get(index_key.as_str()).cloned() else {
-            return;
-        };
-        let now = current_unix_ms();
-        let Some(record) = inner.incidents.get_mut(incident_id.as_str()) else {
-            return;
-        };
-        if record.state == IncidentState::Resolved {
-            return;
-        }
-        record.state = IncidentState::Resolved;
-        record.updated_at_unix_ms = now;
-        record.resolved_at_unix_ms = Some(now);
-        push_incident_history(
-            &mut inner.incident_history,
-            RuntimeIncidentHistoryEntry {
-                incident_id,
-                domain,
-                state: IncidentState::Resolved,
-                summary: summary.to_owned(),
-                recorded_at_unix_ms: now,
-            },
-        );
+        resolve_incident_locked(&mut inner, domain, dedupe_key, summary);
     }
 
     pub(crate) fn record_remediation_attempt(
@@ -483,6 +469,38 @@ impl SelfHealingState {
         truncate_vec(&mut inner.remediation_attempts, REMEDIATION_HISTORY_LIMIT);
         record
     }
+}
+
+fn resolve_incident_locked(
+    inner: &mut SelfHealingStateInner,
+    domain: IncidentDomain,
+    dedupe_key: &str,
+    summary: &str,
+) {
+    let index_key = incident_index_key(domain, dedupe_key);
+    let Some(incident_id) = inner.incident_index.get(index_key.as_str()).cloned() else {
+        return;
+    };
+    let now = current_unix_ms();
+    let Some(record) = inner.incidents.get_mut(incident_id.as_str()) else {
+        return;
+    };
+    if record.state == IncidentState::Resolved {
+        return;
+    }
+    record.state = IncidentState::Resolved;
+    record.updated_at_unix_ms = now;
+    record.resolved_at_unix_ms = Some(now);
+    push_incident_history(
+        &mut inner.incident_history,
+        RuntimeIncidentHistoryEntry {
+            incident_id,
+            domain,
+            state: IncidentState::Resolved,
+            summary: summary.to_owned(),
+            recorded_at_unix_ms: now,
+        },
+    );
 }
 
 pub(crate) fn spawn_self_healing_loop(state: AppState) -> tokio::task::JoinHandle<()> {
@@ -1151,6 +1169,32 @@ mod tests {
 
         state.clear_heartbeat(WorkHeartbeatKind::Run, "01ARZ3NDEKTSV4RRFFQ69G5FAX");
         assert!(state.list_heartbeats().is_empty());
+    }
+
+    #[test]
+    fn clearing_heartbeat_resolves_matching_watchdog_incident() {
+        let state = SelfHealingState::new();
+        let run_id = "01ARZ3NDEKTSV4RRFFQ69G5FAX";
+        state.record_heartbeat(WorkHeartbeatUpdate {
+            kind: WorkHeartbeatKind::Run,
+            object_id: run_id.to_owned(),
+            summary: "run summary".to_owned(),
+        });
+        let heartbeat = state.list_heartbeats().pop().expect("heartbeat should exist");
+        let _ = state.observe_incident(RuntimeIncidentObservation {
+            domain: IncidentDomain::Watchdog,
+            severity: IncidentSeverity::High,
+            summary: "run appears stuck".to_owned(),
+            detail: "test detail".to_owned(),
+            dedupe_key: heartbeat_dedupe_key(&heartbeat),
+            remediation: Some(build_run_watchdog_remediation()),
+        });
+
+        state.clear_heartbeat(WorkHeartbeatKind::Run, run_id);
+
+        assert!(state.list_heartbeats().is_empty());
+        assert!(state.active_incidents(8).is_empty());
+        assert_eq!(state.incident_summary().resolved, 1);
     }
 
     #[test]
