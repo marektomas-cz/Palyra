@@ -345,11 +345,7 @@ pub(crate) async fn console_routine_import_handler(
     if let Some(job) = existing_job.as_ref() {
         ensure_job_owner(job, session.context.principal.as_str())?;
     }
-    let approval_policy = routine_approval_policy_with_auto_enable_guard(
-        bundle.job.schedule_type,
-        bundle.job.schedule_payload_json.as_str(),
-        bundle.routine.approval_policy.clone(),
-    );
+    let approval_policy = bundle.routine.approval_policy.clone();
     let approval_required = requested_enabled
         && approval_policy.mode == RoutineApprovalMode::BeforeEnable
         && !routine_approval_granted(
@@ -493,15 +489,13 @@ pub(crate) async fn console_routine_upsert_handler(
         approval_mode_was_requested,
         execution_posture_was_requested,
     );
-    let approval_policy = if trigger_kind == RoutineTriggerKind::FileWatch {
-        approval_policy
-    } else {
-        routine_approval_policy_with_auto_enable_guard(
-            schedule.schedule_type,
-            schedule.schedule_payload_json.as_str(),
-            approval_policy,
-        )
-    };
+    let approval_policy = approval_policy_for_requested_schedule(
+        trigger_kind,
+        schedule.schedule_type,
+        schedule.schedule_payload_json.as_str(),
+        approval_policy,
+        approval_mode_was_requested,
+    );
     validate_sensitive_tool_approval_policy(&execution, &approval_policy)?;
     let concurrency_policy = parse_concurrency_policy(payload.concurrency_policy.as_deref())?;
     let retry_policy = parse_retry_policy(payload.retry_max_attempts, payload.retry_backoff_ms)?;
@@ -630,13 +624,8 @@ pub(crate) async fn console_routine_set_enabled_handler(
         session.context.principal.as_str(),
     )
     .await?;
-    let guarded_approval_policy = routine_approval_policy_with_auto_enable_guard(
-        routine.job.schedule_type,
-        routine.job.schedule_payload_json.as_str(),
-        routine.metadata.approval_policy.clone(),
-    );
     let approval_required = payload.enabled
-        && guarded_approval_policy.mode == RoutineApprovalMode::BeforeEnable
+        && routine.metadata.approval_policy.mode == RoutineApprovalMode::BeforeEnable
         && !routine_approval_granted(
             &state,
             routine_approval_subject_id(
@@ -2745,6 +2734,23 @@ fn default_approval_policy_for_execution(
     approval_policy
 }
 
+fn approval_policy_for_requested_schedule(
+    trigger_kind: RoutineTriggerKind,
+    schedule_type: CronScheduleType,
+    schedule_payload_json: &str,
+    approval_policy: RoutineApprovalPolicy,
+    approval_mode_was_requested: bool,
+) -> RoutineApprovalPolicy {
+    if trigger_kind == RoutineTriggerKind::FileWatch || approval_mode_was_requested {
+        return approval_policy;
+    }
+    routine_approval_policy_with_auto_enable_guard(
+        schedule_type,
+        schedule_payload_json,
+        approval_policy,
+    )
+}
+
 #[allow(clippy::result_large_err)]
 fn validate_sensitive_tool_approval_policy(
     execution: &RoutineExecutionConfig,
@@ -2927,12 +2933,12 @@ mod tests {
     use std::fs;
 
     use super::{
-        compare_optional_matchers, is_in_quiet_hours, normalize_channel, parse_delivery,
-        parse_execution_config, parse_optional_schedule_timezone_mode, parse_quiet_hours,
-        parse_routine_approval_subject, routine_approval_subject_id,
-        routine_automation_flag_permits_enabled_write, routine_matches_trigger,
-        routine_output_fields_from_session, routine_output_text_from_tape_events,
-        routine_troubleshooting_recommended_action,
+        approval_policy_for_requested_schedule, compare_optional_matchers, is_in_quiet_hours,
+        normalize_channel, parse_delivery, parse_execution_config,
+        parse_optional_schedule_timezone_mode, parse_quiet_hours, parse_routine_approval_subject,
+        routine_approval_subject_id, routine_automation_flag_permits_enabled_write,
+        routine_matches_trigger, routine_output_fields_from_session,
+        routine_output_text_from_tape_events, routine_troubleshooting_recommended_action,
     };
     use crate::cron::CronTimezoneMode;
     use crate::journal::{CronScheduleType, OrchestratorSessionRecord, OrchestratorTapeRecord};
@@ -3386,6 +3392,32 @@ mod tests {
         );
 
         assert_eq!(approval_policy.mode, RoutineApprovalMode::None);
+    }
+
+    #[test]
+    fn requested_schedule_approval_policy_preserves_explicit_none_for_fast_recurring_jobs() {
+        let approval_policy = approval_policy_for_requested_schedule(
+            RoutineTriggerKind::Schedule,
+            CronScheduleType::Every,
+            json!({ "interval_ms": 60_000_u64 }).to_string().as_str(),
+            RoutineApprovalPolicy { mode: RoutineApprovalMode::None },
+            true,
+        );
+
+        assert_eq!(approval_policy.mode, RoutineApprovalMode::None);
+    }
+
+    #[test]
+    fn requested_schedule_approval_policy_guards_implicit_none_for_fast_recurring_jobs() {
+        let approval_policy = approval_policy_for_requested_schedule(
+            RoutineTriggerKind::Schedule,
+            CronScheduleType::Every,
+            json!({ "interval_ms": 60_000_u64 }).to_string().as_str(),
+            RoutineApprovalPolicy { mode: RoutineApprovalMode::None },
+            false,
+        );
+
+        assert_eq!(approval_policy.mode, RoutineApprovalMode::BeforeEnable);
     }
 
     #[test]
