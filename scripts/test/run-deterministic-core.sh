@@ -43,7 +43,9 @@ if command -v cygpath >/dev/null 2>&1; then
 fi
 
 cleanup_desktop_test_target_dir() {
-  rm -rf "$DESKTOP_TEST_TARGET_DIR"
+  if [[ -n "${DESKTOP_TEST_TARGET_DIR:-}" && -d "$DESKTOP_TEST_TARGET_DIR" ]]; then
+    rm -rf "$DESKTOP_TEST_TARGET_DIR"
+  fi
 }
 
 trap cleanup_desktop_test_target_dir EXIT
@@ -75,6 +77,8 @@ run_desktop_test openai_oauth_bootstrap_and_callback_state_reuse_console_session
 run_desktop_test openai_profile_actions_hit_expected_routes_including_reconnect
 run_desktop_test discord_onboarding_preflight_apply_and_verify_use_console_session_and_csrf
 run_desktop_test support_bundle_export_plan_capture_does_not_hold_supervisor_lock
+
+cleanup_desktop_test_target_dir
 
 "$CARGO_BIN" test -p palyra-cli --test workflow_regression_contract --locked
 "$CARGO_BIN" test -p palyra-daemon --test openai_auth_surface --locked
