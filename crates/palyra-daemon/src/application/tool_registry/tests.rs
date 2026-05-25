@@ -346,6 +346,22 @@ fn browser_observe_schema_exposes_visible_text_default() {
 }
 
 #[test]
+fn browser_binary_artifact_tools_expose_output_path() {
+    for tool_name in
+        ["palyra.browser.screenshot", "palyra.browser.pdf", "palyra.browser.downloads.get"]
+    {
+        let entry = registry_entry(tool_name).expect("browser binary artifact tool should exist");
+        let description = entry.input_schema["properties"]["output_path"]["description"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            description.contains("workspace-relative") && description.contains("absolute OS path"),
+            "{tool_name} should expose a first-class binary save path"
+        );
+    }
+}
+
+#[test]
 fn routines_control_schema_discourages_slug_ids_and_short_intervals() {
     let entry = registry_entry("palyra.routines.control").expect("routines control tool entry");
 

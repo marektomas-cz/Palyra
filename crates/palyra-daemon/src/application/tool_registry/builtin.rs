@@ -803,11 +803,13 @@ fn browser_tool_description(tool_name: &str) -> &'static str {
         "palyra.browser.wait_for" => "Wait for a browser condition.",
         "palyra.browser.title" => "Read the current browser title.",
         "palyra.browser.screenshot" => {
-            "Capture a bounded browser screenshot; do not use it alone as visible text evidence."
+            "Capture a bounded browser screenshot and optionally save it directly to a workspace or approved user-owned output_path; do not use it alone as visible text evidence."
         }
-        "palyra.browser.pdf" => "Capture a bounded browser PDF.",
+        "palyra.browser.pdf" => {
+            "Capture a bounded browser PDF and optionally save it directly to a workspace or approved user-owned output_path."
+        }
         "palyra.browser.observe" => {
-            "Observe visible browser state, bounded DOM/accessibility/text evidence, and safe current form/storage state for page-content claims."
+            "Observe visible browser state, bounded DOM/accessibility visible text evidence, and safe current form/storage state for page-content claims."
         }
         "palyra.browser.network_log" => "Read bounded browser network logs.",
         "palyra.browser.console_log" => "Read bounded browser console logs.",
@@ -820,7 +822,7 @@ fn browser_tool_description(tool_name: &str) -> &'static str {
         "palyra.browser.permissions.set" => "Update browser permission state.",
         "palyra.browser.downloads.list" => "List browser download artifacts.",
         "palyra.browser.downloads.get" => {
-            "Return a bounded browser download artifact payload as base64."
+            "Return a bounded browser download artifact payload and optionally save it directly to a workspace or approved user-owned output_path."
         }
         _ => "Operate a brokered browser session.",
     }
@@ -945,6 +947,21 @@ fn browser_tool_schema(tool_name: &str) -> Value {
             ));
             properties.push(("poll_interval_ms", json!({"type":"integer","minimum":1})));
         }
+        "palyra.browser.screenshot" => {
+            properties.push(("max_bytes", json!({"type":"integer","minimum":1})));
+            properties.push(("format", json!({"type":"string","enum":["png"],"default":"png"})));
+            properties.push((
+                "output_path",
+                json!({"type":"string","description":"Optional workspace-relative path, or approved user-owned absolute OS path, where the daemon should write the PNG bytes. Use this when the user asks to save a screenshot; do not try to write image_base64 with file patch tools."}),
+            ));
+        }
+        "palyra.browser.pdf" => {
+            properties.push(("max_bytes", json!({"type":"integer","minimum":1})));
+            properties.push((
+                "output_path",
+                json!({"type":"string","description":"Optional workspace-relative path, or approved user-owned absolute OS path, where the daemon should write the PDF bytes. Use this when the user asks to save a PDF; do not try to write pdf_base64 with file patch tools."}),
+            ));
+        }
         "palyra.browser.session.create" => {
             properties.push((
                 "profile_id",
@@ -971,6 +988,10 @@ fn browser_tool_schema(tool_name: &str) -> Value {
                 json!({"type":"string","description":"Optional artifact id returned by palyra.browser.downloads.list. If omitted, the latest non-quarantined artifact is fetched."}),
             ));
             properties.push(("max_bytes", json!({"type":"integer","minimum":1})));
+            properties.push((
+                "output_path",
+                json!({"type":"string","description":"Optional workspace-relative path, or approved user-owned absolute OS path, where the daemon should write the artifact bytes. Use this as the safe artifact-to-file transfer path instead of reading base64 and patching binary files."}),
+            ));
         }
         "palyra.browser.observe" => {
             properties.push((

@@ -310,8 +310,16 @@ async fn read_browser_upload_file(
 }
 
 fn validate_browser_workspace_relative_path(path: &Path) -> Result<PathBuf, String> {
+    validate_browser_workspace_relative_path_for_tool(BROWSER_UPLOAD_TOOL_NAME, "file_path", path)
+}
+
+fn validate_browser_workspace_relative_path_for_tool(
+    tool_name: &str,
+    field_name: &str,
+    path: &Path,
+) -> Result<PathBuf, String> {
     if path.as_os_str().is_empty() {
-        return Err(format!("{BROWSER_UPLOAD_TOOL_NAME} relative file_path must be non-empty"));
+        return Err(format!("{tool_name} relative {field_name} must be non-empty"));
     }
     for component in path.components() {
         if matches!(
@@ -319,11 +327,153 @@ fn validate_browser_workspace_relative_path(path: &Path) -> Result<PathBuf, Stri
             Component::Prefix(_) | Component::RootDir | Component::CurDir | Component::ParentDir
         ) {
             return Err(format!(
-                "{BROWSER_UPLOAD_TOOL_NAME} relative file_path must not contain root, '.', or '..' components"
+                "{tool_name} relative {field_name} must not contain root, '.', or '..' components"
             ));
         }
     }
     Ok(path.to_path_buf())
+}
+
+fn browser_output_path_from_payload<'a>(
+    payload: &'a serde_json::Map<String, Value>,
+    tool_name: &str,
+) -> Result<Option<&'a str>, String> {
+    let Some(value) = payload.get("output_path") else {
+        return Ok(None);
+    };
+    let Some(output_path) = value.as_str().map(str::trim) else {
+        return Err(format!("{tool_name} field 'output_path' must be a string"));
+    };
+    if output_path.is_empty() {
+        return Err(format!("{tool_name} field 'output_path' must be non-empty"));
+    }
+    if output_path.chars().any(char::is_control) {
+        return Err(format!("{tool_name} field 'output_path' contains unsupported characters"));
+    }
+    Ok(Some(output_path))
+}
+
+async fn save_browser_output_file_from_payload(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    context: ToolRuntimeExecutionContext<'_>,
+    payload: &serde_json::Map<String, Value>,
+    tool_name: &str,
+    mime_type: &str,
+    bytes: &[u8],
+) -> Result<Option<Value>, String> {
+    let Some(output_path) = browser_output_path_from_payload(payload, tool_name)? else {
+        return Ok(None);
+    };
+    let workspace_roots = resolve_browser_agent_workspace_roots(runtime_state, context, tool_name)
+        .await
+        .map_err(|error| format!("{tool_name} failed to resolve output workspace: {error}"))?;
+    let target = resolve_browser_output_path(
+        tool_name,
+        output_path,
+        workspace_roots.as_slice(),
+        browser_user_owned_os_roots().as_slice(),
+    )?;
+    fs::write(target.as_path(), bytes).map_err(|error| {
+        format!("{tool_name} failed to write output_path {output_path}: {error}")
+    })?;
+    let canonical_target = fs::canonicalize(target.as_path()).unwrap_or(target);
+    Ok(Some(json!({
+        "path": canonical_target.to_string_lossy(),
+        "mime_type": mime_type,
+        "size_bytes": bytes.len(),
+        "sha256": hex::encode(Sha256::digest(bytes)),
+    })))
+}
+
+fn resolve_browser_output_path(
+    tool_name: &str,
+    output_path: &str,
+    workspace_roots: &[PathBuf],
+    user_owned_roots: &[PathBuf],
+) -> Result<PathBuf, String> {
+    let requested = PathBuf::from(output_path);
+    let allowed_roots = if requested.is_absolute() {
+        workspace_roots.iter().chain(user_owned_roots.iter()).cloned().collect::<Vec<_>>()
+    } else {
+        let relative = validate_browser_workspace_relative_path_for_tool(
+            tool_name,
+            "output_path",
+            &requested,
+        )?;
+        let Some(root) = workspace_roots.first() else {
+            return Err(format!("{tool_name} agent has no workspace root"));
+        };
+        return prepare_browser_output_target(
+            tool_name,
+            root.join(relative).as_path(),
+            workspace_roots,
+        );
+    };
+    prepare_browser_output_target(tool_name, requested.as_path(), allowed_roots.as_slice())
+}
+
+fn prepare_browser_output_target(
+    tool_name: &str,
+    target: &Path,
+    allowed_roots: &[PathBuf],
+) -> Result<PathBuf, String> {
+    if browser_protected_os_path(target) {
+        return Err(format!("{tool_name} denied protected output_path {}", target.display()));
+    }
+    let file_name = target
+        .file_name()
+        .ok_or_else(|| format!("{tool_name} output_path must include a file name"))?;
+    let parent = target
+        .parent()
+        .ok_or_else(|| format!("{tool_name} output_path must include a parent directory"))?;
+    let existing_parent = nearest_existing_parent(parent)
+        .ok_or_else(|| format!("{tool_name} output_path has no existing parent directory"))?;
+    let canonical_existing_parent =
+        fs::canonicalize(existing_parent.as_path()).map_err(|error| {
+            format!(
+                "{tool_name} failed to resolve output_path parent {}: {error}",
+                existing_parent.display()
+            )
+        })?;
+    if !canonical_file_path_is_inside_workspace_roots(
+        canonical_existing_parent.as_path(),
+        allowed_roots,
+    ) {
+        return Err(format!(
+            "{tool_name} output_path parent {} is outside agent workspace roots and approved user-owned OS roots",
+            canonical_existing_parent.display()
+        ));
+    }
+    fs::create_dir_all(parent).map_err(|error| {
+        format!("{tool_name} failed to create output_path parent {}: {error}", parent.display())
+    })?;
+    let canonical_parent = fs::canonicalize(parent).map_err(|error| {
+        format!("{tool_name} failed to resolve output_path parent {}: {error}", parent.display())
+    })?;
+    if !canonical_file_path_is_inside_workspace_roots(canonical_parent.as_path(), allowed_roots) {
+        return Err(format!(
+            "{tool_name} output_path parent {} is outside agent workspace roots and approved user-owned OS roots",
+            canonical_parent.display()
+        ));
+    }
+    let resolved = canonical_parent.join(file_name);
+    if fs::metadata(resolved.as_path()).is_ok_and(|metadata| !metadata.is_file()) {
+        return Err(format!(
+            "{tool_name} output_path is not a regular file: {}",
+            resolved.display()
+        ));
+    }
+    Ok(resolved)
+}
+
+fn nearest_existing_parent(path: &Path) -> Option<PathBuf> {
+    let mut candidate = path;
+    loop {
+        if candidate.exists() {
+            return Some(candidate.to_path_buf());
+        }
+        candidate = candidate.parent()?;
+    }
 }
 
 fn browser_user_owned_os_roots() -> Vec<PathBuf> {
@@ -1670,20 +1820,44 @@ pub(crate) async fn execute_browser_tool(
                     } else {
                         String::new()
                     };
+                    let mut success = response.success;
+                    let mut error = response.error.clone();
+                    let saved_file = if response.success {
+                        match save_browser_output_file_from_payload(
+                            runtime_state,
+                            context,
+                            &payload,
+                            BROWSER_SCREENSHOT_TOOL_NAME,
+                            response.mime_type.as_str(),
+                            response.image_bytes.as_slice(),
+                        )
+                        .await
+                        {
+                            Ok(saved_file) => saved_file,
+                            Err(save_error) => {
+                                success = false;
+                                error = save_error;
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    };
                     let output = json!({
-                        "success": response.success,
+                        "success": success,
                         "mime_type": response.mime_type,
                         "size_bytes": response.image_bytes.len(),
                         "sha256": image_sha256,
+                        "saved_file": saved_file,
                         "layout_metrics": response.layout_metrics.map(browser_layout_metrics_to_json),
                         "image_base64": STANDARD
                             .encode(response.image_bytes.as_slice()),
-                        "error": response.error,
+                        "error": error,
                     });
                     (
-                        response.success,
+                        success,
                         serde_json::to_vec(&output).unwrap_or_else(|_| b"{}".to_vec()),
-                        if response.success { String::new() } else { response.error },
+                        if success { String::new() } else { error },
                     )
                 }
                 Err(error) => (
@@ -1738,19 +1912,43 @@ pub(crate) async fn execute_browser_tool(
             match client.export_pdf(request).await {
                 Ok(response) => {
                     let response = response.into_inner();
+                    let mut success = response.success;
+                    let mut error = response.error.clone();
+                    let saved_file = if response.success {
+                        match save_browser_output_file_from_payload(
+                            runtime_state,
+                            context,
+                            &payload,
+                            BROWSER_PDF_TOOL_NAME,
+                            response.mime_type.as_str(),
+                            response.pdf_bytes.as_slice(),
+                        )
+                        .await
+                        {
+                            Ok(saved_file) => saved_file,
+                            Err(save_error) => {
+                                success = false;
+                                error = save_error;
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    };
                     let output = json!({
-                        "success": response.success,
+                        "success": success,
                         "mime_type": response.mime_type,
                         "size_bytes": response.size_bytes,
                         "sha256": response.sha256,
                         "artifact": response.artifact.map(browser_download_artifact_to_json),
+                        "saved_file": saved_file,
                         "pdf_base64": STANDARD.encode(response.pdf_bytes.as_slice()),
-                        "error": response.error,
+                        "error": error,
                     });
                     (
-                        response.success,
+                        success,
                         serde_json::to_vec(&output).unwrap_or_else(|_| b"{}".to_vec()),
-                        if response.success { String::new() } else { response.error },
+                        if success { String::new() } else { error },
                     )
                 }
                 Err(error) => (
@@ -2763,13 +2961,41 @@ pub(crate) async fn execute_browser_tool(
             match client.get_download_artifact(request).await {
                 Ok(response) => {
                     let response = response.into_inner();
-                    let success = response.success;
-                    let error = response.error.clone();
+                    let mut success = response.success;
+                    let mut error = response.error.clone();
                     let content_sha256 = hex::encode(Sha256::digest(response.content.as_slice()));
+                    let artifact = response.artifact.map(browser_download_artifact_to_json);
+                    let mime_type = artifact
+                        .as_ref()
+                        .and_then(|value| value.get("mime_type"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("application/octet-stream");
+                    let saved_file = if response.success {
+                        match save_browser_output_file_from_payload(
+                            runtime_state,
+                            context,
+                            &payload,
+                            BROWSER_DOWNLOADS_GET_TOOL_NAME,
+                            mime_type,
+                            response.content.as_slice(),
+                        )
+                        .await
+                        {
+                            Ok(saved_file) => saved_file,
+                            Err(save_error) => {
+                                success = false;
+                                error = save_error;
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    };
                     let output = json!({
                         "success": success,
-                        "error": response.error,
-                        "artifact": response.artifact.map(browser_download_artifact_to_json),
+                        "error": error,
+                        "artifact": artifact,
+                        "saved_file": saved_file,
                         "content_base64": STANDARD.encode(response.content.as_slice()),
                         "content_bytes": response.content.len(),
                         "content_sha256": content_sha256,
@@ -3308,8 +3534,8 @@ mod tests {
         browser_observe_include_visible_text, browser_session_profile_id_from_payload,
         browser_tool_execution_outcome, browser_url_targets_loopback,
         canonical_file_path_is_inside_workspace_roots, normalize_browser_press_key_input,
-        parse_browser_download_artifact_id, validate_browser_workspace_relative_path,
-        BROWSER_CALLER_PRINCIPAL_HEADER,
+        parse_browser_download_artifact_id, resolve_browser_output_path,
+        validate_browser_workspace_relative_path, BROWSER_CALLER_PRINCIPAL_HEADER,
     };
     use crate::transport::grpc::proto::palyra::browser::v1 as browser_v1;
     use palyra_common::CANONICAL_PROTOCOL_MAJOR;
@@ -3481,6 +3707,61 @@ mod tests {
                 "unexpected validation error for {denied:?}: {error}"
             );
         }
+    }
+
+    #[test]
+    fn browser_output_path_resolves_relative_artifact_inside_workspace() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(workspace.as_path()).expect("workspace should be created");
+        let canonical_workspace = workspace.canonicalize().expect("workspace should canonicalize");
+
+        let output = resolve_browser_output_path(
+            "palyra.browser.screenshot",
+            "artifacts/s022-visual-smoke.png",
+            std::slice::from_ref(&canonical_workspace),
+            &[],
+        )
+        .expect("relative browser output path should resolve");
+
+        assert!(output.starts_with(canonical_workspace.as_path()));
+        assert_eq!(
+            output.file_name().and_then(|value| value.to_str()),
+            Some("s022-visual-smoke.png")
+        );
+        assert!(
+            output.parent().is_some_and(|parent| parent.is_dir()),
+            "output parent should be created"
+        );
+    }
+
+    #[test]
+    fn browser_output_path_rejects_traversal_and_unapproved_absolute_paths() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let workspace = temp.path().join("workspace");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(workspace.as_path()).expect("workspace should be created");
+        std::fs::create_dir_all(outside.as_path()).expect("outside should be created");
+        let canonical_workspace = workspace.canonicalize().expect("workspace should canonicalize");
+
+        let traversal = resolve_browser_output_path(
+            "palyra.browser.screenshot",
+            "../outside/smoke.png",
+            std::slice::from_ref(&canonical_workspace),
+            &[],
+        )
+        .expect_err("relative traversal should be rejected");
+        assert!(traversal.contains("relative output_path"));
+
+        let absolute_outside = outside.join("smoke.png");
+        let outside_error = resolve_browser_output_path(
+            "palyra.browser.screenshot",
+            absolute_outside.to_string_lossy().as_ref(),
+            &[canonical_workspace],
+            &[],
+        )
+        .expect_err("unapproved absolute path should be rejected");
+        assert!(outside_error.contains("outside agent workspace roots"));
     }
 
     #[test]
