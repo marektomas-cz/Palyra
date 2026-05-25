@@ -5994,7 +5994,10 @@ fn spawn_click_fetch_http_server() -> (String, thread::JoinHandle<()>) {
                     stream.set_nonblocking(false).expect("accepted stream should become blocking");
                     let request = read_http_request(&mut stream);
                     let path = http_request_path(request.as_str());
-                    if path.starts_with("/mock-data.json") {
+                    if path.starts_with("/mock-data.json")
+                        || path.contains("/mock-data.json")
+                        || request.contains("/mock-data.json")
+                    {
                         data_seen = true;
                         let body = r#"[{"name":"Atlas"},{"name":"Beacon"},{"name":"Cobalt"}]"#;
                         let response = format!(
