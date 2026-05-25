@@ -3283,7 +3283,7 @@ fn ensure_browser_start_preflight(resolved: &BrowserResolvedConfig) -> Result<()
         ));
     }
 
-    if !browser_profile_state_key_configured(&resolved.policy, None, false) {
+    if !browser_profile_state_key_available_for_start(&resolved.policy) {
         advisories.push(browser_profile_state_key_guidance(config_path));
     }
 
@@ -3529,9 +3529,14 @@ fn browser_profile_state_key_configured(
     lifecycle_running: bool,
 ) -> bool {
     policy.profiles_ready
-        || policy.state_key_vault_ref_configured
         || (lifecycle_running
             && metadata.is_some_and(|entry| entry.state_encryption_key_configured))
+}
+
+fn browser_profile_state_key_available_for_start(policy: &BrowserPolicySnapshot) -> bool {
+    policy.profiles_ready
+        || policy.state_encryption_key_env_configured
+        || policy.state_key_vault_ref_configured
 }
 
 fn browser_policy_with_lifecycle_profile_readiness(
@@ -3548,7 +3553,7 @@ fn browser_policy_with_lifecycle_profile_readiness(
 fn browser_profile_state_key_guidance(config_path: Option<&str>) -> String {
     let configure_command = browser_state_key_configure_command(config_path);
     format!(
-        "Browser profiles require {BROWSERD_STATE_ENCRYPTION_KEY_ENV} in the browserd process environment. Set it to a stable base64-encoded 32-byte key before starting browserd, or store one with `{configure_command}` so `palyra browser start` can inject it. Restart browserd, then run `palyra browser status` and confirm profiles_ready=true or state_key_vault_ref_configured=true before using `palyra browser profiles ...`."
+        "Browser profiles require {BROWSERD_STATE_ENCRYPTION_KEY_ENV} in the running browserd process environment. Store a stable base64-encoded 32-byte key with `{configure_command}` or set it in the browserd environment, then restart browserd through `palyra browser start`, the desktop supervisor, or the test harness launcher. Run `palyra browser status` and confirm profiles_ready=true before using `palyra browser profiles ...`."
     )
 }
 
@@ -5371,19 +5376,67 @@ mod tests {
     }
 
     #[test]
-    fn browser_profile_prerequisites_accept_vault_ref_configuration() {
+    fn browser_profile_prerequisites_reject_vault_ref_until_runtime_is_ready() {
         let mut policy = disabled_policy();
         policy.configured_enabled = true;
         policy.state_key_vault_ref_configured = true;
 
-        super::ensure_browser_profile_prerequisites(
+        let error = super::ensure_browser_profile_prerequisites(
             &policy,
             None,
             false,
             "profiles list",
             Some(r"C:\Palyra\palyra.toml"),
         )
-        .expect("vault-backed state key config should satisfy profile preflight");
+        .expect_err("profile commands require the key in the running browserd process");
+
+        assert!(
+            error.to_string().contains("profiles_ready=true")
+                && !error
+                    .to_string()
+                    .contains("state_key_vault_ref_configured=true"),
+            "profile prerequisite should point to runtime readiness, not static vault config: {error}"
+        );
+    }
+
+    #[test]
+    fn browser_profile_status_does_not_mark_vault_ref_alone_ready() {
+        let mut policy = disabled_policy();
+        policy.configured_enabled = true;
+        policy.state_key_vault_ref_configured = true;
+
+        let hydrated = super::browser_policy_with_lifecycle_profile_readiness(policy, None, false);
+        assert!(
+            !hydrated.profiles_ready,
+            "status policy must not treat a configured vault ref as a running browserd key"
+        );
+
+        let warnings = super::browser_profile_prerequisite_warnings(
+            &hydrated,
+            None,
+            false,
+            Some(r"C:\Palyra\palyra.toml"),
+        );
+        assert!(
+            warnings.iter().any(|warning| {
+                warning.contains("profiles_ready=true")
+                    && warning.contains("test harness launcher")
+                    && !warning.contains("state_key_vault_ref_configured=true")
+            }),
+            "vault-only profile config should produce runtime readiness guidance: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn browser_start_preflight_accepts_vault_ref_configuration() {
+        let mut policy = disabled_policy();
+        policy.configured_enabled = true;
+        policy.state_key_vault_ref_configured = true;
+
+        assert!(
+            super::browser_profile_state_key_available_for_start(&policy),
+            "start preflight should accept a configured vault ref because start can inject it"
+        );
     }
 
     #[test]
