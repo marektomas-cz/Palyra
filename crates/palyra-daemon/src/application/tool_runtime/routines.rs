@@ -1612,6 +1612,9 @@ fn output_delivered_for_outcome(
     delivery: &RoutineDeliveryConfig,
     outcome_kind: RoutineRunOutcomeKind,
 ) -> bool {
+    if matches!(outcome_kind, RoutineRunOutcomeKind::Denied) {
+        return false;
+    }
     if delivery.silent_policy == RoutineSilentPolicy::AuditOnly {
         return false;
     }
@@ -2033,8 +2036,8 @@ mod tests {
     use std::fs;
 
     use crate::routines::{
-        RoutineApprovalMode, RoutineApprovalPolicy, RoutineExecutionConfig,
-        RoutineExecutionPosture, RoutineRunMode, RoutineTriggerKind,
+        RoutineApprovalMode, RoutineApprovalPolicy, RoutineDeliveryConfig, RoutineExecutionConfig,
+        RoutineExecutionPosture, RoutineRunMode, RoutineRunOutcomeKind, RoutineTriggerKind,
     };
     use serde_json::json;
     use ulid::Ulid;
@@ -2249,6 +2252,17 @@ mod tests {
         );
 
         assert_eq!(approval_policy.mode, RoutineApprovalMode::None);
+    }
+
+    #[test]
+    fn output_delivered_for_outcome_denied_is_false() {
+        let delivery = RoutineDeliveryConfig::default();
+
+        assert!(!super::output_delivered_for_outcome(&delivery, RoutineRunOutcomeKind::Denied));
+        assert!(super::output_delivered_for_outcome(
+            &delivery,
+            RoutineRunOutcomeKind::SuccessWithOutput
+        ));
     }
 
     #[test]

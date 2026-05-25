@@ -819,6 +819,7 @@ async fn enrich_routine_run_output_fields(
         owner_principal,
         orchestrator_run_id.as_deref(),
         tape_output.as_deref(),
+        routine_run_allows_output_preview(run),
         &session,
     ) else {
         return Ok(());
@@ -868,6 +869,7 @@ fn routine_output_fields_from_session(
     owner_principal: &str,
     orchestrator_run_id: Option<&str>,
     tape_output: Option<&str>,
+    allow_preview: bool,
     session: &crate::journal::OrchestratorSessionRecord,
 ) -> Option<Map<String, Value>> {
     if session.principal != owner_principal {
@@ -882,6 +884,10 @@ fn routine_output_fields_from_session(
             "command": format!("palyra sessions show --session-id {session_id} --json"),
         }),
     );
+    if !allow_preview {
+        fields.insert("output_source".to_owned(), json!("suppressed_terminal_failure"));
+        return Some(fields);
+    }
     if let Some(output_preview) =
         tape_output.and_then(|value| normalize_routine_output_text(Some(value)))
     {
@@ -907,6 +913,10 @@ fn routine_output_fields_from_session(
     }
     fields.insert("output_source".to_owned(), json!("session_preview"));
     Some(fields)
+}
+
+fn routine_run_allows_output_preview(run: &Value) -> bool {
+    !matches!(run.pointer("/outcome_kind").and_then(Value::as_str), Some("denied" | "failed"))
 }
 
 fn normalize_routine_output_text(value: Option<&str>) -> Option<String> {
@@ -2436,6 +2446,9 @@ fn output_delivered_for_outcome(
     delivery: &RoutineDeliveryConfig,
     outcome_kind: RoutineRunOutcomeKind,
 ) -> bool {
+    if matches!(outcome_kind, RoutineRunOutcomeKind::Denied) {
+        return false;
+    }
     if delivery.silent_policy == RoutineSilentPolicy::AuditOnly {
         return false;
     }
@@ -2910,19 +2923,19 @@ mod tests {
 
     use super::{
         approval_policy_for_requested_schedule, compare_optional_matchers, is_in_quiet_hours,
-        normalize_channel, parse_delivery, parse_execution_config,
+        normalize_channel, output_delivered_for_outcome, parse_delivery, parse_execution_config,
         parse_optional_schedule_timezone_mode, parse_quiet_hours, parse_routine_approval_subject,
         parse_timezone_mode, routine_approval_subject_id,
         routine_automation_flag_permits_enabled_write, routine_matches_trigger,
         routine_output_fields_from_session, routine_output_text_from_tape_events,
-        routine_troubleshooting_recommended_action,
+        routine_run_allows_output_preview, routine_troubleshooting_recommended_action,
     };
     use crate::cron::CronTimezoneMode;
     use crate::journal::{CronScheduleType, OrchestratorSessionRecord, OrchestratorTapeRecord};
     use crate::routines::{
-        RoutineApprovalMode, RoutineApprovalPolicy, RoutineDeliveryMode, RoutineExecutionConfig,
-        RoutineExecutionPosture, RoutineMetadataRecord, RoutineRunMode, RoutineSilentPolicy,
-        RoutineTriggerKind,
+        RoutineApprovalMode, RoutineApprovalPolicy, RoutineDeliveryConfig, RoutineDeliveryMode,
+        RoutineExecutionConfig, RoutineExecutionPosture, RoutineMetadataRecord, RoutineRunMode,
+        RoutineRunOutcomeKind, RoutineSilentPolicy, RoutineTriggerKind,
     };
     use axum::http::StatusCode;
     use chrono::{TimeZone, Utc};
@@ -3497,6 +3510,7 @@ mod tests {
             "operator",
             Some("01ARZ3NDEKTSV4RRFFQ69G5FB0"),
             None,
+            true,
             &session,
         )
         .expect("owner session output should be visible");
@@ -3531,6 +3545,7 @@ mod tests {
                 "other",
                 Some("01ARZ3NDEKTSV4RRFFQ69G5FB0"),
                 None,
+                true,
                 &session,
             )
             .is_none(),
@@ -3544,6 +3559,7 @@ mod tests {
             "operator",
             Some("01ARZ3NDEKTSV4RRFFQ69G5FB0"),
             None,
+            true,
             &stale_session,
         )
         .expect("owner lookup should still be visible");
@@ -3562,6 +3578,7 @@ mod tests {
             "operator",
             Some("01ARZ3NDEKTSV4RRFFQ69G5FB0"),
             Some("IMMUTABLE_RUN_OUTPUT"),
+            true,
             &stale_session,
         )
         .expect("owner tape output should be visible");
@@ -3573,6 +3590,41 @@ mod tests {
             tape_fields.get("output_source").and_then(|value| value.as_str()),
             Some("run_tape")
         );
+
+        let suppressed_fields = routine_output_fields_from_session(
+            "01ARZ3NDEKTSV4RRFFQ69G5FAW",
+            "operator",
+            Some("01ARZ3NDEKTSV4RRFFQ69G5FB0"),
+            Some("WATCH_KEEP_DONE"),
+            false,
+            &stale_session,
+        )
+        .expect("owner lookup should remain visible when preview is suppressed");
+        assert!(
+            suppressed_fields.get("output_preview").is_none(),
+            "denied and failed routine runs must not surface success-looking tape replies"
+        );
+        assert_eq!(
+            suppressed_fields.get("output_source").and_then(|value| value.as_str()),
+            Some("suppressed_terminal_failure")
+        );
+    }
+
+    #[test]
+    fn denied_routine_output_is_not_delivered_or_previewed() {
+        let delivery = RoutineDeliveryConfig::default();
+
+        assert!(!output_delivered_for_outcome(&delivery, RoutineRunOutcomeKind::Denied));
+        assert!(output_delivered_for_outcome(&delivery, RoutineRunOutcomeKind::SuccessWithOutput));
+        assert!(!routine_run_allows_output_preview(&json!({
+            "outcome_kind": "denied"
+        })));
+        assert!(!routine_run_allows_output_preview(&json!({
+            "outcome_kind": "failed"
+        })));
+        assert!(routine_run_allows_output_preview(&json!({
+            "outcome_kind": "success_with_output"
+        })));
     }
 
     #[test]
