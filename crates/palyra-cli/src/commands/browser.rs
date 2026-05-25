@@ -18,7 +18,7 @@ use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use tonic::{metadata::MetadataMap, transport::Endpoint, Request};
+use tonic::{metadata::MetadataMap, transport::Endpoint, Code, Request};
 
 use crate::args::{
     BrowserPermissionsCommand, BrowserProfilesCommand, BrowserSessionCommand, BrowserTabsCommand,
@@ -666,7 +666,7 @@ async fn run_browser_status(
     let metadata = read_browser_service_metadata()?;
     let cli_lifecycle_running =
         metadata.as_ref().is_some_and(|value| process_is_running(value.pid));
-    let policy = browser_policy_with_lifecycle_profile_readiness(
+    let mut policy = browser_policy_with_lifecycle_profile_readiness(
         resolved.policy,
         metadata.as_ref(),
         cli_lifecycle_running,
@@ -679,6 +679,11 @@ async fn run_browser_status(
     let control_plane = browser_status_control_plane_policy_snapshot();
     let browserd_reachable = health_response.is_some() || grpc_error.is_none();
     let browserd_healthy = health_response.is_some() && grpc_error.is_none();
+    if browserd_healthy
+        && probe_browser_profile_readiness(&resolved.connection).await.unwrap_or(false)
+    {
+        policy.profiles_ready = true;
+    }
     let lifecycle_running =
         effective_browser_lifecycle_running(cli_lifecycle_running, browserd_reachable);
     let mut warnings = browser_status_warnings(
@@ -3099,6 +3104,30 @@ async fn probe_browser_grpc(connection: &BrowserServiceConnection) -> Result<()>
     Ok(())
 }
 
+async fn probe_browser_profile_readiness(connection: &BrowserServiceConnection) -> Result<bool> {
+    let mut client = connect_browser_service(connection).await?;
+    let response = client
+        .list_profiles(browser_request(
+            browser_v1::ListProfilesRequest {
+                v: CANONICAL_PROTOCOL_MAJOR,
+                principal: BROWSER_PROBE_PRINCIPAL.to_owned(),
+            },
+            connection.auth_token.as_deref(),
+            BROWSER_PROBE_PRINCIPAL,
+        )?)
+        .await;
+    match response {
+        Ok(_) => Ok(true),
+        Err(status)
+            if status.code() == Code::FailedPrecondition
+                && status.message().contains(BROWSERD_STATE_ENCRYPTION_KEY_ENV) =>
+        {
+            Ok(false)
+        }
+        Err(status) => Err(anyhow!("failed to call browser ListProfiles: {status}")),
+    }
+}
+
 async fn get_browser_session_detail(session_id: &str) -> Result<browser_v1::BrowserSessionDetail> {
     let resolved = resolve_browser_config(None, None, None)?;
     let caller_principal = resolve_browser_caller_principal(app::ConnectionDefaults::USER)?;
@@ -3540,7 +3569,7 @@ fn ensure_browser_profile_prerequisites(
     config_path: Option<&str>,
 ) -> Result<()> {
     if !action.starts_with("profiles ")
-        || browser_profile_state_key_configured(policy, metadata, lifecycle_running)
+        || browser_profile_state_key_available_for_command(policy, metadata, lifecycle_running)
     {
         return Ok(());
     }
@@ -3563,6 +3592,15 @@ fn browser_profile_state_key_configured(
 fn browser_profile_state_key_available_for_start(policy: &BrowserPolicySnapshot) -> bool {
     policy.profiles_ready
         || policy.state_encryption_key_env_configured
+        || policy.state_key_vault_ref_configured
+}
+
+fn browser_profile_state_key_available_for_command(
+    policy: &BrowserPolicySnapshot,
+    metadata: Option<&BrowserServiceMetadata>,
+    lifecycle_running: bool,
+) -> bool {
+    browser_profile_state_key_configured(policy, metadata, lifecycle_running)
         || policy.state_key_vault_ref_configured
 }
 
@@ -5417,26 +5455,20 @@ mod tests {
     }
 
     #[test]
-    fn browser_profile_prerequisites_reject_vault_ref_until_runtime_is_ready() {
+    fn browser_profile_prerequisites_allow_vault_ref_to_reach_runtime() {
         let mut policy = disabled_policy();
         policy.configured_enabled = true;
         policy.state_key_vault_ref_configured = true;
 
-        let error = super::ensure_browser_profile_prerequisites(
+        super::ensure_browser_profile_prerequisites(
             &policy,
             None,
             false,
             "profiles list",
             Some(r"C:\Palyra\palyra.toml"),
         )
-        .expect_err("profile commands require the key in the running browserd process");
-
-        assert!(
-            error.to_string().contains("profiles_ready=true")
-                && !error
-                    .to_string()
-                    .contains("state_key_vault_ref_configured=true"),
-            "profile prerequisite should point to runtime readiness, not static vault config: {error}"
+        .expect(
+            "profile commands should contact browserd when a vault-backed state key is configured",
         );
     }
 
