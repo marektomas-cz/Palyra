@@ -1023,13 +1023,18 @@ fn build_routine_upsert_payload(args: RoutineUpsertArgs) -> Result<Map<String, V
     );
     insert_optional_string(&mut payload, "delivery_failure_channel", delivery_failure_channel);
     payload.insert("silent_policy".to_owned(), Value::String(silent_policy.as_str().to_owned()));
-    payload.insert("run_mode".to_owned(), Value::String(run_mode.as_str().to_owned()));
+    insert_optional_string(
+        &mut payload,
+        "run_mode",
+        run_mode.map(|value| value.as_str().to_owned()),
+    );
     insert_optional_string(&mut payload, "procedure_profile_id", procedure_profile_id);
     insert_optional_string(&mut payload, "skill_profile_id", skill_profile_id);
     insert_optional_string(&mut payload, "provider_profile_id", provider_profile_id);
-    payload.insert(
-        "execution_posture".to_owned(),
-        Value::String(execution_posture.as_str().to_owned()),
+    insert_optional_string(
+        &mut payload,
+        "execution_posture",
+        execution_posture.map(|value| value.as_str().to_owned()),
     );
     insert_optional_string(&mut payload, "quiet_hours_start", quiet_hours_start);
     insert_optional_string(&mut payload, "quiet_hours_end", quiet_hours_end);
@@ -1039,7 +1044,11 @@ fn build_routine_upsert_payload(args: RoutineUpsertArgs) -> Result<Map<String, V
         quiet_hours_timezone.map(|value| value.as_str().to_owned()),
     );
     payload.insert("cooldown_ms".to_owned(), Value::from(cooldown_ms));
-    payload.insert("approval_mode".to_owned(), Value::String(approval_mode.as_str().to_owned()));
+    insert_optional_string(
+        &mut payload,
+        "approval_mode",
+        approval_mode.map(|value| value.as_str().to_owned()),
+    );
     insert_optional_string(&mut payload, "template_id", template_id);
     Ok(payload)
 }
@@ -1528,16 +1537,16 @@ struct RoutineUpsertArgs {
     delivery_failure_mode: Option<RoutineDeliveryModeArg>,
     delivery_failure_channel: Option<String>,
     silent_policy: RoutineSilentPolicyArg,
-    run_mode: RoutineRunModeArg,
+    run_mode: Option<RoutineRunModeArg>,
     procedure_profile_id: Option<String>,
     skill_profile_id: Option<String>,
     provider_profile_id: Option<String>,
-    execution_posture: RoutineExecutionPostureArg,
+    execution_posture: Option<RoutineExecutionPostureArg>,
     quiet_hours_start: Option<String>,
     quiet_hours_end: Option<String>,
     quiet_hours_timezone: Option<RoutinePreviewTimezoneArg>,
     cooldown_ms: u64,
-    approval_mode: RoutineApprovalModeArg,
+    approval_mode: Option<RoutineApprovalModeArg>,
     template_id: Option<String>,
 }
 
@@ -1641,21 +1650,83 @@ mod tests {
             delivery_failure_mode: None,
             delivery_failure_channel: None,
             silent_policy: RoutineSilentPolicyArg::Noisy,
-            run_mode: RoutineRunModeArg::SameSession,
+            run_mode: None,
             procedure_profile_id: None,
             skill_profile_id: None,
             provider_profile_id: None,
-            execution_posture: RoutineExecutionPostureArg::Standard,
+            execution_posture: None,
             quiet_hours_start: None,
             quiet_hours_end: None,
             quiet_hours_timezone: None,
             cooldown_ms: 0,
-            approval_mode: RoutineApprovalModeArg::None,
+            approval_mode: None,
             template_id: None,
         })
         .expect("schedule payload should build");
 
         assert_eq!(payload["natural_language_schedule"], "every Monday at 09:00");
         assert_eq!(payload["schedule_timezone"], "Europe/Prague");
+        assert!(
+            payload.get("run_mode").is_none(),
+            "CLI should let daemon choose trigger-aware run mode defaults"
+        );
+        assert!(
+            payload.get("execution_posture").is_none(),
+            "CLI should let daemon choose trigger-aware execution posture defaults"
+        );
+        assert!(
+            payload.get("approval_mode").is_none(),
+            "CLI should not force a default approval policy"
+        );
+    }
+
+    #[test]
+    fn build_schedule_upsert_payload_preserves_explicit_execution_controls() {
+        let payload = build_routine_upsert_payload(RoutineUpsertArgs {
+            id: None,
+            name: "Monday report".to_owned(),
+            prompt: "Summarize incidents".to_owned(),
+            trigger_kind: RoutineTriggerKindArg::Schedule,
+            owner: None,
+            channel: None,
+            session_key: None,
+            session_label: None,
+            workdir: None,
+            enabled: None,
+            natural_language_schedule: Some("every Monday at 09:00".to_owned()),
+            schedule_timezone: None,
+            schedule_type: None,
+            schedule: None,
+            trigger_payload: None,
+            watch_path: None,
+            watch_poll_interval_ms: None,
+            concurrency: CronConcurrencyPolicyArg::Forbid,
+            retry_max_attempts: 1,
+            retry_backoff_ms: 1000,
+            misfire: CronMisfirePolicyArg::Skip,
+            jitter_ms: 0,
+            max_runs: None,
+            delivery_mode: RoutineDeliveryModeArg::SameChannel,
+            delivery_channel: None,
+            delivery_failure_mode: None,
+            delivery_failure_channel: None,
+            silent_policy: RoutineSilentPolicyArg::Noisy,
+            run_mode: Some(RoutineRunModeArg::FreshSession),
+            procedure_profile_id: None,
+            skill_profile_id: None,
+            provider_profile_id: None,
+            execution_posture: Some(RoutineExecutionPostureArg::SensitiveTools),
+            quiet_hours_start: None,
+            quiet_hours_end: None,
+            quiet_hours_timezone: None,
+            cooldown_ms: 0,
+            approval_mode: Some(RoutineApprovalModeArg::BeforeFirstRun),
+            template_id: None,
+        })
+        .expect("schedule payload should build");
+
+        assert_eq!(payload["run_mode"], "fresh_session");
+        assert_eq!(payload["execution_posture"], "sensitive_tools");
+        assert_eq!(payload["approval_mode"], "before_first_run");
     }
 }

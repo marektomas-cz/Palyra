@@ -60,7 +60,7 @@ Options:
       --silent-policy <SILENT_POLICY>
           [default: noisy] [possible values: noisy, failure-only, audit-only]
       --run-mode <RUN_MODE>
-          [default: same-session] [possible values: same-session, fresh-session]
+          [possible values: same-session, fresh-session]
       --procedure-profile-id <PROCEDURE_PROFILE_ID>
 
       --skill-profile-id <SKILL_PROFILE_ID>
@@ -68,7 +68,7 @@ Options:
       --provider-profile-id <PROVIDER_PROFILE_ID>
 
       --execution-posture <EXECUTION_POSTURE>
-          [default: standard] [possible values: standard, sensitive-tools]
+          [possible values: standard, sensitive-tools]
       --quiet-hours-start <QUIET_HOURS_START>
 
       --quiet-hours-end <QUIET_HOURS_END>
@@ -78,7 +78,7 @@ Options:
       --cooldown-ms <COOLDOWN_MS>
           [default: 0]
       --approval-mode <APPROVAL_MODE>
-          [default: none] [possible values: none, before-enable, before-first-run]
+          [possible values: none, before-enable, before-first-run]
       --template-id <TEMPLATE_ID>
 
       --json

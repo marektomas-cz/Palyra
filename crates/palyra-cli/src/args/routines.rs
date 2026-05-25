@@ -275,16 +275,16 @@ pub struct RoutineUpsertCommand {
     pub delivery_failure_channel: Option<String>,
     #[arg(long, value_enum, default_value_t = RoutineSilentPolicyArg::Noisy)]
     pub silent_policy: RoutineSilentPolicyArg,
-    #[arg(long, value_enum, default_value_t = RoutineRunModeArg::SameSession)]
-    pub run_mode: RoutineRunModeArg,
+    #[arg(long, value_enum)]
+    pub run_mode: Option<RoutineRunModeArg>,
     #[arg(long)]
     pub procedure_profile_id: Option<String>,
     #[arg(long)]
     pub skill_profile_id: Option<String>,
     #[arg(long)]
     pub provider_profile_id: Option<String>,
-    #[arg(long, value_enum, default_value_t = RoutineExecutionPostureArg::Standard)]
-    pub execution_posture: RoutineExecutionPostureArg,
+    #[arg(long, value_enum)]
+    pub execution_posture: Option<RoutineExecutionPostureArg>,
     #[arg(long)]
     pub quiet_hours_start: Option<String>,
     #[arg(long)]
@@ -293,8 +293,8 @@ pub struct RoutineUpsertCommand {
     pub quiet_hours_timezone: Option<RoutinePreviewTimezoneArg>,
     #[arg(long, default_value_t = 0)]
     pub cooldown_ms: u64,
-    #[arg(long, value_enum, default_value_t = RoutineApprovalModeArg::None)]
-    pub approval_mode: RoutineApprovalModeArg,
+    #[arg(long, value_enum)]
+    pub approval_mode: Option<RoutineApprovalModeArg>,
     #[arg(long)]
     pub template_id: Option<String>,
     #[arg(long, default_value_t = false)]

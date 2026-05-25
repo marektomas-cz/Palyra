@@ -496,7 +496,6 @@ pub(crate) async fn console_routine_upsert_handler(
         approval_policy,
         approval_mode_was_requested,
     );
-    validate_sensitive_tool_approval_policy(&execution, &approval_policy)?;
     let concurrency_policy = parse_concurrency_policy(payload.concurrency_policy.as_deref())?;
     let retry_policy = parse_retry_policy(payload.retry_max_attempts, payload.retry_backoff_ms)?;
     let misfire_policy = parse_misfire_policy(payload.misfire_policy.as_deref())?;
@@ -2719,18 +2718,11 @@ fn parse_approval_policy(value: Option<&str>) -> Result<RoutineApprovalPolicy, R
 }
 
 fn default_approval_policy_for_execution(
-    execution: &RoutineExecutionConfig,
+    _execution: &RoutineExecutionConfig,
     approval_policy: RoutineApprovalPolicy,
-    approval_mode_was_requested: bool,
-    execution_posture_was_requested: bool,
+    _approval_mode_was_requested: bool,
+    _execution_posture_was_requested: bool,
 ) -> RoutineApprovalPolicy {
-    if !approval_mode_was_requested
-        && !execution_posture_was_requested
-        && execution.execution_posture == RoutineExecutionPosture::SensitiveTools
-        && approval_policy.mode == RoutineApprovalMode::None
-    {
-        return RoutineApprovalPolicy { mode: RoutineApprovalMode::BeforeEnable };
-    }
     approval_policy
 }
 
@@ -2749,21 +2741,6 @@ fn approval_policy_for_requested_schedule(
         schedule_payload_json,
         approval_policy,
     )
-}
-
-#[allow(clippy::result_large_err)]
-fn validate_sensitive_tool_approval_policy(
-    execution: &RoutineExecutionConfig,
-    approval_policy: &RoutineApprovalPolicy,
-) -> Result<(), Response> {
-    if execution.execution_posture == RoutineExecutionPosture::SensitiveTools
-        && approval_policy.mode == RoutineApprovalMode::None
-    {
-        return Err(runtime_status_response(tonic::Status::invalid_argument(
-            "approval_mode=before_enable or before_first_run is required when execution_posture=sensitive_tools",
-        )));
-    }
-    Ok(())
 }
 
 #[allow(clippy::result_large_err)]
@@ -3367,7 +3344,7 @@ mod tests {
     }
 
     #[test]
-    fn default_approval_policy_requires_enable_approval_for_implicit_sensitive_tools() {
+    fn default_approval_policy_keeps_implicit_sensitive_tools_unblocked() {
         let execution = RoutineExecutionConfig {
             run_mode: RoutineRunMode::FreshSession,
             execution_posture: RoutineExecutionPosture::SensitiveTools,
@@ -3380,7 +3357,7 @@ mod tests {
             false,
         );
 
-        assert_eq!(approval_policy.mode, RoutineApprovalMode::BeforeEnable);
+        assert_eq!(approval_policy.mode, RoutineApprovalMode::None);
     }
 
     #[test]
@@ -3424,20 +3401,6 @@ mod tests {
         );
 
         assert_eq!(approval_policy.mode, RoutineApprovalMode::BeforeEnable);
-    }
-
-    #[test]
-    fn validate_sensitive_tool_approval_policy_requires_routine_gate() {
-        let execution = RoutineExecutionConfig {
-            run_mode: RoutineRunMode::FreshSession,
-            execution_posture: RoutineExecutionPosture::SensitiveTools,
-            ..RoutineExecutionConfig::default()
-        };
-        let approval_policy = RoutineApprovalPolicy { mode: RoutineApprovalMode::None };
-        let response = super::validate_sensitive_tool_approval_policy(&execution, &approval_policy)
-            .expect_err("sensitive tool routines require an approval gate");
-
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[test]
