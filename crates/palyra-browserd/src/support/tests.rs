@@ -197,6 +197,42 @@ async fn browser_service_records_failed_navigation_in_action_log() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn browser_service_pdf_zero_max_bytes_uses_session_budget() {
+    let runtime = simulated_runtime_for_tests();
+    let service = BrowserServiceImpl { runtime };
+    let created = create_test_session(&service, "user:ops").await;
+    let session_id = created.session_id.expect("session id should be present");
+
+    let mut default_budget_request = Request::new(browser_v1::ExportPdfRequest {
+        v: 1,
+        session_id: Some(session_id.clone()),
+        max_bytes: 0,
+    });
+    insert_principal(&mut default_budget_request, "user:ops");
+    let pdf = service
+        .export_pdf(default_budget_request)
+        .await
+        .expect("export_pdf should execute")
+        .into_inner();
+    assert!(pdf.success, "zero max_bytes should use session budget: {}", pdf.error);
+    assert!(!pdf.pdf_bytes.is_empty(), "PDF bytes should be returned");
+
+    let mut tiny_limit_request = Request::new(browser_v1::ExportPdfRequest {
+        v: 1,
+        session_id: Some(session_id),
+        max_bytes: 1,
+    });
+    insert_principal(&mut tiny_limit_request, "user:ops");
+    let limited = service
+        .export_pdf(tiny_limit_request)
+        .await
+        .expect("export_pdf should execute")
+        .into_inner();
+    assert!(!limited.success, "explicit max_bytes should still be enforced");
+    assert!(limited.error.contains("pdf output exceeds max_bytes"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn browser_service_sets_file_input_in_simulated_mode() {
     let runtime = simulated_runtime_for_tests();
     let service = BrowserServiceImpl { runtime: Arc::clone(&runtime) };

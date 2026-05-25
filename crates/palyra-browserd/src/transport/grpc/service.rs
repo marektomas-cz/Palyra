@@ -2987,7 +2987,11 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
                 session.active_tab().and_then(|tab| tab.last_url.clone()),
             )
         };
-        let max_bytes = payload.max_bytes.max(1).min(budget_max_bytes);
+        let max_bytes = if payload.max_bytes == 0 {
+            budget_max_bytes
+        } else {
+            payload.max_bytes.min(budget_max_bytes)
+        };
         let pdf_bytes = match self.runtime.engine_mode {
             BrowserEngineMode::Simulated => MINIMAL_SIMULATED_PDF.to_vec(),
             BrowserEngineMode::Chromium => {
