@@ -31,6 +31,8 @@ const DEFAULT_BROWSER_GRPC_PORT: u16 =
     palyra_common::local_runtime_ports::DEFAULT_BROWSER_GRPC_PORT;
 const DEFAULT_BROWSER_HEALTH_PORT: u16 =
     palyra_common::local_runtime_ports::DEFAULT_BROWSER_HEALTH_PORT;
+const BROWSER_CONTROL_PLANE_TIMEOUT_BUFFER_MS: u64 = 5_000;
+const BROWSER_CONTROL_PLANE_MIN_TIMEOUT_MS: u64 = 10_000;
 const BROWSER_SERVICE_METADATA_SCHEMA_VERSION: u32 = 1;
 const BROWSER_SERVICE_START_POLL_MS: u64 = 250;
 const BROWSER_SERVICE_STOP_TIMEOUT_MS: u64 = 5_000;
@@ -1274,8 +1276,11 @@ async fn run_browser_open(args: BrowserOpenArgs) -> Result<()> {
         timeout_ms,
         json,
     } = args;
-    let context =
-        client::control_plane::connect_admin_console(app::ConnectionOverrides::default()).await?;
+    let context = client::control_plane::connect_admin_console_with_request_timeout(
+        app::ConnectionOverrides::default(),
+        browser_control_plane_request_timeout(timeout_ms),
+    )
+    .await?;
     let create = context
         .client
         .create_browser_session(&control_plane::BrowserSessionCreateRequest {
@@ -1824,8 +1829,11 @@ async fn run_browser_navigate(
     max_redirects: Option<u32>,
     allow_private_targets: bool,
 ) -> Result<()> {
-    let context =
-        client::control_plane::connect_admin_console(app::ConnectionOverrides::default()).await?;
+    let context = client::control_plane::connect_admin_console_with_request_timeout(
+        app::ConnectionOverrides::default(),
+        browser_control_plane_request_timeout(timeout_ms),
+    )
+    .await?;
     let envelope = context
         .client
         .navigate_browser_session(
@@ -1864,6 +1872,16 @@ async fn run_browser_navigate(
     ensure_browser_command_success("browser.navigate", success, error.as_str())
 }
 
+fn browser_control_plane_request_timeout(action_timeout_ms: Option<u64>) -> Option<Duration> {
+    action_timeout_ms.map(|timeout_ms| {
+        Duration::from_millis(
+            timeout_ms
+                .saturating_add(BROWSER_CONTROL_PLANE_TIMEOUT_BUFFER_MS)
+                .max(BROWSER_CONTROL_PLANE_MIN_TIMEOUT_MS),
+        )
+    })
+}
+
 async fn run_browser_click(args: BrowserClickArgs) -> Result<()> {
     let BrowserClickArgs {
         session_id,
@@ -1875,8 +1893,11 @@ async fn run_browser_click(args: BrowserClickArgs) -> Result<()> {
         output,
         json,
     } = args;
-    let context =
-        client::control_plane::connect_admin_console(app::ConnectionOverrides::default()).await?;
+    let context = client::control_plane::connect_admin_console_with_request_timeout(
+        app::ConnectionOverrides::default(),
+        browser_control_plane_request_timeout(timeout_ms),
+    )
+    .await?;
     let envelope = context
         .client
         .click_browser_session(
@@ -1936,8 +1957,11 @@ async fn run_browser_type(args: BrowserTypeArgs) -> Result<()> {
         output,
         json,
     } = args;
-    let context =
-        client::control_plane::connect_admin_console(app::ConnectionOverrides::default()).await?;
+    let context = client::control_plane::connect_admin_console_with_request_timeout(
+        app::ConnectionOverrides::default(),
+        browser_control_plane_request_timeout(timeout_ms),
+    )
+    .await?;
     let envelope = context
         .client
         .type_browser_session(
@@ -2150,8 +2174,11 @@ async fn run_browser_wait(args: BrowserWaitArgs) -> Result<()> {
         output,
         json,
     } = args;
-    let context =
-        client::control_plane::connect_admin_console(app::ConnectionOverrides::default()).await?;
+    let context = client::control_plane::connect_admin_console_with_request_timeout(
+        app::ConnectionOverrides::default(),
+        browser_control_plane_request_timeout(timeout_ms),
+    )
+    .await?;
     let envelope = context
         .client
         .wait_for_browser_session(
@@ -4774,7 +4801,8 @@ fn proto_console_severity_text(value: i32) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        browser_command_payload_should_emit, browser_command_policy_action, browser_failure_detail,
+        browser_command_payload_should_emit, browser_command_policy_action,
+        browser_control_plane_request_timeout, browser_failure_detail,
         browser_identifier_json_value, browser_open_output_value,
         browser_service_auth_token_command, browser_service_enable_command,
         browser_service_stop_complete, browser_service_stop_pending_reasons,
@@ -4792,7 +4820,7 @@ mod tests {
     use crate::{args::BrowserCommand, browser_v1, common_v1};
     use palyra_control_plane as control_plane;
     use serde_json::{json, Value};
-    use std::process::Command;
+    use std::{process::Command, time::Duration};
 
     fn disabled_policy() -> BrowserPolicySnapshot {
         BrowserPolicySnapshot {
@@ -4977,6 +5005,19 @@ mod tests {
         assert!(browser_failure_detail("blocked URL scheme file").starts_with("policy_blocked:"));
         assert!(browser_failure_detail("Chromium session SOCKS5 proxy request failed")
             .starts_with("browser_proxy_failed:"));
+    }
+
+    #[test]
+    fn browser_navigate_control_plane_timeout_exceeds_action_timeout() {
+        assert_eq!(browser_control_plane_request_timeout(None), None);
+        assert_eq!(
+            browser_control_plane_request_timeout(Some(10_000)),
+            Some(Duration::from_millis(15_000))
+        );
+        assert_eq!(
+            browser_control_plane_request_timeout(Some(1_000)),
+            Some(Duration::from_millis(10_000))
+        );
     }
 
     #[test]
