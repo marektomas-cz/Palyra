@@ -4,6 +4,8 @@
 use std::process::Command;
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
+    fs,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex, RwLock,
@@ -50,7 +52,7 @@ pub(crate) use crate::transport::grpc::services::{
 use crate::{
     agents::{
         AgentCreateOutcome, AgentCreateRequest, AgentRecord, AgentRegistry, AgentRegistryError,
-        AgentResolutionSource,
+        AgentResolutionSource, AgentResolveRequest,
     },
     application::{
         conversation_bindings::ConversationBindingStore,
@@ -842,11 +844,19 @@ async fn process_runner_tool_config_for_session(
     input_json: &[u8],
 ) -> ToolCallConfig {
     let mut config = runtime_state.config.tool_call.clone();
-    let workspace_roots = [config.process_runner.workspace_root.clone()];
-    match session_active_workspace_root(runtime_state, context.session_id, &workspace_roots).await {
+    let workspace_roots =
+        process_runner_workspace_roots_for_session(runtime_state, context, &config).await;
+    match session_active_workspace_root(
+        runtime_state,
+        context.session_id,
+        workspace_roots.as_slice(),
+    )
+    .await
+    {
         Ok(Some(active_root)) => {
             if process_runner_input_should_use_active_root(input_json, &active_root) {
                 config.process_runner.workspace_root = active_root.root;
+                return config;
             }
         }
         Ok(None) => {}
@@ -859,7 +869,130 @@ async fn process_runner_tool_config_for_session(
             );
         }
     }
+    if let Some(workspace_root) =
+        process_runner_workspace_root_for_input(input_json, workspace_roots.as_slice())
+    {
+        config.process_runner.workspace_root = workspace_root;
+    }
     config
+}
+
+async fn process_runner_workspace_roots_for_session(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    context: ToolRuntimeExecutionContext<'_>,
+    config: &ToolCallConfig,
+) -> Vec<PathBuf> {
+    let fallback = vec![config.process_runner.workspace_root.clone()];
+    let outcome = runtime_state
+        .resolve_agent_for_context(AgentResolveRequest {
+            principal: context.principal.to_owned(),
+            channel: context.channel.map(str::to_owned),
+            session_id: Some(context.session_id.to_owned()),
+            preferred_agent_id: None,
+            persist_session_binding: false,
+        })
+        .await;
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            warn!(
+                run_id = %context.run_id,
+                session_id = %context.session_id,
+                error = %error.message(),
+                "failed to resolve agent workspace for process runner; using configured workspace root"
+            );
+            return fallback;
+        }
+    };
+    let workspace_roots =
+        outcome.agent.workspace_roots.iter().map(PathBuf::from).collect::<Vec<_>>();
+    if workspace_roots.is_empty() {
+        fallback
+    } else {
+        workspace_roots
+    }
+}
+
+fn process_runner_workspace_root_for_input(
+    input_json: &[u8],
+    workspace_roots: &[PathBuf],
+) -> Option<PathBuf> {
+    if workspace_roots.is_empty() {
+        return None;
+    }
+
+    let input = parse_process_runner_tool_input(input_json).ok()?;
+    if let Some(cwd) = input.cwd.as_deref() {
+        if let Some(root) = workspace_root_containing_process_path(cwd, workspace_roots) {
+            return Some(root);
+        }
+    }
+    input
+        .args
+        .iter()
+        .find_map(|arg| workspace_root_containing_process_path(arg.as_str(), workspace_roots))
+        .or_else(|| workspace_roots.first().cloned())
+}
+
+fn workspace_root_containing_process_path(
+    raw: &str,
+    workspace_roots: &[PathBuf],
+) -> Option<PathBuf> {
+    process_path_candidates(raw)
+        .into_iter()
+        .find_map(|candidate| workspace_root_containing_path(candidate.as_path(), workspace_roots))
+}
+
+fn process_path_candidates(raw: &str) -> Vec<PathBuf> {
+    let trimmed = raw.trim().trim_matches('"').trim_matches('\'');
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    let mut candidates = Vec::new();
+    push_process_path_candidate(&mut candidates, trimmed);
+    if let Some((_, value)) = trimmed.split_once('=') {
+        push_process_path_candidate(
+            &mut candidates,
+            value.trim().trim_matches('"').trim_matches('\''),
+        );
+    }
+    candidates
+}
+
+fn push_process_path_candidate(candidates: &mut Vec<PathBuf>, value: &str) {
+    let path = PathBuf::from(value);
+    if path.is_absolute() {
+        candidates.push(path);
+    }
+}
+
+fn workspace_root_containing_path(
+    candidate: &Path,
+    workspace_roots: &[PathBuf],
+) -> Option<PathBuf> {
+    let inspected = if candidate.exists() {
+        fs::canonicalize(candidate).ok()?
+    } else {
+        nearest_existing_process_path_ancestor(candidate)
+            .and_then(|ancestor| fs::canonicalize(ancestor).ok())?
+    };
+
+    workspace_roots.iter().find_map(|root| {
+        let canonical_root = fs::canonicalize(root).ok()?;
+        inspected.starts_with(canonical_root.as_path()).then(|| root.clone())
+    })
+}
+
+fn nearest_existing_process_path_ancestor(path: &Path) -> Option<&Path> {
+    let mut cursor = path.parent();
+    while let Some(candidate) = cursor {
+        if candidate.exists() {
+            return Some(candidate);
+        }
+        cursor = candidate.parent();
+    }
+    None
 }
 
 fn process_runner_input_should_use_active_root(

@@ -1716,11 +1716,14 @@ fn virtual_workspace_path_suffix(raw: &str) -> Option<PathBuf> {
         return Some(PathBuf::new());
     }
 
-    if normalized == "/workspace" {
+    if normalized == "workspace" || normalized == "/workspace" {
         return Some(PathBuf::new());
     }
 
-    normalized.strip_prefix("/workspace/").map(PathBuf::from)
+    normalized
+        .strip_prefix("/workspace/")
+        .or_else(|| normalized.strip_prefix("workspace/"))
+        .map(PathBuf::from)
 }
 
 fn named_virtual_workspace_path_suffix(raw: &str) -> Option<PathBuf> {
@@ -1730,11 +1733,14 @@ fn named_virtual_workspace_path_suffix(raw: &str) -> Option<PathBuf> {
     }
 
     let normalized = trimmed.replace('\\', "/");
-    if normalized == "/workspace" {
+    if normalized == "workspace" || normalized == "/workspace" {
         return Some(PathBuf::new());
     }
 
-    normalized.strip_prefix("/workspace/").map(PathBuf::from)
+    normalized
+        .strip_prefix("/workspace/")
+        .or_else(|| normalized.strip_prefix("workspace/"))
+        .map(PathBuf::from)
 }
 
 fn rewrite_host_virtual_workspace_args(
@@ -3195,13 +3201,17 @@ mod tests {
         let canonical_nested =
             fs::canonicalize(nested.as_path()).expect("nested workspace path should canonicalize");
 
-        for alias in ["/", "\\", "/workspace", "\\workspace"] {
+        for alias in ["/", "\\", "workspace", "/workspace", "\\workspace"] {
             let resolved = resolve_working_directory(canonical_workspace.as_path(), Some(alias))
                 .expect("virtual workspace root aliases should resolve");
             assert_eq!(resolved, canonical_workspace, "alias {alias}");
         }
 
-        for alias in ["/workspace/e2e-file-workflow", "\\workspace\\e2e-file-workflow"] {
+        for alias in [
+            "workspace/e2e-file-workflow",
+            "/workspace/e2e-file-workflow",
+            "\\workspace\\e2e-file-workflow",
+        ] {
             let resolved = resolve_working_directory(canonical_workspace.as_path(), Some(alias))
                 .expect("virtual workspace child alias should resolve");
             assert_eq!(resolved, canonical_nested, "alias {alias}");
@@ -3220,14 +3230,18 @@ mod tests {
         let canonical_nested =
             fs::canonicalize(nested.as_path()).expect("nested workspace path should canonicalize");
 
-        for alias in ["/workspace", "\\workspace"] {
+        for alias in ["workspace", "/workspace", "\\workspace"] {
             let resolved =
                 resolve_host_working_directory(canonical_workspace.as_path(), Some(alias))
                     .expect("host access should resolve named virtual workspace root aliases");
             assert_eq!(resolved, canonical_workspace, "alias {alias}");
         }
 
-        for alias in ["/workspace/fixtures/todo-app", "\\workspace\\fixtures\\todo-app"] {
+        for alias in [
+            "workspace/fixtures/todo-app",
+            "/workspace/fixtures/todo-app",
+            "\\workspace\\fixtures\\todo-app",
+        ] {
             let resolved =
                 resolve_host_working_directory(canonical_workspace.as_path(), Some(alias))
                     .expect("host access should resolve named virtual workspace child aliases");

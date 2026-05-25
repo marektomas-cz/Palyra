@@ -43,13 +43,14 @@ use super::vault::vault_get_requires_approval;
 use super::{
     best_effort_mark_approval_error, common_v1, constant_time_eq,
     enforce_vault_get_approval_policy, enforce_vault_scope_access, ingest_memory_best_effort,
-    process_runner_input_should_use_active_root, resolve_cron_job_channel_for_create,
-    tool_approval_response_proposal_id, workspace_patch_metrics_from_output,
-    CachedMemorySearchEntry, GatewayAuthConfig, GatewayJournalConfigSnapshot,
-    GatewayRuntimeConfigSnapshot, GatewayRuntimeState, MemoryRuntimeConfig, ProviderRequest,
-    RequestContext, ToolApprovalOutcome, CANVAS_PATCH_HISTORY_RESPONSE_ROW_LIMIT, HEADER_CHANNEL,
-    HEADER_DEVICE_ID, HEADER_PRINCIPAL, MAX_APPROVAL_PAGE_LIMIT,
-    VAULT_RATE_LIMIT_MAX_PRINCIPAL_BUCKETS, VAULT_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW,
+    process_runner_input_should_use_active_root, process_runner_workspace_root_for_input,
+    resolve_cron_job_channel_for_create, tool_approval_response_proposal_id,
+    workspace_patch_metrics_from_output, CachedMemorySearchEntry, GatewayAuthConfig,
+    GatewayJournalConfigSnapshot, GatewayRuntimeConfigSnapshot, GatewayRuntimeState,
+    MemoryRuntimeConfig, ProviderRequest, RequestContext, ToolApprovalOutcome,
+    CANVAS_PATCH_HISTORY_RESPONSE_ROW_LIMIT, HEADER_CHANNEL, HEADER_DEVICE_ID, HEADER_PRINCIPAL,
+    MAX_APPROVAL_PAGE_LIMIT, VAULT_RATE_LIMIT_MAX_PRINCIPAL_BUCKETS,
+    VAULT_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW,
 };
 use crate::application::run_stream::orchestration::{
     finalize_run_stream_after_provider_response, RunStreamPostProviderOutcome,
@@ -154,6 +155,45 @@ fn process_runner_input_preserves_explicit_active_root_paths() {
         br#"{"command":"npm","args":["--prefix=scenario-s002-notes-api","test"]}"#,
         &active_root,
     ));
+}
+
+#[test]
+fn process_runner_workspace_root_defaults_to_agent_workspace() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let configured = tempdir.path().join("configured-process-root");
+    let agent_workspace = tempdir.path().join("agent-workspace");
+    fs::create_dir_all(configured.as_path()).expect("configured root should exist");
+    fs::create_dir_all(agent_workspace.as_path()).expect("agent root should exist");
+
+    let selected = process_runner_workspace_root_for_input(
+        br#"{"command":"node","args":["calculator.test.js"]}"#,
+        &[agent_workspace.clone(), configured],
+    )
+    .expect("workspace root should be selected");
+
+    assert_eq!(selected, agent_workspace);
+}
+
+#[test]
+fn process_runner_workspace_root_follows_absolute_cwd_inside_agent_root() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let first_root = tempdir.path().join("first");
+    let second_root = tempdir.path().join("second");
+    let project = second_root.join("e2e-cli-file-workflow");
+    fs::create_dir_all(first_root.as_path()).expect("first root should exist");
+    fs::create_dir_all(project.as_path()).expect("project root should exist");
+    let input = serde_json::to_vec(&json!({
+        "command": "node",
+        "args": ["calculator.test.js"],
+        "cwd": project,
+    }))
+    .expect("input should serialize");
+
+    let selected =
+        process_runner_workspace_root_for_input(&input, &[first_root, second_root.clone()])
+            .expect("workspace root should be selected");
+
+    assert_eq!(selected, second_root);
 }
 
 async fn lock_session_compaction_test_guard() -> MutexGuard<'static, ()> {
