@@ -378,6 +378,23 @@ struct ProcedureSkillPaths {
     slug: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct ProcedureSkillInventoryEntry {
+    entry_kind: &'static str,
+    slug: String,
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summary: Option<String>,
+    status: String,
+    path: PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    raw_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stored_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    quarantine_path: Option<String>,
+}
+
 fn run_skills_procedure_save(command: SkillsProcedureSaveCommand) -> Result<()> {
     let body = read_procedure_skill_body(command.body, command.body_file.as_deref())?;
     let paths = resolve_procedure_skill_paths(
@@ -726,6 +743,92 @@ fn render_procedure_skill_markdown(document: ProcedureSkillDocument<'_>) -> Stri
     }
     frontmatter.push("---".to_owned());
     format!("{}\n\n{}\n", frontmatter.join("\n"), document.body.trim())
+}
+
+fn collect_procedure_skill_inventory(
+    skills_root: &Path,
+) -> Result<Vec<ProcedureSkillInventoryEntry>> {
+    if !skills_root.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(skills_root).with_context(|| {
+        format!("failed to read procedure skills directory {}", skills_root.display())
+    })? {
+        let entry = entry.with_context(|| {
+            format!("failed to read procedure skills directory entry {}", skills_root.display())
+        })?;
+        let path = entry.path();
+        if !path.is_file() || path.extension().and_then(|value| value.to_str()) != Some("md") {
+            continue;
+        }
+        let content = fs::read_to_string(path.as_path())
+            .with_context(|| format!("failed to read procedure skill {}", path.display()))?;
+        if let Some(procedure) = parse_procedure_skill_document(path, content.as_str())? {
+            entries.push(procedure);
+        }
+    }
+    entries.sort_by(|left, right| left.slug.cmp(&right.slug));
+    Ok(entries)
+}
+
+fn parse_procedure_skill_document(
+    path: PathBuf,
+    content: &str,
+) -> Result<Option<ProcedureSkillInventoryEntry>> {
+    let mut lines = content.lines();
+    if lines.next().map(str::trim) != Some("---") {
+        return Ok(None);
+    }
+
+    let mut fields = BTreeMap::new();
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed == "---" {
+            break;
+        }
+        let Some((key, value)) = trimmed.split_once(':') else {
+            continue;
+        };
+        fields.insert(key.trim().to_owned(), parse_markdown_frontmatter_scalar(value.trim())?);
+    }
+    if fields.get("schema").map(String::as_str) != Some("palyra.procedural_skill.v1") {
+        return Ok(None);
+    }
+
+    let slug = fields
+        .remove("slug")
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| anyhow!("procedure skill {} is missing slug", path.display()))?;
+    let name = fields
+        .remove("name")
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| slug.replace('-', " "));
+    let status = fields
+        .remove("status")
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "unknown".to_owned());
+
+    Ok(Some(ProcedureSkillInventoryEntry {
+        entry_kind: "procedure",
+        slug,
+        name,
+        summary: fields.remove("summary").filter(|value| !value.trim().is_empty()),
+        status,
+        path,
+        raw_sha256: fields.remove("raw_sha256").filter(|value| !value.trim().is_empty()),
+        stored_sha256: fields.remove("stored_sha256").filter(|value| !value.trim().is_empty()),
+        quarantine_path: fields.remove("quarantine_path").filter(|value| !value.trim().is_empty()),
+    }))
+}
+
+fn parse_markdown_frontmatter_scalar(value: &str) -> Result<String> {
+    let trimmed = value.trim();
+    if trimmed.starts_with('"') {
+        return serde_json::from_str::<String>(trimmed)
+            .with_context(|| format!("failed to parse frontmatter string value {trimmed}"));
+    }
+    Ok(trimmed.to_owned())
 }
 
 fn markdown_frontmatter_scalar(value: &str) -> String {
@@ -1135,12 +1238,98 @@ fn run_skills_list(
         entries.retain(|entry| entry.eligibility.eligible);
     }
 
-    skills_output::emit_inventory_list(
-        skills_root.as_path(),
-        entries.as_slice(),
-        output::preferred_json(json_output),
-    )?;
+    let mut procedures = collect_procedure_skill_inventory(skills_root.as_path())?;
+    if publisher.is_some() || current_only {
+        procedures.clear();
+    }
+    if quarantined_only {
+        procedures.retain(|entry| entry.status.contains("quarantined"));
+    }
+    if eligible_only {
+        procedures.retain(|entry| entry.status == "active");
+    }
+
+    if procedures.is_empty() {
+        skills_output::emit_inventory_list(
+            skills_root.as_path(),
+            entries.as_slice(),
+            output::preferred_json(json_output),
+        )?;
+    } else {
+        emit_skills_list_with_procedures(
+            skills_root.as_path(),
+            entries.as_slice(),
+            procedures.as_slice(),
+            output::preferred_json(json_output),
+        )?;
+    }
     std::io::stdout().flush().context("stdout flush failed")
+}
+
+fn emit_skills_list_with_procedures(
+    skills_root: &Path,
+    installed_entries: &[SkillInventoryEntry],
+    procedure_entries: &[ProcedureSkillInventoryEntry],
+    json_output: bool,
+) -> Result<()> {
+    if json_output {
+        let mut entries = Vec::with_capacity(installed_entries.len() + procedure_entries.len());
+        for entry in installed_entries {
+            let mut value =
+                serde_json::to_value(entry).context("failed to encode installed skill entry")?;
+            if let Some(object) = value.as_object_mut() {
+                object.insert("entry_kind".to_owned(), json!("skill"));
+            }
+            entries.push(value);
+        }
+        for entry in procedure_entries {
+            entries.push(
+                serde_json::to_value(entry).context("failed to encode procedure skill entry")?,
+            );
+        }
+        return output::print_json_pretty(
+            &json!({
+                "skills_root": skills_root,
+                "count": entries.len(),
+                "installed_count": installed_entries.len(),
+                "procedure_count": procedure_entries.len(),
+                "entries": entries,
+            }),
+            "failed to encode skills inventory as JSON",
+        );
+    }
+
+    println!(
+        "skills.list root={} count={} installed_count={} procedure_count={}",
+        skills_root.display(),
+        installed_entries.len() + procedure_entries.len(),
+        installed_entries.len(),
+        procedure_entries.len()
+    );
+    for entry in installed_entries {
+        println!(
+            "skills.entry kind=skill skill_id={} version={} publisher={} install_state={} runtime_status={} trust={} eligibility={} tool_count={} source={}",
+            entry.record.skill_id,
+            entry.record.version,
+            entry.record.publisher,
+            entry.install_state,
+            entry.runtime_status.status,
+            entry.record.trust_decision,
+            entry.eligibility.status,
+            entry.tool_count,
+            entry.record.source.reference
+        );
+    }
+    for entry in procedure_entries {
+        println!(
+            "skills.entry kind=procedure slug={} name={} status={} path={}",
+            entry.slug,
+            entry.name,
+            entry.status,
+            entry.path.display()
+        );
+    }
+    Ok(())
 }
 
 fn run_skills_info(
@@ -1189,13 +1378,42 @@ fn run_skills_check(
     normalize_installed_skills_index(&mut index);
 
     let selected_records = if let Some(skill_id) = skill_id.as_deref() {
-        let record_index = find_installed_skill_record(&index, skill_id, version.as_deref())?;
-        vec![index.entries[record_index].clone()]
+        match find_installed_skill_record(&index, skill_id, version.as_deref()) {
+            Ok(record_index) => vec![index.entries[record_index].clone()],
+            Err(error) => {
+                if version.is_none() {
+                    let procedure_entries =
+                        collect_procedure_skill_inventory(skills_root.as_path())?;
+                    if let Some(procedure) =
+                        procedure_entries.iter().find(|entry| entry.slug == skill_id)
+                    {
+                        emit_procedure_check_results(
+                            skills_root.as_path(),
+                            std::slice::from_ref(procedure),
+                            json_output,
+                        )?;
+                        return std::io::stdout().flush().context("stdout flush failed");
+                    }
+                }
+                return Err(error);
+            }
+        }
     } else {
         let mut records =
             index.entries.iter().filter(|entry| entry.current).cloned().collect::<Vec<_>>();
         if records.is_empty() {
             records = index.entries.clone();
+        }
+        if records.is_empty() {
+            let procedure_entries = collect_procedure_skill_inventory(skills_root.as_path())?;
+            if !procedure_entries.is_empty() {
+                emit_procedure_check_results(
+                    skills_root.as_path(),
+                    procedure_entries.as_slice(),
+                    json_output,
+                )?;
+                return std::io::stdout().flush().context("stdout flush failed");
+            }
         }
         records
     };
@@ -1291,6 +1509,68 @@ fn run_skills_check(
 
     skills_output::emit_check_results(skills_root.as_path(), results.as_slice(), json_output)?;
     std::io::stdout().flush().context("stdout flush failed")
+}
+
+fn emit_procedure_check_results(
+    skills_root: &Path,
+    procedure_entries: &[ProcedureSkillInventoryEntry],
+    json_output: bool,
+) -> Result<()> {
+    let results = procedure_entries.iter().map(procedure_check_result_value).collect::<Vec<_>>();
+    if json_output {
+        return output::print_json_pretty(
+            &json!({
+                "skills_root": skills_root,
+                "count": results.len(),
+                "results": results,
+            }),
+            "failed to encode procedure skill check results as JSON",
+        );
+    }
+
+    println!("skills.check root={} count={}", skills_root.display(), results.len());
+    for result in results {
+        println!(
+            "skills.check.entry kind=procedure slug={} status={} check_status={}",
+            result.get("slug").and_then(Value::as_str).unwrap_or("-"),
+            result.get("status").and_then(Value::as_str).unwrap_or("-"),
+            result.get("check_status").and_then(Value::as_str).unwrap_or("-")
+        );
+        if let Some(reasons) = result.get("reasons").and_then(Value::as_array) {
+            let reason_text = reasons.iter().filter_map(Value::as_str).collect::<Vec<_>>();
+            if !reason_text.is_empty() {
+                println!("skills.check.reasons {}", reason_text.join(" | "));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn procedure_check_result_value(entry: &ProcedureSkillInventoryEntry) -> Value {
+    let mut reasons = Vec::new();
+    let check_status = if entry.status == "active" {
+        "ready"
+    } else if entry.status.contains("quarantined") {
+        reasons.push("procedure raw recipe is quarantined or dry-run only".to_owned());
+        "blocked"
+    } else {
+        reasons.push(format!("procedure status is {}", entry.status));
+        "unknown"
+    };
+
+    json!({
+        "entry_kind": "procedure",
+        "slug": entry.slug,
+        "name": entry.name,
+        "summary": entry.summary,
+        "status": entry.status,
+        "path": entry.path,
+        "check_status": check_status,
+        "trust_accepted": true,
+        "audit_passed": check_status == "ready",
+        "quarantine_required": entry.status.contains("quarantined"),
+        "reasons": reasons,
+    })
 }
 
 fn run_skills_verify(

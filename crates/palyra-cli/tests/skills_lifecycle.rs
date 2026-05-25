@@ -129,6 +129,84 @@ fn skills_check_json_reports_empty_inventory() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn procedure_save_is_listed_and_checkable() -> Result<()> {
+    let workdir = TempDir::new().context("tempdir")?;
+    let skills_dir = workdir.path().join("procedure-skills");
+
+    let save_args = vec![
+        "skills".to_owned(),
+        "procedure".to_owned(),
+        "save".to_owned(),
+        "--skills-dir".to_owned(),
+        skills_dir.to_string_lossy().into_owned(),
+        "--slug".to_owned(),
+        "e2e-procedure-smoke".to_owned(),
+        "--name".to_owned(),
+        "E2E Procedure Smoke".to_owned(),
+        "--summary".to_owned(),
+        "E2E procedure save smoke".to_owned(),
+        "--body".to_owned(),
+        "When asked, reply PROCEDURE_SMOKE_OK.".to_owned(),
+        "--json".to_owned(),
+    ];
+    let save_output = run_cli(&workdir, save_args.as_slice())?;
+    assert!(
+        save_output.status.success(),
+        "procedure save should succeed: {}",
+        String::from_utf8_lossy(&save_output.stderr)
+    );
+
+    let list_args = vec![
+        "skills".to_owned(),
+        "list".to_owned(),
+        "--skills-dir".to_owned(),
+        skills_dir.to_string_lossy().into_owned(),
+        "--json".to_owned(),
+    ];
+    let list_output = run_cli(&workdir, list_args.as_slice())?;
+    assert!(
+        list_output.status.success(),
+        "skills list should include procedures: {}",
+        String::from_utf8_lossy(&list_output.stderr)
+    );
+    let list_payload: Value = serde_json::from_slice(list_output.stdout.as_slice())
+        .context("list output should be JSON")?;
+    assert_eq!(list_payload.get("count").and_then(Value::as_u64), Some(1));
+    let entries = list_payload
+        .get("entries")
+        .and_then(Value::as_array)
+        .context("list output must include entries array")?;
+    assert_eq!(entries[0].get("entry_kind").and_then(Value::as_str), Some("procedure"));
+    assert_eq!(entries[0].get("slug").and_then(Value::as_str), Some("e2e-procedure-smoke"));
+
+    let check_args = vec![
+        "skills".to_owned(),
+        "check".to_owned(),
+        "e2e-procedure-smoke".to_owned(),
+        "--skills-dir".to_owned(),
+        skills_dir.to_string_lossy().into_owned(),
+        "--allow-untrusted".to_owned(),
+        "--json".to_owned(),
+    ];
+    let check_output = run_cli(&workdir, check_args.as_slice())?;
+    assert!(
+        check_output.status.success(),
+        "skills check should validate saved procedure: {}",
+        String::from_utf8_lossy(&check_output.stderr)
+    );
+    let check_payload: Value = serde_json::from_slice(check_output.stdout.as_slice())
+        .context("check output should be JSON")?;
+    assert_eq!(check_payload.get("count").and_then(Value::as_u64), Some(1));
+    let results = check_payload
+        .get("results")
+        .and_then(Value::as_array)
+        .context("check output must include results array")?;
+    assert_eq!(results[0].get("entry_kind").and_then(Value::as_str), Some("procedure"));
+    assert_eq!(results[0].get("check_status").and_then(Value::as_str), Some("ready"));
+    Ok(())
+}
+
 fn seed_skill_secret(workdir: &TempDir, scope: &str, key: &str, value: &str) -> Result<()> {
     let args = vec![
         "secrets".to_owned(),
