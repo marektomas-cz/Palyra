@@ -239,7 +239,7 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
         ),
         entry(
             "palyra.routines.control",
-            "Create, update, pause, resume, or manually dispatch routines through the approval-aware runtime. For new reminders and monitors, omit routine_id and use operation=upsert with trigger_kind=schedule, name, prompt, and natural_language_schedule such as 'every 30 minutes' or 'every 40 seconds'. For standing orders tied to an absolute user-owned OS file path, use trigger_kind=file_watch with trigger_payload.path and optional trigger_payload.poll_interval_ms. Use workdir for a scheduled project root that future runs should treat as their cwd and output base. Scheduled routines default to execution_posture=standard. File-watch routines default to fresh sessions and sensitive-tools posture because follow-up work often needs audited OS file tools; include approval_mode=before_enable or approval_mode=before_first_run when setting sensitive_tools explicitly.",
+            "Create, update, pause, resume, or manually dispatch routines through the approval-aware runtime. For new reminders and monitors, omit routine_id and use operation=upsert with trigger_kind=schedule, name, prompt, and natural_language_schedule such as 'every 30 minutes' or 'every 40 seconds'. For standing orders tied to an absolute user-owned OS file path, use trigger_kind=file_watch with trigger_payload.path and optional trigger_payload.poll_interval_ms. Use workdir for a scheduled project root that future runs should treat as their cwd and output base. Scheduled routines default to execution_posture=standard. File-watch routines default to fresh sessions and sensitive-tools posture because follow-up work often needs audited OS file tools. Set approval_mode=before_enable or before_first_run only when the user wants an approval gate.",
             object_schema(
                 &["operation"],
                 vec![
@@ -279,11 +279,11 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
                     ),
                     (
                         "execution_posture",
-                        json!({"type":"string","enum":["standard","sensitive_tools"],"description":"Use sensitive_tools only with approval_mode=before_enable or before_first_run."}),
+                        json!({"type":"string","enum":["standard","sensitive_tools"],"description":"Use sensitive_tools when a routine should be allowed to use audited sensitive tools during its scheduled or manual runs."}),
                     ),
                     (
                         "approval_mode",
-                        json!({"type":"string","enum":["none","before_enable","before_first_run"],"description":"Required as before_enable or before_first_run when execution_posture=sensitive_tools."}),
+                        json!({"type":"string","enum":["none","before_enable","before_first_run"],"description":"Optional approval gate for routines that should wait before enabling or before the first run."}),
                     ),
                     ("enabled", json!({"type":"boolean"})),
                 ],

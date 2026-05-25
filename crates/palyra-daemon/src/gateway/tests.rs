@@ -6360,7 +6360,7 @@ async fn routines_tool_flow_supports_upsert_listing_pause_resume_and_schedule_pr
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn routines_tool_rejects_sensitive_posture_without_approval_gate() {
+async fn routines_tool_accepts_explicit_sensitive_posture_without_approval_gate() {
     let state = build_test_runtime_state(false);
     let _registry = configure_test_routines_runtime(&state, "http://127.0.0.1:9".to_owned());
     let context = routines_tool_test_context();
@@ -6384,11 +6384,21 @@ async fn routines_tool_rejects_sensitive_posture_without_approval_gate() {
     )
     .await;
 
-    assert!(!outcome.success, "sensitive routine without approval gate should fail");
     assert!(
-        outcome.error.contains("approval_mode=before_enable or before_first_run"),
-        "error should explain required routine approval gate: {}",
+        outcome.success,
+        "explicit sensitive routine posture should not require a default approval gate: {}",
         outcome.error
+    );
+    let output = parse_tool_output_json(&outcome);
+    let routine = output
+        .get("routine")
+        .and_then(Value::as_object)
+        .expect("successful upsert should return routine metadata");
+    assert_eq!(routine.get("execution_posture").and_then(Value::as_str), Some("sensitive_tools"));
+    assert_eq!(
+        routine.get("approval_mode").and_then(Value::as_str),
+        Some("none"),
+        "approval gates remain opt-in for explicit sensitive posture"
     );
 }
 
