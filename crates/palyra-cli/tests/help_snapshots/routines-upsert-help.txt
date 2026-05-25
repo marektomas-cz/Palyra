@@ -23,6 +23,8 @@ Options:
           [possible values: true, false]
       --natural-language-schedule <NATURAL_LANGUAGE_SCHEDULE>
 
+      --schedule-timezone <TIMEZONE>
+          Schedule timezone: local, utc, or an IANA timezone such as Europe/Prague
       --schedule-type <SCHEDULE_TYPE>
           [possible values: cron, every, at]
       --schedule <SCHEDULE>

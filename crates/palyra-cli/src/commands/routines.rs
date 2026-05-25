@@ -84,6 +84,7 @@ pub(crate) async fn run_routines_async(command: RoutinesCommand) -> Result<()> {
                 workdir,
                 enabled,
                 natural_language_schedule,
+                schedule_timezone,
                 schedule_type,
                 schedule,
                 trigger_payload,
@@ -131,6 +132,7 @@ pub(crate) async fn run_routines_async(command: RoutinesCommand) -> Result<()> {
                 workdir: resolve_routine_workdir(workdir)?,
                 enabled,
                 natural_language_schedule,
+                schedule_timezone,
                 schedule_type,
                 schedule,
                 trigger_payload,
@@ -933,6 +935,7 @@ fn build_routine_upsert_payload(args: RoutineUpsertArgs) -> Result<Map<String, V
         workdir,
         enabled,
         natural_language_schedule,
+        schedule_timezone,
         schedule_type,
         schedule,
         trigger_payload,
@@ -984,6 +987,7 @@ fn build_routine_upsert_payload(args: RoutineUpsertArgs) -> Result<Map<String, V
         &mut payload,
         trigger_kind,
         natural_language_schedule,
+        schedule_timezone,
         schedule_type,
         schedule,
     )?;
@@ -1148,11 +1152,17 @@ fn insert_schedule_fields(
     payload: &mut Map<String, Value>,
     trigger_kind: RoutineTriggerKindArg,
     natural_language_schedule: Option<String>,
+    schedule_timezone: Option<RoutinePreviewTimezoneArg>,
     schedule_type: Option<CronScheduleTypeArg>,
     schedule: Option<String>,
 ) -> Result<()> {
     if trigger_kind != RoutineTriggerKindArg::Schedule {
         return Ok(());
+    }
+    if let Some(timezone) =
+        schedule_timezone.as_ref().map(RoutinePreviewTimezoneArg::as_str).map(str::trim)
+    {
+        payload.insert("schedule_timezone".to_owned(), Value::String(timezone.to_owned()));
     }
     if let Some(phrase) =
         natural_language_schedule.as_deref().map(str::trim).filter(|value| !value.is_empty())
@@ -1501,6 +1511,7 @@ struct RoutineUpsertArgs {
     workdir: Option<String>,
     enabled: Option<bool>,
     natural_language_schedule: Option<String>,
+    schedule_timezone: Option<RoutinePreviewTimezoneArg>,
     schedule_type: Option<CronScheduleTypeArg>,
     schedule: Option<String>,
     trigger_payload: Option<Value>,
@@ -1547,7 +1558,15 @@ struct TemplateRoutineArgs {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_file_watch_trigger_payload, parse_every_schedule_interval_ms};
+    use super::{
+        build_file_watch_trigger_payload, build_routine_upsert_payload,
+        parse_every_schedule_interval_ms, RoutineUpsertArgs,
+    };
+    use crate::cli::{
+        CronConcurrencyPolicyArg, CronMisfirePolicyArg, RoutineApprovalModeArg,
+        RoutineDeliveryModeArg, RoutineExecutionPostureArg, RoutineRunModeArg,
+        RoutineSilentPolicyArg, RoutineTriggerKindArg,
+    };
     use serde_json::json;
 
     #[test]
@@ -1589,5 +1608,54 @@ mod tests {
             .expect_err("missing watch path should fail before reaching daemon");
 
         assert!(error.to_string().contains("file-watch routines require --watch-path"));
+    }
+
+    #[test]
+    fn build_schedule_upsert_payload_preserves_explicit_timezone() {
+        let payload = build_routine_upsert_payload(RoutineUpsertArgs {
+            id: None,
+            name: "Monday report".to_owned(),
+            prompt: "Summarize incidents".to_owned(),
+            trigger_kind: RoutineTriggerKindArg::Schedule,
+            owner: None,
+            channel: None,
+            session_key: None,
+            session_label: None,
+            workdir: None,
+            enabled: None,
+            natural_language_schedule: Some("every Monday at 09:00".to_owned()),
+            schedule_timezone: Some("Europe/Prague".parse().expect("valid timezone")),
+            schedule_type: None,
+            schedule: None,
+            trigger_payload: None,
+            watch_path: None,
+            watch_poll_interval_ms: None,
+            concurrency: CronConcurrencyPolicyArg::Forbid,
+            retry_max_attempts: 1,
+            retry_backoff_ms: 1000,
+            misfire: CronMisfirePolicyArg::Skip,
+            jitter_ms: 0,
+            max_runs: None,
+            delivery_mode: RoutineDeliveryModeArg::SameChannel,
+            delivery_channel: None,
+            delivery_failure_mode: None,
+            delivery_failure_channel: None,
+            silent_policy: RoutineSilentPolicyArg::Noisy,
+            run_mode: RoutineRunModeArg::SameSession,
+            procedure_profile_id: None,
+            skill_profile_id: None,
+            provider_profile_id: None,
+            execution_posture: RoutineExecutionPostureArg::Standard,
+            quiet_hours_start: None,
+            quiet_hours_end: None,
+            quiet_hours_timezone: None,
+            cooldown_ms: 0,
+            approval_mode: RoutineApprovalModeArg::None,
+            template_id: None,
+        })
+        .expect("schedule payload should build");
+
+        assert_eq!(payload["natural_language_schedule"], "every Monday at 09:00");
+        assert_eq!(payload["schedule_timezone"], "Europe/Prague");
     }
 }

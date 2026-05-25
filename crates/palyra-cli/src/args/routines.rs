@@ -219,6 +219,12 @@ pub struct RoutineUpsertCommand {
     pub enabled: Option<bool>,
     #[arg(long)]
     pub natural_language_schedule: Option<String>,
+    #[arg(
+        long,
+        value_name = "TIMEZONE",
+        help = "Schedule timezone: local, utc, or an IANA timezone such as Europe/Prague"
+    )]
+    pub schedule_timezone: Option<RoutinePreviewTimezoneArg>,
     #[arg(long, value_enum, requires = "schedule")]
     pub schedule_type: Option<CronScheduleTypeArg>,
     #[arg(

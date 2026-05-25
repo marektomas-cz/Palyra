@@ -2830,13 +2830,12 @@ fn ensure_job_owner(job: &CronJobRecord, principal: &str) -> Result<(), Response
 
 #[allow(clippy::result_large_err)]
 fn parse_timezone_mode(value: Option<&str>) -> Result<CronTimezoneMode, Response> {
-    match value.map(str::trim).filter(|value| !value.is_empty()) {
-        Some("local") | None => Ok(CronTimezoneMode::Local),
-        Some("utc") => Ok(CronTimezoneMode::Utc),
-        Some(_) => Err(runtime_status_response(tonic::Status::invalid_argument(
-            "timezone must be one of local|utc",
-        ))),
-    }
+    let value = value.map(str::trim).filter(|value| !value.is_empty()).unwrap_or("local");
+    CronTimezoneMode::from_str(value).ok_or_else(|| {
+        runtime_status_response(tonic::Status::invalid_argument(
+            "timezone must be local, utc, or an IANA timezone",
+        ))
+    })
 }
 
 #[allow(clippy::result_large_err)]
@@ -2936,9 +2935,10 @@ mod tests {
         approval_policy_for_requested_schedule, compare_optional_matchers, is_in_quiet_hours,
         normalize_channel, parse_delivery, parse_execution_config,
         parse_optional_schedule_timezone_mode, parse_quiet_hours, parse_routine_approval_subject,
-        routine_approval_subject_id, routine_automation_flag_permits_enabled_write,
-        routine_matches_trigger, routine_output_fields_from_session,
-        routine_output_text_from_tape_events, routine_troubleshooting_recommended_action,
+        parse_timezone_mode, routine_approval_subject_id,
+        routine_automation_flag_permits_enabled_write, routine_matches_trigger,
+        routine_output_fields_from_session, routine_output_text_from_tape_events,
+        routine_troubleshooting_recommended_action,
     };
     use crate::cron::CronTimezoneMode;
     use crate::journal::{CronScheduleType, OrchestratorSessionRecord, OrchestratorTapeRecord};
@@ -3031,6 +3031,12 @@ mod tests {
 
     #[test]
     fn schedule_timezone_override_defaults_to_daemon_mode_when_absent() {
+        assert_eq!(
+            parse_timezone_mode(Some("Europe/Prague"))
+                .expect("schedule preview should accept IANA timezone")
+                .as_str(),
+            "Europe/Prague"
+        );
         assert_eq!(
             parse_optional_schedule_timezone_mode(None, CronTimezoneMode::Utc)
                 .expect("missing override should use daemon default"),
