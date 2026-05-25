@@ -3231,8 +3231,12 @@ impl App {
                 let current_model = self
                     .current_session_catalog
                     .as_ref()
+                    .filter(|session| session.quick_controls.model.override_active)
                     .and_then(|session| session.quick_controls.model.value.clone())
-                    .or_else(|| models.status.text_model.clone());
+                    .or_else(|| {
+                        status::effective_runtime_model_display(Some(&models))
+                            .map(ToOwned::to_owned)
+                    });
                 let items = models
                     .models
                     .iter()
@@ -3921,6 +3925,24 @@ mod tests {
         assert!(quick_control_reset_requested("reset"));
         assert!(quick_control_reset_requested("inherit"));
         assert!(!quick_control_reset_requested("on"));
+    }
+
+    #[test]
+    fn inherited_model_display_prefers_runtime_default_over_legacy_agent_profile() {
+        assert_eq!(
+            status::model_display_from_sources(false, Some("deterministic"), Some("MiniMax-M2.7"))
+                .as_deref(),
+            Some("MiniMax-M2.7")
+        );
+    }
+
+    #[test]
+    fn model_display_keeps_explicit_session_override() {
+        assert_eq!(
+            status::model_display_from_sources(true, Some("deterministic"), Some("MiniMax-M2.7"))
+                .as_deref(),
+            Some("deterministic")
+        );
     }
 
     #[test]

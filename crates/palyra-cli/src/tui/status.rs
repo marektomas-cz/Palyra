@@ -245,18 +245,17 @@ impl App {
     }
 
     pub(super) fn current_session_model_display(&self) -> String {
-        self.current_session_catalog
+        let quick_control_display = self
+            .current_session_catalog
             .as_ref()
-            .map(|session| session.quick_controls.model.display_value.trim())
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned)
-            .or_else(|| {
-                self.models
-                    .as_ref()
-                    .and_then(|models| models.status.text_model.as_deref())
-                    .map(ToOwned::to_owned)
-            })
-            .unwrap_or_else(|| "none".to_owned())
+            .map(|session| session.quick_controls.model.display_value.as_str());
+        let override_active = self.current_session_model_override_active();
+        model_display_from_sources(
+            override_active,
+            quick_control_display,
+            effective_runtime_model_display(self.models.as_ref()),
+        )
+        .unwrap_or_else(|| "none".to_owned())
     }
 
     pub(super) fn current_session_agent_display(&self) -> String {
@@ -453,6 +452,35 @@ impl App {
         ]
         .join("\n")
     }
+}
+
+pub(super) fn effective_runtime_model_display(models: Option<&ModelsListPayload>) -> Option<&str> {
+    models.and_then(|models| {
+        models
+            .status
+            .default_chat_model_id
+            .as_deref()
+            .or(models.status.text_model.as_deref())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    })
+}
+
+pub(super) fn model_display_from_sources(
+    override_active: bool,
+    quick_control_display: Option<&str>,
+    runtime_model_display: Option<&str>,
+) -> Option<String> {
+    let quick_control_display =
+        quick_control_display.map(str::trim).filter(|value| !value.is_empty());
+    if override_active {
+        return quick_control_display.map(ToOwned::to_owned);
+    }
+    runtime_model_display
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or(quick_control_display)
+        .map(ToOwned::to_owned)
 }
 
 pub(super) fn browser_catalog_optional_error(error: &anyhow::Error) -> bool {
