@@ -2209,7 +2209,7 @@ fn console_agent_endpoints_require_session_and_csrf_and_bridge_runtime() -> Resu
 
     let (cookie, csrf_token) = login_console_session(&client, admin_port, CONSOLE_ADMIN_PRINCIPAL)?;
 
-    let empty_list = client
+    let initial_list = client
         .get(format!("http://127.0.0.1:{admin_port}/console/v1/agents"))
         .header("Cookie", cookie.clone())
         .send()
@@ -2218,10 +2218,25 @@ fn console_agent_endpoints_require_session_and_csrf_and_bridge_runtime() -> Resu
         .context("agents list endpoint returned non-success status")?
         .json::<palyra_control_plane::AgentListEnvelope>()
         .context("failed to parse agents list response json")?;
-    assert!(empty_list.agents.is_empty(), "fresh daemon should start with an empty agent registry");
     assert_eq!(
-        empty_list.default_agent_id, None,
-        "fresh daemon should not publish a default agent id"
+        initial_list.default_agent_id.as_deref(),
+        Some("local-default"),
+        "fresh daemon should publish the bootstrapped local default agent"
+    );
+    assert_eq!(
+        initial_list.agents.len(),
+        1,
+        "fresh daemon should start with only the bootstrapped local default agent"
+    );
+    let bootstrapped_agent = initial_list
+        .agents
+        .iter()
+        .find(|agent| agent.agent_id == "local-default")
+        .expect("bootstrapped local default agent should be listed");
+    assert_eq!(bootstrapped_agent.display_name, "LocalDefaultAgent");
+    assert!(
+        !bootstrapped_agent.workspace_roots.is_empty(),
+        "bootstrapped local default agent should expose a workspace root"
     );
 
     let oversized_after_agent_id_response = client
@@ -2285,7 +2300,10 @@ fn console_agent_endpoints_require_session_and_csrf_and_bridge_runtime() -> Resu
         .json::<palyra_control_plane::AgentCreateEnvelope>()
         .context("failed to parse main agent create response json")?;
     assert_eq!(created_main.agent.agent_id, "main");
-    assert!(created_main.default_changed, "first created agent should become default");
+    assert!(
+        created_main.default_changed,
+        "explicit default create should switch the default agent"
+    );
     assert_eq!(created_main.default_agent_id.as_deref(), Some("main"));
     assert!(
         !created_main.agent.agent_dir.trim().is_empty(),
@@ -2327,7 +2345,20 @@ fn console_agent_endpoints_require_session_and_csrf_and_bridge_runtime() -> Resu
         .context("agents list after creation returned non-success status")?
         .json::<palyra_control_plane::AgentListEnvelope>()
         .context("failed to parse populated agents list response json")?;
-    assert_eq!(listed.agents.len(), 2, "agents list should include both created agents");
+    assert_eq!(
+        listed.agents.len(),
+        3,
+        "agents list should include the bootstrapped agent and both created agents"
+    );
+    assert!(
+        listed.agents.iter().any(|agent| agent.agent_id == "local-default"),
+        "agents list should retain the bootstrapped local default agent"
+    );
+    assert!(
+        listed.agents.iter().any(|agent| agent.agent_id == "main")
+            && listed.agents.iter().any(|agent| agent.agent_id == "review"),
+        "agents list should include both created agents"
+    );
     assert_eq!(listed.default_agent_id.as_deref(), Some("main"));
 
     let fetched_main = client
