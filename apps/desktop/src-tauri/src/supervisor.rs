@@ -13,6 +13,7 @@ use std::{
 
 use anyhow::{bail, Context, Result};
 use palyra_common::config_system::{get_value_at_path, set_value_at_path};
+use palyra_vault::{BackendPreference as VaultBackendPreference, Vault, VaultConfig, VaultRef};
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -36,6 +37,7 @@ use super::{
 const NODE_HOST_STATE_DIR: &str = "node-host";
 const NODE_HOST_CONFIG_FILE_NAME: &str = "node-host.json";
 const DESKTOP_CONFIG_RELOAD_MODE_ENV: &str = "PALYRA_DESKTOP_CONFIG_RELOAD_MODE";
+const BROWSERD_STATE_ENCRYPTION_KEY_ENV: &str = "PALYRA_BROWSERD_STATE_ENCRYPTION_KEY";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -247,6 +249,7 @@ pub(crate) struct ControlCenter {
     pub(crate) admin_token: String,
     pub(crate) admin_bound_principal: Option<String>,
     pub(crate) browser_auth_token: String,
+    pub(crate) browser_state_encryption_key: Option<BrowserStateEncryptionKey>,
     pub(crate) runtime: RuntimeConfig,
     pub(crate) gateway: ManagedService,
     pub(crate) browserd: ManagedService,
@@ -324,6 +327,7 @@ struct ConfigRuntimeTokenOverrides {
     admin_token: Option<String>,
     admin_bound_principal: Option<String>,
     browser_auth_token: Option<String>,
+    browser_state_encryption_key: Option<BrowserStateEncryptionKey>,
     config_file_present: bool,
 }
 
@@ -341,6 +345,29 @@ struct DesktopRuntimeAuthConfig {
     admin_token: String,
     admin_bound_principal: Option<String>,
     browser_auth_token: String,
+    browser_state_encryption_key: Option<BrowserStateEncryptionKey>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct BrowserStateEncryptionKey(String);
+
+impl BrowserStateEncryptionKey {
+    fn parse(raw: impl Into<String>, source: &str) -> Result<Self> {
+        let raw = raw.into();
+        let value = normalize_optional_text(raw.as_str())
+            .with_context(|| format!("{source} resolved to an empty browser state key"))?;
+        Ok(Self(value.to_owned()))
+    }
+
+    fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl std::fmt::Debug for BrowserStateEncryptionKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("BrowserStateEncryptionKey(<redacted>)")
+    }
 }
 
 fn runtime_auth_with_config_overrides(
@@ -357,6 +384,7 @@ fn runtime_auth_with_config_overrides(
         browser_auth_token: overrides
             .browser_auth_token
             .unwrap_or_else(|| fallback.browser_auth_token.clone()),
+        browser_state_encryption_key: overrides.browser_state_encryption_key,
     })
 }
 
@@ -433,8 +461,39 @@ fn config_runtime_token_overrides(
         admin_token: toml_string_at_path(&document, "admin.auth_token"),
         admin_bound_principal: toml_string_at_path(&document, "admin.bound_principal"),
         browser_auth_token: toml_string_at_path(&document, "tool_call.browser_service.auth_token"),
+        browser_state_encryption_key: browser_state_encryption_key_from_config(
+            &document,
+            config_path.parent(),
+        )?,
         config_file_present: true,
     })
+}
+
+fn browser_state_encryption_key_from_config(
+    document: &toml::Value,
+    config_dir: Option<&Path>,
+) -> Result<Option<BrowserStateEncryptionKey>> {
+    let Some(raw_vault_ref) =
+        toml_string_at_path(document, "tool_call.browser_service.state_key_vault_ref")
+    else {
+        return Ok(None);
+    };
+    let parsed = VaultRef::parse(raw_vault_ref.as_str()).with_context(|| {
+        "failed to parse tool_call.browser_service.state_key_vault_ref".to_owned()
+    })?;
+    let vault = Vault::open_with_config(VaultConfig {
+        root: toml_path_at_path(document, "storage.vault_dir", config_dir),
+        identity_store_root: toml_path_at_path(document, "gateway.identity_store_dir", config_dir),
+        backend_preference: VaultBackendPreference::Auto,
+        ..Default::default()
+    })
+    .context("failed to initialize vault runtime for browser state key")?;
+    let secret = vault
+        .get_secret(&parsed.scope, parsed.key.as_str())
+        .context("failed to read browser state key vault ref")?;
+    let secret =
+        String::from_utf8(secret).context("browser state key vault ref must be UTF-8 text")?;
+    BrowserStateEncryptionKey::parse(secret, "browser state key vault ref").map(Some)
 }
 
 fn toml_string_at_path(document: &toml::Value, path: &str) -> Option<String> {
@@ -443,6 +502,19 @@ fn toml_string_at_path(document: &toml::Value, path: &str) -> Option<String> {
         current = current.get(segment)?;
     }
     normalize_optional_text(current.as_str().unwrap_or_default()).map(str::to_owned)
+}
+
+fn toml_path_at_path(
+    document: &toml::Value,
+    path: &str,
+    config_dir: Option<&Path>,
+) -> Option<PathBuf> {
+    let path = PathBuf::from(toml_string_at_path(document, path)?);
+    if path.is_absolute() {
+        Some(path)
+    } else {
+        config_dir.map(|dir| dir.join(path))
+    }
 }
 
 fn toml_u16_at_path(document: &toml::Value, path: &str) -> Option<u16> {
@@ -490,6 +562,21 @@ fn config_file_signature(path: &Path) -> Result<ConfigFileSignature> {
     })?;
     let modified_unix_ms = system_time_to_unix_ms(modified);
     Ok(ConfigFileSignature { modified_unix_ms, len: metadata.len() })
+}
+
+fn browserd_env_values(
+    runtime_root: &Path,
+    browser_auth_token: &str,
+    browser_state_encryption_key: Option<&BrowserStateEncryptionKey>,
+) -> Vec<(String, String)> {
+    let mut env = vec![
+        ("PALYRA_STATE_ROOT".to_owned(), runtime_root.to_string_lossy().into_owned()),
+        ("PALYRA_BROWSERD_AUTH_TOKEN".to_owned(), browser_auth_token.to_owned()),
+    ];
+    if let Some(state_key) = browser_state_encryption_key {
+        env.push((BROWSERD_STATE_ENCRYPTION_KEY_ENV.to_owned(), state_key.as_str().to_owned()));
+    }
+    env
 }
 
 impl ControlCenter {
@@ -558,6 +645,7 @@ impl ControlCenter {
             admin_token: runtime_auth.admin_token,
             admin_bound_principal: runtime_auth.admin_bound_principal,
             browser_auth_token: runtime_auth.browser_auth_token,
+            browser_state_encryption_key: runtime_auth.browser_state_encryption_key,
             runtime,
             gateway,
             browserd,
@@ -1386,10 +1474,11 @@ impl ControlCenter {
     }
 
     fn browserd_env(&self) -> Vec<(String, String)> {
-        vec![
-            ("PALYRA_STATE_ROOT".to_owned(), self.runtime_root.to_string_lossy().into_owned()),
-            ("PALYRA_BROWSERD_AUTH_TOKEN".to_owned(), self.browser_auth_token.clone()),
-        ]
+        browserd_env_values(
+            self.runtime_root.as_path(),
+            self.browser_auth_token.as_str(),
+            self.browser_state_encryption_key.as_ref(),
+        )
     }
 
     fn refresh_runtime_tokens_from_active_config(&mut self) -> Result<bool> {
@@ -1410,12 +1499,14 @@ impl ControlCenter {
             runtime_config_with_config_overrides(RuntimeConfig::default(), config_path)?;
         let auth_changed = self.admin_token != runtime_auth.admin_token
             || self.admin_bound_principal != runtime_auth.admin_bound_principal
-            || self.browser_auth_token != runtime_auth.browser_auth_token;
+            || self.browser_auth_token != runtime_auth.browser_auth_token
+            || self.browser_state_encryption_key != runtime_auth.browser_state_encryption_key;
         let runtime_changed = self.runtime != runtime_config;
         if auth_changed {
             self.admin_token = runtime_auth.admin_token;
             self.admin_bound_principal = runtime_auth.admin_bound_principal;
             self.browser_auth_token = runtime_auth.browser_auth_token;
+            self.browser_state_encryption_key = runtime_auth.browser_state_encryption_key;
             if let Ok(mut session_cache) = self.console_session_cache.lock() {
                 *session_cache = None;
             }
@@ -1848,11 +1939,12 @@ fn apply_profile_process_env(profile: &DesktopResolvedProfile) {
 mod tests {
     use std::{env, fs};
 
+    use palyra_vault::{BackendPreference, Vault, VaultConfig, VaultScope};
+
     use super::{
-        normalize_browser_open_url, runtime_auth_with_config_overrides,
+        browserd_env_values, normalize_browser_open_url, runtime_auth_with_config_overrides,
         runtime_config_with_config_overrides, runtime_secrets_with_config_overrides,
-        ConfigReloadWatchOutcome,
-        DesktopConfigReloadWatchState,
+        BrowserStateEncryptionKey, ConfigReloadWatchOutcome, DesktopConfigReloadWatchState,
     };
     use crate::RuntimeConfig;
     use crate::desktop_state::DesktopRuntimeSecrets;
@@ -1933,6 +2025,85 @@ auth_token = "config-browser-token"
         assert_eq!(effective.admin_token, "desktop-admin-token");
         assert_eq!(effective.browser_auth_token, "desktop-browser-token");
         let _ = fs::remove_dir_all(fixture.as_path());
+    }
+
+    #[test]
+    fn runtime_auth_with_config_overrides_reads_browser_state_key_vault_ref() {
+        let fixture =
+            env::temp_dir().join(format!("palyra-desktop-browser-key-test-{}", ulid::Ulid::new()));
+        fs::create_dir_all(fixture.as_path()).expect("fixture dir should be created");
+        let identity_root = fixture.join("identity");
+        let vault_root = fixture.join("vault");
+        let browser_state_key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+        let vault = Vault::open_with_config(VaultConfig {
+            root: Some(vault_root.clone()),
+            identity_store_root: Some(identity_root.clone()),
+            backend_preference: BackendPreference::EncryptedFile,
+            ..Default::default()
+        })
+        .expect("fixture vault should open");
+        vault
+            .put_secret(&VaultScope::Global, "browser_state_key", browser_state_key.as_bytes())
+            .expect("browser state key should be stored");
+
+        let config_path = fixture.join("palyra.toml");
+        fs::write(
+            config_path.as_path(),
+            format!(
+                r#"
+version = 1
+
+[gateway]
+identity_store_dir = '{}'
+
+[storage]
+vault_dir = '{}'
+
+[tool_call.browser_service]
+state_key_vault_ref = "global/browser_state_key"
+"#,
+                identity_root.display(),
+                vault_root.display()
+            ),
+        )
+        .expect("config fixture should be written");
+
+        let fallback = DesktopRuntimeSecrets {
+            admin_token: "desktop-admin-token".to_owned(),
+            browser_auth_token: "desktop-browser-token".to_owned(),
+        };
+        let effective = runtime_auth_with_config_overrides(&fallback, Some(config_path.as_path()))
+            .expect("browser state key vault ref should resolve");
+
+        assert_eq!(
+            effective.browser_state_encryption_key.as_ref().map(|key| key.as_str()),
+            Some(browser_state_key)
+        );
+        let _ = fs::remove_dir_all(fixture.as_path());
+    }
+
+    #[test]
+    fn browserd_env_values_include_resolved_profile_state_key() {
+        let fixture =
+            env::temp_dir().join(format!("palyra-desktop-browser-env-test-{}", ulid::Ulid::new()));
+        let browser_state_key = BrowserStateEncryptionKey::parse(
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            "fixture browser state key",
+        )
+        .expect("fixture browser state key should parse");
+
+        let env = browserd_env_values(
+            fixture.as_path(),
+            "browser-auth-token",
+            Some(&browser_state_key),
+        );
+
+        assert_eq!(
+            env.iter()
+                .find(|(key, _)| key == super::BROWSERD_STATE_ENCRYPTION_KEY_ENV)
+                .map(|(_, value)| value.as_str()),
+            Some(browser_state_key.as_str())
+        );
     }
 
     #[test]
