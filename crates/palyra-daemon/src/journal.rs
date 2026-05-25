@@ -6015,6 +6015,12 @@ impl JournalStore {
                     ORCHESTRATOR_TITLE_GENERATION_STATE_MANUAL_LOCKED,
                 ],
             )?;
+            if request.reset_session {
+                guard.execute(
+                    "DELETE FROM session_project_context_state WHERE session_ulid = ?1",
+                    params![session.session_id.as_str()],
+                )?;
+            }
 
             session.updated_at_unix_ms = now;
             if requested_session_label.is_some() {
@@ -19889,9 +19895,10 @@ mod tests {
         MemoryItemCreateRequest, MemoryItemsListFilter, MemoryMaintenanceRequest,
         MemoryPurgeRequest, MemoryRetentionPolicy, MemorySearchRequest, MemorySource,
         OrchestratorCancelRequest, OrchestratorQueuedInputCreateRequest,
-        OrchestratorRunStartRequest, OrchestratorSessionUpsertRequest,
-        OrchestratorTapeAppendRequest, OrchestratorUsageDelta, RecallArtifactCreateRequest,
-        RecallArtifactListFilter, SessionSearchRequest, SkillExecutionStatus,
+        OrchestratorRunStartRequest, OrchestratorSessionResolveRequest,
+        OrchestratorSessionUpsertRequest, OrchestratorTapeAppendRequest, OrchestratorUsageDelta,
+        RecallArtifactCreateRequest, RecallArtifactListFilter,
+        SessionProjectContextStateUpsertRequest, SessionSearchRequest, SkillExecutionStatus,
         SkillStatusUpsertRequest, ToolJobAttachRequest, ToolJobCreateRequest,
         ToolJobRetentionPolicy, ToolJobRetryPolicy, ToolJobRetryRequest, ToolJobState,
         ToolJobTailAppendRequest, ToolJobTailReadRequest, ToolJobTailStream,
@@ -20025,6 +20032,47 @@ mod tests {
                 parameter_delta_json: None,
             })
             .expect("orchestrator run should be created");
+    }
+
+    #[test]
+    fn reset_orchestrator_session_clears_project_context_state() {
+        let db_path = temp_db_path();
+        let store = JournalStore::open(test_journal_config(db_path, false))
+            .expect("journal store should open");
+        let session_id = "01ARZ3NDEKTSV4RRFFQ69G5RST";
+        upsert_orchestrator_session(&store, session_id);
+        store
+            .upsert_session_project_context_state(&SessionProjectContextStateUpsertRequest {
+                session_id: session_id.to_owned(),
+                focus_paths: vec!["old-project".to_owned()],
+                disabled_entry_ids: vec!["old-entry".to_owned()],
+                approved_entry_ids: Vec::new(),
+                last_refreshed_at_unix_ms: Some(1_730_000_000_000),
+            })
+            .expect("project context state should be recorded");
+
+        let resolved = store
+            .resolve_orchestrator_session(&OrchestratorSessionResolveRequest {
+                session_id: Some(session_id.to_owned()),
+                session_key: None,
+                session_label: None,
+                principal: "user:ops".to_owned(),
+                device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+                channel: Some("cli".to_owned()),
+                require_existing: true,
+                reset_session: true,
+            })
+            .expect("session reset should resolve");
+
+        assert!(resolved.reset_applied);
+        assert_eq!(resolved.session.last_run_id, None);
+        assert!(
+            store
+                .session_project_context_state(session_id)
+                .expect("project context lookup should succeed")
+                .is_none(),
+            "reset-session must not retain stale project focus paths"
+        );
     }
 
     #[test]
