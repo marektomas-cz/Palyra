@@ -1092,7 +1092,9 @@ pub(crate) async fn console_browser_observe_handler(
         session_id: Some(common_v1::CanonicalId { ulid: session_id.clone() }),
         include_dom_snapshot: query.include_dom_snapshot.unwrap_or(true),
         include_accessibility_tree: query.include_accessibility_tree.unwrap_or(true),
-        include_visible_text: query.include_visible_text.unwrap_or(false),
+        include_visible_text: console_browser_observe_include_visible_text(
+            query.include_visible_text,
+        ),
         max_dom_snapshot_bytes: query.max_dom_snapshot_bytes.unwrap_or(0),
         max_accessibility_tree_bytes: query.max_accessibility_tree_bytes.unwrap_or(0),
         max_visible_text_bytes: query.max_visible_text_bytes.unwrap_or(0),
@@ -2521,6 +2523,10 @@ fn console_browser_tab_to_json(tab: browser_v1::BrowserTab) -> Value {
     serde_json::to_value(control_plane_browser_tab(tab)).unwrap_or(Value::Null)
 }
 
+fn console_browser_observe_include_visible_text(value: Option<bool>) -> bool {
+    value.unwrap_or(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2596,5 +2602,12 @@ mod tests {
 
         assert_eq!(artifact.session_id.as_deref(), Some("01ARZ3NDEKTSV4RRFFQ69G5FB0"));
         assert_eq!(artifact.profile_id.as_deref(), Some("01ARZ3NDEKTSV4RRFFQ69G5FB1"));
+    }
+
+    #[test]
+    fn console_observe_includes_visible_text_by_default() {
+        assert!(console_browser_observe_include_visible_text(None));
+        assert!(console_browser_observe_include_visible_text(Some(true)));
+        assert!(!console_browser_observe_include_visible_text(Some(false)));
     }
 }

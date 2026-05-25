@@ -519,8 +519,12 @@ pub(crate) fn build_accessibility_tree_snapshot(
     max_bytes: usize,
 ) -> (String, bool) {
     let mut lines = Vec::new();
-    for (index, tag) in collect_opening_tags(page_body).iter().enumerate() {
-        if let Some(line) = build_accessibility_line(index + 1, tag.as_str()) {
+    for (index, candidate) in collect_accessibility_candidates(page_body).iter().enumerate() {
+        if let Some(line) = build_accessibility_line(
+            index + 1,
+            candidate.tag.as_str(),
+            candidate.inner_text.as_str(),
+        ) {
             lines.push(line);
         }
     }
@@ -528,11 +532,16 @@ pub(crate) fn build_accessibility_tree_snapshot(
     truncate_utf8_bytes_with_flag(content.as_str(), max_bytes)
 }
 
-fn build_accessibility_line(index: usize, tag: &str) -> Option<String> {
+struct AccessibilityCandidate {
+    tag: String,
+    inner_text: String,
+}
+
+fn build_accessibility_line(index: usize, tag: &str, inner_text: &str) -> Option<String> {
     let tag_lower = tag.to_ascii_lowercase();
     let role = accessibility_role_for_tag(tag, tag_lower.as_str())?;
     let tag_name = html_tag_name(tag_lower.as_str()).unwrap_or("unknown");
-    let name = accessibility_name_for_tag(tag);
+    let name = accessibility_name_for_tag(tag, inner_text);
     let selector = accessibility_selector_for_tag(tag);
     Some(format!("{index:04} role={role}; name={name}; tag={tag_name}; selector={selector}"))
 }
@@ -578,16 +587,41 @@ fn accessibility_role_for_tag(tag: &str, tag_lower: &str) -> Option<String> {
     Some(inferred.to_owned())
 }
 
-fn accessibility_name_for_tag(tag: &str) -> String {
-    for attr_name in ["aria-label", "title", "alt", "placeholder", "name", "id"] {
+fn accessibility_name_for_tag(tag: &str, inner_text: &str) -> String {
+    let tag_lower = tag.to_ascii_lowercase();
+    let tag_name = html_tag_name(tag_lower.as_str()).unwrap_or("unknown");
+    for attr_name in ["aria-label", "title", "alt", "placeholder"] {
         if let Some(value) = extract_attr_value_case_insensitive(tag, attr_name)
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty())
         {
-            if contains_sensitive_material(value.as_str()) {
-                return "<redacted>".to_owned();
-            }
-            return truncate_utf8_bytes(value.as_str(), 128);
+            return accessibility_name_value(value.as_str());
+        }
+    }
+    if tag_name == "input"
+        && matches!(
+            extract_attr_value(tag_lower.as_str(), "type")
+                .unwrap_or_else(|| "text".to_owned())
+                .as_str(),
+            "submit" | "button" | "reset"
+        )
+    {
+        if let Some(value) = extract_attr_value_case_insensitive(tag, "value")
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+        {
+            return accessibility_name_value(value.as_str());
+        }
+    }
+    if accessibility_name_can_use_inner_text(tag_name) && !inner_text.trim().is_empty() {
+        return accessibility_name_value(inner_text);
+    }
+    if matches!(tag_name, "input" | "textarea" | "select" | "form") {
+        if let Some(value) = extract_attr_value_case_insensitive(tag, "name")
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+        {
+            return accessibility_name_value(value.as_str());
         }
     }
     if let Some(href) = extract_attr_value_case_insensitive(tag, "href")
@@ -597,6 +631,21 @@ fn accessibility_name_for_tag(tag: &str) -> String {
         return normalize_url_with_redaction(href.as_str());
     }
     "-".to_owned()
+}
+
+fn accessibility_name_can_use_inner_text(tag_name: &str) -> bool {
+    matches!(
+        tag_name,
+        "a" | "button" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "label" | "option" | "summary"
+    )
+}
+
+fn accessibility_name_value(value: &str) -> String {
+    if contains_sensitive_material(value) {
+        "<redacted>".to_owned()
+    } else {
+        truncate_utf8_bytes(value, 128)
+    }
 }
 
 fn accessibility_selector_for_tag(tag: &str) -> String {
@@ -647,6 +696,57 @@ pub(crate) fn build_visible_text_snapshot(page_body: &str, max_bytes: usize) -> 
     }
     let collapsed = visible.split_whitespace().collect::<Vec<_>>().join(" ");
     truncate_utf8_bytes_with_flag(collapsed.as_str(), max_bytes)
+}
+
+fn collect_accessibility_candidates(html: &str) -> Vec<AccessibilityCandidate> {
+    let mut candidates = Vec::new();
+    let lower = html.to_ascii_lowercase();
+    let mut cursor = 0usize;
+    while let Some(rel_start) = html[cursor..].find('<') {
+        let start = cursor + rel_start;
+        let Some(rel_end) = html[start..].find('>') else {
+            break;
+        };
+        let end = start + rel_end;
+        let tag = &html[start..=end];
+        if tag.starts_with("</") || tag.starts_with("<!") || tag.starts_with("<?") {
+            cursor = end.saturating_add(1);
+            continue;
+        }
+        let tag_lower = tag.to_ascii_lowercase();
+        let Some(tag_name) = html_tag_name(tag_lower.as_str()) else {
+            cursor = end.saturating_add(1);
+            continue;
+        };
+        if matches!(tag_name, "script" | "style") {
+            cursor = end.saturating_add(1);
+            continue;
+        }
+        candidates.push(AccessibilityCandidate {
+            tag: tag.to_owned(),
+            inner_text: accessibility_inner_text_for_tag(html, lower.as_str(), end + 1, tag_name),
+        });
+        cursor = end.saturating_add(1);
+    }
+    candidates
+}
+
+fn accessibility_inner_text_for_tag(
+    html: &str,
+    lower_html: &str,
+    content_start: usize,
+    tag_name: &str,
+) -> String {
+    if content_start >= html.len() {
+        return String::new();
+    }
+    let close_pattern = format!("</{tag_name}>");
+    let Some(rel_close) = lower_html[content_start..].find(close_pattern.as_str()) else {
+        return String::new();
+    };
+    let close = content_start + rel_close;
+    let (text, _) = build_visible_text_snapshot(&html[content_start..close], 128);
+    text
 }
 
 fn strip_tag_block_case_insensitive(input: &str, tag_name: &str) -> String {
@@ -712,4 +812,43 @@ fn collect_opening_tags(html: &str) -> Vec<String> {
         cursor = end.saturating_add(1);
     }
     tags
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_accessibility_tree_snapshot, build_visible_text_snapshot};
+
+    #[test]
+    fn visible_text_snapshot_extracts_page_text() {
+        let html = r#"<html><body><h1>Palyra Browser Visible Text</h1><p>Fixture paragraph visible to the browser snapshot.</p><button>Click me</button></body></html>"#;
+
+        let (visible_text, truncated) = build_visible_text_snapshot(html, 4096);
+
+        assert!(!truncated);
+        assert_eq!(
+            visible_text,
+            "Palyra Browser Visible Text Fixture paragraph visible to the browser snapshot. Click me"
+        );
+    }
+
+    #[test]
+    fn accessibility_tree_prefers_visible_text_over_ids_for_common_controls() {
+        let html = r#"<html><body><h1 id="main-title">Palyra Browser Visible Text</h1><button id="action">Click me</button></body></html>"#;
+
+        let (accessibility_tree, truncated) = build_accessibility_tree_snapshot(html, 4096);
+
+        assert!(!truncated);
+        assert!(
+            accessibility_tree.contains(
+                "role=heading; name=Palyra Browser Visible Text; tag=h1; selector=#main-title"
+            ),
+            "{accessibility_tree}"
+        );
+        assert!(
+            accessibility_tree.contains("role=button; name=Click me; tag=button; selector=#action"),
+            "{accessibility_tree}"
+        );
+        assert!(!accessibility_tree.contains("name=main-title"), "{accessibility_tree}");
+        assert!(!accessibility_tree.contains("name=action"), "{accessibility_tree}");
+    }
 }
