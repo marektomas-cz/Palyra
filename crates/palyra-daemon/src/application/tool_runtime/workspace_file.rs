@@ -22,6 +22,7 @@ use crate::{
     agents::AgentResolveRequest,
     application::tool_runtime::workspace_scope::{
         relative_path_should_use_active_root, session_active_workspace_root,
+        workspace_root_override_targets_active_root,
     },
     gateway::{
         GatewayRuntimeState, ToolRuntimeExecutionContext, MAX_WORKSPACE_LIST_DIR_TOOL_INPUT_BYTES,
@@ -535,6 +536,14 @@ async fn resolve_workspace_file_roots(
     if let Some(workspace_root) = workspace_root {
         let workspace_root = workspace_root.trim();
         if !workspace_root.is_empty() {
+            if let Some(active_root) =
+                session_active_workspace_root(runtime_state, session_id, agent_workspace_roots)
+                    .await?
+            {
+                if workspace_root_override_targets_active_root(workspace_root, &active_root) {
+                    return Ok(vec![active_root.root]);
+                }
+            }
             return resolve_workspace_root_override(
                 tool_name,
                 agent_workspace_roots,

@@ -20,6 +20,7 @@ use crate::{
     agents::AgentResolveRequest,
     application::tool_runtime::workspace_scope::{
         relative_path_should_use_active_root, session_active_workspace_root,
+        workspace_root_override_targets_active_root,
     },
     gateway::{
         current_unix_ms, GatewayRuntimeState, MAX_PATCH_TOOL_MARKER_BYTES,
@@ -319,6 +320,17 @@ async fn resolve_workspace_patch_roots(
         };
         let workspace_root = raw_workspace_root.trim();
         if !workspace_root.is_empty() {
+            if let Some(active_root) =
+                session_active_workspace_root(runtime_state, session_id, agent_workspace_roots)
+                    .await?
+            {
+                if workspace_root_override_targets_active_root(workspace_root, &active_root) {
+                    return resolved_active_workspace_patch_roots(
+                        active_root.root.as_path(),
+                        agent_workspace_roots,
+                    );
+                }
+            }
             return resolve_workspace_root_override(
                 agent_workspace_roots,
                 workspace_root,
@@ -330,21 +342,10 @@ async fn resolve_workspace_patch_roots(
         session_active_workspace_root(runtime_state, session_id, agent_workspace_roots).await?
     {
         if patch_should_use_active_root(patch, &active_root) {
-            let canonical_constraint_roots =
-                canonicalize_agent_workspace_roots(agent_workspace_roots)?;
-            let risk_path_prefixes = workspace_root_risk_path_prefixes_from_canonical(
-                fs::canonicalize(active_root.root.as_path())
-                    .map_err(|error| {
-                        format!("palyra.fs.apply_patch failed to resolve active workspace root: {error}")
-                    })?
-                    .as_path(),
-                canonical_constraint_roots.as_slice(),
+            return resolved_active_workspace_patch_roots(
+                active_root.root.as_path(),
+                agent_workspace_roots,
             );
-            return Ok(ResolvedWorkspacePatchRoots {
-                roots: vec![active_root.root],
-                canonical_constraint_roots,
-                risk_path_prefixes,
-            });
         }
     }
     Ok(ResolvedWorkspacePatchRoots {
@@ -450,6 +451,25 @@ fn resolve_workspace_root_override(
     Err(format!(
         "palyra.fs.apply_patch workspace_root does not exist inside agent workspace roots: {workspace_root}"
     ))
+}
+
+fn resolved_active_workspace_patch_roots(
+    active_root: &Path,
+    agent_workspace_roots: &[PathBuf],
+) -> Result<ResolvedWorkspacePatchRoots, String> {
+    let canonical_constraint_roots = canonicalize_agent_workspace_roots(agent_workspace_roots)?;
+    let active_root = fs::canonicalize(active_root).map_err(|error| {
+        format!("palyra.fs.apply_patch failed to resolve active workspace root: {error}")
+    })?;
+    let risk_path_prefixes = workspace_root_risk_path_prefixes_from_canonical(
+        active_root.as_path(),
+        canonical_constraint_roots.as_slice(),
+    );
+    Ok(ResolvedWorkspacePatchRoots {
+        roots: vec![active_root],
+        canonical_constraint_roots,
+        risk_path_prefixes,
+    })
 }
 
 fn workspace_root_risk_path_prefixes_from_canonical(

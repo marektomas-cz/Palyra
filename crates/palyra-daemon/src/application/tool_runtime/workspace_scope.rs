@@ -101,6 +101,35 @@ pub(crate) fn relative_path_should_use_active_root(
     canonical_parent.is_dir() && canonical_parent.starts_with(canonical_active_root.as_path())
 }
 
+pub(crate) fn workspace_root_override_targets_active_root(
+    workspace_root: &str,
+    active: &ActiveWorkspaceRoot,
+) -> bool {
+    let workspace_root = workspace_root.trim();
+    if workspace_root.is_empty() {
+        return false;
+    }
+
+    let requested = Path::new(workspace_root);
+    if requested.is_absolute() {
+        return fs::canonicalize(requested).is_ok_and(|candidate| candidate == active.root);
+    }
+
+    let Some(normalized) = normalize_relative_workspace_path(workspace_root) else {
+        return false;
+    };
+    if normalized == "." {
+        return false;
+    }
+    if normalized == active.relative_path {
+        return true;
+    }
+    Path::new(active.relative_path.as_str())
+        .file_name()
+        .and_then(|value| value.to_str())
+        .is_some_and(|basename| normalized == basename)
+}
+
 fn canonicalize_workspace_roots(workspace_roots: &[PathBuf]) -> Vec<PathBuf> {
     workspace_roots
         .iter()
@@ -157,7 +186,8 @@ fn normalize_relative_workspace_path(path: &str) -> Option<String> {
 mod tests {
     use super::{
         active_workspace_root_from_focus_paths, relative_path_already_targets_active_root,
-        relative_path_should_use_active_root, ActiveWorkspaceRoot,
+        relative_path_should_use_active_root, workspace_root_override_targets_active_root,
+        ActiveWorkspaceRoot,
     };
     use std::fs;
 
@@ -235,5 +265,31 @@ mod tests {
 
         assert_eq!(active.root, fs::canonicalize(project).expect("project should canonicalize"));
         assert_eq!(active.relative_path, "scenario-s027-routine");
+    }
+
+    #[test]
+    fn workspace_root_override_accepts_active_root_relative_path_or_basename() {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let active_dir = tempdir.path().join("e2e-workspaces").join("harness-smoke-20260525");
+        fs::create_dir_all(active_dir.as_path()).expect("active directory should exist");
+        let active = ActiveWorkspaceRoot {
+            root: fs::canonicalize(active_dir.as_path()).expect("active dir should canonicalize"),
+            relative_path: "e2e-workspaces/harness-smoke-20260525".to_owned(),
+        };
+
+        assert!(workspace_root_override_targets_active_root(
+            "e2e-workspaces/harness-smoke-20260525",
+            &active
+        ));
+        assert!(workspace_root_override_targets_active_root("harness-smoke-20260525", &active));
+        assert!(workspace_root_override_targets_active_root(
+            active.root.to_string_lossy().as_ref(),
+            &active
+        ));
+        assert!(!workspace_root_override_targets_active_root(
+            "other/harness-smoke-20260525",
+            &active
+        ));
+        assert!(!workspace_root_override_targets_active_root(".", &active));
     }
 }
