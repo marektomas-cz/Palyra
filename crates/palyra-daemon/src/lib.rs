@@ -2105,6 +2105,8 @@ pub async fn run() -> Result<()> {
         .context("failed to initialize model provider runtime")?;
     let agent_registry = agents::AgentRegistry::open(identity_runtime.store_root.as_path())
         .context("failed to initialize agent registry state")?;
+    ensure_local_default_agent(&agent_registry, &loaded)
+        .context("failed to ensure local default agent state")?;
     let runtime_state_root = resolve_runtime_state_root(identity_runtime.store_root.as_path())
         .context("failed to resolve webhook registry state root")?;
     let acp_runtime = Arc::new(
@@ -2638,6 +2640,55 @@ pub async fn run() -> Result<()> {
     tokio::try_join!(admin_server, grpc_transport)?;
 
     Ok(())
+}
+
+fn ensure_local_default_agent(
+    agent_registry: &agents::AgentRegistry,
+    loaded: &config::LoadedConfig,
+) -> Result<()> {
+    if loaded.deployment.mode != config::DeploymentMode::LocalDesktop {
+        return Ok(());
+    }
+
+    let workspace_root =
+        default_agent_workspace_root(loaded.tool_call.process_runner.workspace_root.as_path())?;
+    let outcome = agent_registry.ensure_local_default_agent(
+        workspace_root.as_path(),
+        loaded.model_provider.default_chat_model_id(),
+    )?;
+
+    match outcome {
+        agents::AgentDefaultEnsureOutcome::AlreadyConfigured { .. } => {}
+        agents::AgentDefaultEnsureOutcome::Created { agent_id } => {
+            info!(
+                agent_id = agent_id.as_str(),
+                workspace_root = %workspace_root.display(),
+                "created local default agent during startup"
+            );
+        }
+        agents::AgentDefaultEnsureOutcome::SelectedExisting { agent_id } => {
+            info!(
+                agent_id = agent_id.as_str(),
+                "selected existing sole agent as local default during startup"
+            );
+        }
+        agents::AgentDefaultEnsureOutcome::SkippedMultipleAgents { observed_agent_count } => {
+            warn!(
+                observed_agent_count,
+                "local agent registry has no default agent and multiple agents are present; leaving explicit selection to the operator"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn default_agent_workspace_root(configured_workspace_root: &FsPath) -> Result<PathBuf> {
+    if configured_workspace_root.is_absolute() {
+        return Ok(configured_workspace_root.to_path_buf());
+    }
+    Ok(std::env::current_dir()
+        .context("failed to resolve current directory for default agent workspace root")?
+        .join(configured_workspace_root))
 }
 
 #[derive(Debug, Deserialize)]
