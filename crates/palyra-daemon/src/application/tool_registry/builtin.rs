@@ -807,7 +807,7 @@ fn browser_tool_description(tool_name: &str) -> &'static str {
         }
         "palyra.browser.pdf" => "Capture a bounded browser PDF.",
         "palyra.browser.observe" => {
-            "Observe visible browser state including visible text for page-content claims."
+            "Observe visible browser state, bounded DOM/accessibility/text evidence, and safe current form/storage state for page-content claims."
         }
         "palyra.browser.network_log" => "Read bounded browser network logs.",
         "palyra.browser.console_log" => "Read bounded browser console logs.",
@@ -973,10 +973,18 @@ fn browser_tool_schema(tool_name: &str) -> Value {
             properties.push(("max_bytes", json!({"type":"integer","minimum":1})));
         }
         "palyra.browser.observe" => {
-            properties.push(("include_dom_snapshot", json!({"type":"boolean","default":true})));
-            properties
-                .push(("include_accessibility_tree", json!({"type":"boolean","default":true})));
-            properties.push(("include_visible_text", json!({"type":"boolean","default":true})));
+            properties.push((
+                "include_dom_snapshot",
+                json!({"type":"boolean","default":true,"description":"Include bounded DOM evidence with safe current form values when available."}),
+            ));
+            properties.push((
+                "include_accessibility_tree",
+                json!({"type":"boolean","default":true,"description":"Include bounded accessibility roles, names, and grounded selectors."}),
+            ));
+            properties.push((
+                "include_visible_text",
+                json!({"type":"boolean","default":true,"description":"Include visible text plus safe browser state summaries, including current form and local/session storage state when available."}),
+            ));
             properties.push(("max_dom_snapshot_bytes", json!({"type":"integer","minimum":0})));
             properties
                 .push(("max_accessibility_tree_bytes", json!({"type":"integer","minimum":0})));

@@ -2752,6 +2752,54 @@ async fn browser_service_observe_returns_stable_sanitized_snapshot() {
     handle.join().expect("test server thread should exit");
 }
 
+#[test]
+fn dom_snapshot_exposes_safe_form_values_and_state_flags() {
+    let html = r#"
+<html><body>
+  <input id="project" name="project" type="text" value="Palyra S024">
+  <input id="owner" name="owner" type="email" value="owner-s024@example.test">
+  <input id="remember" name="remember" type="checkbox" value="yes" checked="true">
+  <select id="region" name="region" value="eu"><option value="us">US</option><option value="eu" selected="true">EU</option></select>
+</body></html>
+"#;
+
+    let (snapshot, truncated) = build_dom_snapshot(html, 8 * 1024);
+
+    assert!(!truncated);
+    assert!(
+        snapshot.contains("id=\"owner\"") && snapshot.contains("value=\"owner-s024@example.test\""),
+        "safe current input values should be visible in observe snapshots: {snapshot}"
+    );
+    assert!(
+        snapshot.contains("checked=\"true\"") && snapshot.contains("selected=\"true\""),
+        "form checked/selected state should be visible in observe snapshots: {snapshot}"
+    );
+}
+
+#[test]
+fn dom_snapshot_redacts_sensitive_form_values() {
+    let html = r#"
+<html><body>
+  <input id="password" name="password" type="password" value="supersecret">
+  <input id="csrf-token" name="csrf_token" type="hidden" value="token=supersecret">
+  <input id="query" name="query" type="text" value="safe text">
+</body></html>
+"#;
+
+    let (snapshot, truncated) = build_dom_snapshot(html, 8 * 1024);
+
+    assert!(!truncated);
+    assert!(
+        snapshot.contains("id=\"query\"") && snapshot.contains("value=\"safe text\""),
+        "non-sensitive form values should remain useful: {snapshot}"
+    );
+    assert!(
+        snapshot.contains("id=\"password\"") && snapshot.contains("value=\"<redacted>\""),
+        "password values should be redacted: {snapshot}"
+    );
+    assert!(!snapshot.contains("supersecret"), "sensitive form values must not leak: {snapshot}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn browser_service_observe_truncates_deterministically_when_oversized() {
     let large_body = format!(

@@ -480,11 +480,14 @@ fn build_dom_line(index: usize, tag: &str) -> String {
         "title",
         "alt",
         "placeholder",
+        "value",
+        "checked",
+        "selected",
     ] {
         let Some(value) = extract_attr_value_case_insensitive(tag, attr_name) else {
             continue;
         };
-        let sanitized = sanitize_snapshot_attribute(attr_name, value.as_str());
+        let sanitized = sanitize_snapshot_attribute(tag, attr_name, value.as_str());
         if sanitized.is_empty() {
             continue;
         }
@@ -497,21 +500,40 @@ fn build_dom_line(index: usize, tag: &str) -> String {
     }
 }
 
-fn sanitize_snapshot_attribute(attr_name: &str, raw_value: &str) -> String {
+fn sanitize_snapshot_attribute(tag: &str, attr_name: &str, raw_value: &str) -> String {
     if raw_value.trim().is_empty() {
         return String::new();
     }
     let lower = attr_name.to_ascii_lowercase();
-    if matches!(lower.as_str(), "value" | "password" | "token") {
+    if matches!(lower.as_str(), "password" | "token") {
         return "<redacted>".to_owned();
     }
     if lower == "href" || lower == "src" || lower == "action" {
         return normalize_url_with_redaction(raw_value);
     }
+    if lower == "value" && snapshot_form_value_is_sensitive(tag) {
+        return "<redacted>".to_owned();
+    }
     if contains_sensitive_material(raw_value) {
         return "<redacted>".to_owned();
     }
     truncate_utf8_bytes(raw_value, 128)
+}
+
+fn snapshot_form_value_is_sensitive(tag: &str) -> bool {
+    let tag_lower = tag.to_ascii_lowercase();
+    if html_tag_name(tag_lower.as_str()) == Some("input") {
+        let input_type = extract_attr_value(tag_lower.as_str(), "type")
+            .unwrap_or_else(|| "text".to_owned())
+            .to_ascii_lowercase();
+        if matches!(input_type.as_str(), "password" | "hidden" | "file") {
+            return true;
+        }
+    }
+    ["name", "id", "autocomplete", "placeholder", "aria-label", "title"]
+        .iter()
+        .filter_map(|attr_name| extract_attr_value_case_insensitive(tag, attr_name))
+        .any(|value| is_sensitive_debug_key(value.as_str()))
 }
 
 pub(crate) fn build_accessibility_tree_snapshot(
