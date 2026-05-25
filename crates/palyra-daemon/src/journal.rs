@@ -28,8 +28,9 @@ use crate::{
     delegation::{DelegationMergeResult, DelegationSnapshot},
     domain::workspace::{
         curated_workspace_templates, normalize_workspace_path,
+        normalize_workspace_prefix as normalize_workspace_path_prefix,
         scan_workspace_content_for_prompt_injection, validate_workspace_content,
-        WorkspaceDocumentState, WorkspacePathError,
+        WorkspaceDocumentState,
     },
     orchestrator::RunLifecycleState,
     retrieval::{MemoryEmbeddingsPosture, MemoryEmbeddingsRuntimeProfile},
@@ -15048,17 +15049,7 @@ fn enforce_owner_only_permissions(_path: &Path, _mode: u32) -> Result<(), Journa
 }
 
 fn normalize_workspace_prefix(raw: &str) -> Result<String, JournalError> {
-    let trimmed = raw.trim().replace('\\', "/");
-    if trimmed.is_empty() {
-        return Err(JournalError::InvalidWorkspacePath {
-            reason: WorkspacePathError::Empty.to_string(),
-        });
-    }
-    if trimmed == "context" || trimmed == "daily" || trimmed == "projects" {
-        return Ok(trimmed);
-    }
-    normalize_workspace_path(trimmed.as_str())
-        .map(|info| info.normalized_path)
+    normalize_workspace_path_prefix(raw)
         .map_err(|error| JournalError::InvalidWorkspacePath { reason: error.to_string() })
 }
 
@@ -25091,6 +25082,49 @@ mod tests {
         assert!(
             risky_hits.iter().any(|hit| hit.document.path == "projects/risky-note.md"),
             "quarantined search should surface risky workspace content when explicitly requested"
+        );
+    }
+
+    #[test]
+    fn workspace_search_accepts_nested_directory_prefixes() {
+        let db_path = temp_db_path();
+        let store = JournalStore::open(test_journal_config(db_path, false))
+            .expect("journal store should open");
+
+        store
+            .upsert_workspace_document(&sample_workspace_write_request(
+                "projects/s079-a/build-target.md",
+                "Project A private build target for S079 is alpha.",
+            ))
+            .expect("project A workspace document should be created");
+        store
+            .upsert_workspace_document(&sample_workspace_write_request(
+                "projects/s079-b/build-target.md",
+                "Project B private build target for S079 is beta.",
+            ))
+            .expect("project B workspace document should be created");
+
+        let hits = store
+            .search_workspace_documents(&WorkspaceSearchRequest {
+                principal: "user:ops".to_owned(),
+                channel: Some("cli".to_owned()),
+                agent_id: Some("agent:writer".to_owned()),
+                query: "S079 build target".to_owned(),
+                prefix: Some("projects/s079-a/".to_owned()),
+                top_k: 5,
+                min_score: 0.0,
+                include_historical: false,
+                include_quarantined: false,
+            })
+            .expect("workspace search should accept a directory prefix");
+
+        assert!(
+            hits.iter().any(|hit| hit.document.path == "projects/s079-a/build-target.md"),
+            "directory prefix should include matching project A document"
+        );
+        assert!(
+            hits.iter().all(|hit| hit.document.path != "projects/s079-b/build-target.md"),
+            "directory prefix must not leak sibling project documents"
         );
     }
 

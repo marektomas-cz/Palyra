@@ -486,7 +486,7 @@ pub fn validate_workspace_content(content: &str) -> Result<(), WorkspaceContentE
     Ok(())
 }
 
-pub fn normalize_workspace_path(path: &str) -> Result<WorkspacePathInfo, WorkspacePathError> {
+fn normalize_workspace_path_segments(path: &str) -> Result<Vec<String>, WorkspacePathError> {
     let trimmed = path.trim();
     if trimmed.is_empty() {
         return Err(WorkspacePathError::Empty);
@@ -522,7 +522,27 @@ pub fn normalize_workspace_path(path: &str) -> Result<WorkspacePathInfo, Workspa
     if segments.is_empty() {
         return Err(WorkspacePathError::Empty);
     }
+    Ok(segments)
+}
 
+/// Normalizes a workspace search prefix under the curated workspace roots.
+///
+/// Unlike [`normalize_workspace_path`], this accepts directory-style prefixes such as
+/// `projects/release/` in addition to exact document paths. It preserves the same root,
+/// traversal, absolute path, control-character, and sensitive-segment validation rules.
+pub fn normalize_workspace_prefix(prefix: &str) -> Result<String, WorkspacePathError> {
+    let segments = normalize_workspace_path_segments(prefix)?;
+    let normalized_prefix = segments.join("/");
+    let root = segments[0].to_ascii_lowercase();
+    match normalized_prefix.as_str() {
+        "README.md" | "MEMORY.md" | "HEARTBEAT.md" => Ok(normalized_prefix),
+        _ if root == "context" || root == "daily" || root == "projects" => Ok(normalized_prefix),
+        _ => Err(WorkspacePathError::RootNotAllowed(segments[0].clone())),
+    }
+}
+
+pub fn normalize_workspace_path(path: &str) -> Result<WorkspacePathInfo, WorkspacePathError> {
+    let segments = normalize_workspace_path_segments(path)?;
     let normalized_path = segments.join("/");
     let root = segments[0].to_ascii_lowercase();
     let path_info = match normalized_path.as_str() {
@@ -806,6 +826,35 @@ mod tests {
         let error = normalize_workspace_path("projects/notes\nignore.md")
             .expect_err("control characters must fail");
         assert!(matches!(error, WorkspacePathError::ControlCharacter(_)));
+    }
+
+    #[test]
+    fn normalize_workspace_prefix_accepts_project_directory_prefixes() {
+        assert_eq!(
+            normalize_workspace_prefix("projects/s079-a/")
+                .expect("project directory prefix should normalize"),
+            "projects/s079-a"
+        );
+        assert_eq!(
+            normalize_workspace_prefix("projects/s079-a/build-target.md")
+                .expect("exact project document prefix should normalize"),
+            "projects/s079-a/build-target.md"
+        );
+    }
+
+    #[test]
+    fn normalize_workspace_prefix_preserves_path_safety_rules() {
+        let traversal =
+            normalize_workspace_prefix("projects/../secrets").expect_err("traversal must fail");
+        assert!(matches!(traversal, WorkspacePathError::Traversal));
+
+        let sensitive =
+            normalize_workspace_prefix("projects/.git").expect_err("sensitive segment must fail");
+        assert!(matches!(sensitive, WorkspacePathError::SensitiveSegment(_)));
+
+        let unknown =
+            normalize_workspace_prefix("tmp/project-a").expect_err("unknown root must fail");
+        assert!(matches!(unknown, WorkspacePathError::RootNotAllowed(_)));
     }
 
     #[test]
