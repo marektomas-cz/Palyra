@@ -4729,7 +4729,7 @@ fn prompt_tool_approval_decision_from_terminal(
     }
 
     eprintln!("{}", tool_approval_prompt_line(approval));
-    eprint!("agent.approval.prompt allow_once [y/N]: ");
+    eprint!("{}", tool_approval_terminal_prompt_text());
     std::io::stderr().flush().context("stderr flush failed")?;
     let mut input = String::new();
     std::io::stdin()
@@ -4745,6 +4745,10 @@ fn prompt_tool_approval_decision_from_terminal(
             "denied_by_cli_terminal".to_owned()
         },
     })
+}
+
+fn tool_approval_terminal_prompt_text() -> &'static str {
+    "agent.approval.prompt allow_once [y/N default=N]: "
 }
 
 fn tool_approval_prompt_line(approval: &common_v1::ToolApprovalRequest) -> String {
@@ -5624,6 +5628,14 @@ mod agent_stream_output_tests {
         assert!(line.contains("summary=\"run a command with access_token=<redacted>\""), "{line}");
         assert!(!line.contains("browser-secret"), "{line}");
         assert!(!line.contains("raw-token"), "{line}");
+    }
+
+    #[test]
+    fn terminal_approval_prompt_declares_deny_default() {
+        let prompt = tool_approval_terminal_prompt_text();
+
+        assert!(prompt.contains("[y/N"), "{prompt}");
+        assert!(prompt.contains("default=N"), "{prompt}");
     }
 
     #[test]

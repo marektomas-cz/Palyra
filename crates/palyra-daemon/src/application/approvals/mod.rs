@@ -203,7 +203,7 @@ fn default_approval_prompt_options() -> Vec<ApprovalPromptOption> {
             option_id: "allow_once".to_owned(),
             label: "Allow once".to_owned(),
             description: "Approve this single action".to_owned(),
-            default_selected: true,
+            default_selected: false,
             decision_scope: ApprovalDecisionScope::Once,
             timebox_ttl_ms: None,
         },
@@ -219,7 +219,7 @@ fn default_approval_prompt_options() -> Vec<ApprovalPromptOption> {
             option_id: "deny_once".to_owned(),
             label: "Deny".to_owned(),
             description: "Reject this action".to_owned(),
-            default_selected: false,
+            default_selected: true,
             decision_scope: ApprovalDecisionScope::Once,
             timebox_ttl_ms: None,
         },
@@ -644,6 +644,26 @@ mod tests {
             ApprovalSubjectType::BrowserAction
         );
         assert_eq!(approval_subject_type_for_tool("palyra.process.run"), ApprovalSubjectType::Tool);
+    }
+
+    #[test]
+    fn default_tool_approval_prompt_marks_deny_as_terminal_default() {
+        let options = default_approval_prompt_options();
+
+        assert_eq!(
+            options
+                .iter()
+                .find(|option| option.option_id == "allow_once")
+                .map(|option| option.default_selected),
+            Some(false)
+        );
+        assert_eq!(
+            options
+                .iter()
+                .find(|option| option.option_id == "deny_once")
+                .map(|option| option.default_selected),
+            Some(true)
+        );
     }
 
     #[test]
