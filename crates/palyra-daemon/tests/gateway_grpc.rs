@@ -2557,7 +2557,7 @@ async fn grpc_agents_create_set_default_and_resolve_roundtrip() -> Result<()> {
         .await
         .context("failed to call CreateAgent for main")?
         .into_inner();
-    assert!(created_main.default_changed, "first create should set default");
+    assert!(created_main.default_changed, "explicit default create should switch default");
 
     let mut create_review = tonic::Request::new(gateway_v1::CreateAgentRequest {
         v: 1,
@@ -2596,6 +2596,15 @@ async fn grpc_agents_create_set_default_and_resolve_roundtrip() -> Result<()> {
     let listed =
         client.list_agents(list_request).await.context("failed to call ListAgents")?.into_inner();
     assert_eq!(listed.default_agent_id, "review");
+    assert_eq!(
+        listed.agents.len(),
+        3,
+        "list should include the bootstrapped agent and both created agents"
+    );
+    assert!(
+        listed.agents.iter().any(|agent| agent.agent_id == "local-default"),
+        "list should retain the bootstrapped local default agent"
+    );
     assert!(
         listed.agents.iter().any(|agent| agent.agent_id == "main")
             && listed.agents.iter().any(|agent| agent.agent_id == "review"),
@@ -2663,7 +2672,7 @@ async fn grpc_agents_create_set_default_and_resolve_roundtrip() -> Result<()> {
             .get("agents")
             .and_then(|value| value.get("agent_count"))
             .and_then(Value::as_u64),
-        Some(2),
+        Some(3),
         "admin status should expose agent count"
     );
     assert!(
