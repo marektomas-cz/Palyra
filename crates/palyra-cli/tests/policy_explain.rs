@@ -73,9 +73,18 @@ allowed_tools = ["palyra.fs.apply_patch"]
 
     let stdout = String::from_utf8(output.stdout).context("stdout was not UTF-8")?;
     let payload: Value = serde_json::from_str(stdout.as_str()).context("stdout was not JSON")?;
-    assert_eq!(payload.get("decision").and_then(Value::as_str), Some("allow"));
+    assert_eq!(payload.get("decision").and_then(Value::as_str), Some("deny_by_default"));
+    assert_eq!(payload.get("approval_required").and_then(Value::as_bool), Some(true));
+    assert_eq!(
+        payload.pointer("/runtime_approval_overlay/approval_required").and_then(Value::as_bool),
+        Some(true)
+    );
     assert_eq!(
         payload.pointer("/explanation/is_allowlisted_tool").and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        payload.pointer("/explanation/is_sensitive_action").and_then(Value::as_bool),
         Some(true)
     );
     assert_eq!(

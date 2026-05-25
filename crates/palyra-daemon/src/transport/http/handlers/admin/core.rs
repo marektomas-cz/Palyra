@@ -181,17 +181,28 @@ pub(crate) async fn admin_policy_explain_handler(
         action: query.action,
         resource: query.resource,
     };
+    let requested_tool = requested_tool_for_admin_policy_explain(&request);
     let request_context = palyra_policy::PolicyRequestContext {
         device_id: query.device_id,
         channel: query.channel,
         session_id: query.session_id,
         run_id: query.run_id,
-        tool_name: None,
+        tool_name: requested_tool.clone(),
         skill_id: None,
-        capabilities: Vec::new(),
+        capabilities: requested_tool
+            .as_deref()
+            .map(crate::tool_protocol::tool_policy_capability_names)
+            .unwrap_or_default(),
     };
     let evaluation_config = PolicyEvaluationConfig {
         allowlisted_tools: state.runtime.config.tool_call.allowed_tools.clone(),
+        sensitive_tool_names: palyra_common::tool_catalog::sensitive_allowlisted_tool_names(
+            state.runtime.config.tool_call.allowed_tools.as_slice(),
+        ),
+        sensitive_capability_names: palyra_common::tool_catalog::SENSITIVE_CAPABILITY_POLICY_NAMES
+            .iter()
+            .map(|value| (*value).to_owned())
+            .collect(),
         ..PolicyEvaluationConfig::default()
     };
     let evaluation =
@@ -208,6 +219,11 @@ pub(crate) async fn admin_policy_explain_handler(
             ("deny_by_default".to_owned(), true, reason.clone())
         }
     };
+    let runtime_approval_tool = requested_tool;
+    let runtime_approval_required = runtime_approval_tool
+        .as_deref()
+        .map(crate::tool_protocol::tool_requires_approval)
+        .unwrap_or(false);
 
     Ok(Json(PolicyExplainResponse {
         principal: request.principal,
@@ -215,10 +231,28 @@ pub(crate) async fn admin_policy_explain_handler(
         resource: request.resource,
         decision,
         approval_required,
+        runtime_approval_required,
+        runtime_approval_tool,
         reason,
         matched_policies: evaluation.explanation.matched_policy_ids,
         diagnostics,
     }))
+}
+
+fn requested_tool_for_admin_policy_explain(request: &PolicyRequest) -> Option<String> {
+    if !request.action.eq_ignore_ascii_case("tool.execute") {
+        return None;
+    }
+    let trimmed = request.resource.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let tool_name = trimmed.strip_prefix("tool:").unwrap_or(trimmed).trim();
+    if tool_name.is_empty() {
+        None
+    } else {
+        Some(tool_name.to_ascii_lowercase())
+    }
 }
 
 pub(crate) async fn admin_run_status_handler(

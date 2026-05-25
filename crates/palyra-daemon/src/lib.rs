@@ -1926,6 +1926,8 @@ struct PolicyExplainResponse {
     resource: String,
     decision: String,
     approval_required: bool,
+    runtime_approval_required: bool,
+    runtime_approval_tool: Option<String>,
     reason: String,
     matched_policies: Vec<String>,
     diagnostics: serde_json::Value,

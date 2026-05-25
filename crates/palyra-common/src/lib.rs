@@ -18,6 +18,7 @@ pub mod replay_bundle;
 pub mod runtime_contracts;
 pub mod runtime_preview;
 pub mod secret_refs;
+pub mod tool_catalog;
 pub mod versioned_json;
 mod webhook;
 #[cfg(windows)]

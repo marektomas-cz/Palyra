@@ -205,10 +205,12 @@ allowed_tools = ["palyra.fs.apply_patch"]
         .json::<Value>()
         .context("failed to parse admin policy explain response body")?;
 
-    assert_eq!(body.get("decision").and_then(Value::as_str), Some("allow"));
+    assert_eq!(body.get("decision").and_then(Value::as_str), Some("deny_by_default"));
+    assert_eq!(body.get("approval_required").and_then(Value::as_bool), Some(true));
+    assert_eq!(body.get("runtime_approval_required").and_then(Value::as_bool), Some(true));
     assert_eq!(
         body.pointer("/diagnostics/reason_code").and_then(Value::as_str),
-        Some("policy.allow")
+        Some("policy.explicit_approval_required")
     );
     Ok(())
 }
