@@ -1,3 +1,7 @@
+use std::collections::VecDeque;
+
+use tokio::sync::mpsc;
+
 use crate::*;
 
 fn interactive_session_started_message(
@@ -179,14 +183,18 @@ async fn run_agent_interactive_async(
     eprintln!("{started_message}");
     std::io::stderr().flush().context("stderr flush failed")?;
 
-    let stdin = std::io::stdin();
     let mut last_run_id = None::<String>;
-    for line in stdin.lock().lines() {
-        let prompt = line.context("failed to read interactive prompt from stdin")?;
-        let prompt = prompt.trim();
-        if prompt.is_empty() {
-            continue;
-        }
+    let mut input_rx = spawn_interactive_stdin_reader();
+    let mut pending_prompts = VecDeque::<String>::new();
+    loop {
+        let prompt = match pending_prompts.pop_front() {
+            Some(prompt) => prompt,
+            None => match read_next_interactive_prompt(&mut input_rx).await? {
+                Some(prompt) => prompt,
+                None => break,
+            },
+        };
+        let prompt = prompt.as_str();
         if prompt.eq_ignore_ascii_case("/exit") {
             break;
         }
@@ -279,12 +287,280 @@ async fn run_agent_interactive_async(
         })?;
         last_run_id = Some(request.run_id.clone());
         let run_id = request.run_id.clone();
-        let outcome = execute_agent_stream_async(connection.clone(), request, ndjson).await?;
-        if let Some(state_root) = onboarding_state_root.as_ref().filter(|_| outcome.completed()) {
+        let outcome = execute_interactive_agent_stream(
+            &runtime,
+            request,
+            ndjson,
+            &mut input_rx,
+            &mut pending_prompts,
+        )
+        .await?;
+        if let Some(state_root) =
+            onboarding_state_root.as_ref().filter(|_| outcome.stream.completed())
+        {
             commands::onboarding::record_cli_first_success(state_root.as_path(), run_id.as_str())?;
+        }
+        if outcome.exit_requested {
+            break;
         }
     }
     Ok(())
+}
+
+fn spawn_interactive_stdin_reader() -> mpsc::UnboundedReceiver<Result<String, String>> {
+    let (tx, rx) = mpsc::unbounded_channel();
+    std::thread::spawn(move || {
+        let stdin = std::io::stdin();
+        for line in stdin.lock().lines() {
+            let line = line.map_err(|error| error.to_string());
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    rx
+}
+
+fn normalize_interactive_prompt_line(line: &str) -> Option<String> {
+    let prompt = line.trim();
+    (!prompt.is_empty()).then(|| prompt.to_owned())
+}
+
+async fn read_next_interactive_prompt(
+    input_rx: &mut mpsc::UnboundedReceiver<Result<String, String>>,
+) -> Result<Option<String>> {
+    while let Some(line) = input_rx.recv().await {
+        let line =
+            line.map_err(|error| anyhow!("failed to read interactive prompt from stdin: {error}"))?;
+        if let Some(prompt) = normalize_interactive_prompt_line(line.as_str()) {
+            return Ok(Some(prompt));
+        }
+    }
+    Ok(None)
+}
+
+fn interactive_interrupt_message(cancel_requested: bool, queued_prompt_count: usize) -> String {
+    format!(
+        "agent.interactive.interrupt run_id={} cancel_requested={} queued_prompt_count={} reason=interactive_interrupt",
+        REDACTED, cancel_requested, queued_prompt_count
+    )
+}
+
+fn interactive_queue_message(queued_prompt_count: usize) -> String {
+    format!(
+        "agent.interactive.queue active_run_cancel_pending=true queued_prompt_count={queued_prompt_count}"
+    )
+}
+
+fn interactive_exit_after_interrupt_message(cancel_requested: bool) -> String {
+    format!(
+        "agent.interactive.exit active_run_cancel_requested={} exit_after_current_run=true",
+        cancel_requested
+    )
+}
+
+struct InteractiveAgentStreamOutcome {
+    stream: AgentStreamOutcome,
+    exit_requested: bool,
+}
+
+async fn execute_interactive_agent_stream(
+    runtime: &client::operator::OperatorRuntime,
+    request: AgentRunInput,
+    ndjson: bool,
+    input_rx: &mut mpsc::UnboundedReceiver<Result<String, String>>,
+    pending_prompts: &mut VecDeque<String>,
+) -> Result<InteractiveAgentStreamOutcome> {
+    let run_id = request.run_id.clone();
+    let mut stream = runtime.start_run_stream(request).await.map_err(|error| {
+        enrich_agent_principal_auth_error(error, runtime.connection().principal.as_str())
+    })?;
+    let mut text_emitter = AgentTextEmitter::default();
+    let mut failed_message = None::<String>;
+    let mut completed = false;
+    let mut saw_terminal_status = false;
+    let mut approval_mode = AgentApprovalMode::Prompt;
+    let mut abort_requested = false;
+    let mut exit_requested = false;
+    let mut input_closed = false;
+
+    loop {
+        tokio::select! {
+            maybe_prompt = read_next_interactive_prompt(input_rx), if !input_closed => {
+                match maybe_prompt? {
+                    Some(prompt) => {
+                        if prompt.eq_ignore_ascii_case("/help") {
+                            eprintln!(
+                                "agent.interactive.commands /help /session /reset /abort [run_id] /exit | active run input interrupts the current run and queues the new prompt"
+                            );
+                            std::io::stderr().flush().context("stderr flush failed")?;
+                            continue;
+                        }
+                        if prompt.eq_ignore_ascii_case("/session") {
+                            eprintln!(
+                                "agent.interactive.session active_run=true run_id={} queued_prompt_count={}",
+                                REDACTED,
+                                pending_prompts.len()
+                            );
+                            std::io::stderr().flush().context("stderr flush failed")?;
+                            continue;
+                        }
+                        if prompt.eq_ignore_ascii_case("/reset") {
+                            eprintln!("agent.interactive.reset active_run=true deferred=false message=reset_requires_idle_session");
+                            std::io::stderr().flush().context("stderr flush failed")?;
+                            continue;
+                        }
+                        if let Some(target_run_id) = prompt.strip_prefix("/abort").map(str::trim) {
+                            let target_run_id = if target_run_id.is_empty() {
+                                run_id.clone()
+                            } else {
+                                resolve_or_generate_canonical_id(Some(target_run_id.to_owned()))?
+                            };
+                            let response = runtime
+                                .abort_run(target_run_id, Some("interactive_abort".to_owned()))
+                                .await?;
+                            if response.run_id.as_ref().is_some_and(|value| value.ulid == run_id) {
+                                abort_requested = true;
+                            }
+                            eprintln!(
+                                "agent.interactive.abort run_id={} cancel_requested={} reason={}",
+                                REDACTED,
+                                response.cancel_requested,
+                                redacted_text_presence(response.reason.as_str())
+                            );
+                            std::io::stderr().flush().context("stderr flush failed")?;
+                            continue;
+                        }
+                        if prompt.eq_ignore_ascii_case("/exit") {
+                            let response = runtime
+                                .abort_run(run_id.clone(), Some("interactive_exit".to_owned()))
+                                .await?;
+                            abort_requested = true;
+                            exit_requested = true;
+                            eprintln!("{}", interactive_exit_after_interrupt_message(response.cancel_requested));
+                            std::io::stderr().flush().context("stderr flush failed")?;
+                            continue;
+                        }
+
+                        pending_prompts.push_back(prompt);
+                        if abort_requested {
+                            eprintln!("{}", interactive_queue_message(pending_prompts.len()));
+                        } else {
+                            let response = runtime
+                                .abort_run(run_id.clone(), Some("interactive_interrupt".to_owned()))
+                                .await?;
+                            abort_requested = true;
+                            eprintln!(
+                                "{}",
+                                interactive_interrupt_message(
+                                    response.cancel_requested,
+                                    pending_prompts.len()
+                                )
+                            );
+                        }
+                        std::io::stderr().flush().context("stderr flush failed")?;
+                    }
+                    None => {
+                        input_closed = true;
+                    }
+                }
+            }
+            maybe_event = stream.next_event() => {
+                let Some(event) = maybe_event? else {
+                    break;
+                };
+                let reached_terminal_status = matches!(
+                    event.body.as_ref(),
+                    Some(common_v1::run_stream_event::Body::Status(status))
+                        if is_terminal_stream_status(status.kind)
+                );
+                if let Some(common_v1::run_stream_event::Body::Status(status)) = event.body.as_ref() {
+                    if status.kind == common_v1::stream_status::StatusKind::Failed as i32 {
+                        failed_message = Some(sanitize_agent_failure_message(status.message.as_str()));
+                    } else if status.kind == common_v1::stream_status::StatusKind::Done as i32 {
+                        completed = true;
+                    }
+                }
+                if ndjson {
+                    emit_acp_event_ndjson(&event)?;
+                } else {
+                    text_emitter.emit(&event)?;
+                }
+                std::io::stdout().flush().context("stdout flush failed")?;
+                if let Some(common_v1::run_stream_event::Body::ToolApprovalRequest(approval)) =
+                    event.body.as_ref()
+                {
+                    let decision = prompt_tool_approval_decision_from_interactive_input(
+                        approval,
+                        &mut approval_mode,
+                        input_rx,
+                    )
+                    .await?;
+                    stream.send_tool_approval_decision(
+                        approval,
+                        decision.approved,
+                        decision.reason,
+                        common_v1::ApprovalDecisionScope::Once as i32,
+                        0,
+                    )?;
+                }
+                if reached_terminal_status {
+                    saw_terminal_status = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    if !ndjson {
+        text_emitter.finish()?;
+    }
+    let outcome = AgentStreamOutcome { completed, failed_message };
+    if abort_requested {
+        return Ok(InteractiveAgentStreamOutcome { stream: outcome, exit_requested });
+    }
+    if !saw_terminal_status {
+        anyhow::bail!(
+            "agent run stream ended before a terminal status was received; the run may still be in progress"
+        );
+    }
+    outcome.ensure_success()?;
+    Ok(InteractiveAgentStreamOutcome { stream: outcome, exit_requested })
+}
+
+async fn prompt_tool_approval_decision_from_interactive_input(
+    approval: &common_v1::ToolApprovalRequest,
+    mode: &mut AgentApprovalMode,
+    input_rx: &mut mpsc::UnboundedReceiver<Result<String, String>>,
+) -> Result<ToolApprovalDecision> {
+    match *mode {
+        AgentApprovalMode::Prompt => {}
+        AgentApprovalMode::Deny | AgentApprovalMode::AllowOnce => {
+            return prompt_tool_approval_decision_with_mode_state(approval, mode);
+        }
+    }
+
+    if !std::io::stdin().is_terminal() {
+        eprintln!("agent.approval.non_interactive_hint {}", approval_required_cli_hint());
+        return Ok(ToolApprovalDecision {
+            approved: false,
+            reason: "approval_required_non_interactive_cli".to_owned(),
+        });
+    }
+
+    eprintln!("{}", tool_approval_prompt_line(approval));
+    eprint!("{}", tool_approval_terminal_prompt_text());
+    std::io::stderr().flush().context("stderr flush failed")?;
+    let input = read_next_interactive_prompt(input_rx).await?.unwrap_or_default();
+    let approved = matches!(input.trim().to_ascii_lowercase().as_str(), "y" | "yes");
+    Ok(ToolApprovalDecision {
+        approved,
+        reason: if approved {
+            "approved_by_cli_terminal".to_owned()
+        } else {
+            "denied_by_cli_terminal".to_owned()
+        },
+    })
 }
 
 fn redacted_identifier_presence(value: Option<&common_v1::CanonicalId>) -> &'static str {
@@ -340,7 +616,10 @@ async fn ensure_interactive_session(
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_agent_run_approval_flags, interactive_session_started_message};
+    use super::{
+        ensure_agent_run_approval_flags, interactive_interrupt_message,
+        interactive_session_started_message, normalize_interactive_prompt_line,
+    };
     use crate::args::AgentApprovalModeArg;
     use crate::proto::palyra::{common::v1 as common_v1, gateway::v1 as gateway_v1};
 
@@ -366,6 +645,26 @@ mod tests {
         assert!(banner.contains("exit_hint=/exit"));
         assert!(banner.contains("session_key=ops:triage"));
         assert!(!banner.contains("session_id="));
+    }
+
+    #[test]
+    fn interactive_prompt_lines_trim_and_skip_empty_input() {
+        assert_eq!(
+            normalize_interactive_prompt_line("  redirect active run  "),
+            Some("redirect active run".to_owned())
+        );
+        assert_eq!(normalize_interactive_prompt_line(" \t "), None);
+    }
+
+    #[test]
+    fn interactive_interrupt_message_is_visible_and_redacted() {
+        let message = interactive_interrupt_message(true, 2);
+
+        assert!(message.contains("agent.interactive.interrupt"));
+        assert!(message.contains("cancel_requested=true"));
+        assert!(message.contains("queued_prompt_count=2"));
+        assert!(message.contains("run_id=<redacted>"));
+        assert!(!message.contains("redirect active run"));
     }
 
     #[test]
