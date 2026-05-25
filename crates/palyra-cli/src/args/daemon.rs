@@ -204,6 +204,8 @@ pub enum DaemonCommand {
         run_id: String,
         #[arg(long)]
         reason: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     DashboardUrl {
         #[arg(long)]

@@ -5093,6 +5093,7 @@ fn parse_daemon_run_cancel_with_reason() {
                 channel: None,
                 run_id: "01ARZ3NDEKTSV4RRFFQ69G5FAX".to_owned(),
                 reason: Some("operator requested".to_owned()),
+                json: false,
             }
         }
     );

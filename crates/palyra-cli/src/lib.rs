@@ -10286,7 +10286,7 @@ struct RunTapeEvent {
     payload_json: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct RunCancelResponse {
     run_id: String,
     cancel_requested: bool,

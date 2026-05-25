@@ -578,7 +578,16 @@ pub(crate) fn run_daemon(command: DaemonCommand) -> Result<()> {
             }
             std::io::stdout().flush().context("stdout flush failed")
         }
-        DaemonCommand::RunCancel { url, token, principal, device_id, channel, run_id, reason } => {
+        DaemonCommand::RunCancel {
+            url,
+            token,
+            principal,
+            device_id,
+            channel,
+            run_id,
+            reason,
+            json,
+        } => {
             validate_canonical_id(run_id.as_str())
                 .context("run_id must be a canonical ULID for daemon run-cancel")?;
             let connection = root_context()?.resolve_http_connection(
@@ -611,10 +620,17 @@ pub(crate) fn run_daemon(command: DaemonCommand) -> Result<()> {
                 .context("daemon run cancel endpoint returned non-success status")?
                 .json()
                 .context("failed to parse daemon run cancel payload")?;
-            println!(
-                "run.cancel run_id={} cancel_requested={} reason={}",
-                response.run_id, response.cancel_requested, response.reason
-            );
+            if output::preferred_json(json) {
+                output::print_json_pretty(
+                    &response,
+                    "failed to encode daemon run cancel output as JSON",
+                )?;
+            } else {
+                println!(
+                    "run.cancel run_id={} cancel_requested={} reason={}",
+                    response.run_id, response.cancel_requested, response.reason
+                );
+            }
             std::io::stdout().flush().context("stdout flush failed")
         }
     }

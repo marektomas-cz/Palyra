@@ -224,6 +224,44 @@ fn palyra_daemon_run_inspection_supports_json_output() -> Result<()> {
         tape_payload.pointer("/events/0/event_type").and_then(serde_json::Value::as_str),
         Some("model_token")
     );
+
+    let cancel_fixture = spawn_json_fixture_with_method(
+        "POST",
+        format!("/admin/v1/runs/{run_id}/cancel"),
+        format!(r#"{{"run_id":"{run_id}","cancel_requested":true,"reason":"operator requested"}}"#),
+    )?;
+    let cancel_output = Command::new(env!("CARGO_BIN_EXE_palyra"))
+        .args([
+            "--output-format",
+            "json",
+            "gateway",
+            "run-cancel",
+            "--url",
+            cancel_fixture.base_url.as_str(),
+            "--run-id",
+            run_id,
+            "--reason",
+            "operator requested",
+        ])
+        .output()
+        .context("failed to execute palyra gateway run-cancel with global JSON output")?;
+    cancel_fixture.finish()?;
+    assert!(
+        cancel_output.status.success(),
+        "run-cancel should support global JSON output: {}",
+        String::from_utf8_lossy(&cancel_output.stderr)
+    );
+    let cancel_payload: serde_json::Value = serde_json::from_slice(cancel_output.stdout.as_slice())
+        .context("run-cancel stdout should be JSON")?;
+    assert_eq!(cancel_payload.get("run_id").and_then(serde_json::Value::as_str), Some(run_id));
+    assert_eq!(
+        cancel_payload.get("cancel_requested").and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        cancel_payload.get("reason").and_then(serde_json::Value::as_str),
+        Some("operator requested")
+    );
     Ok(())
 }
 
@@ -379,6 +417,14 @@ impl JsonFixture {
 }
 
 fn spawn_json_fixture(expected_path_prefix: String, body: String) -> Result<JsonFixture> {
+    spawn_json_fixture_with_method("GET", expected_path_prefix, body)
+}
+
+fn spawn_json_fixture_with_method(
+    expected_method: &'static str,
+    expected_path_prefix: String,
+    body: String,
+) -> Result<JsonFixture> {
     let listener =
         TcpListener::bind("127.0.0.1:0").context("failed to bind JSON fixture listener")?;
     listener.set_nonblocking(true).context("failed to configure JSON fixture listener")?;
@@ -408,7 +454,7 @@ fn spawn_json_fixture(expected_path_prefix: String, body: String) -> Result<Json
         let bytes = stream.read(&mut buffer).context("failed to read JSON fixture request")?;
         let request = String::from_utf8_lossy(&buffer[..bytes]);
         let first_line = request.lines().next().unwrap_or_default();
-        let expected = format!("GET {expected_path_prefix}");
+        let expected = format!("{expected_method} {expected_path_prefix}");
         if !first_line.starts_with(expected.as_str()) {
             anyhow::bail!(
                 "expected request path prefix '{}' but received '{}'",
