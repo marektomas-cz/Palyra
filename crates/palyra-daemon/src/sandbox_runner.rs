@@ -52,6 +52,8 @@ const BACKGROUND_STARTUP_OUTPUT_DRAIN_MS: u64 = 4_000;
 const BACKGROUND_STARTUP_OUTPUT_DRAIN_MS: u64 = 1_000;
 const BACKGROUND_POST_OUTPUT_EXIT_CHECK_MS: u64 = 250;
 const BACKGROUND_METADATA_RETURN_RESERVE_MS: u64 = 100;
+const BACKGROUND_MONITOR_POLL_MS: u64 = 50;
+const BACKGROUND_TERMINATION_WAIT_MS: u64 = 1_000;
 const DEFAULT_BACKGROUND_PROCESS_LIFETIME_MS: u64 = 10 * 60_000;
 const MAX_BACKGROUND_PROCESS_LIFETIME_MS: u64 = 30 * 60_000;
 const SENSITIVE_URL_PATH_MARKERS: &[&str] =
@@ -586,7 +588,18 @@ fn execute_builtin_process_command(
     workspace_root: &Path,
     cwd: &Path,
 ) -> Result<Option<SandboxProcessRunSuccess>, SandboxProcessRunError> {
-    let stdout = match input.command.trim().to_ascii_lowercase().as_str() {
+    let command = input.command.trim();
+    match command.to_ascii_lowercase().as_str() {
+        "palyra.process.stop" | "palyra-process-stop" => {
+            return Ok(Some(builtin_stop_process_success(command, input.args.as_slice())?));
+        }
+        "palyra.process.status" | "palyra-process-status" => {
+            return Ok(Some(builtin_process_status_success(command, input.args.as_slice())?));
+        }
+        _ => {}
+    }
+
+    let stdout = match command.to_ascii_lowercase().as_str() {
         "pwd" => {
             if !input.args.is_empty() {
                 return Err(SandboxProcessRunError {
@@ -597,14 +610,11 @@ fn execute_builtin_process_command(
             format!("{}\n", cwd.to_string_lossy())
         }
         "echo" => format!("{}\n", input.args.join(" ")),
-        "ls" | "dir" => builtin_list_directory_stdout(
-            input.command.trim(),
-            input.args.as_slice(),
-            workspace_root,
-            cwd,
-        )?,
+        "ls" | "dir" => {
+            builtin_list_directory_stdout(command, input.args.as_slice(), workspace_root, cwd)?
+        }
         "cat" | "type" => builtin_read_files_stdout(
-            input.command.trim(),
+            command,
             input.args.as_slice(),
             workspace_root,
             cwd,
@@ -612,7 +622,7 @@ fn execute_builtin_process_command(
         )?,
         "mkdir" => builtin_make_directory_stdout(
             process_runner_allows_host_access(policy),
-            input.command.trim(),
+            command,
             input.args.as_slice(),
             workspace_root,
             cwd,
@@ -638,6 +648,136 @@ fn execute_builtin_process_command(
         message: format!("failed to serialize sandbox builtin process output JSON: {error}"),
     })?;
     Ok(Some(SandboxProcessRunSuccess { output_json }))
+}
+
+fn builtin_stop_process_success(
+    command: &str,
+    args: &[String],
+) -> Result<SandboxProcessRunSuccess, SandboxProcessRunError> {
+    let pid = parse_builtin_pid_arg(command, args)?;
+    let was_running = process_id_is_alive(pid).map_err(|error| SandboxProcessRunError {
+        kind: SandboxProcessRunErrorKind::RuntimeFailure,
+        message: format!(
+            "palyra.process.run builtin '{command}' failed to inspect pid {pid}: {error}"
+        ),
+    })?;
+    let mut stop_error = None;
+    if was_running {
+        if let Err(error) = terminate_background_process_tree(pid) {
+            stop_error = Some(error.to_string());
+        }
+    }
+    let stopped = !was_running
+        || wait_for_process_not_alive(pid, Duration::from_millis(BACKGROUND_TERMINATION_WAIT_MS));
+    let alive = !stopped && process_id_is_alive(pid).unwrap_or(true);
+    if let Some(error) = stop_error.as_ref().filter(|_| !stopped) {
+        return Err(SandboxProcessRunError {
+            kind: SandboxProcessRunErrorKind::RuntimeFailure,
+            message: format!(
+                "palyra.process.run builtin '{command}' failed to stop pid {pid}: {error}"
+            ),
+        });
+    }
+    let output_json = serde_json::to_vec(&json!({
+        "exit_code": 0,
+        "stdout": format!("pid={pid} stopped={stopped} was_running={was_running}\n"),
+        "stderr": "",
+        "stdout_truncated": false,
+        "stderr_truncated": false,
+        "stdout_redacted": false,
+        "stderr_redacted": false,
+        "duration_ms": 0,
+        "pid": pid,
+        "was_running": was_running,
+        "stopped": stopped,
+        "alive": alive,
+        "tier": "builtin",
+        "sandbox_backend": "builtin_portable",
+    }))
+    .map_err(|error| SandboxProcessRunError {
+        kind: SandboxProcessRunErrorKind::RuntimeFailure,
+        message: format!("failed to serialize sandbox process stop output JSON: {error}"),
+    })?;
+    Ok(SandboxProcessRunSuccess { output_json })
+}
+
+fn builtin_process_status_success(
+    command: &str,
+    args: &[String],
+) -> Result<SandboxProcessRunSuccess, SandboxProcessRunError> {
+    let pid = parse_builtin_pid_arg(command, args)?;
+    let alive = process_id_is_alive(pid).map_err(|error| SandboxProcessRunError {
+        kind: SandboxProcessRunErrorKind::RuntimeFailure,
+        message: format!(
+            "palyra.process.run builtin '{command}' failed to inspect pid {pid}: {error}"
+        ),
+    })?;
+    let output_json = serde_json::to_vec(&json!({
+        "exit_code": 0,
+        "stdout": format!("pid={pid} alive={alive}\n"),
+        "stderr": "",
+        "stdout_truncated": false,
+        "stderr_truncated": false,
+        "stdout_redacted": false,
+        "stderr_redacted": false,
+        "duration_ms": 0,
+        "pid": pid,
+        "alive": alive,
+        "tier": "builtin",
+        "sandbox_backend": "builtin_portable",
+    }))
+    .map_err(|error| SandboxProcessRunError {
+        kind: SandboxProcessRunErrorKind::RuntimeFailure,
+        message: format!("failed to serialize sandbox process status output JSON: {error}"),
+    })?;
+    Ok(SandboxProcessRunSuccess { output_json })
+}
+
+fn wait_for_process_not_alive(pid: u32, max_wait: Duration) -> bool {
+    let started_at = Instant::now();
+    loop {
+        match process_id_is_alive(pid) {
+            Ok(false) => return true,
+            Ok(true) => {}
+            Err(_) => return false,
+        }
+        if started_at.elapsed() >= max_wait {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(BACKGROUND_MONITOR_POLL_MS));
+    }
+}
+
+fn parse_builtin_pid_arg(command: &str, args: &[String]) -> Result<u32, SandboxProcessRunError> {
+    let pid_arg = match args {
+        [pid] => pid.as_str(),
+        [flag, pid] if matches!(flag.trim().to_ascii_lowercase().as_str(), "--pid" | "/pid") => {
+            pid.as_str()
+        }
+        _ => {
+            return Err(SandboxProcessRunError {
+                kind: SandboxProcessRunErrorKind::InvalidInput,
+                message: format!(
+                    "palyra.process.run builtin '{command}' requires a single numeric pid argument"
+                ),
+            });
+        }
+    };
+    let pid = pid_arg.trim().parse::<u32>().map_err(|_| SandboxProcessRunError {
+        kind: SandboxProcessRunErrorKind::InvalidInput,
+        message: format!(
+            "palyra.process.run builtin '{command}' requires a valid positive pid, got {pid_arg:?}"
+        ),
+    })?;
+    if pid == 0 {
+        return Err(SandboxProcessRunError {
+            kind: SandboxProcessRunErrorKind::InvalidInput,
+            message: format!(
+                "palyra.process.run builtin '{command}' requires a valid positive pid, got 0"
+            ),
+        });
+    }
+    Ok(pid)
 }
 
 fn builtin_read_files_stdout(
@@ -2153,10 +2293,7 @@ fn spawn_background_process(
         terminate_background_child(child);
         return Err(background_process_lifetime_expired_error(input, lifetime_ms));
     };
-    thread::spawn(move || {
-        thread::sleep(remaining_lifetime);
-        terminate_background_child(child);
-    });
+    thread::spawn(move || monitor_background_child_until_lifetime(child, remaining_lifetime));
 
     let RedactedProcessOutputText { text: stdout_text, redacted: stdout_redacted } =
         redacted_process_output(stdout.bytes.as_slice());
@@ -2182,7 +2319,7 @@ fn spawn_background_process(
         "lifetime_ms": lifetime_ms,
         "max_lifetime_ms": max_lifetime_ms,
         "background_lifetime_note": format!(
-            "Palyra will auto-terminate this background process after {lifetime_ms}ms; set timeout_ms up to {max_lifetime_ms}ms within the operator-configured tool execution timeout for long browser verification loops, and use cleanup.manual_command when finished."
+            "Palyra will auto-terminate this background process after {lifetime_ms}ms; set timeout_ms up to {max_lifetime_ms}ms within the operator-configured tool execution timeout for long browser verification loops, and use cleanup.portable_stop_command when finished."
         ),
         "process_handle": {
             "kind": "pid",
@@ -2327,6 +2464,30 @@ fn spawn_background_capture_reader<R>(
 fn terminate_background_child(mut child: Child) {
     terminate_child_process_tree(&mut child);
     let _ = child.wait();
+}
+
+fn monitor_background_child_until_lifetime(mut child: Child, lifetime: Duration) {
+    let started_at = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) => {}
+            Err(_) => return,
+        }
+
+        let elapsed = started_at.elapsed();
+        if elapsed >= lifetime {
+            terminate_child_process_tree(&mut child);
+            let _ = wait_for_background_process_exit(
+                &mut child,
+                Duration::from_millis(BACKGROUND_TERMINATION_WAIT_MS),
+            );
+            return;
+        }
+
+        let remaining = lifetime.saturating_sub(elapsed);
+        thread::sleep(remaining.min(Duration::from_millis(BACKGROUND_MONITOR_POLL_MS)));
+    }
 }
 
 #[cfg(windows)]
@@ -2501,6 +2662,33 @@ fn trusted_windows_system32_dir() -> io::Result<PathBuf> {
 }
 
 #[cfg(unix)]
+pub(crate) fn terminate_background_process_tree(pid: u32) -> io::Result<()> {
+    match terminate_unix_process_group(pid) {
+        Ok(()) => Ok(()),
+        Err(group_error) => {
+            let process_id = pid as libc::pid_t;
+            let result = unsafe { libc::kill(process_id, libc::SIGKILL) };
+            if result == 0 {
+                return Ok(());
+            }
+            let process_error = io::Error::last_os_error();
+            Err(io::Error::other(format!(
+                "failed to terminate process group or pid {pid}: group kill failed: {group_error}; pid kill failed: {process_error}"
+            )))
+        }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(crate) fn terminate_background_process_tree(pid: u32) -> io::Result<()> {
+    let _ = pid;
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "portable background process termination is unsupported on this platform",
+    ))
+}
+
+#[cfg(unix)]
 fn terminate_unix_process_group(pid: u32) -> io::Result<()> {
     let process_group_id = pid as libc::pid_t;
     let result = unsafe { libc::kill(-process_group_id, libc::SIGKILL) };
@@ -2508,6 +2696,34 @@ fn terminate_unix_process_group(pid: u32) -> io::Result<()> {
         return Ok(());
     }
     Err(io::Error::last_os_error())
+}
+
+#[cfg(windows)]
+fn process_id_is_alive(pid: u32) -> io::Result<bool> {
+    palyra_common::windows_security::process_is_alive(pid)
+}
+
+#[cfg(unix)]
+fn process_id_is_alive(pid: u32) -> io::Result<bool> {
+    let process_id = pid as libc::pid_t;
+    let result = unsafe { libc::kill(process_id, 0) };
+    if result == 0 {
+        return Ok(true);
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        return Ok(false);
+    }
+    Err(error)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn process_id_is_alive(pid: u32) -> io::Result<bool> {
+    let _ = pid;
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "portable process status is unsupported on this platform",
+    ))
 }
 
 fn terminate_child_process_tree(child: &mut Child) {
@@ -2521,7 +2737,7 @@ fn terminate_child_process_tree(child: &mut Child) {
     #[cfg(unix)]
     {
         let pid = child.id();
-        if terminate_unix_process_group(pid).is_ok() {
+        if terminate_background_process_tree(pid).is_ok() {
             return;
         }
     }
@@ -2537,6 +2753,14 @@ fn background_cleanup_metadata(
         "auto_kill_after_ms": lifetime_ms,
         "process_tree": cfg!(any(unix, windows)),
         "windows_job_object": windows_job_bound,
+        "portable_stop_command": {
+            "command": "palyra.process.stop",
+            "args": [pid.to_string()],
+        },
+        "portable_status_command": {
+            "command": "palyra.process.status",
+            "args": [pid.to_string()],
+        },
         "manual_command": background_cleanup_command(pid),
         "note": background_cleanup_note(),
     })
@@ -2562,11 +2786,11 @@ fn background_cleanup_command(pid: u32) -> serde_json::Value {
 fn background_cleanup_note() -> &'static str {
     #[cfg(windows)]
     {
-        "Use the manual command to terminate the direct process and its descendants if the run fails before the automatic lifetime cleanup runs."
+        "Use cleanup.portable_stop_command to terminate the direct process and its descendants; manual_command is a platform fallback if the run fails before automatic lifetime cleanup runs."
     }
     #[cfg(not(windows))]
     {
-        "Use the manual command to terminate the direct process group if the run fails before the automatic lifetime cleanup runs."
+        "Use cleanup.portable_stop_command to terminate the direct process group; manual_command is a platform fallback if the run fails before automatic lifetime cleanup runs."
     }
 }
 
@@ -3105,7 +3329,8 @@ mod tests {
         fs, io,
         path::{Path, PathBuf},
         process::Command,
-        time::{Duration, SystemTime, UNIX_EPOCH},
+        thread,
+        time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     };
 
     use super::{
@@ -3119,6 +3344,7 @@ mod tests {
         validate_process_termination_scope, validate_runtime_egress_enforcement,
         EgressEnforcementMode, ProcessRunnerInput, SandboxProcessRunErrorKind,
         SandboxProcessRunnerPolicy, SandboxProcessRunnerTier, StreamCapture,
+        BACKGROUND_MONITOR_POLL_MS,
     };
 
     const BACKGROUND_TEST_EXECUTION_TIMEOUT_MS: u64 = 10_000;
@@ -4135,6 +4361,11 @@ mod tests {
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default()
             .contains("operator-configured tool execution timeout"));
+        assert!(output
+            .get("background_lifetime_note")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .contains("cleanup.portable_stop_command"));
         assert!(output.get("pid").and_then(serde_json::Value::as_u64).is_some());
         assert_eq!(
             output
@@ -4151,6 +4382,18 @@ mod tests {
         assert_eq!(
             output.pointer("/cleanup/windows_job_object").and_then(serde_json::Value::as_bool),
             Some(cfg!(windows))
+        );
+        assert_eq!(
+            output
+                .pointer("/cleanup/portable_stop_command/command")
+                .and_then(serde_json::Value::as_str),
+            Some("palyra.process.stop")
+        );
+        assert_eq!(
+            output
+                .pointer("/cleanup/portable_status_command/command")
+                .and_then(serde_json::Value::as_str),
+            Some("palyra.process.status")
         );
         assert!(output.pointer("/cleanup/manual_command/command").is_some());
 
@@ -4221,6 +4464,106 @@ mod tests {
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default()
             .contains("not command completion output"));
+
+        let _ = fs::remove_dir_all(workspace.as_path());
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn background_process_can_be_stopped_with_portable_builtin() {
+        let Some(python) = ["python3", "python", "py"].into_iter().find(|command| {
+            Command::new(command)
+                .arg("--version")
+                .output()
+                .map(|output| output.status.success())
+                .unwrap_or(false)
+        }) else {
+            return;
+        };
+        let workspace = unique_temp_dir("workspace-background-portable-stop");
+        fs::create_dir_all(workspace.as_path()).expect("workspace directory should be created");
+        fs::write(
+            workspace.join("sleep.py"),
+            "import time\nprint('ready', flush=True)\ntime.sleep(30)\n",
+        )
+        .expect("background script should be written");
+        let mut policy = sandbox_policy_with_allowed_executables(
+            workspace.clone(),
+            vec![
+                python.to_owned(),
+                "palyra.process.stop".to_owned(),
+                "palyra.process.status".to_owned(),
+            ],
+        );
+        policy.allow_interpreters = true;
+        policy.egress_enforcement_mode = EgressEnforcementMode::Preflight;
+
+        let start_input = serde_json::to_vec(&serde_json::json!({
+            "command": python,
+            "args": ["sleep.py"],
+            "background": true,
+            "timeout_ms": BACKGROUND_TEST_EXECUTION_TIMEOUT_MS
+        }))
+        .expect("input should serialize");
+        let started = run_constrained_process(
+            &policy,
+            start_input.as_slice(),
+            background_test_execution_timeout(),
+        )
+        .expect("background process should start");
+        let started_output: serde_json::Value =
+            serde_json::from_slice(&started.output_json).expect("output should parse");
+        let pid = started_output
+            .get("pid")
+            .and_then(serde_json::Value::as_u64)
+            .expect("background process should return pid");
+
+        let status_input = serde_json::to_vec(&serde_json::json!({
+            "command": "palyra.process.status",
+            "args": [pid.to_string()],
+        }))
+        .expect("status input should serialize");
+        let status = run_constrained_process(
+            &policy,
+            status_input.as_slice(),
+            background_test_execution_timeout(),
+        )
+        .expect("portable status should run");
+        let status_output: serde_json::Value =
+            serde_json::from_slice(&status.output_json).expect("status output should parse");
+        assert_eq!(status_output.get("alive").and_then(serde_json::Value::as_bool), Some(true));
+
+        let stop_input = serde_json::to_vec(&serde_json::json!({
+            "command": "palyra.process.stop",
+            "args": [pid.to_string()],
+        }))
+        .expect("stop input should serialize");
+        let stopped = run_constrained_process(
+            &policy,
+            stop_input.as_slice(),
+            background_test_execution_timeout(),
+        )
+        .expect("portable stop should run");
+        let stopped_output: serde_json::Value =
+            serde_json::from_slice(&stopped.output_json).expect("stop output should parse");
+        assert_eq!(stopped_output.get("stopped").and_then(serde_json::Value::as_bool), Some(true));
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let status = run_constrained_process(
+                &policy,
+                status_input.as_slice(),
+                background_test_execution_timeout(),
+            )
+            .expect("portable status should run after stop");
+            let status_output: serde_json::Value =
+                serde_json::from_slice(&status.output_json).expect("status output should parse");
+            if status_output.get("alive").and_then(serde_json::Value::as_bool) == Some(false) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "background pid {pid} should stop promptly");
+            thread::sleep(Duration::from_millis(BACKGROUND_MONITOR_POLL_MS));
+        }
 
         let _ = fs::remove_dir_all(workspace.as_path());
     }
