@@ -174,6 +174,7 @@ pub(crate) enum AgentDefaultEnsureOutcome {
     AlreadyConfigured { agent_id: String },
     Created { agent_id: String },
     SelectedExisting { agent_id: String },
+    Updated { agent_id: String },
     SkippedMultipleAgents { observed_agent_count: usize },
 }
 
@@ -428,6 +429,12 @@ impl AgentRegistry {
     ) -> Result<AgentDefaultEnsureOutcome, AgentRegistryError> {
         let page = self.list_agents(None, Some(2))?;
         if let Some(agent_id) = page.default_agent_id {
+            if agent_id == "local-default"
+                && self
+                    .sync_local_default_agent_workspace_root(agent_id.as_str(), workspace_root)?
+            {
+                return Ok(AgentDefaultEnsureOutcome::Updated { agent_id });
+            }
             return Ok(AgentDefaultEnsureOutcome::AlreadyConfigured { agent_id });
         }
 
@@ -449,6 +456,16 @@ impl AgentRegistry {
             }
             [agent] => {
                 let outcome = self.set_default_agent(agent.agent_id.as_str())?;
+                if outcome.default_agent_id == "local-default"
+                    && self.sync_local_default_agent_workspace_root(
+                        outcome.default_agent_id.as_str(),
+                        workspace_root,
+                    )?
+                {
+                    return Ok(AgentDefaultEnsureOutcome::Updated {
+                        agent_id: outcome.default_agent_id,
+                    });
+                }
                 Ok(AgentDefaultEnsureOutcome::SelectedExisting {
                     agent_id: outcome.default_agent_id,
                 })
@@ -457,6 +474,43 @@ impl AgentRegistry {
                 observed_agent_count: page.agents.len(),
             }),
         }
+    }
+
+    fn sync_local_default_agent_workspace_root(
+        &self,
+        agent_id: &str,
+        workspace_root: &Path,
+    ) -> Result<bool, AgentRegistryError> {
+        let mut guard = self.state.lock().map_err(|_| AgentRegistryError::LockPoisoned)?;
+        let mut next = guard.clone();
+        let agent = next
+            .agents
+            .iter_mut()
+            .find(|candidate| candidate.agent_id == agent_id)
+            .ok_or_else(|| AgentRegistryError::AgentNotFound(agent_id.to_owned()))?;
+        if agent.agent_id != "local-default" {
+            return Ok(false);
+        }
+
+        let agent_dir = PathBuf::from(agent.agent_dir.as_str());
+        let workspace_roots = resolve_workspace_roots(
+            &[workspace_root.to_string_lossy().into_owned()],
+            agent_dir.as_path(),
+            true,
+        )?;
+        let workspace_roots = workspace_roots
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        if agent.workspace_roots == workspace_roots {
+            return Ok(false);
+        }
+
+        agent.workspace_roots = workspace_roots;
+        agent.updated_at_unix_ms = current_unix_ms()?;
+        persist_registry(self.registry_path.as_path(), &next)?;
+        *guard = next;
+        Ok(true)
     }
 
     pub fn delete_agent(&self, agent_id: &str) -> Result<AgentDeleteOutcome, AgentRegistryError> {
@@ -1302,6 +1356,49 @@ mod tests {
         assert_eq!(page.agents[0].default_model_profile, "MiniMax-M2.7");
         let canonical_workspace =
             fs::canonicalize(workspace.as_path()).expect("workspace should canonicalize");
+        assert_eq!(
+            page.agents[0].workspace_roots,
+            vec![canonical_workspace.to_string_lossy().into_owned()]
+        );
+    }
+
+    #[test]
+    fn ensure_local_default_agent_updates_stale_local_default_workspace_root() {
+        let temp = tempdir().expect("tempdir should be created");
+        let identity_root = temp.path().join("state").join("identity");
+        let old_workspace = temp.path().join("state").join("workspace");
+        let new_workspace = temp.path().join("workspace");
+        fs::create_dir_all(old_workspace.as_path()).expect("old workspace should exist");
+        fs::create_dir_all(new_workspace.as_path()).expect("new workspace should exist");
+        let registry =
+            AgentRegistry::open(identity_root.as_path()).expect("registry should initialize");
+
+        registry
+            .create_agent(AgentCreateRequest {
+                agent_id: "local-default".to_owned(),
+                display_name: "LocalDefaultAgent".to_owned(),
+                agent_dir: None,
+                workspace_roots: vec![old_workspace.to_string_lossy().into_owned()],
+                default_model_profile: None,
+                execution_backend_preference: None,
+                default_tool_allowlist: Vec::new(),
+                default_skill_allowlist: Vec::new(),
+                set_default: true,
+                allow_absolute_paths: true,
+            })
+            .expect("stale local default agent should be created");
+
+        let outcome = registry
+            .ensure_local_default_agent(new_workspace.as_path(), Some("MiniMax-M2.7".to_owned()))
+            .expect("local default agent should synchronize");
+
+        assert_eq!(
+            outcome,
+            AgentDefaultEnsureOutcome::Updated { agent_id: "local-default".to_owned() }
+        );
+        let page = registry.list_agents(None, Some(10)).expect("agents should list");
+        let canonical_workspace =
+            fs::canonicalize(new_workspace.as_path()).expect("new workspace should canonicalize");
         assert_eq!(
             page.agents[0].workspace_roots,
             vec![canonical_workspace.to_string_lossy().into_owned()]

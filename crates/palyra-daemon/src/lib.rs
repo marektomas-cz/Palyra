@@ -2674,6 +2674,13 @@ fn ensure_local_default_agent(
                 "selected existing sole agent as local default during startup"
             );
         }
+        agents::AgentDefaultEnsureOutcome::Updated { agent_id } => {
+            info!(
+                agent_id = agent_id.as_str(),
+                workspace_root = %workspace_root.display(),
+                "updated local default agent workspace root during startup"
+            );
+        }
         agents::AgentDefaultEnsureOutcome::SkippedMultipleAgents { observed_agent_count } => {
             warn!(
                 observed_agent_count,
