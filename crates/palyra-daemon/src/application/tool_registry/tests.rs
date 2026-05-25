@@ -226,6 +226,43 @@ fn anthropic_catalog_exposes_browser_viewport_without_exclusive_bounds() {
 }
 
 #[test]
+fn anthropic_catalog_exposes_routines_control_trigger_payload() {
+    let config = config(&["palyra.routines.control"]);
+    let snapshot = build_model_visible_tool_catalog_snapshot(ToolCatalogBuildRequest {
+        config: &config,
+        browser_service_enabled: false,
+        request_context: &request_context(),
+        provider_kind: "anthropic",
+        provider_model_id: Some("minimax-m2.7"),
+        surface: ToolExposureSurface::RunStream,
+        remaining_tool_budget: 1,
+        created_at_unix_ms: 42,
+    });
+
+    let control = snapshot
+        .tools
+        .iter()
+        .find(|tool| tool.name == "palyra.routines.control")
+        .expect("routines control should stay visible for Anthropic-compatible providers");
+    assert!(
+        !snapshot.filtered_tools.iter().any(|tool| {
+            tool.name == "palyra.routines.control"
+                && tool.reason_code.as_str() == "provider_schema_incompatible"
+        }),
+        "routines control must not be filtered for schema dialect incompatibility"
+    );
+    assert_eq!(
+        control.provider_schema["properties"]["trigger_payload"]["additionalProperties"],
+        serde_json::Value::Bool(true)
+    );
+
+    let payload = snapshot_to_provider_request_value(&snapshot);
+    let tools = provider_tools_from_catalog_snapshot(&payload, ToolSchemaDialect::Anthropic);
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0]["name"], "palyra.routines.control");
+}
+
+#[test]
 fn browser_session_lifecycle_returns_model_visible_handles() {
     assert_eq!(
         projection_policy_for_tool("palyra.browser.session.create"),

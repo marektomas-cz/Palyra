@@ -263,7 +263,7 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
                     ),
                     (
                         "trigger_payload",
-                        json!({"type":"object","description":"Trigger-specific payload. For trigger_kind=file_watch, provide path as an absolute user-owned OS path and optional poll_interval_ms >= 30000 plus fire_on_start."}),
+                        json!({"type":"object","description":"Trigger-specific payload. For trigger_kind=file_watch, provide path as an absolute user-owned OS path and optional poll_interval_ms >= 30000 plus fire_on_start.","properties":{},"additionalProperties":true}),
                     ),
                     ("natural_language_schedule", json!({"type":"string"})),
                     ("schedule_type", json!({"type":"string","enum":["cron","every","at"]})),
