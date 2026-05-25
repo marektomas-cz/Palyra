@@ -6761,10 +6761,17 @@ fn resolve_daemon_journal_db_path(db_path_override: Option<String>) -> Result<Pa
             .map(|value| value.trim().to_owned())
         {
             if !journal_db_path.is_empty() {
-                return Ok(resolve_config_relative_path(
-                    config_path.as_path(),
-                    journal_db_path.as_str(),
-                ));
+                let resolved =
+                    resolve_config_relative_path(config_path.as_path(), journal_db_path.as_str());
+                if resolved.is_file() {
+                    return Ok(resolved);
+                }
+                if let Some(runtime_journal) =
+                    discover_desktop_runtime_journal_db_path(config_path.as_path())
+                {
+                    return Ok(runtime_journal);
+                }
+                return Ok(resolved);
             }
         }
     }
@@ -6821,6 +6828,31 @@ fn installed_journal_path_belongs_to_state_root(
         return false;
     };
     installed_journal_path.starts_with(active_state_root)
+}
+
+fn discover_desktop_runtime_journal_db_path(config_path: &Path) -> Option<PathBuf> {
+    if let Some(context) = app::current_root_context() {
+        let candidate = desktop_runtime_journal_db_path(context.state_root());
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+
+    let state_root = infer_state_root_from_config_path(config_path)?;
+    let candidate = desktop_runtime_journal_db_path(state_root.as_path());
+    candidate.is_file().then_some(candidate)
+}
+
+fn infer_state_root_from_config_path(config_path: &Path) -> Option<PathBuf> {
+    let config_dir = config_path.parent()?;
+    if config_dir.file_name().and_then(|value| value.to_str()) == Some("config") {
+        return config_dir.parent().map(Path::to_path_buf);
+    }
+    None
+}
+
+fn desktop_runtime_journal_db_path(state_root: &Path) -> PathBuf {
+    state_root.join("desktop-control-center").join("runtime").join(DEFAULT_JOURNAL_DB_PATH)
 }
 
 fn resolve_config_relative_path(config_path: &Path, raw_path: &str) -> PathBuf {
@@ -6916,12 +6948,18 @@ fn resolve_installed_journal_db_path_from_metadata(
         return install_candidate;
     }
 
-    let state_candidate = metadata
-        .state_root
-        .as_deref()
-        .and_then(normalize_optional_text)
-        .map(PathBuf::from)
-        .map(|state_root| state_root.join(DEFAULT_JOURNAL_DB_PATH));
+    let state_candidate =
+        metadata.state_root.as_deref().and_then(normalize_optional_text).map(PathBuf::from).map(
+            |state_root| {
+                let desktop_runtime_candidate =
+                    desktop_runtime_journal_db_path(state_root.as_path());
+                if desktop_runtime_candidate.is_file() {
+                    desktop_runtime_candidate
+                } else {
+                    state_root.join(DEFAULT_JOURNAL_DB_PATH)
+                }
+            },
+        );
     if let Some(state_candidate) = state_candidate.as_ref() {
         if state_candidate.is_file() {
             return state_candidate.clone();
@@ -12894,6 +12932,37 @@ mod journal_path_tests {
     }
 
     #[test]
+    fn relative_configured_journal_path_prefers_existing_desktop_runtime_journal() -> Result<()> {
+        let _guard = crate::app::test_env_lock_for_tests().lock().expect("env lock");
+        crate::app::clear_root_context_for_tests();
+        let tempdir = tempdir()?;
+        let state_root = tempdir.path().join("state-root");
+        let config_path = state_root.join("config").join("palyra.toml");
+        let runtime_journal =
+            state_root.join("desktop-control-center").join("runtime").join(DEFAULT_JOURNAL_DB_PATH);
+        fs::create_dir_all(config_path.parent().expect("config parent should exist"))?;
+        fs::create_dir_all(runtime_journal.parent().expect("journal parent should exist"))?;
+        fs::write(
+            config_path.as_path(),
+            "[storage]\njournal_db_path = \"data/journal.sqlite3\"\n",
+        )?;
+        fs::write(runtime_journal.as_path(), [])?;
+        let _palyra_config = ScopedEnvVar::set("PALYRA_CONFIG", config_path.as_path());
+        let _journal_env = ScopedEnvVar::unset("PALYRA_JOURNAL_DB_PATH");
+
+        crate::app::install_root_context(crate::args::RootOptions {
+            state_root: Some(state_root.display().to_string()),
+            ..crate::args::RootOptions::default()
+        })?;
+
+        let resolved = resolve_daemon_journal_db_path(None)?;
+
+        assert_eq!(resolved, runtime_journal);
+        crate::app::clear_root_context_for_tests();
+        Ok(())
+    }
+
+    #[test]
     fn installed_journal_path_does_not_override_missing_root_context_default_outside_state_root(
     ) -> Result<()> {
         let tempdir = tempdir()?;
@@ -13005,7 +13074,8 @@ mod journal_path_tests {
         let install_root = workspace_root.join("install");
         let state_root = workspace_root.join("state");
         let binary_path = install_root.join(if cfg!(windows) { "palyra.exe" } else { "palyra" });
-        let journal_path = workspace_root.join(DEFAULT_JOURNAL_DB_PATH);
+        let journal_path =
+            state_root.join("desktop-control-center").join("runtime").join(DEFAULT_JOURNAL_DB_PATH);
 
         fs::create_dir_all(install_root.as_path())?;
         fs::create_dir_all(state_root.as_path())?;
