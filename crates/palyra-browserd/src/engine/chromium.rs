@@ -2705,12 +2705,27 @@ async fn write_chromium_upload_file(
             upload_dir.display()
         )
     })?;
-    let file_name = sanitize_download_file_name(file_name);
-    let path = upload_dir.join(format!("{}-{}", Ulid::new(), file_name));
+    let path = chromium_upload_staging_path(upload_dir.as_path(), file_name)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "failed to initialize Chromium upload staging directory '{}': {error}",
+                parent.display()
+            )
+        })?;
+    }
     fs::write(path.as_path(), file_bytes).map_err(|error| {
         format!("failed to stage uploaded browser file '{}': {error}", path.display())
     })?;
     Ok(path)
+}
+
+fn chromium_upload_staging_path(upload_dir: &Path, file_name: &str) -> Result<PathBuf, String> {
+    let file_name = sanitize_download_file_name(file_name);
+    if file_name.is_empty() {
+        return Err("upload file name is empty after sanitization".to_owned());
+    }
+    Ok(upload_dir.join(Ulid::new().to_string()).join(file_name))
 }
 
 fn chromium_type_script(
@@ -3258,7 +3273,7 @@ mod tests {
     use super::{
         chromium_network_log_headers, chromium_read_local_storage_script,
         chromium_restore_local_storage_script, chromium_touch_emulation_max_touch_points,
-        chromium_transport_idle_timeout, clamp_chromium_snapshot,
+        chromium_transport_idle_timeout, chromium_upload_staging_path, clamp_chromium_snapshot,
         decode_chromium_console_entries_value, decode_chromium_json_script_value,
         decode_chromium_network_entries_value, parse_chromium_client_download_entries,
         parse_chromium_console_entries, parse_chromium_layout_metrics,
@@ -3275,6 +3290,7 @@ mod tests {
     };
     use base64::Engine as _;
     use std::collections::HashMap;
+    use std::path::Path;
     use std::time::Duration;
 
     #[test]
@@ -3301,6 +3317,34 @@ mod tests {
         let timeout = chromium_transport_idle_timeout(configured_startup_timeout);
 
         assert_eq!(timeout, Duration::from_millis(DEFAULT_SESSION_IDLE_TTL_MS));
+    }
+
+    #[test]
+    fn chromium_upload_staging_path_preserves_visible_basename() {
+        let upload_dir = Path::new("/tmp/palyra-uploads");
+        let staged = chromium_upload_staging_path(upload_dir, "upload-source.txt")
+            .expect("upload staging path should be created");
+
+        assert_eq!(staged.file_name().and_then(|value| value.to_str()), Some("upload-source.txt"));
+        assert_ne!(staged.parent(), Some(upload_dir));
+        assert!(staged.starts_with(upload_dir));
+    }
+
+    #[test]
+    fn chromium_upload_staging_path_sanitizes_visible_basename_without_prefixing_it() {
+        let upload_dir = Path::new("/tmp/palyra-uploads");
+        let staged = chromium_upload_staging_path(upload_dir, "../upload source.csv")
+            .expect("upload staging path should be created");
+        let file_name = staged.file_name().and_then(|value| value.to_str()).unwrap_or_default();
+        let staging_dir_name = staged
+            .parent()
+            .and_then(|value| value.file_name())
+            .and_then(|value| value.to_str())
+            .unwrap_or_default();
+
+        assert_eq!(file_name, "upload_source.csv");
+        assert_ne!(staging_dir_name, file_name);
+        assert_eq!(staged.parent().and_then(|value| value.parent()), Some(upload_dir));
     }
 
     #[test]
