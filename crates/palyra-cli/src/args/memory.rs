@@ -34,7 +34,11 @@ pub enum MemoryCommand {
         query: String,
         #[arg(long, value_enum, default_value_t = MemoryScopeArg::Principal)]
         scope: MemoryScopeArg,
-        #[arg(long)]
+        #[arg(
+            long,
+            value_name = "SESSION_ID_OR_KEY",
+            help = "Session canonical ULID or user-facing session key for session-scoped memory"
+        )]
         session: Option<String>,
         #[arg(long)]
         channel: Option<String>,
@@ -82,7 +86,11 @@ pub enum MemoryCommand {
         json: bool,
     },
     Purge {
-        #[arg(long)]
+        #[arg(
+            long,
+            value_name = "SESSION_ID_OR_KEY",
+            help = "Session canonical ULID or user-facing session key for session-scoped purge"
+        )]
         session: Option<String>,
         #[arg(long)]
         channel: Option<String>,
@@ -95,7 +103,11 @@ pub enum MemoryCommand {
         content: String,
         #[arg(long, value_enum, default_value_t = MemorySourceArg::Manual)]
         source: MemorySourceArg,
-        #[arg(long)]
+        #[arg(
+            long,
+            value_name = "SESSION_ID_OR_KEY",
+            help = "Session canonical ULID or user-facing session key for session-scoped ingest"
+        )]
         session: Option<String>,
         #[arg(long)]
         channel: Option<String>,

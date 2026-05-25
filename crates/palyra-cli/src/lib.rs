@@ -3723,7 +3723,7 @@ fn optional_ulid_json_value(value: &Option<common_v1::CanonicalId>) -> Value {
     }
 }
 
-fn resolve_memory_scope(
+async fn resolve_memory_scope(
     scope: MemoryScopeArg,
     channel: Option<String>,
     session: Option<String>,
@@ -3736,26 +3736,83 @@ fn resolve_memory_scope(
             Some(value)
         }
     });
-    let session = session.map(|value| value.trim().to_owned()).and_then(|value| {
-        if value.is_empty() {
-            None
-        } else {
-            Some(value)
-        }
-    });
-    if let Some(session_id) = session.as_deref() {
-        validate_canonical_id(session_id).context("memory --session must be a canonical ULID")?;
-    }
+    let session = session.and_then(normalize_optional_text_arg);
 
     match scope {
         MemoryScopeArg::Principal => Ok((None, None)),
         MemoryScopeArg::Channel => Ok((channel.or(Some(connection.channel.clone())), None)),
         MemoryScopeArg::Session => {
             let session = session.ok_or_else(|| {
-                anyhow!("memory --scope session requires --session <canonical-ulid>")
+                anyhow!("memory --scope session requires --session <session-id-or-key>")
             })?;
-            Ok((channel.or(Some(connection.channel.clone())), Some(session)))
+            let session_id =
+                resolve_memory_session_id(session, connection, "memory search --session").await?;
+            Ok((channel.or(Some(connection.channel.clone())), Some(session_id.ulid)))
         }
+    }
+}
+
+async fn resolve_optional_memory_session_id(
+    session: Option<String>,
+    connection: &AgentConnection,
+    argument_name: &str,
+) -> Result<Option<common_v1::CanonicalId>> {
+    let Some(session) = session.and_then(normalize_optional_text_arg) else {
+        return Ok(None);
+    };
+    resolve_memory_session_id(session, connection, argument_name).await.map(Some)
+}
+
+async fn resolve_memory_session_id(
+    session: String,
+    connection: &AgentConnection,
+    argument_name: &str,
+) -> Result<common_v1::CanonicalId> {
+    match memory_session_selector(session) {
+        MemorySessionSelector::Canonical(ulid) => Ok(common_v1::CanonicalId { ulid }),
+        MemorySessionSelector::Key(session_key) => {
+            let runtime = client::operator::OperatorRuntime::new(connection.clone());
+            let response = runtime
+                .resolve_session(SessionResolveInput {
+                    session_id: None,
+                    session_key: session_key.clone(),
+                    session_label: String::new(),
+                    require_existing: true,
+                    reset_session: false,
+                })
+                .await
+                .with_context(|| {
+                    format!(
+                        "{argument_name} `{session_key}` is not a canonical session ULID and could not be resolved as a session key; run `palyra sessions show --session-key {session_key} --json` to verify it or pass the returned session_id"
+                    )
+                })?;
+            let resolved = response.session.with_context(|| {
+                format!(
+                    "{argument_name} `{session_key}` resolved as a session key, but the gateway returned no session payload"
+                )
+            })?;
+            let session_id = resolved.session_id.with_context(|| {
+                format!(
+                    "{argument_name} `{session_key}` resolved as a session key, but the gateway returned no session_id"
+                )
+            })?;
+            Ok(session_id)
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MemorySessionSelector {
+    Canonical(String),
+    Key(String),
+}
+
+fn memory_session_selector(session: String) -> MemorySessionSelector {
+    let session = session.trim().to_owned();
+    if validate_canonical_id(session.as_str()).is_ok() {
+        MemorySessionSelector::Canonical(session)
+    } else {
+        MemorySessionSelector::Key(session)
     }
 }
 
@@ -13035,6 +13092,28 @@ mod tests {
             result.is_err(),
             "proof from CLI arg must require explicit insecure acknowledgment"
         );
+    }
+}
+
+#[cfg(test)]
+mod memory_session_selector_tests {
+    use super::{memory_session_selector, MemorySessionSelector};
+
+    #[test]
+    fn accepts_canonical_session_id() {
+        let selector = memory_session_selector(" 01ARZ3NDEKTSV4RRFFQ69G5FAV ".to_owned());
+
+        assert_eq!(
+            selector,
+            MemorySessionSelector::Canonical("01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned())
+        );
+    }
+
+    #[test]
+    fn treats_user_facing_key_as_resolvable() {
+        let selector = memory_session_selector(" cli-memory-store ".to_owned());
+
+        assert_eq!(selector, MemorySessionSelector::Key("cli-memory-store".to_owned()));
     }
 }
 

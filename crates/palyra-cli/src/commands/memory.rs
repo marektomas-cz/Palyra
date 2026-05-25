@@ -217,7 +217,7 @@ pub(crate) async fn run_memory_async(
             let min_score =
                 parse_float_arg(min_score, "memory search --min-score", 0.0, 1.0, Some(0.0))?;
             let (channel_scope, session_scope) =
-                resolve_memory_scope(scope, channel, session, &connection)?;
+                resolve_memory_scope(scope, channel, session, &connection).await?;
             let mut request = Request::new(memory_v1::SearchMemoryRequest {
                 v: CANONICAL_PROTOCOL_MAJOR,
                 query,
@@ -440,13 +440,9 @@ pub(crate) async fn run_memory_async(
                     "memory purge requires one of: --principal, --session, or --channel"
                 ));
             }
-            let session_id = if let Some(session) = session {
-                validate_canonical_id(session.as_str())
-                    .context("memory purge --session must be a canonical ULID")?;
-                Some(common_v1::CanonicalId { ulid: session })
-            } else {
-                None
-            };
+            let session_id =
+                resolve_optional_memory_session_id(session, &connection, "memory purge --session")
+                    .await?;
             let mut request = Request::new(memory_v1::PurgeMemoryRequest {
                 v: CANONICAL_PROTOCOL_MAJOR,
                 channel: channel.unwrap_or_default(),
@@ -486,13 +482,9 @@ pub(crate) async fn run_memory_async(
             }
             let confidence =
                 parse_float_arg(confidence, "memory ingest --confidence", 0.0, 1.0, Some(1.0))?;
-            let session_id = if let Some(session) = session {
-                validate_canonical_id(session.as_str())
-                    .context("memory ingest --session must be a canonical ULID")?;
-                Some(common_v1::CanonicalId { ulid: session })
-            } else {
-                None
-            };
+            let session_id =
+                resolve_optional_memory_session_id(session, &connection, "memory ingest --session")
+                    .await?;
             let mut request = Request::new(memory_v1::IngestMemoryRequest {
                 v: CANONICAL_PROTOCOL_MAJOR,
                 source: memory_source_to_proto(source),
