@@ -2,6 +2,7 @@ use std::path::Path;
 
 use anyhow::bail;
 
+use super::models::{load_models_status, ModelsStatusPayload};
 use crate::*;
 
 pub(crate) fn run_agents(command: AgentsCommand) -> Result<()> {
@@ -35,14 +36,16 @@ pub(crate) async fn run_agents_async(
     match command {
         AgentsCommand::List { after, limit, json: _, ndjson } => {
             let ndjson = output::preferred_ndjson(json, ndjson);
+            let model_routing = load_agent_model_routing_snapshot();
             let response = client.list_agents(after, limit).await?;
             if json {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&json!({
-                        "agents": response.agents.iter().map(agent_to_json).collect::<Vec<_>>(),
+                        "agents": response.agents.iter().map(|agent| agent_to_json_with_model_routing(agent, &model_routing)).collect::<Vec<_>>(),
                         "default_agent_id": empty_to_none(response.default_agent_id),
                         "next_after_agent_id": empty_to_none(response.next_after_agent_id),
+                        "model_routing": model_routing.to_json(),
                         "execution_backends": response.execution_backends.iter().map(execution_backend_inventory_to_json).collect::<Vec<_>>(),
                     }))?
                 );
@@ -52,7 +55,7 @@ pub(crate) async fn run_agents_async(
                         "{}",
                         serde_json::to_string(&json!({
                             "type": "agent",
-                            "agent": agent_to_json(agent),
+                            "agent": agent_to_json_with_model_routing(agent, &model_routing),
                             "is_default": response.default_agent_id == agent.agent_id,
                         }))?
                     );
@@ -64,15 +67,30 @@ pub(crate) async fn run_agents_async(
                     text_or_none(response.default_agent_id.as_str()),
                     text_or_none(response.next_after_agent_id.as_str())
                 );
+                println!(
+                    "agents.model_routing status={} effective_model_profile={} source={}{}",
+                    model_routing.status,
+                    model_routing.effective_model_profile.as_deref().unwrap_or("none"),
+                    model_routing.source,
+                    model_routing
+                        .error
+                        .as_ref()
+                        .map(|error| format!(" error={error}"))
+                        .unwrap_or_default()
+                );
                 print_execution_backend_inventory(response.execution_backends.as_slice());
                 for agent in &response.agents {
                     println!(
-                        "agent id={} name={} dir={} workspaces={} model_profile={} backend_preference={}",
+                        "agent id={} name={} dir={} workspaces={} model_profile={} effective_model_profile={} backend_preference={}",
                         agent.agent_id,
                         agent.display_name,
                         agent.agent_dir,
                         agent.workspace_roots.len(),
                         agent.default_model_profile,
+                        model_routing
+                            .effective_model_profile
+                            .as_deref()
+                            .unwrap_or(agent.default_model_profile.as_str()),
                         text_or_none(agent.execution_backend_preference.as_str())
                     );
                 }
@@ -133,12 +151,14 @@ pub(crate) async fn run_agents_async(
         AgentsCommand::Show { agent_id, json: _ } => {
             let response = client.get_agent(normalize_agent_id_cli(agent_id.as_str())?).await?;
             let agent = response.agent.context("GetAgent returned empty agent payload")?;
+            let model_routing = load_agent_model_routing_snapshot();
             if json {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&json!({
-                        "agent": agent_to_json(&agent),
+                        "agent": agent_to_json_with_model_routing(&agent, &model_routing),
                         "is_default": response.is_default,
+                        "model_routing": model_routing.to_json(),
                         "resolved_execution_backend": empty_to_none(response.resolved_execution_backend),
                         "execution_backend_fallback_used": response.execution_backend_fallback_used,
                         "execution_backend_reason": response.execution_backend_reason,
@@ -147,12 +167,16 @@ pub(crate) async fn run_agents_async(
                 );
             } else {
                 println!(
-                    "agents.show id={} name={} dir={} default={} model_profile={} backend_preference={} resolved_backend={} fallback={}",
+                    "agents.show id={} name={} dir={} default={} model_profile={} effective_model_profile={} backend_preference={} resolved_backend={} fallback={}",
                     agent.agent_id,
                     agent.display_name,
                     agent.agent_dir,
                     response.is_default,
                     agent.default_model_profile,
+                    model_routing
+                        .effective_model_profile
+                        .as_deref()
+                        .unwrap_or(agent.default_model_profile.as_str()),
                     text_or_none(agent.execution_backend_preference.as_str()),
                     text_or_none(response.resolved_execution_backend.as_str()),
                     response.execution_backend_fallback_used
@@ -273,12 +297,14 @@ pub(crate) async fn run_agents_async(
                 .await?;
             let agent = response.agent.context("CreateAgent returned empty agent payload")?;
             if json {
+                let model_routing = load_agent_model_routing_snapshot();
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&json!({
-                        "agent": agent_to_json(&agent),
+                        "agent": agent_to_json_with_model_routing(&agent, &model_routing),
                         "default_changed": response.default_changed,
                         "default_agent_id": empty_to_none(response.default_agent_id),
+                        "model_routing": model_routing.to_json(),
                         "resolved_execution_backend": empty_to_none(response.resolved_execution_backend),
                         "execution_backend_fallback_used": response.execution_backend_fallback_used,
                         "execution_backend_reason": response.execution_backend_reason,
@@ -320,10 +346,11 @@ pub(crate) async fn run_agents_async(
                 .bindings;
             if dry_run {
                 if json {
+                    let model_routing = load_agent_model_routing_snapshot();
                     println!(
                         "{}",
                         serde_json::to_string_pretty(&json!({
-                            "agent": agent_to_json(&agent),
+                            "agent": agent_to_json_with_model_routing(&agent, &model_routing),
                             "would_delete": true,
                             "binding_count": bindings.len(),
                             "bindings": bindings.iter().map(agent_binding_to_json).collect::<Vec<_>>(),
@@ -393,14 +420,16 @@ pub(crate) async fn run_agents_async(
                 .await?;
             let agent =
                 response.agent.context("ResolveAgentForContext returned empty agent payload")?;
+            let model_routing = load_agent_model_routing_snapshot();
             if json {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&json!({
-                        "agent": agent_to_json(&agent),
+                        "agent": agent_to_json_with_model_routing(&agent, &model_routing),
                         "source": agent_resolution_source_label(response.source),
                         "binding_created": response.binding_created,
                         "is_default": response.is_default,
+                        "model_routing": model_routing.to_json(),
                         "resolved_execution_backend": empty_to_none(response.resolved_execution_backend),
                         "execution_backend_fallback_used": response.execution_backend_fallback_used,
                         "execution_backend_reason": response.execution_backend_reason,
@@ -409,11 +438,15 @@ pub(crate) async fn run_agents_async(
                 );
             } else {
                 println!(
-                    "agents.identity agent_id={} source={} binding_created={} default={} backend_preference={} resolved_backend={} fallback={}",
+                    "agents.identity agent_id={} source={} binding_created={} default={} effective_model_profile={} backend_preference={} resolved_backend={} fallback={}",
                     agent.agent_id,
                     agent_resolution_source_label(response.source),
                     response.binding_created,
                     response.is_default,
+                    model_routing
+                        .effective_model_profile
+                        .as_deref()
+                        .unwrap_or(agent.default_model_profile.as_str()),
                     text_or_none(agent.execution_backend_preference.as_str()),
                     text_or_none(response.resolved_execution_backend.as_str()),
                     response.execution_backend_fallback_used
@@ -425,6 +458,103 @@ pub(crate) async fn run_agents_async(
     }
 
     std::io::stdout().flush().context("stdout flush failed")
+}
+
+#[derive(Debug, Clone)]
+struct AgentModelRoutingSnapshot {
+    status: String,
+    effective_model_profile: Option<String>,
+    source: String,
+    provider_id: Option<String>,
+    provider_kind: Option<String>,
+    error: Option<String>,
+}
+
+impl AgentModelRoutingSnapshot {
+    fn to_json(&self) -> Value {
+        json!({
+            "status": self.status,
+            "effective_model_profile": self.effective_model_profile,
+            "source": self.source,
+            "provider_id": self.provider_id,
+            "provider_kind": self.provider_kind,
+            "error": self.error,
+        })
+    }
+}
+
+fn load_agent_model_routing_snapshot() -> AgentModelRoutingSnapshot {
+    match load_models_status(None) {
+        Ok(status) => agent_model_routing_snapshot_from_status(&status),
+        Err(error) => AgentModelRoutingSnapshot {
+            status: "unavailable".to_owned(),
+            effective_model_profile: None,
+            source: "models_status_error".to_owned(),
+            provider_id: None,
+            provider_kind: None,
+            error: Some(sanitize_diagnostic_error(format!("{error:#}").as_str())),
+        },
+    }
+}
+
+fn agent_model_routing_snapshot_from_status(
+    status: &ModelsStatusPayload,
+) -> AgentModelRoutingSnapshot {
+    let (effective_model_profile, source) =
+        if let Some(model) = status.default_chat_model_id.clone() {
+            (Some(model), "model_provider.default_chat_model_id")
+        } else if let Some(model) = status.text_model.clone() {
+            (Some(model), "model_provider.text_model")
+        } else {
+            (None, "model_provider.unconfigured")
+        };
+    AgentModelRoutingSnapshot {
+        status: if effective_model_profile.is_some() { "available" } else { "missing" }.to_owned(),
+        effective_model_profile,
+        source: source.to_owned(),
+        provider_id: Some(status.provider_id.clone()),
+        provider_kind: Some(status.provider_kind.clone()),
+        error: None,
+    }
+}
+
+fn agent_to_json_with_model_routing(
+    agent: &gateway_v1::Agent,
+    routing: &AgentModelRoutingSnapshot,
+) -> Value {
+    let effective_model_profile =
+        routing.effective_model_profile.as_deref().unwrap_or(agent.default_model_profile.as_str());
+    let default_is_authoritative = routing
+        .effective_model_profile
+        .as_deref()
+        .is_none_or(|model| model.eq_ignore_ascii_case(agent.default_model_profile.as_str()));
+    json!({
+        "agent_id": agent.agent_id,
+        "display_name": agent.display_name,
+        "agent_dir": agent.agent_dir,
+        "workspace_roots": agent.workspace_roots,
+        "default_model_profile": agent.default_model_profile,
+        "default_model_profile_source": "agent_registry",
+        "default_model_profile_authoritative": default_is_authoritative,
+        "effective_model_profile": effective_model_profile,
+        "effective_model_profile_source": routing.source,
+        "model_profile_authority": if default_is_authoritative { "agent_registry" } else { "model_provider_runtime" },
+        "model_profile_note": if default_is_authoritative {
+            Value::Null
+        } else {
+            Value::String(
+                "default_model_profile is legacy agent registry metadata; runtime chat routing uses effective_model_profile"
+                    .to_owned(),
+            )
+        },
+        "model_routing_status": routing.status,
+        "model_routing_error": routing.error,
+        "execution_backend_preference": empty_to_none(agent.execution_backend_preference.clone()),
+        "default_tool_allowlist": agent.default_tool_allowlist,
+        "default_skill_allowlist": agent.default_skill_allowlist,
+        "created_at_unix_ms": agent.created_at_unix_ms,
+        "updated_at_unix_ms": agent.updated_at_unix_ms,
+    })
 }
 
 fn agent_binding_to_json(binding: &gateway_v1::AgentBinding) -> Value {
@@ -537,6 +667,67 @@ fn agent_resolution_source_label(raw: i32) -> &'static str {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    fn sample_models_status() -> ModelsStatusPayload {
+        ModelsStatusPayload {
+            path: "palyra.toml".to_owned(),
+            provider_id: "minimax-primary".to_owned(),
+            provider_display_name: "MiniMax".to_owned(),
+            protocol_compatibility: "anthropic_compatible".to_owned(),
+            provider_kind: "anthropic".to_owned(),
+            auth_provider_kind: Some("minimax".to_owned()),
+            endpoint_base_url: Some("https://api.minimax.io".to_owned()),
+            openai_base_url: None,
+            text_model: Some("MiniMax-M2.7".to_owned()),
+            embeddings_model: None,
+            embeddings_dims: None,
+            auth_profile_id: None,
+            api_key_configured: true,
+            default_chat_model_id: Some("MiniMax-M2.7".to_owned()),
+            default_embeddings_model_id: None,
+            failover_enabled: true,
+            response_cache_enabled: true,
+            registry_provider_count: 1,
+            registry_model_count: 1,
+            registry_valid: true,
+            validation_issues: Vec::new(),
+            migrated: false,
+        }
+    }
+
+    fn sample_agent(default_model_profile: &str) -> gateway_v1::Agent {
+        gateway_v1::Agent {
+            agent_id: "local-default".to_owned(),
+            display_name: "LocalDefaultAgent".to_owned(),
+            default_model_profile: default_model_profile.to_owned(),
+            ..gateway_v1::Agent::default()
+        }
+    }
+
+    #[test]
+    fn agent_json_labels_registry_model_profile_as_non_authoritative_when_routing_differs() {
+        let routing = agent_model_routing_snapshot_from_status(&sample_models_status());
+        let payload = agent_to_json_with_model_routing(&sample_agent("deterministic"), &routing);
+
+        assert_eq!(payload["default_model_profile"], "deterministic");
+        assert_eq!(payload["effective_model_profile"], "MiniMax-M2.7");
+        assert_eq!(
+            payload["effective_model_profile_source"],
+            "model_provider.default_chat_model_id"
+        );
+        assert_eq!(payload["default_model_profile_authoritative"], false);
+        assert_eq!(payload["model_profile_authority"], "model_provider_runtime");
+    }
+
+    #[test]
+    fn agent_json_keeps_registry_profile_authoritative_when_it_matches_routing() {
+        let routing = agent_model_routing_snapshot_from_status(&sample_models_status());
+        let payload = agent_to_json_with_model_routing(&sample_agent("MiniMax-M2.7"), &routing);
+
+        assert_eq!(payload["default_model_profile_authoritative"], true);
+        assert_eq!(payload["model_profile_authority"], "agent_registry");
+        assert!(payload["model_profile_note"].is_null());
+    }
 
     #[test]
     fn prepare_workspace_roots_preserves_relative_values_for_daemon_containment() -> Result<()> {

@@ -4014,21 +4014,6 @@ fn empty_to_none(value: String) -> Option<String> {
     Some(trimmed.to_owned())
 }
 
-fn agent_to_json(agent: &gateway_v1::Agent) -> serde_json::Value {
-    json!({
-        "agent_id": agent.agent_id,
-        "display_name": agent.display_name,
-        "agent_dir": agent.agent_dir,
-        "workspace_roots": agent.workspace_roots,
-        "default_model_profile": agent.default_model_profile,
-        "execution_backend_preference": empty_to_none(agent.execution_backend_preference.clone()),
-        "default_tool_allowlist": agent.default_tool_allowlist,
-        "default_skill_allowlist": agent.default_skill_allowlist,
-        "created_at_unix_ms": agent.created_at_unix_ms,
-        "updated_at_unix_ms": agent.updated_at_unix_ms,
-    })
-}
-
 fn open_url_in_default_browser(url: &str) -> Result<()> {
     let normalized_url = normalize_browser_open_url(url)?;
 
