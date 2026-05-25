@@ -19754,7 +19754,8 @@ fn is_secret_marker_char(ch: char) -> bool {
 
 fn is_secret_like_marker_token(token: &str) -> bool {
     let normalized = token.to_ascii_lowercase();
-    normalized.contains("dummy_secret")
+    normalized.contains("palyra_test_secret")
+        || normalized.contains("dummy_secret")
         || normalized.contains("secret_should_not_appear")
         || (normalized.contains("secret")
             && (normalized.contains("should_not_appear")
@@ -20083,6 +20084,17 @@ mod tests {
         assert!(!redacted.contains("S013_DUMMY_SECRET_SHOULD_NOT_APPEAR"));
         assert!(redacted.contains("README says"));
         assert!(redacted.contains("must be printed"));
+    }
+
+    #[test]
+    fn redact_payload_json_masks_palyra_test_secret_markers_inside_text() {
+        let redacted = super::redact_payload_json(
+            br#"{"tool_output":"model.token = \"palyra_test_secret_123456\";"}"#,
+        )
+        .expect("payload redaction should succeed");
+
+        assert!(redacted.contains("<redacted>"), "{redacted}");
+        assert!(!redacted.contains("palyra_test_secret_123456"), "{redacted}");
     }
 
     #[test]

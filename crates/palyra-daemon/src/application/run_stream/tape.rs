@@ -1,7 +1,11 @@
 use std::sync::Arc;
 
-use palyra_common::runtime_preview::{RuntimeDecisionPayload, RuntimePreviewCapability};
 use palyra_common::CANONICAL_PROTOCOL_MAJOR;
+use palyra_common::{
+    redaction::{is_sensitive_key, redact_auth_error, redact_url_segments_in_text, REDACTED},
+    runtime_preview::{RuntimeDecisionPayload, RuntimePreviewCapability},
+};
+use palyra_safety::{redact_text_for_export, SafetyContentKind, SafetySourceKind, TrustLabel};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tonic::Status;
@@ -80,6 +84,65 @@ fn model_token_event(
             is_final,
         })),
     }
+}
+
+fn redact_run_stream_text(raw: &str) -> String {
+    let url_redacted = redact_url_segments_in_text(raw);
+    let auth_redacted = redact_auth_error(url_redacted.as_str());
+    redact_text_for_export(
+        auth_redacted.as_str(),
+        SafetySourceKind::ToolOutput,
+        SafetyContentKind::PlainText,
+        TrustLabel::TrustedLocal,
+    )
+    .redacted_text
+}
+
+fn redact_run_stream_json_value(value: &mut Value) -> bool {
+    match value {
+        Value::Object(object) => {
+            let mut redacted = false;
+            for (key, child) in object.iter_mut() {
+                if is_sensitive_key(key) {
+                    if !child.is_null() {
+                        *child = Value::String(REDACTED.to_owned());
+                        redacted = true;
+                    }
+                    continue;
+                }
+                redacted |= redact_run_stream_json_value(child);
+            }
+            redacted
+        }
+        Value::Array(items) => {
+            let mut redacted = false;
+            for item in items {
+                redacted |= redact_run_stream_json_value(item);
+            }
+            redacted
+        }
+        Value::String(text) => {
+            let redacted_text = redact_run_stream_text(text.as_str());
+            if redacted_text == *text {
+                return false;
+            }
+            *text = redacted_text;
+            true
+        }
+        _ => false,
+    }
+}
+
+fn redacted_run_stream_output_json(output_json: &[u8]) -> Vec<u8> {
+    let mut value = serde_json::from_slice::<Value>(output_json).unwrap_or_else(|_| {
+        json!({
+            "raw": redact_run_stream_text(String::from_utf8_lossy(output_json).as_ref()),
+        })
+    });
+    redact_run_stream_json_value(&mut value);
+    serde_json::to_vec(&value).unwrap_or_else(|_| {
+        br#"{"redacted":true,"reason":"tool_result_serialization_failed"}"#.to_vec()
+    })
 }
 
 fn tool_proposal_event(
@@ -293,7 +356,8 @@ pub(crate) async fn send_model_token_with_tape(
     token: &str,
     is_final: bool,
 ) -> Result<(), Status> {
-    let event = model_token_event(run_id.to_owned(), token.to_owned(), is_final);
+    let safe_token = redact_run_stream_text(token);
+    let event = model_token_event(run_id.to_owned(), safe_token.clone(), is_final);
     sender
         .send(Ok(event))
         .await
@@ -320,7 +384,7 @@ pub(crate) async fn send_model_token_with_tape(
             run_id: run_id.to_owned(),
             seq: *tape_seq,
             event_type: "model_token".to_owned(),
-            payload_json: model_token_tape_payload(token, is_final),
+            payload_json: model_token_tape_payload(safe_token.as_str(), is_final),
         })
         .await?;
     *tape_seq += 1;
@@ -797,12 +861,14 @@ pub(crate) async fn send_tool_result_with_tape(
     output_json: &[u8],
     error: &str,
 ) -> Result<(), Status> {
+    let safe_output_json = redacted_run_stream_output_json(output_json);
+    let safe_error = redact_run_stream_text(error);
     let event = tool_result_event(
         run_id.to_owned(),
         proposal_id.to_owned(),
         success,
-        output_json.to_vec(),
-        error.to_owned(),
+        safe_output_json.clone(),
+        safe_error.clone(),
     );
     sender
         .send(Ok(event))
@@ -813,7 +879,12 @@ pub(crate) async fn send_tool_result_with_tape(
             run_id: run_id.to_owned(),
             seq: *tape_seq,
             event_type: "tool_result".to_owned(),
-            payload_json: tool_result_tape_payload(proposal_id, success, output_json, error),
+            payload_json: tool_result_tape_payload(
+                proposal_id,
+                success,
+                safe_output_json.as_slice(),
+                safe_error.as_str(),
+            ),
         })
         .await?;
     *tape_seq += 1;
@@ -1020,12 +1091,50 @@ fn tool_attestation_tape_payload(
 
 #[cfg(test)]
 mod tests {
-    use super::should_attempt_tool_result_compaction;
+    use serde_json::Value;
+
+    use super::{
+        redact_run_stream_text, redacted_run_stream_output_json,
+        should_attempt_tool_result_compaction,
+    };
 
     #[test]
     fn tool_result_compaction_guard_requires_results_and_single_run_emit() {
         assert!(!should_attempt_tool_result_compaction(0, false));
         assert!(should_attempt_tool_result_compaction(1, false));
         assert!(!should_attempt_tool_result_compaction(1, true));
+    }
+
+    #[test]
+    fn run_stream_text_redacts_secret_canaries() {
+        let redacted = redact_run_stream_text("final answer palyra_test_secret_123456");
+
+        assert!(redacted.contains("[REDACTED_SECRET]"));
+        assert!(!redacted.contains("palyra_test_secret_123456"));
+    }
+
+    #[test]
+    fn run_stream_tool_result_redacts_nested_secret_text() {
+        let output = br#"{"path":"fixture.txt","text":"model.token = \"palyra_test_secret_123456\";","nested":{"safe":"visible"}}"#;
+        let redacted = redacted_run_stream_output_json(output);
+        let redacted_text =
+            String::from_utf8(redacted.clone()).expect("redacted output should remain utf8 json");
+        let value: Value =
+            serde_json::from_slice(redacted.as_slice()).expect("redacted output should be json");
+
+        assert!(!redacted_text.contains("palyra_test_secret_123456"));
+        assert_eq!(value["text"], "model.token = \"[REDACTED_SECRET]\";");
+        assert_eq!(value["nested"]["safe"], "visible");
+    }
+
+    #[test]
+    fn run_stream_tool_result_redacts_sensitive_json_keys() {
+        let output = br#"{"token":"plain-value","text":"visible"}"#;
+        let redacted = redacted_run_stream_output_json(output);
+        let value: Value =
+            serde_json::from_slice(redacted.as_slice()).expect("redacted output should be json");
+
+        assert_eq!(value["token"], "<redacted>");
+        assert_eq!(value["text"], "visible");
     }
 }

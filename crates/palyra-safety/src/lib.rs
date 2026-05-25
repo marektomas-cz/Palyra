@@ -889,15 +889,16 @@ fn is_env_identifier(value: &str) -> bool {
 }
 
 fn bare_token_assignment_value_looks_secret(value: &str) -> bool {
-    let bounded_value = value
+    let candidate = value.trim().trim_start_matches(['"', '\'', '`']);
+    let bounded_value = candidate
         .char_indices()
         .find_map(|(index, ch)| {
             (ch.is_whitespace()
                 || matches!(ch, '&' | '"' | '\'' | '`' | ',' | ';' | ')' | ']' | '}'))
             .then_some(index)
         })
-        .map(|index| &value[..index])
-        .unwrap_or(value);
+        .map(|index| &candidate[..index])
+        .unwrap_or(candidate);
     let normalized = bounded_value
         .trim()
         .trim_matches(['"', '\'', '`'])
@@ -1099,7 +1100,8 @@ fn is_secret_marker_char(ch: char) -> bool {
 
 fn is_secret_like_marker_token(token: &str) -> bool {
     let normalized = token.to_ascii_lowercase();
-    normalized.contains("dummy_secret")
+    normalized.contains("palyra_test_secret")
+        || normalized.contains("dummy_secret")
         || normalized.contains("secret_should_not_appear")
         || (normalized.contains("secret")
             && (normalized.contains("should_not_appear")
@@ -1422,6 +1424,22 @@ mod tests {
     }
 
     #[test]
+    fn palyra_test_secret_canary_markers_are_redacted_for_export() {
+        let outcome = redact_text_for_export(
+            "model returned palyra_test_secret_123456 in the final answer.",
+            SafetySourceKind::ToolOutput,
+            SafetyContentKind::PlainText,
+            TrustLabel::TrustedLocal,
+        );
+
+        assert!(outcome.redacted);
+        assert!(outcome.redacted_text.contains("[REDACTED_SECRET]"));
+        assert!(!outcome.redacted_text.contains("palyra_test_secret_123456"));
+        assert!(outcome.scan.finding_codes().iter().any(|code| code == "secret_leak.marker"));
+        assert_eq!(outcome.scan.recommended_action, SafetyAction::Redact);
+    }
+
+    #[test]
     fn short_sensitive_assignments_preserve_key_names_and_redact_values() {
         let outcome = redact_text_for_export(
             "PALYRA_E2E_API_KEY=local-dev-secret-value\nSAFE_FLAG=PALYRA_E2E_BETA",
@@ -1496,6 +1514,26 @@ mod tests {
         assert!(!outcome.redacted_text.contains("= [REDACTED_SECRET];"));
         assert!(!outcome.redacted_text.contains("super-secret-value"));
         assert!(!outcome.redacted_text.contains("local-dev-secret"));
+    }
+
+    #[test]
+    fn quoted_token_assignments_with_secret_values_are_redacted() {
+        let source = "model.token = \"palyra_test_secret_123456\";";
+        let outcome = redact_text_for_export(
+            source,
+            SafetySourceKind::Workspace,
+            SafetyContentKind::WorkspaceDocument,
+            TrustLabel::TrustedLocal,
+        );
+
+        assert!(outcome.redacted);
+        assert_eq!(outcome.redacted_text, "model.token = \"[REDACTED_SECRET]\";");
+        assert!(!outcome.redacted_text.contains("palyra_test_secret_123456"));
+        assert!(outcome
+            .scan
+            .finding_codes()
+            .iter()
+            .any(|code| code == "secret_leak.marker" || code == "secret_leak.assignment.token"));
     }
 
     #[test]

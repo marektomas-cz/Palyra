@@ -1965,8 +1965,9 @@ mod tests {
     fn read_workspace_file_redacts_secret_like_source_literals() {
         let tempdir = tempfile::tempdir().expect("tempdir should be created");
         let file_path = tempdir.path().join("app.js");
-        let contents =
-            "const publicValue = 'visible';\nconst privateValue = 'S020_DUMMY_SECRET_SHOULD_NOT_APPEAR';\n";
+        let contents = "const publicValue = 'visible';\n\
+             const privateValue = 'S020_DUMMY_SECRET_SHOULD_NOT_APPEAR';\n\
+             const modelToken = 'palyra_test_secret_123456';\n";
         fs::write(file_path, contents).expect("workspace file should be written");
         let input = WorkspaceReadFileInput {
             path: "app.js".to_owned(),
@@ -1985,6 +1986,10 @@ mod tests {
         assert!(
             !text.contains("S020_DUMMY_SECRET_SHOULD_NOT_APPEAR"),
             "source literal should be redacted from tool output: {text}"
+        );
+        assert!(
+            !text.contains("palyra_test_secret_123456"),
+            "test harness secret marker should be redacted from tool output: {text}"
         );
     }
 
