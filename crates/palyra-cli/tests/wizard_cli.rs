@@ -1194,6 +1194,24 @@ fn configure_auth_model_backfills_admin_defaults_for_resume_path() -> Result<()>
         after_values.iter().any(|value| value.as_str() == Some("provider_kind=anthropic")),
         "configure output should preserve the technical compatibility provider kind: {payload}"
     );
+    let follow_up_checks = payload
+        .get("follow_up_checks")
+        .and_then(Value::as_array)
+        .context("configure summary should include follow-up checks")?;
+    assert!(
+        follow_up_checks.iter().filter_map(Value::as_str).any(|value| {
+            value.contains("model-provider auth changes require runtime reload")
+                && value.contains("gateway install")
+                && value.contains("desktop-managed local runtimes")
+        }),
+        "configure auth-model should explain service-managed versus desktop restart paths: {payload}"
+    );
+    assert!(
+        follow_up_checks.iter().filter_map(Value::as_str).all(|value| {
+            !value.contains("restart daemon so model-provider auth changes take effect")
+        }),
+        "configure auth-model should not emit stale generic restart guidance: {payload}"
+    );
 
     let written = fs::read_to_string(&config_path)
         .with_context(|| format!("failed to read {}", config_path.display()))?;

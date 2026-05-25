@@ -3357,16 +3357,18 @@ fn section_follow_up_checks(
             vec![
                 format!("palyra deployment preflight --deployment-profile {profile}"),
                 format!("palyra deployment recipe --deployment-profile {profile} --output-dir ./artifacts/deploy"),
-                "restart daemon so deployment profile changes take effect".to_owned(),
+                gateway_restart_follow_up("deployment profile changes require runtime reload"),
             ]
         }
         ConfigureSectionArg::Workspace => {
-            vec!["restart daemon or new runs to pick up workspace-root changes".to_owned()]
+            vec![gateway_restart_follow_up(
+                "workspace-root changes require runtime reload for existing daemon processes",
+            )]
         }
         ConfigureSectionArg::AuthModel => vec![
             "palyra doctor".to_owned(),
             "palyra models status".to_owned(),
-            "restart daemon so model-provider auth changes take effect".to_owned(),
+            gateway_restart_follow_up("model-provider auth changes require runtime reload"),
         ],
         ConfigureSectionArg::Gateway => {
             let mut values = vec!["palyra gateway status".to_owned()];
@@ -3383,7 +3385,7 @@ fn section_follow_up_checks(
         ConfigureSectionArg::RuntimeControls => vec![
             "palyra doctor".to_owned(),
             "palyra gateway status".to_owned(),
-            "restart daemon so runtime control changes take effect".to_owned(),
+            gateway_restart_follow_up("runtime control changes require runtime reload"),
         ],
         ConfigureSectionArg::DaemonService => {
             vec!["palyra gateway install --start".to_owned(), "palyra gateway status".to_owned()]
@@ -3402,6 +3404,12 @@ fn section_follow_up_checks(
     };
     dedupe_strings(&mut follow_ups);
     Ok(follow_ups)
+}
+
+fn gateway_restart_follow_up(reason: &str) -> String {
+    format!(
+        "{reason}: use `palyra gateway restart` only for a gateway installed with `palyra gateway install`; for foreground or desktop-managed local runtimes, restart the owning terminal, desktop app, or test harness launcher."
+    )
 }
 
 fn configure_runtime_controls(
