@@ -35,17 +35,27 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
         ),
         entry(
             "palyra.memory.search",
-            "Search scoped Palyra memory and return redacted hits.",
+            "Search scoped Palyra memory or workspace/project documents and return redacted hits.",
             object_schema(
                 &["query"],
                 vec![
                     ("query", json!({"type":"string","maxLength":8192})),
                     (
                         "scope",
-                        json!({"type":"string","enum":["principal","session","channel"],"description":"Defaults to principal for cross-session recall. Use session only for the current session, and channel only for authenticated channel memory."}),
+                        json!({"type":"string","enum":["principal","session","channel","workspace","project"],"description":"Defaults to session. Use principal for cross-session recall, session only for the current session, channel for authenticated channel memory, and workspace/project for indexed project documents."}),
                     ),
                     ("top_k", json!({"type":"integer","minimum":1,"maximum":20})),
                     ("min_score", json!({"type":"number","minimum":0.0,"maximum":1.0})),
+                    (
+                        "workspace_prefix",
+                        json!({"type":"string","description":"Optional workspace/project document path prefix used with scope=workspace or scope=project."}),
+                    ),
+                    (
+                        "prefix",
+                        json!({"type":"string","description":"Alias for workspace_prefix used with scope=workspace or scope=project."}),
+                    ),
+                    ("include_workspace_historical", json!({"type":"boolean"})),
+                    ("include_workspace_quarantined", json!({"type":"boolean"})),
                     ("tags", json!({"type":"array","items":{"type":"string"},"maxItems":16})),
                     (
                         "sources",

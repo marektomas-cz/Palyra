@@ -34,7 +34,7 @@ use crate::journal::{
     MemoryItemRecord, MemoryScoreBreakdown, MemorySearchHit, MemorySearchRequest, MemorySource,
     OrchestratorBackgroundTaskCreateRequest, OrchestratorBackgroundTaskUpdateRequest,
     OrchestratorRunStartRequest, OrchestratorSessionResolveRequest,
-    OrchestratorSessionUpsertRequest, OrchestratorTapeAppendRequest,
+    OrchestratorSessionUpsertRequest, OrchestratorTapeAppendRequest, WorkspaceDocumentWriteRequest,
 };
 use tonic::{transport::Server as TonicServer, Code};
 use ulid::Ulid;
@@ -4837,6 +4837,80 @@ async fn memory_search_tool_principal_scope_returns_principal_global_memory_only
                 .is_none_or(|content| !content.contains("Cross-channel feature flag"))
         }),
         "principal-scope search must not surface channel-scoped memory: {payload}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn memory_search_tool_workspace_scope_returns_project_prefix_hits() {
+    let state = build_test_runtime_state(false);
+    let context = routines_tool_test_context();
+    let marker = "PALYRA_E2E_PROJECT_MEMORY_PREFIX";
+    state
+        .upsert_workspace_document(WorkspaceDocumentWriteRequest {
+            document_id: None,
+            principal: context.principal.to_owned(),
+            channel: context.channel.map(str::to_owned),
+            agent_id: None,
+            session_id: Some(context.session_id.to_owned()),
+            path: "projects/e2e/project-memory.md".to_owned(),
+            title: Some("Project Memory".to_owned()),
+            content_text: format!("Project-scoped workspace fact: {marker}"),
+            template_id: None,
+            template_version: None,
+            template_content_hash: None,
+            source_memory_id: None,
+            manual_override: false,
+        })
+        .await
+        .expect("workspace document should be indexed");
+    state
+        .upsert_workspace_document(WorkspaceDocumentWriteRequest {
+            document_id: None,
+            principal: context.principal.to_owned(),
+            channel: context.channel.map(str::to_owned),
+            agent_id: None,
+            session_id: Some(context.session_id.to_owned()),
+            path: "projects/other/project-memory.md".to_owned(),
+            title: Some("Other Project Memory".to_owned()),
+            content_text: format!("Other workspace project should not leak: {marker}"),
+            template_id: None,
+            template_version: None,
+            template_content_hash: None,
+            source_memory_id: None,
+            manual_override: false,
+        })
+        .await
+        .expect("workspace noise document should be indexed");
+
+    let outcome = execute_memory_search_tool(
+        &state,
+        context.principal,
+        context.channel,
+        context.session_id,
+        "01ARZ3NDEKTSV4RRFFQ69G5FD8",
+        br#"{"query":"PALYRA_E2E_PROJECT_MEMORY_PREFIX","scope":"workspace","workspace_prefix":"projects/e2e","top_k":4,"min_score":0.0}"#,
+    )
+    .await;
+
+    assert!(outcome.success, "workspace search tool should succeed: {}", outcome.error);
+    let payload = parse_tool_output_json(&outcome);
+    assert_eq!(payload.get("scope").and_then(Value::as_str), Some("workspace"));
+    assert_eq!(payload.get("workspace_prefix").and_then(Value::as_str), Some("projects/e2e"));
+    let hits =
+        payload.get("hits").and_then(Value::as_array).expect("search output should include hits");
+    assert!(
+        hits.iter().any(|hit| {
+            hit.pointer("/document/path").and_then(Value::as_str)
+                == Some("projects/e2e/project-memory.md")
+        }),
+        "workspace-scope search should surface matching project-prefix document: {payload}"
+    );
+    assert!(
+        hits.iter().all(|hit| {
+            hit.pointer("/document/path").and_then(Value::as_str)
+                != Some("projects/other/project-memory.md")
+        }),
+        "workspace-scope search must honor project prefix boundaries: {payload}"
     );
 }
 

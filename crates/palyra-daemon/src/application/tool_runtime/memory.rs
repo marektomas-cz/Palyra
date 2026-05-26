@@ -25,6 +25,7 @@ use crate::{
     journal::{
         MemoryItemLifecycleUpdateRequest, MemoryItemRecord, MemorySearchHit, MemorySearchRequest,
         MemorySource, SessionSearchOutcome, SessionSearchRequest, WorkspaceSearchHit,
+        WorkspaceSearchRequest,
     },
     tool_protocol::{ToolAttestation, ToolExecutionOutcome},
     transport::grpc::auth::RequestContext,
@@ -836,8 +837,102 @@ pub(crate) async fn execute_memory_search_tool(
         );
     }
 
-    let scope = parsed.get("scope").and_then(Value::as_str).unwrap_or("session");
-    let (channel_scope, session_scope, resource) = match scope {
+    let min_score = parsed.get("min_score").and_then(Value::as_f64).unwrap_or(0.0);
+    if !min_score.is_finite() || !(0.0..=1.0).contains(&min_score) {
+        return memory_tool_execution_outcome(
+            attestation_namespace,
+            proposal_id,
+            input_json,
+            false,
+            b"{}".to_vec(),
+            "palyra.memory.search min_score must be in range 0.0..=1.0".to_owned(),
+        );
+    }
+    let top_k = parsed
+        .get("top_k")
+        .and_then(Value::as_u64)
+        .map(|value| (value as usize).clamp(1, MAX_MEMORY_SEARCH_TOP_K))
+        .unwrap_or(8);
+
+    let scope = parsed
+        .get("scope")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_else(|| "session".to_owned());
+    if matches!(scope.as_str(), "workspace" | "project") {
+        if let Err(error) = authorize_memory_action(principal, "memory.search", "memory:workspace")
+        {
+            return memory_tool_execution_outcome(
+                attestation_namespace,
+                proposal_id,
+                input_json,
+                false,
+                b"{}".to_vec(),
+                format!("memory policy denied tool workspace search request: {}", error.message()),
+            );
+        }
+        let workspace_prefix = optional_trimmed_string(parsed.get("workspace_prefix"))
+            .or_else(|| optional_trimmed_string(parsed.get("prefix")));
+        let search_hits = match runtime_state
+            .search_workspace_documents(WorkspaceSearchRequest {
+                principal: principal.to_owned(),
+                channel: channel.map(str::to_owned),
+                agent_id: optional_trimmed_string(parsed.get("agent_id")),
+                query,
+                prefix: workspace_prefix.clone(),
+                top_k,
+                min_score,
+                include_historical: parsed
+                    .get("include_workspace_historical")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                include_quarantined: parsed
+                    .get("include_workspace_quarantined")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            })
+            .await
+        {
+            Ok(hits) => hits,
+            Err(error) => {
+                return memory_tool_execution_outcome(
+                    attestation_namespace,
+                    proposal_id,
+                    input_json,
+                    false,
+                    b"{}".to_vec(),
+                    format!("palyra.memory.search workspace search failed: {}", error.message()),
+                );
+            }
+        };
+        let mut payload = workspace_search_tool_output_payload(search_hits.as_slice());
+        if let Some(object) = payload.as_object_mut() {
+            object.insert("scope".to_owned(), json!(scope));
+            object.insert("workspace_prefix".to_owned(), json!(workspace_prefix));
+        }
+        return match serde_json::to_vec(&payload) {
+            Ok(output_json) => memory_tool_execution_outcome(
+                attestation_namespace,
+                proposal_id,
+                input_json,
+                true,
+                output_json,
+                String::new(),
+            ),
+            Err(error) => memory_tool_execution_outcome(
+                attestation_namespace,
+                proposal_id,
+                input_json,
+                false,
+                b"{}".to_vec(),
+                format!("palyra.memory.search failed to serialize workspace output: {error}"),
+            ),
+        };
+    }
+
+    let (channel_scope, session_scope, resource) = match scope.as_str() {
         "principal" => (channel.map(str::to_owned), None, "memory:principal".to_owned()),
         "channel" => {
             let Some(channel) = channel.map(str::to_owned) else {
@@ -866,7 +961,8 @@ pub(crate) async fn execute_memory_search_tool(
                 input_json,
                 false,
                 b"{}".to_vec(),
-                "palyra.memory.search scope must be one of: session|channel|principal".to_owned(),
+                "palyra.memory.search scope must be one of: session|channel|principal|workspace|project"
+                    .to_owned(),
             );
         }
     };
@@ -882,22 +978,6 @@ pub(crate) async fn execute_memory_search_tool(
         );
     }
 
-    let min_score = parsed.get("min_score").and_then(Value::as_f64).unwrap_or(0.0);
-    if !min_score.is_finite() || !(0.0..=1.0).contains(&min_score) {
-        return memory_tool_execution_outcome(
-            attestation_namespace,
-            proposal_id,
-            input_json,
-            false,
-            b"{}".to_vec(),
-            "palyra.memory.search min_score must be in range 0.0..=1.0".to_owned(),
-        );
-    }
-    let top_k = parsed
-        .get("top_k")
-        .and_then(Value::as_u64)
-        .map(|value| (value as usize).clamp(1, MAX_MEMORY_SEARCH_TOP_K))
-        .unwrap_or(8);
     let tags = match parsed.get("tags") {
         Some(Value::Array(values)) => {
             if values.len() > MAX_MEMORY_TOOL_TAGS {
