@@ -232,11 +232,12 @@ pub(crate) async fn run_cron_async(command: CronCommand) -> Result<()> {
                 output::print_json_pretty(&payload, "failed to encode cron run-now output as JSON")
             } else {
                 println!(
-                    "cron.run_now id={} run_id={} status={} message={}",
+                    "cron.run_now id={} run_id={} status={} session_key={} message={}",
                     id,
                     json_optional_string_at(&payload, "/run_id").unwrap_or_default(),
                     json_optional_string_at(&payload, "/status")
                         .unwrap_or_else(|| "unknown".to_owned()),
+                    cron_run_session_key(&payload).unwrap_or_else(|| "none".to_owned()),
                     json_optional_string_at(&payload, "/message").unwrap_or_default(),
                 );
                 std::io::stdout().flush().context("stdout flush failed")
@@ -659,9 +660,10 @@ fn emit_cron_runs(id: &str, payload: &Value, json: bool) -> Result<()> {
     );
     for run in runs {
         println!(
-            "cron.run run_id={} status={} workdir={} started_at_ms={} finished_at_ms={} tool_calls={} tool_denies={}",
+            "cron.run run_id={} status={} session_key={} workdir={} started_at_ms={} finished_at_ms={} tool_calls={} tool_denies={}",
             json_optional_string_at(run, "/run_id").unwrap_or_else(|| "unknown".to_owned()),
             json_optional_string_at(run, "/status").unwrap_or_else(|| "unknown".to_owned()),
+            cron_run_session_key(run).unwrap_or_else(|| "none".to_owned()),
             json_optional_string_at(run, "/trigger_payload/workdir")
                 .or_else(|| json_optional_string_at(run, "/workdir"))
                 .unwrap_or_else(|| "none".to_owned()),
@@ -672,6 +674,11 @@ fn emit_cron_runs(id: &str, payload: &Value, json: bool) -> Result<()> {
         );
     }
     std::io::stdout().flush().context("stdout flush failed")
+}
+
+fn cron_run_session_key(run: &Value) -> Option<String> {
+    json_optional_string_at(run, "/session_key")
+        .or_else(|| json_optional_string_at(run, "/output_lookup/session_key"))
 }
 
 fn schedule_routine_array(payload: &Value) -> &[Value] {
@@ -828,7 +835,7 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        build_schedule_routine_payload, cron_mutation_json_payload,
+        build_schedule_routine_payload, cron_mutation_json_payload, cron_run_session_key,
         cron_update_only_changes_enabled, ScheduleRoutineConfig,
     };
     use crate::cli::{
@@ -1024,5 +1031,18 @@ mod tests {
             output.pointer("/approval/approval_id").and_then(serde_json::Value::as_str),
             Some("01APPROVAL")
         );
+    }
+
+    #[test]
+    fn cron_run_session_key_reads_top_level_and_lookup_key() {
+        let top_level = json!({ "session_key": "cron:daily:run-1" });
+        assert_eq!(cron_run_session_key(&top_level).as_deref(), Some("cron:daily:run-1"));
+
+        let lookup = json!({
+            "output_lookup": {
+                "session_key": "cron:daily:run-2"
+            }
+        });
+        assert_eq!(cron_run_session_key(&lookup).as_deref(), Some("cron:daily:run-2"));
     }
 }

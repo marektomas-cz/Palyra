@@ -124,6 +124,8 @@ pub struct DispatchOutcome {
     pub run_id: Option<String>,
     pub status: CronRunStatus,
     pub message: String,
+    pub session_key: Option<String>,
+    pub session_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2010,6 +2012,8 @@ async fn prepare_file_watch_dispatch(
             run_id: None,
             status: CronRunStatus::Accepted,
             message: "file watch unchanged; no run dispatched".to_owned(),
+            session_key: None,
+            session_label: None,
         }));
     };
     let event = change.event.clone();
@@ -2168,6 +2172,8 @@ async fn dispatch_job(
                     run_id: None,
                     status: CronRunStatus::Accepted,
                     message: "run queued due to active execution".to_owned(),
+                    session_key: None,
+                    session_label: None,
                 });
             }
             ConcurrencyDecision::QueueAlreadyPresent => {
@@ -2175,6 +2181,8 @@ async fn dispatch_job(
                     run_id: None,
                     status: CronRunStatus::Accepted,
                     message: "run remains queued until active execution completes".to_owned(),
+                    session_key: None,
+                    session_label: None,
                 });
             }
             ConcurrencyDecision::SkipQueueFull => {
@@ -2217,6 +2225,8 @@ async fn dispatch_job(
         })),
         ..options
     };
+    let effective_preview =
+        build_effective_cron_execution_request(state.as_ref(), &job, run_id.as_str(), &options)?;
     state
         .start_cron_run(CronRunStartRequest {
             run_id: run_id.clone(),
@@ -2255,6 +2265,8 @@ async fn dispatch_job(
         } else {
             "scheduled run dispatched".to_owned()
         },
+        session_key: Some(effective_preview.session_key),
+        session_label: Some(effective_preview.session_label),
     })
 }
 
@@ -2292,7 +2304,13 @@ async fn register_terminal(
             session_id: None,
         })
         .await?;
-    Ok(DispatchOutcome { run_id: Some(run_id), status, message: message.to_owned() })
+    Ok(DispatchOutcome {
+        run_id: Some(run_id),
+        status,
+        message: message.to_owned(),
+        session_key: None,
+        session_label: None,
+    })
 }
 
 async fn run_job_with_retries(

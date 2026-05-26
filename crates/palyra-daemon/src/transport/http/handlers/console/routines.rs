@@ -877,11 +877,16 @@ fn routine_output_fields_from_session(
     }
 
     let mut fields = Map::new();
+    fields.insert("session_key".to_owned(), json!(session.session_key.as_str()));
     fields.insert(
         "output_lookup".to_owned(),
         json!({
             "session_id": session_id,
-            "command": format!("palyra sessions show --session-id {session_id} --json"),
+            "session_key": session.session_key.as_str(),
+            "command": format!(
+                "palyra sessions show --session-key {} --json",
+                session.session_key
+            ),
         }),
     );
     if !allow_preview {
@@ -1951,11 +1956,20 @@ async fn dispatch_single_routine(
             })
             .map_err(routine_registry_error_response)?;
     }
+    let output_lookup = outcome.session_key.as_ref().map(|session_key| {
+        json!({
+            "session_key": session_key,
+            "command": format!("palyra sessions show --session-key {session_key} --json"),
+        })
+    });
     Ok(json!({
         "routine_id": routine.metadata.routine_id,
         "run_id": outcome.run_id,
         "status": outcome.status.as_str(),
         "message": outcome.message,
+        "session_key": outcome.session_key,
+        "session_label": outcome.session_label,
+        "output_lookup": output_lookup,
         "dispatch_mode": request.dispatch_mode.as_str(),
         "delivery_preview": routine_delivery_preview(&delivery),
     }))
@@ -3534,11 +3548,19 @@ mod tests {
                 .and_then(|value| value.as_str()),
             Some("01ARZ3NDEKTSV4RRFFQ69G5FAW")
         );
+        assert_eq!(fields.get("session_key").and_then(|value| value.as_str()), Some("cron:daily"));
+        assert_eq!(
+            fields
+                .get("output_lookup")
+                .and_then(|value| value.get("session_key"))
+                .and_then(|value| value.as_str()),
+            Some("cron:daily")
+        );
         assert!(fields
             .get("output_lookup")
             .and_then(|value| value.get("command"))
             .and_then(|value| value.as_str())
-            .is_some_and(|command| command.contains("sessions show --session-id")));
+            .is_some_and(|command| command.contains("sessions show --session-key cron:daily")));
         assert!(
             routine_output_fields_from_session(
                 "01ARZ3NDEKTSV4RRFFQ69G5FAW",
