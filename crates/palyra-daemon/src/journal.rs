@@ -5480,6 +5480,11 @@ impl fmt::Debug for JournalStore {
     }
 }
 
+fn origin_kind_updates_session_last_run(origin_kind: &str) -> bool {
+    let normalized = origin_kind.trim().to_ascii_lowercase();
+    !matches!(normalized.as_str(), "background" | "delegation")
+}
+
 impl JournalStore {
     pub(crate) fn max_payload_bytes(&self) -> usize {
         self.config.max_payload_bytes
@@ -6864,6 +6869,8 @@ impl JournalStore {
         request: &OrchestratorRunStartRequest,
     ) -> Result<(), JournalError> {
         let now = current_unix_ms()?;
+        let updates_session_last_run =
+            origin_kind_updates_session_last_run(request.origin_kind.as_str());
         let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
         match guard.execute(
             r#"
@@ -6906,10 +6913,18 @@ impl JournalStore {
                         UPDATE orchestrator_sessions
                         SET
                             updated_at_unix_ms = ?2,
-                            last_run_ulid = ?3
+                            last_run_ulid = CASE
+                                WHEN ?4 = 1 THEN ?3
+                                ELSE last_run_ulid
+                            END
                         WHERE session_ulid = ?1
                     "#,
-                    params![request.session_id, now, request.run_id],
+                    params![
+                        request.session_id,
+                        now,
+                        request.run_id,
+                        if updates_session_last_run { 1_i64 } else { 0_i64 },
+                    ],
                 )?;
                 append_run_lifecycle_event_tx(
                     &guard,
@@ -20498,6 +20513,66 @@ mod tests {
             replay.record.expect("record should exist").state,
             IdempotencyOperationState::Completed
         );
+    }
+
+    #[test]
+    fn background_and_delegation_runs_do_not_replace_session_last_run() {
+        let db_path = temp_db_path();
+        let store = JournalStore::open(test_journal_config(db_path, false))
+            .expect("journal store should open");
+        let session_id = "01ARZ3NDEKTSV4RRFFQ69G5P03";
+        let foreground_run_id = "01ARZ3NDEKTSV4RRFFQ69G5P04";
+        let background_run_id = "01ARZ3NDEKTSV4RRFFQ69G5P05";
+        let delegation_run_id = "01ARZ3NDEKTSV4RRFFQ69G5P06";
+        store
+            .upsert_orchestrator_session(&OrchestratorSessionUpsertRequest {
+                session_id: session_id.to_owned(),
+                session_key: "session:last-run-foreground".to_owned(),
+                session_label: Some("Last run foreground".to_owned()),
+                principal: "user:ops".to_owned(),
+                device_id: "device:local".to_owned(),
+                channel: Some("cli".to_owned()),
+            })
+            .expect("session should be created");
+
+        store
+            .start_orchestrator_run(&OrchestratorRunStartRequest {
+                run_id: foreground_run_id.to_owned(),
+                session_id: session_id.to_owned(),
+                origin_kind: "run_stream".to_owned(),
+                origin_run_id: None,
+                triggered_by_principal: Some("user:ops".to_owned()),
+                parameter_delta_json: None,
+            })
+            .expect("foreground run should start");
+        store
+            .update_orchestrator_run_state(foreground_run_id, RunLifecycleState::Done, None)
+            .expect("foreground run should complete");
+
+        for (run_id, origin_kind) in
+            [(background_run_id, "background"), (delegation_run_id, "delegation")]
+        {
+            store
+                .start_orchestrator_run(&OrchestratorRunStartRequest {
+                    run_id: run_id.to_owned(),
+                    session_id: session_id.to_owned(),
+                    origin_kind: origin_kind.to_owned(),
+                    origin_run_id: Some(foreground_run_id.to_owned()),
+                    triggered_by_principal: Some("user:ops".to_owned()),
+                    parameter_delta_json: None,
+                })
+                .expect("child run should start");
+            store
+                .update_orchestrator_run_state(run_id, RunLifecycleState::Cancelled, None)
+                .expect("child run should cancel");
+        }
+
+        let session = store
+            .orchestrator_session_by_id(session_id)
+            .expect("session lookup should succeed")
+            .expect("session should exist");
+        assert_eq!(session.last_run_id.as_deref(), Some(foreground_run_id));
+        assert_eq!(session.last_run_state.as_deref(), Some(RunLifecycleState::Done.as_str()));
     }
 
     #[test]
