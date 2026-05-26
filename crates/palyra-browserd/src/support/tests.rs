@@ -79,6 +79,12 @@ fn resolve_chromium_path_for_tests() -> Option<PathBuf> {
         .or_else(|| headless_chrome::browser::default_executable().ok())
 }
 
+async fn chromium_integration_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
+    static CHROMIUM_INTEGRATION_TEST_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> =
+        std::sync::OnceLock::new();
+    CHROMIUM_INTEGRATION_TEST_LOCK.get_or_init(|| tokio::sync::Mutex::new(())).lock().await
+}
+
 fn simulated_runtime_for_tests() -> Arc<BrowserRuntimeState> {
     Arc::new(
         BrowserRuntimeState::new(&Args {
@@ -1356,6 +1362,7 @@ async fn browser_service_chromium_engine_executes_real_dom_actions() {
     let Some(chromium_path) = resolve_chromium_path_for_tests() else {
         return;
     };
+    let _guard = chromium_integration_test_guard().await;
     let (url, handle) = spawn_static_http_server_with_request_budget(
             200,
             "<html><head><title>Chromium Fixture</title><script>function markClicked(){document.getElementById('status').textContent='clicked';}function markTyped(value){document.getElementById('typed-status').textContent=value;}</script></head><body><input id='name-input' oninput='markTyped(this.value)' /><button id='submit-btn' onclick='markClicked()'>Submit</button><div id='typed-status'>empty</div><div id='status'>idle</div></body></html>",
@@ -1568,6 +1575,7 @@ async fn browser_service_chromium_captures_blob_download_artifacts() {
     let Some(chromium_path) = resolve_chromium_path_for_tests() else {
         return;
     };
+    let _guard = chromium_integration_test_guard().await;
     let (url, handle) = spawn_static_http_server_with_request_budget(
         200,
         r#"<html><head><title>Blob Download Fixture</title><script>
@@ -1698,6 +1706,7 @@ async fn browser_service_chromium_profile_persistence_restores_local_storage() {
     let Some(chromium_path) = resolve_chromium_path_for_tests() else {
         return;
     };
+    let _guard = chromium_integration_test_guard().await;
     let (url, handle) = spawn_static_http_server_with_request_budget(
         200,
         r#"<html><head><title>Cart Fixture</title><script>
@@ -2114,6 +2123,7 @@ async fn browser_service_chromium_network_log_includes_same_origin_fetch_failure
     let Some(chromium_path) = resolve_chromium_path_for_tests() else {
         return;
     };
+    let _guard = chromium_integration_test_guard().await;
     let runtime = std::sync::Arc::new(
         BrowserRuntimeState::new(&Args {
             bind: "127.0.0.1".to_owned(),
@@ -2219,6 +2229,7 @@ async fn browser_service_chromium_preserves_navigated_private_origin_for_user_fe
     let Some(chromium_path) = resolve_chromium_path_for_tests() else {
         return;
     };
+    let _guard = chromium_integration_test_guard().await;
     let runtime = std::sync::Arc::new(
         BrowserRuntimeState::new(&Args {
             bind: "127.0.0.1".to_owned(),
@@ -2344,6 +2355,7 @@ async fn browser_service_chromium_refreshes_snapshot_before_allowlisted_actions(
     let Some(chromium_path) = resolve_chromium_path_for_tests() else {
         return;
     };
+    let _guard = chromium_integration_test_guard().await;
     let runtime = std::sync::Arc::new(
         BrowserRuntimeState::new(&Args {
             bind: "127.0.0.1".to_owned(),
