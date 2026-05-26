@@ -2340,17 +2340,15 @@ async fn append_parent_spawned_event(
     let Some(parent_run_id) = task.parent_run_id.as_deref() else {
         return Ok(());
     };
-    let delegated_run = build_task_delegated_record(
+    let (delegated_run, graph_explain) = build_optional_delegated_run_context(
         task,
+        parent_run_id,
         Some(child_run_id),
         DelegatedRunState::Running,
         DelegationMergeStatus::NotReady,
         "child_run_spawned",
         "child run spawned through bounded delegation executor",
     )?;
-    let graph_explain =
-        build_delegated_run_graph(parent_run_id.to_owned(), vec![delegated_run.clone()])
-            .explain_json();
     append_parent_tape_event(
         runtime,
         parent_run_id,
@@ -2360,8 +2358,8 @@ async fn append_parent_spawned_event(
             "child_run_id": child_run_id,
             "session_id": task.session_id,
             "delegation": task.delegation,
-            "delegated_run": delegated_run.safe_snapshot_json(),
-            "graph_explain": graph_explain,
+            "delegated_run": delegated_run.clone(),
+            "graph_explain": graph_explain.clone(),
         }),
     )
     .await?;
@@ -2375,7 +2373,7 @@ async fn append_parent_spawned_event(
         json!({
             "legacy_event_type": "child_run_spawned",
             "delegation": task.delegation,
-            "delegated_run": delegated_run.safe_snapshot_json(),
+            "delegated_run": delegated_run,
         }),
     )
     .await
@@ -2718,21 +2716,15 @@ async fn append_child_lifecycle_event(
     let Some(parent_run_id) = task.parent_run_id.as_deref() else {
         return Ok(());
     };
-    let delegated_run = if task.delegation.is_some() {
-        Some(build_task_delegated_record(
-            task,
-            child_run_id,
-            DelegatedRunState::from_child_state(child_state),
-            DelegationMergeStatus::NotReady,
-            event_type,
-            child_state,
-        )?)
-    } else {
-        None
-    };
-    let graph_explain = delegated_run.as_ref().map(|record| {
-        build_delegated_run_graph(parent_run_id.to_owned(), vec![record.clone()]).explain_json()
-    });
+    let (delegated_run, graph_explain) = build_optional_delegated_run_context(
+        task,
+        parent_run_id,
+        child_run_id,
+        DelegatedRunState::from_child_state(child_state),
+        DelegationMergeStatus::NotReady,
+        event_type,
+        child_state,
+    )?;
     append_parent_tape_event(
         runtime,
         parent_run_id,
@@ -2744,13 +2736,33 @@ async fn append_child_lifecycle_event(
             "child_state": child_state,
             "user_visible": user_visible,
             "delegation": task.delegation,
-            "delegated_run": delegated_run.as_ref().map(|record| record.safe_snapshot_json()),
+            "delegated_run": delegated_run,
             "graph_explain": graph_explain,
             "observed_at_unix_ms": crate::gateway::current_unix_ms(),
             "details": details,
         }),
     )
     .await
+}
+
+fn build_optional_delegated_run_context(
+    task: &OrchestratorBackgroundTaskRecord,
+    parent_run_id: &str,
+    child_run_id: Option<&str>,
+    state: DelegatedRunState,
+    merge_status: DelegationMergeStatus,
+    event_type: &str,
+    reason: &str,
+) -> Result<(Option<Value>, Option<Value>), Status> {
+    if task.delegation.is_none() {
+        return Ok((None, None));
+    }
+    let delegated_run =
+        build_task_delegated_record(task, child_run_id, state, merge_status, event_type, reason)?;
+    let graph_explain =
+        build_delegated_run_graph(parent_run_id.to_owned(), vec![delegated_run.clone()])
+            .explain_json();
+    Ok((Some(delegated_run.safe_snapshot_json()), Some(graph_explain)))
 }
 
 async fn append_parent_tape_event(
@@ -2919,8 +2931,8 @@ fn is_terminal_run_state(state: &str) -> bool {
 mod tests {
     use super::{
         append_artifact_references, build_background_task_child_run_attach_update,
-        build_background_task_running_update, categorize_child_failure,
-        child_merge_lifecycle_details, delegated_child_timeout_message,
+        build_background_task_running_update, build_optional_delegated_run_context,
+        categorize_child_failure, child_merge_lifecycle_details, delegated_child_timeout_message,
         evaluate_delegation_scheduler_limits, inject_background_metadata,
         parent_merge_event_payload, replace_background_task_snapshot,
         running_delegated_children_for_parent, running_task_should_wait_for_in_flight_work,
@@ -2931,8 +2943,9 @@ mod tests {
     use crate::{
         application::delivery_arbitration::{DeliveryDecision, DeliveryDecisionAction},
         delegation::{
-            DelegationExecutionMode, DelegationMemoryScopeKind, DelegationMergeApprovalSummary,
-            DelegationMergeContract, DelegationMergeFailureCategory, DelegationMergeResult,
+            DelegatedRunState, DelegationExecutionMode, DelegationMemoryScopeKind,
+            DelegationMergeApprovalSummary, DelegationMergeContract,
+            DelegationMergeFailureCategory, DelegationMergeResult, DelegationMergeStatus,
             DelegationMergeStrategy, DelegationMergeUsageSummary, DelegationRole,
             DelegationRuntimeLimits, DelegationSnapshot,
         },
@@ -3110,6 +3123,33 @@ mod tests {
             budget.record_scheduled_heartbeat(),
             ChildLifecycleTapeDecision::Suppress
         ));
+    }
+
+    #[test]
+    fn non_delegated_background_tasks_do_not_require_delegation_records() {
+        let mut task = sample_task(
+            "task-1",
+            AuxiliaryTaskState::Running.as_str(),
+            100,
+            "group-a",
+            DelegationRuntimeLimits::default(),
+        );
+        task.task_kind = "background_prompt".to_owned();
+        task.delegation = None;
+
+        let (delegated_run, graph_explain) = build_optional_delegated_run_context(
+            &task,
+            "parent-run",
+            Some("child-run"),
+            DelegatedRunState::Running,
+            DelegationMergeStatus::NotReady,
+            "child_run_spawned",
+            "child run spawned",
+        )
+        .expect("plain background prompts should not require delegation metadata");
+
+        assert!(delegated_run.is_none());
+        assert!(graph_explain.is_none());
     }
 
     #[test]
