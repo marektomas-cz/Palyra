@@ -887,6 +887,21 @@ pub(crate) async fn process_run_stream_message(
     let mut repeated_tool_failure_tracker = RepeatedToolFailureTracker::default();
 
     loop {
+        match runtime_state.is_orchestrator_cancel_requested(run_id.clone()).await {
+            Ok(true) => {
+                transition_run_stream_to_cancelled(
+                    sender,
+                    runtime_state,
+                    run_state,
+                    run_id.as_str(),
+                    tape_seq,
+                )
+                .await?;
+                return Ok(RunStreamMessageProcessingOutcome::Terminate);
+            }
+            Ok(false) => {}
+            Err(error) => return Err(error),
+        }
         let _turn_id = match loop_state.start_model_turn() {
             Ok(turn_id) => turn_id,
             Err(reason) => {

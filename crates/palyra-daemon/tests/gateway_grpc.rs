@@ -8582,6 +8582,13 @@ async fn grpc_run_stream_admin_cancel_preempts_inflight_provider_call() -> Resul
             }
         }
     }
+    let provider_wait_deadline = Instant::now() + Duration::from_secs(2);
+    while request_count.load(Ordering::Relaxed) == 0 {
+        if Instant::now() > provider_wait_deadline {
+            anyhow::bail!("run stream did not start the provider call before cancellation");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 
     let cancel_started_at = Instant::now();
     let cancel_snapshot = admin_post_json_async(
