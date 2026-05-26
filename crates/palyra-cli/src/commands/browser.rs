@@ -1321,15 +1321,21 @@ async fn run_browser_open(args: BrowserOpenArgs) -> Result<()> {
         .context("failed to navigate browser session")?;
     let navigate_success = navigate.success;
     let navigate_error = navigate.error.clone();
-    let payload = browser_open_output_value(session_id.as_str(), &create, &navigate);
+    let cleanup = if navigate_success {
+        None
+    } else {
+        Some(browser_open_cleanup_session(&context.client, session_id.as_str()).await)
+    };
+    let payload = browser_open_output_value(session_id.as_str(), &create, &navigate, cleanup);
     emit_browser_value_with_json(
         &payload,
         format!(
-            "browser.open session_id={} success={} final_url={} status_code={}",
+            "browser.open session_id={} success={} final_url={} status_code={} cleanup={}",
             browser_session_handle_text(Some(session_id.as_str())),
             payload.pointer("/navigate/success").and_then(Value::as_bool).unwrap_or(false),
             payload.pointer("/navigate/final_url").and_then(Value::as_str).unwrap_or("-"),
-            payload.pointer("/navigate/status_code").and_then(Value::as_u64).unwrap_or(0)
+            payload.pointer("/navigate/status_code").and_then(Value::as_u64).unwrap_or(0),
+            browser_open_cleanup_status_text(payload.get("cleanup"))
         ),
         "failed to encode browser open output",
         json,
@@ -1337,16 +1343,50 @@ async fn run_browser_open(args: BrowserOpenArgs) -> Result<()> {
     ensure_browser_command_success("browser.open", navigate_success, navigate_error.as_str())
 }
 
+async fn browser_open_cleanup_session(
+    client: &control_plane::ControlPlaneClient,
+    session_id: &str,
+) -> Value {
+    match client.close_browser_session(session_id).await {
+        Ok(envelope) => json!({
+            "attempted": true,
+            "closed": envelope.closed,
+            "reason": envelope.reason,
+        }),
+        Err(error) => json!({
+            "attempted": true,
+            "closed": false,
+            "error": error.to_string(),
+        }),
+    }
+}
+
 fn browser_open_output_value(
     session_id: &str,
     session: &control_plane::BrowserSessionCreateEnvelope,
     navigate: &control_plane::BrowserNavigateEnvelope,
+    cleanup: Option<Value>,
 ) -> Value {
-    json!({
+    let mut value = json!({
         "session_id": session_id,
         "session": session,
         "navigate": navigate,
-    })
+    });
+    if let Some(cleanup) = cleanup {
+        value["cleanup"] = cleanup;
+    }
+    value
+}
+
+fn browser_open_cleanup_status_text(cleanup: Option<&Value>) -> &'static str {
+    let Some(cleanup) = cleanup else {
+        return "not_needed";
+    };
+    if cleanup.get("closed").and_then(Value::as_bool).unwrap_or(false) {
+        "closed"
+    } else {
+        "failed"
+    }
 }
 
 async fn run_browser_session_command(command: BrowserSessionCommand) -> Result<()> {
@@ -4841,7 +4881,7 @@ mod tests {
     use super::{
         browser_command_payload_should_emit, browser_command_policy_action,
         browser_control_plane_request_timeout, browser_failure_detail,
-        browser_identifier_json_value, browser_open_output_value,
+        browser_identifier_json_value, browser_open_cleanup_status_text, browser_open_output_value,
         browser_service_auth_token_command, browser_service_enable_command,
         browser_service_stop_complete, browser_service_stop_pending_reasons,
         browser_session_handle_text, browser_setup_gateway_reload_warning,
@@ -5025,6 +5065,23 @@ mod tests {
         assert!(
             error.to_string().contains("browser.screenshot failed: tab crashed"),
             "failure should include command and browser service error: {error}"
+        );
+    }
+
+    #[test]
+    fn browser_open_cleanup_status_summarizes_best_effort_close() {
+        assert_eq!(browser_open_cleanup_status_text(None), "not_needed");
+        assert_eq!(
+            browser_open_cleanup_status_text(Some(&json!({"attempted": true, "closed": true}))),
+            "closed"
+        );
+        assert_eq!(
+            browser_open_cleanup_status_text(Some(&json!({
+                "attempted": true,
+                "closed": false,
+                "error": "close failed"
+            }))),
+            "failed"
         );
     }
 
@@ -5252,7 +5309,7 @@ mod tests {
             error: String::new(),
         };
 
-        let value = browser_open_output_value(session_id, &session, &navigate);
+        let value = browser_open_output_value(session_id, &session, &navigate, None);
 
         assert_eq!(value.get("session_id").and_then(Value::as_str), Some(session_id));
         assert_eq!(value.pointer("/session/session_id").and_then(Value::as_str), Some(session_id));
