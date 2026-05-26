@@ -2,19 +2,20 @@ use super::{
     action_log_entry_to_proto, browser_v1, build_accessibility_tree_snapshot, build_dom_snapshot,
     chromium_active_tab_for_session, chromium_new_tab_error_is_retryable,
     default_browserd_state_dir_from_env, derive_state_encryption_key, encrypt_state_blob,
-    enforce_non_loopback_bind_auth, navigate_with_guards, parse_daemon_bind_socket,
-    persisted_snapshot_hash, persisted_snapshot_legacy_hash, record_chromium_remote_ip_incident,
-    reset_dns_validation_tracking_for_tests, run_chromium_blocking, sha256_hex,
-    store_dns_nxdomain_cache, store_generated_artifact, update_profile_state_metadata,
-    validate_restored_snapshot_against_profile, validate_target_url, validate_target_url_blocking,
-    Args, BrowserActionLogEntryInternal, BrowserEngineMode, BrowserProfileRecord,
-    BrowserRuntimeState, BrowserServiceImpl, BrowserTabRecord, ChromiumPrivateTargetPolicy,
-    ChromiumSessionProxy, DnsValidationCache, NetworkLogEntryInternal, NetworkLogHeaderInternal,
-    PersistedSessionSnapshot, PersistedStateStore, SessionPermissionsInternal,
-    AUTHORIZATION_HEADER, CANONICAL_PROTOCOL_MAJOR, CHROMIUM_NEW_TAB_RETRY_DELAY_MS,
-    CHROMIUM_PATH_ENV, DEFAULT_CHROMIUM_STARTUP_TIMEOUT_MS, DEFAULT_GRPC_PORT,
-    DEFAULT_MAX_TABS_PER_SESSION, DOWNLOAD_MAX_FILE_BYTES, MAX_RELAY_PAYLOAD_BYTES, ONE_BY_ONE_PNG,
-    PRINCIPAL_HEADER, PROFILE_RECORD_SCHEMA_VERSION, STATE_KEY_LEN,
+    enforce_non_loopback_bind_auth, fetch_http_attachment_download_artifact, navigate_with_guards,
+    parse_daemon_bind_socket, persisted_snapshot_hash, persisted_snapshot_legacy_hash,
+    record_chromium_remote_ip_incident, reset_dns_validation_tracking_for_tests,
+    run_chromium_blocking, sha256_hex, store_dns_nxdomain_cache, store_generated_artifact,
+    update_profile_state_metadata, validate_restored_snapshot_against_profile, validate_target_url,
+    validate_target_url_blocking, Args, BrowserActionLogEntryInternal, BrowserEngineMode,
+    BrowserProfileRecord, BrowserRuntimeState, BrowserServiceImpl, BrowserTabRecord,
+    ChromiumPrivateTargetPolicy, ChromiumSessionProxy, DnsValidationCache, NetworkLogEntryInternal,
+    NetworkLogHeaderInternal, PersistedSessionSnapshot, PersistedStateStore,
+    SessionPermissionsInternal, AUTHORIZATION_HEADER, CANONICAL_PROTOCOL_MAJOR,
+    CHROMIUM_NEW_TAB_RETRY_DELAY_MS, CHROMIUM_PATH_ENV, DEFAULT_CHROMIUM_STARTUP_TIMEOUT_MS,
+    DEFAULT_GRPC_PORT, DEFAULT_MAX_TABS_PER_SESSION, DOWNLOAD_MAX_FILE_BYTES,
+    MAX_RELAY_PAYLOAD_BYTES, ONE_BY_ONE_PNG, PRINCIPAL_HEADER, PROFILE_RECORD_SCHEMA_VERSION,
+    STATE_KEY_LEN,
 };
 use crate::proto;
 use crate::proto::palyra::browser::v1::browser_service_server::BrowserService;
@@ -312,6 +313,73 @@ async fn browser_service_get_download_artifact_returns_content() {
         fetched.artifact.and_then(|artifact| artifact.artifact_id).map(|id| id.ulid),
         Some(artifact.artifact_id)
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn browser_service_captures_http_attachment_download_artifact() {
+    let runtime = simulated_runtime_for_tests();
+    let service = BrowserServiceImpl { runtime: Arc::clone(&runtime) };
+    let created = service
+        .create_session(Request::new(browser_v1::CreateSessionRequest {
+            v: 1,
+            principal: "user:ops".to_owned(),
+            idle_ttl_ms: 10_000,
+            budget: None,
+            allow_private_targets: true,
+            allow_downloads: true,
+            action_allowed_domains: Vec::new(),
+            persistence_enabled: false,
+            persistence_id: String::new(),
+            profile_id: None,
+            private_profile: false,
+            channel: String::new(),
+        }))
+        .await
+        .expect("create_session should succeed")
+        .into_inner();
+    let session_id = created
+        .session_id
+        .as_ref()
+        .map(|value| value.ulid.clone())
+        .expect("session id should be present");
+
+    let (url, handle) = spawn_attachment_fixture_http_server(
+        "/export",
+        "attachment; filename=\"palyra-orders-export.csv\"",
+        "text/csv",
+        b"sku,name,quantity,price\nPAL-1,Palyra mug,1,12.00\n",
+    );
+    let artifact = fetch_http_attachment_download_artifact(
+        runtime.as_ref(),
+        session_id.as_str(),
+        None,
+        url.as_str(),
+        "export",
+        true,
+        2_000,
+    )
+    .await
+    .expect("attachment fetch should execute")
+    .expect("attachment response should be captured");
+    assert_eq!(artifact.file_name, "palyra-orders-export.csv");
+    assert_eq!(artifact.mime_type, "text/csv");
+    assert!(!artifact.quarantined);
+
+    let mut list_request = Request::new(browser_v1::ListDownloadArtifactsRequest {
+        v: 1,
+        session_id: Some(proto::palyra::common::v1::CanonicalId { ulid: session_id }),
+        limit: 10,
+        quarantined_only: false,
+    });
+    insert_principal(&mut list_request, "user:ops");
+    let listed = service
+        .list_download_artifacts(list_request)
+        .await
+        .expect("list_download_artifacts should execute")
+        .into_inner();
+    assert_eq!(listed.artifacts.len(), 1);
+    assert_eq!(listed.artifacts[0].file_name, "palyra-orders-export.csv");
+    handle.join().expect("attachment server thread should exit");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -6260,6 +6328,41 @@ fn spawn_download_fixture_http_server(
         }
     });
     (format!("http://{address}/"), handle)
+}
+
+fn spawn_attachment_fixture_http_server(
+    file_path: &str,
+    content_disposition: &str,
+    file_content_type: &str,
+    file_body: &[u8],
+) -> (String, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let address = listener.local_addr().expect("listener local address should resolve");
+    let file_path = file_path.to_owned();
+    let url_path = file_path.clone();
+    let content_disposition = content_disposition.to_owned();
+    let file_content_type = file_content_type.to_owned();
+    let file_body = file_body.to_vec();
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("listener should accept request");
+        let request = read_http_request(&mut stream);
+        let path = http_request_path(request.as_str());
+        if path == file_path {
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {file_content_type}\r\nContent-Disposition: {content_disposition}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                file_body.len()
+            );
+            stream.write_all(headers.as_bytes()).expect("server should write file headers");
+            stream.write_all(file_body.as_slice()).expect("server should write file body");
+            stream.flush().expect("server should flush file response");
+            return;
+        }
+        let response =
+            "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: 9\r\nConnection: close\r\n\r\nnot found";
+        stream.write_all(response.as_bytes()).expect("server should write 404 response");
+        stream.flush().expect("server should flush 404 response");
+    });
+    (format!("http://{address}{url_path}"), handle)
 }
 
 fn spawn_streaming_download_fixture_http_server(

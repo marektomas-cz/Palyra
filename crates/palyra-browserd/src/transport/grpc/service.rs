@@ -67,6 +67,99 @@ fn request_timeout_ms(requested: u64, session_limit: u64) -> u64 {
     }
 }
 
+fn navigation_error_may_be_download_abort(error: &str) -> bool {
+    let normalized = error.to_ascii_lowercase();
+    normalized.contains("err_aborted") || normalized.contains("net::err_aborted")
+}
+
+fn http_attachment_candidate_from_network_entry(
+    entry: &NetworkLogEntryInternal,
+) -> Option<(String, String)> {
+    if !(200..400).contains(&entry.status_code) {
+        return None;
+    }
+    let content_disposition = entry
+        .headers
+        .iter()
+        .find(|header| header.name.eq_ignore_ascii_case("content-disposition"))
+        .map(|header| header.value.as_str())?;
+    if !content_disposition_is_attachment(content_disposition) {
+        return None;
+    }
+    let file_name = content_disposition_attachment_file_name(content_disposition)
+        .unwrap_or_else(|| infer_download_file_name(entry.request_url.as_str()));
+    Some((entry.request_url.clone(), file_name))
+}
+
+async fn capture_latest_http_attachment_from_network_log(
+    runtime: &BrowserRuntimeState,
+    session_id: &str,
+    profile_id: Option<&str>,
+    allow_private_targets: bool,
+    timeout_ms: u64,
+) -> Result<Option<DownloadArtifactRecord>, String> {
+    let candidate = {
+        let sessions = runtime.sessions.lock().await;
+        let Some(session) = sessions.get(session_id) else {
+            return Err("session_not_found".to_owned());
+        };
+        session.active_tab().and_then(|tab| {
+            tab.network_log.iter().rev().find_map(http_attachment_candidate_from_network_entry)
+        })
+    };
+    let Some((source_url, file_name)) = candidate else {
+        return Ok(None);
+    };
+    fetch_http_attachment_download_artifact(
+        runtime,
+        session_id,
+        profile_id,
+        source_url.as_str(),
+        file_name.as_str(),
+        allow_private_targets,
+        timeout_ms,
+    )
+    .await
+}
+
+async fn store_chromium_captured_downloads(
+    runtime: &BrowserRuntimeState,
+    session_id: &str,
+    profile_id: Option<&str>,
+) -> Result<Option<DownloadArtifactRecord>, String> {
+    let active_tab_id = {
+        let sessions = runtime.sessions.lock().await;
+        sessions.get(session_id).map(|session| session.active_tab_id.clone())
+    };
+    let Some(active_tab_id) = active_tab_id else {
+        return Ok(None);
+    };
+    let downloads =
+        chromium_drain_client_downloads(runtime, session_id, active_tab_id.as_str()).await?;
+    let mut first_record = None;
+    for download in downloads {
+        let mime_type = sniff_download_mime_type(
+            (!download.mime_type.trim().is_empty()).then_some(download.mime_type.as_str()),
+            download.file_name.as_str(),
+            download.content.as_slice(),
+        );
+        let record = store_generated_artifact(
+            runtime,
+            session_id,
+            profile_id,
+            download.source_url.as_str(),
+            download.file_name.as_str(),
+            mime_type.as_str(),
+            download.content.as_slice(),
+        )
+        .await?;
+        if first_record.is_none() {
+            first_record = Some(record);
+        }
+    }
+    Ok(first_record)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ObserveInclusions {
     include_dom_snapshot: bool,
@@ -1064,7 +1157,15 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
             return Err(Status::invalid_argument("navigate requires non-empty url"));
         }
         let started_at_unix_ms = current_unix_ms();
-        let (timeout_ms, max_response_bytes, allow_private_targets, cookie_header) = {
+        let (
+            timeout_ms,
+            max_response_bytes,
+            allow_private_targets,
+            cookie_header,
+            allow_downloads,
+            profile_id,
+            private_profile,
+        ) = {
             let mut sessions = self.runtime.sessions.lock().await;
             let Some(session) = sessions.get_mut(session_id.as_str()) else {
                 return Err(Status::not_found("browser session not found"));
@@ -1078,10 +1179,13 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
                 session.budget.max_response_bytes,
                 payload.allow_private_targets || session.allow_private_targets,
                 cookie_header,
+                session.allow_downloads,
+                session.profile_id.clone(),
+                session.private_profile,
             )
         };
 
-        let outcome = match self.runtime.engine_mode {
+        let mut outcome = match self.runtime.engine_mode {
             BrowserEngineMode::Simulated => {
                 navigate_with_guards(
                     url.as_str(),
@@ -1115,6 +1219,71 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
                 .await
             }
         };
+        let captured_download = if allow_downloads
+            && matches!(self.runtime.engine_mode, BrowserEngineMode::Chromium)
+        {
+            match store_chromium_captured_downloads(
+                self.runtime.as_ref(),
+                session_id.as_str(),
+                if private_profile { None } else { profile_id.as_deref() },
+            )
+            .await
+            {
+                Ok(record) => record,
+                Err(download_error) => {
+                    if navigation_error_may_be_download_abort(outcome.error.as_str()) {
+                        outcome.error =
+                            format!("{}; download capture failed: {download_error}", outcome.error);
+                    }
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        if let Some(record) = captured_download {
+            if !outcome.success && navigation_error_may_be_download_abort(outcome.error.as_str()) {
+                outcome.success = true;
+                outcome.final_url = record.source_url.clone();
+                outcome.status_code = 200;
+                outcome.title.clear();
+                outcome.page_body.clear();
+                outcome.body_bytes = record.size_bytes;
+                outcome.error.clear();
+            }
+        }
+        if !outcome.success
+            && allow_downloads
+            && navigation_error_may_be_download_abort(outcome.error.as_str())
+        {
+            let fallback_file_name = infer_download_file_name(url.as_str());
+            match fetch_http_attachment_download_artifact(
+                self.runtime.as_ref(),
+                session_id.as_str(),
+                if private_profile { None } else { profile_id.as_deref() },
+                url.as_str(),
+                fallback_file_name.as_str(),
+                allow_private_targets,
+                timeout_ms,
+            )
+            .await
+            {
+                Ok(Some(record)) => {
+                    outcome.success = true;
+                    outcome.final_url = record.source_url.clone();
+                    outcome.status_code = 200;
+                    outcome.title.clear();
+                    outcome.page_body.clear();
+                    outcome.body_bytes = record.size_bytes;
+                    outcome.error.clear();
+                }
+                Ok(None) => {}
+                Err(download_error) => {
+                    outcome.error =
+                        format!("{}; download capture failed: {download_error}", outcome.error);
+                }
+            }
+        }
         let network_log_entries = outcome.network_log.clone();
         let cookie_updates = outcome.cookie_updates.clone();
         let mut session_for_persist = None;
@@ -1290,65 +1459,26 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
             && context.allow_downloads
             && matches!(self.runtime.engine_mode, BrowserEngineMode::Chromium)
         {
-            let active_tab_id = {
-                let sessions = self.runtime.sessions.lock().await;
-                sessions.get(session_id.as_str()).map(|session| session.active_tab_id.clone())
-            };
-            if let Some(active_tab_id) = active_tab_id {
-                match chromium_drain_client_downloads(
-                    self.runtime.as_ref(),
-                    session_id.as_str(),
-                    active_tab_id.as_str(),
-                )
-                .await
-                {
-                    Ok(downloads) => {
-                        for download in downloads {
-                            let mime_type = sniff_download_mime_type(
-                                (!download.mime_type.trim().is_empty())
-                                    .then_some(download.mime_type.as_str()),
-                                download.file_name.as_str(),
-                                download.content.as_slice(),
-                            );
-                            match store_generated_artifact(
-                                self.runtime.as_ref(),
-                                session_id.as_str(),
-                                if context.private_profile {
-                                    None
-                                } else {
-                                    context.profile_id.as_deref()
-                                },
-                                download.source_url.as_str(),
-                                download.file_name.as_str(),
-                                mime_type.as_str(),
-                                download.content.as_slice(),
-                            )
-                            .await
-                            {
-                                Ok(record) => {
-                                    if record.quarantined {
-                                        outcome = "download_quarantined".to_owned();
-                                    } else {
-                                        outcome = "download_allowed".to_owned();
-                                    }
-                                    if artifact.is_none() {
-                                        artifact = Some(download_artifact_to_proto(&record));
-                                    }
-                                }
-                                Err(download_error) => {
-                                    success = false;
-                                    outcome = "download_failed".to_owned();
-                                    error = download_error;
-                                    break;
-                                }
-                            }
-                        }
+            match store_chromium_captured_downloads(
+                self.runtime.as_ref(),
+                session_id.as_str(),
+                if context.private_profile { None } else { context.profile_id.as_deref() },
+            )
+            .await
+            {
+                Ok(Some(record)) => {
+                    if record.quarantined {
+                        outcome = "download_quarantined".to_owned();
+                    } else {
+                        outcome = "download_allowed".to_owned();
                     }
-                    Err(download_error) => {
-                        success = false;
-                        outcome = "download_failed".to_owned();
-                        error = download_error;
-                    }
+                    artifact = Some(download_artifact_to_proto(&record));
+                }
+                Ok(None) => {}
+                Err(download_error) => {
+                    success = false;
+                    outcome = "download_failed".to_owned();
+                    error = download_error;
                 }
             }
         }
@@ -1368,6 +1498,32 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
                     }
                     artifact = Some(download_artifact_to_proto(&record));
                 }
+                Err(download_error) => {
+                    success = false;
+                    outcome = "download_failed".to_owned();
+                    error = download_error;
+                }
+            }
+        }
+        if success && context.allow_downloads && artifact.is_none() {
+            match capture_latest_http_attachment_from_network_log(
+                self.runtime.as_ref(),
+                session_id.as_str(),
+                if context.private_profile { None } else { context.profile_id.as_deref() },
+                context.allow_private_targets,
+                timeout_ms,
+            )
+            .await
+            {
+                Ok(Some(record)) => {
+                    if record.quarantined {
+                        outcome = "download_quarantined".to_owned();
+                    } else {
+                        outcome = "download_allowed".to_owned();
+                    }
+                    artifact = Some(download_artifact_to_proto(&record));
+                }
+                Ok(None) => {}
                 Err(download_error) => {
                     success = false;
                     outcome = "download_failed".to_owned();

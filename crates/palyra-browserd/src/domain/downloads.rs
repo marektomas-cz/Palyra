@@ -141,6 +141,28 @@ pub(crate) async fn capture_download_artifact_for_click(
     .await
 }
 
+pub(crate) async fn fetch_http_attachment_download_artifact(
+    runtime: &BrowserRuntimeState,
+    session_id: &str,
+    profile_id: Option<&str>,
+    source_url: &str,
+    file_name: &str,
+    allow_private_targets: bool,
+    timeout_ms: u64,
+) -> Result<Option<DownloadArtifactRecord>, String> {
+    fetch_download_artifact_inner(DownloadArtifactFetch {
+        runtime,
+        session_id,
+        profile_id,
+        source_url,
+        file_name,
+        allow_private_targets,
+        timeout_ms,
+        mode: DownloadCaptureMode::HttpAttachmentOnly,
+    })
+    .await
+}
+
 pub(crate) async fn store_generated_artifact(
     runtime: &BrowserRuntimeState,
     session_id: &str,
@@ -260,6 +282,93 @@ pub(crate) fn infer_download_file_name(raw_url: &str) -> String {
         return DOWNLOAD_FILE_NAME_FALLBACK.to_owned();
     };
     sanitize_download_file_name(value)
+}
+
+pub(crate) fn content_disposition_is_attachment(raw: &str) -> bool {
+    raw.split(';')
+        .next()
+        .map(|value| value.trim().eq_ignore_ascii_case("attachment"))
+        .unwrap_or(false)
+}
+
+pub(crate) fn content_disposition_attachment_file_name(raw: &str) -> Option<String> {
+    if !content_disposition_is_attachment(raw) {
+        return None;
+    }
+    let mut fallback = None;
+    for part in raw.split(';').skip(1) {
+        let Some((name, value)) = part.split_once('=') else {
+            continue;
+        };
+        let name = name.trim();
+        let value = unquote_content_disposition_value(value.trim());
+        if name.eq_ignore_ascii_case("filename*") {
+            if let Some(decoded) = decode_rfc5987_filename(value.as_str()) {
+                return Some(sanitize_download_file_name(decoded.as_str()));
+            }
+        } else if name.eq_ignore_ascii_case("filename") && fallback.is_none() {
+            let sanitized = sanitize_download_file_name(value.as_str());
+            if !sanitized.trim().is_empty() {
+                fallback = Some(sanitized);
+            }
+        }
+    }
+    fallback
+}
+
+fn unquote_content_disposition_value(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.len() < 2 || !trimmed.starts_with('"') || !trimmed.ends_with('"') {
+        return trimmed.to_owned();
+    }
+    let mut output = String::new();
+    let mut escaped = false;
+    for character in trimmed[1..trimmed.len() - 1].chars() {
+        if escaped {
+            output.push(character);
+            escaped = false;
+            continue;
+        }
+        if character == '\\' {
+            escaped = true;
+            continue;
+        }
+        output.push(character);
+    }
+    output
+}
+
+fn decode_rfc5987_filename(raw: &str) -> Option<String> {
+    let (_, encoded) = raw.split_once("''")?;
+    let bytes = percent_decode_ascii(encoded)?;
+    String::from_utf8(bytes).ok().filter(|value| !value.trim().is_empty())
+}
+
+fn percent_decode_ascii(raw: &str) -> Option<Vec<u8>> {
+    let bytes = raw.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let high = *bytes.get(index + 1)?;
+            let low = *bytes.get(index + 2)?;
+            output.push(hex_value(high)?.saturating_mul(16).saturating_add(hex_value(low)?));
+            index += 3;
+        } else {
+            output.push(bytes[index]);
+            index += 1;
+        }
+    }
+    Some(output)
+}
+
+fn hex_value(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
 }
 
 pub(crate) fn sanitize_download_file_name(raw: &str) -> String {
@@ -453,6 +562,51 @@ pub(crate) async fn fetch_download_artifact(
     allow_private_targets: bool,
     timeout_ms: u64,
 ) -> Result<DownloadArtifactRecord, String> {
+    fetch_download_artifact_inner(DownloadArtifactFetch {
+        runtime,
+        session_id,
+        profile_id,
+        source_url,
+        file_name,
+        allow_private_targets,
+        timeout_ms,
+        mode: DownloadCaptureMode::AnySuccessfulResponse,
+    })
+    .await?
+    .ok_or_else(|| "download response was not captured".to_owned())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DownloadCaptureMode {
+    AnySuccessfulResponse,
+    HttpAttachmentOnly,
+}
+
+struct DownloadArtifactFetch<'a> {
+    runtime: &'a BrowserRuntimeState,
+    session_id: &'a str,
+    profile_id: Option<&'a str>,
+    source_url: &'a str,
+    file_name: &'a str,
+    allow_private_targets: bool,
+    timeout_ms: u64,
+    mode: DownloadCaptureMode,
+}
+
+async fn fetch_download_artifact_inner(
+    request: DownloadArtifactFetch<'_>,
+) -> Result<Option<DownloadArtifactRecord>, String> {
+    let DownloadArtifactFetch {
+        runtime,
+        session_id,
+        profile_id,
+        source_url,
+        file_name,
+        allow_private_targets,
+        timeout_ms,
+        mode,
+    } = request;
+
     let mut current_url =
         Url::parse(source_url).map_err(|error| format!("invalid download URL: {error}"))?;
     let mut redirects = 0_u32;
@@ -487,6 +641,16 @@ pub(crate) async fn fetch_download_artifact(
     if !response.status().is_success() {
         return Err(format!("download request returned HTTP {}", response.status().as_u16()));
     }
+    let content_disposition = response
+        .headers()
+        .get(reqwest::header::CONTENT_DISPOSITION)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    if mode == DownloadCaptureMode::HttpAttachmentOnly
+        && !content_disposition.as_deref().is_some_and(content_disposition_is_attachment)
+    {
+        return Ok(None);
+    }
     let header_content_type = response
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
@@ -520,14 +684,18 @@ pub(crate) async fn fetch_download_artifact(
         }
         body.extend_from_slice(chunk.as_ref());
     }
+    let file_name = content_disposition
+        .as_deref()
+        .and_then(content_disposition_attachment_file_name)
+        .unwrap_or_else(|| sanitize_download_file_name(file_name));
     let mime_type =
-        sniff_download_mime_type(header_content_type.as_deref(), file_name, body.as_ref());
-    let quarantine_reason = download_quarantine_reason(file_name, mime_type.as_str());
+        sniff_download_mime_type(header_content_type.as_deref(), file_name.as_str(), body.as_ref());
+    let quarantine_reason = download_quarantine_reason(file_name.as_str(), mime_type.as_str());
     let quarantined = quarantine_reason.is_some();
     let quarantine_reason = quarantine_reason.unwrap_or_default();
 
     let artifact_id = Ulid::new().to_string();
-    let sanitized_name = sanitize_download_file_name(file_name);
+    let sanitized_name = sanitize_download_file_name(file_name.as_str());
     let stored_name = format!("{}-{}", artifact_id, sanitized_name);
     let mut guard = runtime.download_sessions.lock().await;
     let Some(sandbox) = guard.get_mut(session_id) else {
@@ -571,7 +739,7 @@ pub(crate) async fn fetch_download_artifact(
         storage_path,
     };
     sandbox.artifacts.push_back(artifact.clone());
-    Ok(artifact)
+    Ok(Some(artifact))
 }
 
 #[cfg(test)]
@@ -629,5 +797,24 @@ mod tests {
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         );
         assert_eq!(sniff_download_mime_type(None, "notes.md", b"# Notes"), "text/markdown");
+    }
+
+    #[test]
+    fn content_disposition_attachment_filename_supports_quoted_and_extended_forms() {
+        assert_eq!(
+            content_disposition_attachment_file_name(
+                "attachment; filename=\"palyra-orders-export.csv\""
+            )
+            .as_deref(),
+            Some("palyra-orders-export.csv")
+        );
+        assert_eq!(
+            content_disposition_attachment_file_name(
+                "attachment; filename*=UTF-8''palyra%20orders.csv; filename=fallback.csv"
+            )
+            .as_deref(),
+            Some("palyra_orders.csv")
+        );
+        assert_eq!(content_disposition_attachment_file_name("inline; filename=x.csv"), None);
     }
 }
