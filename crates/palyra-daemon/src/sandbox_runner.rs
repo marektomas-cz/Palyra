@@ -304,18 +304,33 @@ pub fn run_constrained_process(
     } else {
         resolve_working_directory(workspace_root.as_path(), input.cwd.as_deref())?
     };
-    validate_interpreter_argument_guardrails(
-        workspace_root.as_path(),
-        working_directory.as_path(),
-        input.command.as_str(),
-        input.args.as_slice(),
-    )?;
-    validate_argument_workspace_scope(
-        workspace_root.as_path(),
-        working_directory.as_path(),
-        input.command.as_str(),
-        input.args.as_slice(),
-    )?;
+    if host_access {
+        validate_host_interpreter_argument_guardrails(
+            workspace_root.as_path(),
+            working_directory.as_path(),
+            input.command.as_str(),
+            input.args.as_slice(),
+        )?;
+        validate_host_argument_scope(
+            workspace_root.as_path(),
+            working_directory.as_path(),
+            input.command.as_str(),
+            input.args.as_slice(),
+        )?;
+    } else {
+        validate_interpreter_argument_guardrails(
+            workspace_root.as_path(),
+            working_directory.as_path(),
+            input.command.as_str(),
+            input.args.as_slice(),
+        )?;
+        validate_argument_workspace_scope(
+            workspace_root.as_path(),
+            working_directory.as_path(),
+            input.command.as_str(),
+            input.args.as_slice(),
+        )?;
+    }
     let requested_hosts = if matches!(policy.egress_enforcement_mode, EgressEnforcementMode::None) {
         Vec::new()
     } else {
@@ -1307,6 +1322,56 @@ fn validate_interpreter_argument_guardrails(
     Ok(())
 }
 
+fn validate_host_interpreter_argument_guardrails(
+    workspace_root: &Path,
+    cwd: &Path,
+    command: &str,
+    args: &[String],
+) -> Result<(), SandboxProcessRunError> {
+    if !is_interpreter_executable(command.trim()) {
+        return Ok(());
+    }
+
+    if args.iter().any(|arg| is_blocked_eval_flag(arg.as_str())) {
+        return Err(SandboxProcessRunError {
+            kind: SandboxProcessRunErrorKind::WorkspaceScopeDenied,
+            message: format!(
+                "sandbox denied: interpreter command '{}' cannot use shell-eval flags (-c/--command)",
+                command
+            ),
+        });
+    }
+
+    for (index, argument) in args.iter().enumerate() {
+        if argument_is_non_path_option_assignment(argument.as_str())
+            || index
+                .checked_sub(1)
+                .and_then(|previous| args.get(previous))
+                .is_some_and(|previous| option_consumes_non_path_value(previous.as_str()))
+        {
+            continue;
+        }
+        if !contains_embedded_absolute_path(argument.as_str()) {
+            continue;
+        }
+        if interpreter_absolute_path_argument_stays_in_host_scope(
+            workspace_root,
+            cwd,
+            argument.as_str(),
+        )? {
+            continue;
+        }
+        return Err(SandboxProcessRunError {
+            kind: SandboxProcessRunErrorKind::WorkspaceScopeDenied,
+            message: format!(
+                "sandbox denied: host interpreter argument contains absolute path outside approved host roots: '{argument}'"
+            ),
+        });
+    }
+
+    Ok(())
+}
+
 fn interpreter_absolute_path_argument_stays_in_workspace(
     workspace_root: &Path,
     cwd: &Path,
@@ -1342,6 +1407,43 @@ fn interpreter_absolute_path_argument_stays_in_workspace(
     Ok(resolve_scoped_path(workspace_root, cwd, trimmed, false).is_ok())
 }
 
+fn interpreter_absolute_path_argument_stays_in_host_scope(
+    workspace_root: &Path,
+    cwd: &Path,
+    argument: &str,
+) -> Result<bool, SandboxProcessRunError> {
+    let trimmed = argument.trim();
+    if trimmed.is_empty() {
+        return Ok(false);
+    }
+
+    if let Some(file_url_path) = parse_file_url_path(trimmed)? {
+        return Ok(
+            resolve_host_access_path(workspace_root, cwd, file_url_path.as_str(), false).is_ok()
+        );
+    }
+
+    if let Some(value) = option_assignment_value(trimmed) {
+        return interpreter_absolute_path_argument_stays_in_host_scope(workspace_root, cwd, value);
+    }
+
+    if let Some(value) = option_compact_value(trimmed) {
+        return interpreter_absolute_path_argument_stays_in_host_scope(workspace_root, cwd, value);
+    }
+
+    if let Some(stays_in_host_scope) =
+        interpreter_path_list_argument_stays_in_host_scope(workspace_root, cwd, trimmed)?
+    {
+        return Ok(stays_in_host_scope);
+    }
+
+    if !token_looks_like_absolute_path(trimmed) {
+        return Ok(false);
+    }
+
+    Ok(resolve_host_access_path(workspace_root, cwd, trimmed, false).is_ok())
+}
+
 fn interpreter_path_list_argument_stays_in_workspace(
     workspace_root: &Path,
     cwd: &Path,
@@ -1365,6 +1467,38 @@ fn interpreter_path_list_argument_stays_in_workspace(
             resolve_scoped_path(workspace_root, cwd, file_url_path.as_str(), false)
         } else {
             resolve_scoped_path(workspace_root, cwd, component, false)
+        };
+        if resolved.is_err() {
+            return Ok(Some(false));
+        }
+    }
+
+    Ok(saw_absolute_path.then_some(true))
+}
+
+fn interpreter_path_list_argument_stays_in_host_scope(
+    workspace_root: &Path,
+    cwd: &Path,
+    argument: &str,
+) -> Result<Option<bool>, SandboxProcessRunError> {
+    if argument.contains("://") {
+        return Ok(None);
+    }
+    let components = interpreter_path_list_components(argument);
+    if components.len() < 2 {
+        return Ok(None);
+    }
+
+    let mut saw_absolute_path = false;
+    for component in components {
+        if !token_looks_like_absolute_path(component) {
+            continue;
+        }
+        saw_absolute_path = true;
+        let resolved = if let Some(file_url_path) = parse_file_url_path(component)? {
+            resolve_host_access_path(workspace_root, cwd, file_url_path.as_str(), false)
+        } else {
+            resolve_host_access_path(workspace_root, cwd, component, false)
         };
         if resolved.is_err() {
             return Ok(Some(false));
@@ -1470,7 +1604,7 @@ fn resolve_host_working_directory(
             message: "host process runner denied cwd with embedded NUL byte".to_owned(),
         });
     }
-    let resolved = resolve_scoped_path(workspace_root, workspace_root, cwd_value, true)?;
+    let resolved = resolve_host_access_path(workspace_root, workspace_root, cwd_value, true)?;
     if !resolved.is_dir() {
         return Err(SandboxProcessRunError {
             kind: SandboxProcessRunErrorKind::WorkspaceScopeDenied,
@@ -1505,6 +1639,66 @@ fn validate_argument_workspace_scope(
     args: &[String],
 ) -> Result<(), SandboxProcessRunError> {
     let _ = rewrite_arguments_to_scoped_paths(workspace_root, cwd, command, args)?;
+    Ok(())
+}
+
+fn validate_host_argument_scope(
+    workspace_root: &Path,
+    cwd: &Path,
+    command: &str,
+    args: &[String],
+) -> Result<(), SandboxProcessRunError> {
+    let mut index = 0usize;
+    while index < args.len() {
+        let arg = &args[index];
+        if argument_is_non_path_option_assignment(arg.as_str()) {
+            index = index.saturating_add(1);
+            continue;
+        }
+        if command_option_consumes_non_path_value(command, arg.as_str()) {
+            index = index.saturating_add(2);
+            continue;
+        }
+        if is_windows_command_switch(command, arg.as_str())
+            || command_positional_arg_is_non_path_value(command, arg.as_str())
+        {
+            index = index.saturating_add(1);
+            continue;
+        }
+        validate_host_argument_path_scope(workspace_root, cwd, command, arg.as_str())?;
+        index = index.saturating_add(1);
+    }
+    Ok(())
+}
+
+fn validate_host_argument_path_scope(
+    workspace_root: &Path,
+    cwd: &Path,
+    command: &str,
+    arg: &str,
+) -> Result<(), SandboxProcessRunError> {
+    if let Some(file_url_path) = parse_file_url_path(arg)? {
+        let _ = resolve_host_access_path(workspace_root, cwd, file_url_path.as_str(), false)?;
+        return Ok(());
+    }
+    if let Some(value) = option_assignment_value(arg) {
+        return validate_host_argument_path_scope(workspace_root, cwd, command, value.trim());
+    }
+    if let Some(value) = option_compact_value(arg) {
+        return validate_host_argument_path_scope(workspace_root, cwd, command, value);
+    }
+    if !argument_requires_path_validation(arg) {
+        return Ok(());
+    }
+    let _ = resolve_host_access_path(workspace_root, cwd, arg, false).map_err(|error| {
+        SandboxProcessRunError {
+            kind: error.kind,
+            message: format!(
+                "sandbox denied: host process argument for command '{command}' is outside approved host roots: {arg}; {}",
+                error.message
+            ),
+        }
+    })?;
     Ok(())
 }
 
@@ -1842,6 +2036,186 @@ fn resolve_scoped_path(
         Ok(inspected)
     } else {
         Ok(candidate)
+    }
+}
+
+fn resolve_host_access_path(
+    workspace_root: &Path,
+    base: &Path,
+    raw: &str,
+    must_exist: bool,
+) -> Result<PathBuf, SandboxProcessRunError> {
+    if let Some(suffix) = virtual_workspace_path_suffix(raw) {
+        return resolve_scoped_path(
+            workspace_root,
+            workspace_root,
+            suffix.to_string_lossy().as_ref(),
+            must_exist,
+        );
+    }
+    if raw.contains('\0') {
+        return Err(SandboxProcessRunError {
+            kind: SandboxProcessRunErrorKind::WorkspaceScopeDenied,
+            message: "host process runner denied path with embedded NUL byte".to_owned(),
+        });
+    }
+    let raw_path = Path::new(raw);
+    if raw_path.components().any(|component| matches!(component, Component::ParentDir)) {
+        return Err(SandboxProcessRunError {
+            kind: SandboxProcessRunErrorKind::WorkspaceScopeDenied,
+            message: format!("host process runner denied path traversal for '{raw}'"),
+        });
+    }
+    let candidate = if raw_path.is_absolute() { PathBuf::from(raw) } else { base.join(raw) };
+    if candidate.components().any(|component| matches!(component, Component::ParentDir)) {
+        return Err(SandboxProcessRunError {
+            kind: SandboxProcessRunErrorKind::WorkspaceScopeDenied,
+            message: format!("host process runner denied path traversal for '{raw}'"),
+        });
+    }
+
+    let inspected = if candidate.exists() {
+        fs::canonicalize(&candidate).map_err(|error| SandboxProcessRunError {
+            kind: SandboxProcessRunErrorKind::WorkspaceScopeDenied,
+            message: format!(
+                "host process runner denied invalid path '{}': {error}",
+                candidate.display()
+            ),
+        })?
+    } else if must_exist {
+        return Err(SandboxProcessRunError {
+            kind: SandboxProcessRunErrorKind::WorkspaceScopeDenied,
+            message: format!(
+                "host process runner required path '{}' does not exist",
+                candidate.display()
+            ),
+        });
+    } else {
+        let ancestor = nearest_existing_ancestor(&candidate)?;
+        fs::canonicalize(&ancestor).map_err(|error| SandboxProcessRunError {
+            kind: SandboxProcessRunErrorKind::WorkspaceScopeDenied,
+            message: format!(
+                "host process runner could not resolve parent path '{}' safely: {error}",
+                ancestor.display()
+            ),
+        })?
+    };
+
+    ensure_host_access_path_allowed(workspace_root, inspected.as_path())?;
+    if candidate.exists() {
+        Ok(inspected)
+    } else {
+        Ok(candidate)
+    }
+}
+
+fn ensure_host_access_path_allowed(
+    workspace_root: &Path,
+    inspected: &Path,
+) -> Result<(), SandboxProcessRunError> {
+    if protected_host_path(inspected) {
+        return Err(SandboxProcessRunError {
+            kind: SandboxProcessRunErrorKind::WorkspaceScopeDenied,
+            message: format!(
+                "host process runner denied protected OS path '{}'",
+                inspected.display()
+            ),
+        });
+    }
+    if path_starts_with_case_aware(inspected, workspace_root)
+        || user_owned_host_roots()
+            .iter()
+            .any(|root| path_starts_with_case_aware(inspected, root.as_path()))
+    {
+        return Ok(());
+    }
+    Err(SandboxProcessRunError {
+        kind: SandboxProcessRunErrorKind::WorkspaceScopeDenied,
+        message: format!(
+            "host process runner path '{}' is outside workspace and approved user-owned OS roots",
+            inspected.display()
+        ),
+    })
+}
+
+fn user_owned_host_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    for key in ["USERPROFILE", "HOME"] {
+        if let Some(value) = std::env::var_os(key) {
+            push_canonical_host_root(&mut roots, PathBuf::from(value));
+        }
+    }
+    push_canonical_host_root(&mut roots, std::env::temp_dir());
+    #[cfg(unix)]
+    {
+        push_canonical_host_root(&mut roots, PathBuf::from("/var/tmp"));
+    }
+    roots
+}
+
+fn push_canonical_host_root(roots: &mut Vec<PathBuf>, root: PathBuf) {
+    let Ok(canonical) = fs::canonicalize(root.as_path()) else {
+        return;
+    };
+    if !canonical.is_dir() {
+        return;
+    }
+    if !roots.iter().any(|existing| same_path_case_aware(existing.as_path(), canonical.as_path())) {
+        roots.push(canonical);
+    }
+}
+
+fn protected_host_path(path: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        let normalized = path.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+        normalized.ends_with(":/")
+            || normalized.contains(":/windows")
+            || normalized.contains(":/program files")
+            || normalized.contains(":/program files (x86)")
+            || normalized.contains(":/system volume information")
+    }
+    #[cfg(not(windows))]
+    {
+        let normalized = path.to_string_lossy().replace('\\', "/");
+        if normalized == "/" {
+            return true;
+        }
+        for prefix in ["/etc", "/bin", "/sbin", "/usr", "/lib", "/lib64", "/System", "/Library"] {
+            if normalized == prefix || normalized.starts_with(format!("{prefix}/").as_str()) {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+fn path_starts_with_case_aware(path: &Path, root: &Path) -> bool {
+    if path.starts_with(root) {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        let path = path.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+        let root = root.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+        path == root || path.starts_with(format!("{root}/").as_str())
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+fn same_path_case_aware(left: &Path, right: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        left.to_string_lossy()
+            .replace('\\', "/")
+            .eq_ignore_ascii_case(&right.to_string_lossy().replace('\\', "/"))
+    }
+    #[cfg(not(windows))]
+    {
+        left == right
     }
 }
 
@@ -3340,6 +3714,7 @@ mod tests {
         resolve_host_working_directory, resolve_working_directory,
         rewrite_arguments_to_scoped_paths, rewrite_host_virtual_workspace_args,
         run_constrained_process, validate_argument_workspace_scope, validate_cmd_invocation_shape,
+        validate_host_argument_scope, validate_host_interpreter_argument_guardrails,
         validate_interpreter_argument_guardrails, validate_no_embedded_command_line_arg,
         validate_process_termination_scope, validate_runtime_egress_enforcement,
         EgressEnforcementMode, ProcessRunnerInput, SandboxProcessRunErrorKind,
@@ -3475,6 +3850,91 @@ mod tests {
         }
 
         let _ = fs::remove_dir_all(workspace.as_path());
+    }
+
+    #[test]
+    fn resolve_host_working_directory_allows_user_owned_os_roots() {
+        let workspace = unique_temp_dir("workspace-host-cwd");
+        let outside = unique_temp_dir("outside-host-cwd");
+        fs::create_dir_all(workspace.as_path()).expect("workspace directory should be created");
+        fs::create_dir_all(outside.as_path()).expect("outside directory should be created");
+        let canonical_workspace = fs::canonicalize(workspace.as_path())
+            .expect("workspace root should canonicalize for host access");
+        let canonical_outside =
+            fs::canonicalize(outside.as_path()).expect("outside cwd should canonicalize");
+
+        let resolved = resolve_host_working_directory(
+            canonical_workspace.as_path(),
+            Some(canonical_outside.to_string_lossy().as_ref()),
+        )
+        .expect("host access should allow user-owned OS cwd");
+
+        assert_eq!(resolved, canonical_outside);
+
+        let _ = fs::remove_dir_all(workspace.as_path());
+        let _ = fs::remove_dir_all(outside.as_path());
+    }
+
+    #[test]
+    fn host_access_allows_user_owned_script_argument() {
+        let workspace = unique_temp_dir("workspace-host-script-arg");
+        let outside = unique_temp_dir("outside-host-script-arg");
+        fs::create_dir_all(workspace.as_path()).expect("workspace directory should be created");
+        fs::create_dir_all(outside.as_path()).expect("outside directory should be created");
+        let script = outside.join("slow-preview.cjs");
+        fs::write(script.as_path(), b"console.log('ok');\n").expect("helper should be written");
+        let canonical_workspace = canonical_workspace_root(workspace.as_path())
+            .expect("workspace root should canonicalize");
+        let canonical_outside =
+            fs::canonicalize(outside.as_path()).expect("outside cwd should canonicalize");
+        let canonical_script =
+            fs::canonicalize(script.as_path()).expect("outside script should canonicalize");
+        let args = vec![canonical_script.to_string_lossy().to_string()];
+
+        validate_host_interpreter_argument_guardrails(
+            canonical_workspace.as_path(),
+            canonical_outside.as_path(),
+            "node",
+            args.as_slice(),
+        )
+        .expect("host access should allow interpreter scripts under user-owned OS roots");
+        validate_host_argument_scope(
+            canonical_workspace.as_path(),
+            canonical_outside.as_path(),
+            "node",
+            args.as_slice(),
+        )
+        .expect("host access should allow absolute script args under user-owned OS roots");
+
+        let _ = fs::remove_dir_all(workspace.as_path());
+        let _ = fs::remove_dir_all(outside.as_path());
+    }
+
+    #[test]
+    fn host_access_rejects_relative_traversal_script_argument() {
+        let workspace = unique_temp_dir("workspace-host-script-traversal");
+        let outside = unique_temp_dir("outside-host-script-traversal");
+        fs::create_dir_all(workspace.as_path()).expect("workspace directory should be created");
+        fs::create_dir_all(outside.as_path()).expect("outside directory should be created");
+        let canonical_workspace = canonical_workspace_root(workspace.as_path())
+            .expect("workspace root should canonicalize");
+        let canonical_outside =
+            fs::canonicalize(outside.as_path()).expect("outside cwd should canonicalize");
+        let args = vec!["../slow-preview.cjs".to_owned()];
+
+        let error = validate_host_argument_scope(
+            canonical_workspace.as_path(),
+            canonical_outside.as_path(),
+            "node",
+            args.as_slice(),
+        )
+        .expect_err("host access should reject parent-directory traversal in script args");
+
+        assert_eq!(error.kind, SandboxProcessRunErrorKind::WorkspaceScopeDenied);
+        assert!(error.message.contains("path traversal"));
+
+        let _ = fs::remove_dir_all(workspace.as_path());
+        let _ = fs::remove_dir_all(outside.as_path());
     }
 
     #[test]
