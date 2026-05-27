@@ -561,7 +561,12 @@ async fn find_lifecycle_duplicate(
                     match_kind: LifecycleDuplicateMatchKind::Exact,
                 }));
             }
-            if hit.score >= MEMORY_RETAIN_NEAR_DUPLICATE_SCORE {
+            if hit.score >= MEMORY_RETAIN_NEAR_DUPLICATE_SCORE
+                && lifecycle_near_duplicate_categories_compatible(
+                    classification.category,
+                    &hit.item,
+                )
+            {
                 return Ok(Some(LifecycleDuplicate {
                     item: hit.item,
                     match_kind: LifecycleDuplicateMatchKind::NearDuplicate,
@@ -779,6 +784,13 @@ fn lifecycle_item_write_category(item: &MemoryItemRecord) -> MemoryWriteCategory
         .find_map(|tag| tag.strip_prefix("memory_write:"))
         .and_then(MemoryWriteCategory::from_tag_value)
         .unwrap_or(MemoryWriteCategory::Fact)
+}
+
+fn lifecycle_near_duplicate_categories_compatible(
+    category: MemoryWriteCategory,
+    item: &MemoryItemRecord,
+) -> bool {
+    category == lifecycle_item_write_category(item)
 }
 
 fn memory_write_category_from_tags(tags: &[String]) -> Option<MemoryWriteCategory> {
@@ -1725,6 +1737,22 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_near_duplicate_rejects_structured_category_mismatch() {
+        let mut item = lifecycle_test_memory_item(
+            "01ARZ3NDEKTSV4RRFFQ69G5W05",
+            None,
+            None,
+            "Project status note: TypeScript Playwright reports document normal CI coverage.",
+        );
+        item.tags.clear();
+
+        assert!(!lifecycle_near_duplicate_categories_compatible(
+            MemoryWriteCategory::Preference,
+            &item
+        ));
+    }
+
+    #[test]
     fn lifecycle_scope_scan_rejects_items_outside_requested_scope() {
         let channel_item = lifecycle_test_memory_item(
             "01ARZ3NDEKTSV4RRFFQ69G5W03",
@@ -1819,7 +1847,7 @@ mod tests {
             source: MemorySource::Manual,
             content_text: content_text.to_owned(),
             content_hash: format!("hash-{memory_id}"),
-            tags: Vec::new(),
+            tags: vec!["memory_write:preference".to_owned()],
             confidence: Some(0.9),
             ttl_unix_ms: None,
             created_at_unix_ms: 1_700_000_000_000,
