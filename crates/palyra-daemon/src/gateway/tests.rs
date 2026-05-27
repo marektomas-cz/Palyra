@@ -2044,7 +2044,7 @@ async fn memory_auto_inject_searches_current_scope_without_cross_session_or_chan
             session_id: Some(current_session_id.to_owned()),
             source: MemorySource::Manual,
             content_text:
-                "Palyra E2E memory smoke preference: TypeScript, Playwright, short Czech reports"
+                "Palyra E2E memory smoke preference: TypeScript, Playwright, short reports"
                     .to_owned(),
             tags: vec!["preference".to_owned()],
             confidence: Some(0.95),
@@ -2059,9 +2059,8 @@ async fn memory_auto_inject_searches_current_scope_without_cross_session_or_chan
             channel: Some("slack:ops".to_owned()),
             session_id: Some(current_session_id.to_owned()),
             source: MemorySource::Manual,
-            content_text:
-                "Cross-channel private preference: TypeScript, Playwright, short Czech reports"
-                    .to_owned(),
+            content_text: "Cross-channel private preference: TypeScript, Playwright, short reports"
+                .to_owned(),
             tags: vec!["preference".to_owned()],
             confidence: Some(0.95),
             ttl_unix_ms: None,
@@ -2076,7 +2075,7 @@ async fn memory_auto_inject_searches_current_scope_without_cross_session_or_chan
         current_run_id,
         &mut tape_seq,
         current_session_id,
-        "Palyra E2E memory smoke TypeScript Playwright Czech reports",
+        "Palyra E2E memory smoke TypeScript Playwright short reports",
         "What reporting language and tooling preference should I use?",
     )
     .await
@@ -2087,7 +2086,7 @@ async fn memory_auto_inject_searches_current_scope_without_cross_session_or_chan
         "current-scope recall should inject memory context: {prompt}"
     );
     assert!(
-        prompt.contains("TypeScript, Playwright, short Czech reports"),
+        prompt.contains("TypeScript, Playwright, short reports"),
         "current-session preference should be visible in the injected snippet: {prompt}"
     );
     assert!(
@@ -2153,7 +2152,7 @@ async fn default_memory_auto_inject_adds_manual_preference_to_fresh_session_prom
             session_id: None,
             source: MemorySource::Manual,
             content_text:
-                "E2E preference: for this test project prefer TypeScript, Playwright, and concise Czech reports."
+                "E2E preference: for this test project prefer TypeScript, Playwright, and concise reports."
                     .to_owned(),
             tags: vec!["e2e-preference".to_owned()],
             confidence: Some(0.95),
@@ -2172,7 +2171,7 @@ async fn default_memory_auto_inject_adds_manual_preference_to_fresh_session_prom
             session_id: current_session_id,
             previous_run_id: None,
             parameter_delta_json: None,
-            input_text: "For this E2E test project, what stack and report style should you prefer? Answer in one concise Czech sentence. Do not use tools unless needed.",
+            input_text: "For this E2E test project, what stack and report style should you prefer? Answer in one concise sentence. Do not use tools unless needed.",
             attachments: &[],
             provider_kind_hint: None,
             provider_model_id_hint: None,
@@ -2191,7 +2190,7 @@ async fn default_memory_auto_inject_adds_manual_preference_to_fresh_session_prom
         prepared.provider_input_text
     );
     assert!(
-        prepared.provider_input_text.contains("TypeScript, Playwright, and concise Czech reports"),
+        prepared.provider_input_text.contains("TypeScript, Playwright, and concise reports"),
         "stored preference should be available to the next session through default auto-inject: {}",
         prepared.provider_input_text
     );
@@ -4981,12 +4980,12 @@ async fn memory_retain_tool_updates_exact_duplicate_instead_of_writing_twice() {
 async fn memory_retain_tool_replaces_near_duplicate_preference_content() {
     let state = build_test_runtime_state(false);
     let context = admin_routines_tool_test_context();
-    let first = br#"{"content_text":"Project UI smoke tests prefer Vitest, not Playwright","scope":"principal","confidence":0.9}"#;
+    let first = br#"{"content_text":"Project UI smoke tests prefer Vitest.","category":"preference","scope":"principal","confidence":0.9}"#;
     let initial =
         execute_memory_retain_tool(&state, context, "01ARZ3NDEKTSV4RRFFQ69G5FC6", first).await;
     assert!(initial.success, "initial preference retain should succeed: {}", initial.error);
 
-    let correction = br#"{"content_text":"Correction: project UI smoke tests prefer Playwright, not Vitest","scope":"principal","confidence":0.9}"#;
+    let correction = br#"{"content_text":"Project UI smoke tests prefer Playwright.","category":"correction","replaces_terms":["Vitest","project UI smoke tests"],"scope":"principal","confidence":0.9}"#;
     let updated =
         execute_memory_retain_tool(&state, context, "01ARZ3NDEKTSV4RRFFQ69G5FC7", correction).await;
     assert!(updated.success, "correction retain should succeed: {}", updated.error);
@@ -4994,7 +4993,7 @@ async fn memory_retain_tool_replaces_near_duplicate_preference_content() {
     assert_eq!(payload.get("status").and_then(Value::as_str), Some("merged"));
     assert_eq!(
         payload.pointer("/item/content_text").and_then(Value::as_str),
-        Some("Project UI smoke tests prefer Playwright")
+        Some("Project UI smoke tests prefer Playwright.")
     );
 
     let hits = state
@@ -5035,7 +5034,7 @@ async fn memory_retain_tool_principal_scope_does_not_replace_channel_scoped_dupl
             channel: Some("cli".to_owned()),
             session_id: None,
             source: MemorySource::Manual,
-            content_text: "Project UI smoke tests prefer Vitest, not Playwright".to_owned(),
+            content_text: "Project UI smoke tests prefer Vitest.".to_owned(),
             tags: vec!["scope:channel".to_owned(), "memory_write:preference".to_owned()],
             confidence: Some(0.9),
             ttl_unix_ms: None,
@@ -5043,7 +5042,7 @@ async fn memory_retain_tool_principal_scope_does_not_replace_channel_scoped_dupl
         .await
         .expect("channel-scoped preference should ingest");
 
-    let correction = br#"{"content_text":"Correction: project UI smoke tests prefer Playwright, not Vitest","scope":"principal","confidence":0.9}"#;
+    let correction = br#"{"content_text":"Project UI smoke tests prefer Playwright.","category":"correction","replaces_terms":["Vitest","project UI smoke tests"],"scope":"principal","confidence":0.9}"#;
     let retained =
         execute_memory_retain_tool(&state, context, "01ARZ3NDEKTSV4RRFFQ69G5FC9", correction).await;
     assert!(retained.success, "principal correction retain should succeed: {}", retained.error);
@@ -5064,7 +5063,7 @@ async fn memory_retain_tool_principal_scope_does_not_replace_channel_scoped_dupl
         .expect("channel memories should list");
     assert_eq!(channel_items.len(), 1, "principal retain must not create channel rows");
     assert_eq!(
-        channel_items[0].content_text, "Project UI smoke tests prefer Vitest, not Playwright",
+        channel_items[0].content_text, "Project UI smoke tests prefer Vitest.",
         "principal retain must not replace channel-scoped memory content"
     );
 
@@ -5092,12 +5091,12 @@ async fn memory_retain_tool_principal_scope_does_not_replace_channel_scoped_dupl
 async fn memory_retain_tool_replaces_conflicting_preference_when_search_terms_shift() {
     let state = build_test_runtime_state(false);
     let context = admin_routines_tool_test_context();
-    let initial = br#"{"content_text":"E2E preference: use TypeScript, Vitest, and concise Czech reports for E2E tests.","scope":"principal","confidence":0.9,"tags":["vitest","e2e-preference"]}"#;
+    let initial = br#"{"content_text":"E2E preference: use TypeScript, Vitest, and brief reports for E2E tests.","category":"preference","scope":"principal","confidence":0.9,"tags":["vitest","e2e-preference"]}"#;
     let initial_outcome =
         execute_memory_retain_tool(&state, context, "01ARZ3NDEKTSV4RRFFQ69G5FD6", initial).await;
     assert!(initial_outcome.success, "initial preference should retain: {}", initial_outcome.error);
 
-    let correction = br#"{"content_text":"Correction: for E2E tests use Playwright, not Vitest. Keep concise Czech reports.","scope":"principal","confidence":0.9,"tags":["playwright","e2e-preference"]}"#;
+    let correction = br#"{"content_text":"For E2E tests use TypeScript, Playwright, and brief reports.","category":"correction","replaces_terms":["Vitest","E2E tests"],"scope":"principal","confidence":0.9,"tags":["playwright","e2e-preference"]}"#;
     let updated =
         execute_memory_retain_tool(&state, context, "01ARZ3NDEKTSV4RRFFQ69G5FD7", correction).await;
     assert!(updated.success, "correction retain should succeed: {}", updated.error);
@@ -5105,7 +5104,7 @@ async fn memory_retain_tool_replaces_conflicting_preference_when_search_terms_sh
     assert_eq!(payload.get("status").and_then(Value::as_str), Some("merged"));
     assert_eq!(
         payload.pointer("/item/content_text").and_then(Value::as_str),
-        Some("For E2E tests use Playwright. Keep concise Czech reports.")
+        Some("For E2E tests use TypeScript, Playwright, and brief reports.")
     );
 
     let (items, _) = state
@@ -5181,7 +5180,7 @@ async fn memory_retain_tool_does_not_overwrite_untyped_status_note_with_loose_pr
         .await
         .expect("status note should ingest");
 
-    let preference = br#"{"content_text":"I prefer TypeScript Playwright reports to be written in pirate voice for every project.","scope":"principal","confidence":0.9}"#;
+    let preference = br#"{"content_text":"I prefer TypeScript Playwright reports to be written in pirate voice for every project.","category":"preference","scope":"principal","confidence":0.9}"#;
     let retained =
         execute_memory_retain_tool(&state, context, "01ARZ3NDEKTSV4RRFFQ69G5FE2", preference).await;
     assert!(retained.success, "preference retain should succeed: {}", retained.error);
@@ -5215,7 +5214,7 @@ async fn memory_retain_tool_does_not_overwrite_untyped_status_note_with_loose_pr
 async fn memory_retain_tool_principal_scope_requires_review_for_user_preferences() {
     let state = build_test_runtime_state(false);
     let input_json =
-        br#"{"content_text":"User prefers Vitest for frontend tests","scope":"principal","confidence":0.9}"#;
+        br#"{"content_text":"User prefers Vitest for frontend tests","category":"preference","scope":"principal","confidence":0.9}"#;
     let outcome = execute_memory_retain_tool(
         &state,
         routines_tool_test_context(),
@@ -5251,7 +5250,7 @@ async fn memory_retain_tool_principal_scope_requires_review_for_user_preferences
 async fn memory_retain_tool_principal_scope_writes_admin_preferences() {
     let state = build_test_runtime_state(false);
     let input_json =
-        br#"{"content_text":"User prefers Vitest for frontend tests","scope":"principal","confidence":0.9}"#;
+        br#"{"content_text":"User prefers Vitest for frontend tests","category":"preference","scope":"principal","confidence":0.9}"#;
     let outcome = execute_memory_retain_tool(
         &state,
         admin_routines_tool_test_context(),
@@ -5270,7 +5269,7 @@ async fn memory_retain_tool_principal_scope_writes_admin_preferences() {
 #[tokio::test(flavor = "multi_thread")]
 async fn memory_retain_tool_principal_scope_requires_review_for_workflow_rules() {
     let state = build_test_runtime_state(false);
-    let input_json = br#"{"content_text":"Workflow rules for E2E memory capacity: always inspect files, run available tests, never log secrets, redact tokens, follow approval policy, do not bypass sandbox guardrails, and write concise Czech reports.","scope":"principal","confidence":0.9,"tags":["e2e-s035-rules"]}"#;
+    let input_json = br#"{"content_text":"Workflow rules for E2E memory capacity: inspect files, run available tests, protect secrets, follow approval policy, preserve sandbox guardrails, and write concise reports.","category":"procedure","scope":"principal","confidence":0.9,"tags":["e2e-s035-rules"]}"#;
     let outcome = execute_memory_retain_tool(
         &state,
         routines_tool_test_context(),
@@ -5411,7 +5410,7 @@ async fn memory_reflect_tool_returns_candidates_without_durable_write() {
     let outcome = execute_memory_reflect_tool(
         routines_tool_test_context(),
         "01ARZ3NDEKTSV4RRFFQ69G5FC4",
-        br#"{"observations":["User prefers concise release summaries","Temporary rollback branch is active today"],"max_candidates":4}"#,
+        br#"{"observations":["User prefers concise release summaries","Temporary rollback branch is active today"],"categories":["preferences"],"max_candidates":4}"#,
     )
     .await;
     assert!(outcome.success, "reflect should succeed: {}", outcome.error);
@@ -5427,7 +5426,7 @@ async fn memory_reflect_tool_returns_candidates_without_durable_write() {
             .iter()
             .any(|candidate| candidate.get("category").and_then(Value::as_str)
                 == Some("preferences")),
-        "reflect should categorize preference observations"
+        "reflect should apply the requested structured category"
     );
     let (items, _) = state
         .list_memory_items(

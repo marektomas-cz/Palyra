@@ -12,7 +12,8 @@ use crate::{
             reflect_memory_candidates, ttl_unix_ms_from_input, MemoryLifecycleProvider,
             MemoryLifecycleRetainOutcome, MemoryLifecycleRetainRequest, MemoryLifecycleScope,
             MemoryLifecycleStatus, MemoryReflectionCategory, MemoryReflectionOutcome,
-            MemoryReflectionRequest, MEMORY_CONTEXT_FENCE_VERSION, MEMORY_TRUST_LABEL_RETRIEVED,
+            MemoryReflectionRequest, MemoryWriteCategory, MEMORY_CONTEXT_FENCE_VERSION,
+            MEMORY_TRUST_LABEL_RETRIEVED,
         },
         recall::{preview_recall, RecallPreviewEnvelope, RecallRequest},
         service_authorization::authorize_memory_action,
@@ -288,6 +289,36 @@ pub(crate) async fn execute_memory_retain_tool(
             );
         }
     };
+    let category_hint = match parsed.get("category").and_then(Value::as_str) {
+        Some(raw) => match MemoryWriteCategory::parse(raw) {
+            Some(category) => Some(category),
+            None => {
+                return memory_tool_execution_outcome(
+                    namespace,
+                    proposal_id,
+                    input_json,
+                    false,
+                    b"{}".to_vec(),
+                    format!("palyra.memory.retain unknown category: {raw}"),
+                );
+            }
+        },
+        None => None,
+    };
+    let replaces_terms =
+        match parse_string_array_field(parsed.get("replaces_terms"), "replaces_terms", 32) {
+            Ok(terms) => terms,
+            Err(error) => {
+                return memory_tool_execution_outcome(
+                    namespace,
+                    proposal_id,
+                    input_json,
+                    false,
+                    b"{}".to_vec(),
+                    error,
+                );
+            }
+        };
     let confidence = match parsed.get("confidence").and_then(Value::as_f64) {
         Some(value) if value.is_finite() && (0.0..=1.0).contains(&value) => Some(value),
         Some(_) => {
@@ -350,6 +381,8 @@ pub(crate) async fn execute_memory_retain_tool(
             scope,
             source,
             content_text,
+            category_hint,
+            replaces_terms,
             tags,
             confidence,
             ttl_unix_ms,

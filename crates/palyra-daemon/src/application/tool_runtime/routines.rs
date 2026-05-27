@@ -450,9 +450,9 @@ async fn upsert_routine(
     )?;
     validate_routine_prompt_self_contained(prompt.as_str(), &execution)
         .map_err(map_registry_error)?;
-    let delivery = normalize_delivery_for_user_visible_prompt(
-        name.as_str(),
-        prompt.as_str(),
+    let success_visibility =
+        parse_success_visibility(optional_string_field(payload, "success_visibility").as_deref())?;
+    let delivery = normalize_delivery_for_success_visibility(
         parse_delivery(
             optional_string_field(payload, "delivery_mode").as_deref(),
             optional_string_field(payload, "delivery_channel"),
@@ -460,6 +460,7 @@ async fn upsert_routine(
             optional_string_field(payload, "delivery_failure_channel"),
             optional_string_field(payload, "silent_policy").as_deref(),
         )?,
+        success_visibility,
     );
     let quiet_hours = parse_quiet_hours(
         optional_string_field(payload, "quiet_hours_start").as_deref(),
@@ -1633,14 +1634,40 @@ fn output_delivered_for_outcome(
     !matches!(effective_mode, RoutineDeliveryMode::LocalOnly | RoutineDeliveryMode::LogsOnly)
 }
 
-fn normalize_delivery_for_user_visible_prompt(
-    name: &str,
-    prompt: &str,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RoutineSuccessVisibility {
+    Announce,
+    ArtifactOnly,
+    AuditOnly,
+}
+
+fn normalize_delivery_for_success_visibility(
     mut delivery: RoutineDeliveryConfig,
+    success_visibility: Option<RoutineSuccessVisibility>,
 ) -> RoutineDeliveryConfig {
-    if !prompt_requests_user_visible_delivery(name, prompt)
-        || output_delivered_for_outcome(&delivery, RoutineRunOutcomeKind::SuccessWithOutput)
-    {
+    match success_visibility {
+        Some(RoutineSuccessVisibility::ArtifactOnly | RoutineSuccessVisibility::AuditOnly) => {
+            return delivery;
+        }
+        Some(RoutineSuccessVisibility::Announce) => {}
+        None if output_delivered_for_outcome(
+            &delivery,
+            RoutineRunOutcomeKind::SuccessWithOutput,
+        ) =>
+        {
+            return delivery;
+        }
+        None if !matches!(
+            delivery.mode,
+            RoutineDeliveryMode::LocalOnly | RoutineDeliveryMode::LogsOnly
+        ) && delivery.silent_policy != RoutineSilentPolicy::AuditOnly =>
+        {
+            return delivery;
+        }
+        None => {}
+    }
+
+    if output_delivered_for_outcome(&delivery, RoutineRunOutcomeKind::SuccessWithOutput) {
         return delivery;
     }
 
@@ -1652,56 +1679,6 @@ fn normalize_delivery_for_user_visible_prompt(
         delivery.silent_policy = RoutineSilentPolicy::Noisy;
     }
     delivery
-}
-
-fn prompt_requests_user_visible_delivery(name: &str, prompt: &str) -> bool {
-    let text = normalized_delivery_intent_text(format!("{name} {prompt}").as_str());
-    let direct_phrases = [
-        " remind me ",
-        " notify me ",
-        " message me ",
-        " send me ",
-        " tell me ",
-        " write me ",
-        " ping me ",
-        " mi napis ",
-        " mi napiš ",
-        " napis mi ",
-        " napiš mi ",
-        " posli mi ",
-        " pošli mi ",
-        " upozorni me ",
-        " upozorni mě ",
-        " pripomen mi ",
-        " připomeň mi ",
-    ];
-    if direct_phrases.iter().any(|phrase| text.contains(phrase)) {
-        return true;
-    }
-
-    let asks_for_message = text.contains(" zpravu ")
-        || text.contains(" zprávu ")
-        || text.contains(" message ")
-        || text.contains(" notification ");
-    let targets_user = text.contains(" mi ") || text.contains(" me ") || text.contains(" mě ");
-    asks_for_message && targets_user
-}
-
-fn normalized_delivery_intent_text(input: &str) -> String {
-    let mut output = String::with_capacity(input.len().saturating_add(2));
-    output.push(' ');
-    for character in input.chars().flat_map(char::to_lowercase) {
-        if character.is_alphanumeric() {
-            output.push(character);
-        } else {
-            output.push(' ');
-        }
-    }
-    output.push(' ');
-    while output.contains("  ") {
-        output = output.replace("  ", " ");
-    }
-    output
 }
 
 fn delivery_reason_for_outcome(
@@ -1851,6 +1828,18 @@ fn parse_delivery(
         );
     }
     Ok(RoutineDeliveryConfig { mode, channel, failure_mode, failure_channel, silent_policy })
+}
+
+fn parse_success_visibility(raw: Option<&str>) -> Result<Option<RoutineSuccessVisibility>, String> {
+    let Some(value) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    match value {
+        "announce" => Ok(Some(RoutineSuccessVisibility::Announce)),
+        "artifact_only" => Ok(Some(RoutineSuccessVisibility::ArtifactOnly)),
+        "audit_only" => Ok(Some(RoutineSuccessVisibility::AuditOnly)),
+        _ => Err("success_visibility must be one of announce|artifact_only|audit_only".to_owned()),
+    }
 }
 
 fn parse_quiet_hours(
@@ -2343,7 +2332,7 @@ mod tests {
     }
 
     #[test]
-    fn user_visible_reminder_delivery_cannot_be_silent_local_only() {
+    fn silent_success_delivery_defaults_to_same_channel_without_structured_opt_in() {
         let delivery = RoutineDeliveryConfig {
             mode: RoutineDeliveryMode::LocalOnly,
             channel: None,
@@ -2352,11 +2341,7 @@ mod tests {
             silent_policy: RoutineSilentPolicy::AuditOnly,
         };
 
-        let normalized = super::normalize_delivery_for_user_visible_prompt(
-            "Cron smoke reminder",
-            "Za 30 sekund mi napiš krátkou zprávu cron smoke test OK.",
-            delivery,
-        );
+        let normalized = super::normalize_delivery_for_success_visibility(delivery, None);
 
         assert_eq!(normalized.mode, RoutineDeliveryMode::SameChannel);
         assert_eq!(normalized.silent_policy, RoutineSilentPolicy::Noisy);
@@ -2376,13 +2361,31 @@ mod tests {
             silent_policy: RoutineSilentPolicy::Noisy,
         };
 
-        let normalized = super::normalize_delivery_for_user_visible_prompt(
-            "Scheduled report",
-            "Každou hodinu zapiš souhrn do reports/status.md.",
+        let normalized = super::normalize_delivery_for_success_visibility(
             delivery,
+            Some(super::RoutineSuccessVisibility::ArtifactOnly),
         );
 
         assert_eq!(normalized.mode, RoutineDeliveryMode::LogsOnly);
+        assert_eq!(normalized.silent_policy, RoutineSilentPolicy::Noisy);
+    }
+
+    #[test]
+    fn announce_success_visibility_forces_user_visible_delivery() {
+        let delivery = RoutineDeliveryConfig {
+            mode: RoutineDeliveryMode::LogsOnly,
+            channel: None,
+            failure_mode: None,
+            failure_channel: None,
+            silent_policy: RoutineSilentPolicy::FailureOnly,
+        };
+
+        let normalized = super::normalize_delivery_for_success_visibility(
+            delivery,
+            Some(super::RoutineSuccessVisibility::Announce),
+        );
+
+        assert_eq!(normalized.mode, RoutineDeliveryMode::SameChannel);
         assert_eq!(normalized.silent_policy, RoutineSilentPolicy::Noisy);
     }
 

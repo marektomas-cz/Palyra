@@ -284,7 +284,7 @@ Examples:
   palyra routines list
   palyra routines create-from-template --template-id heartbeat
   palyra routines upsert --name \"Daily report\" --prompt \"Summarize incidents\" --trigger-kind schedule --natural-language-schedule \"every weekday at 9\"
-  palyra routines schedule-preview \"každý pracovní den v 9\"
+  palyra routines schedule-preview \"every weekday at 9\"
 
 Discoverability:
   `routines` is the first-class automation surface. Use `cron` only for schedule-only compatibility flows.";

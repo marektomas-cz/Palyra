@@ -151,7 +151,15 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
             object_schema(
                 &["content_text"],
                 vec![
-                    ("content_text", json!({"type":"string","maxLength":8192,"description":"Memory content to retain. For corrections, include the corrected preference and the old value being replaced."})),
+                    ("content_text", json!({"type":"string","maxLength":8192,"description":"Memory content to retain. For corrections, include the corrected durable statement only and provide the obsolete values in replaces_terms."})),
+                    (
+                        "category",
+                        json!({"type":"string","enum":["fact","preference","procedure","constraint","decision","correction","transient_runtime_fact"],"description":"Structured lifecycle category. Set this explicitly instead of relying on natural-language wording."}),
+                    ),
+                    (
+                        "replaces_terms",
+                        json!({"type":"array","items":{"type":"string"},"maxItems":32,"description":"For category=correction, language-neutral obsolete values and context terms that identify the existing memory to replace."}),
+                    ),
                     ("scope", json!({"type":"string","enum":["session","channel","principal","workspace","project"],"description":"Defaults to session. Use principal for remembered preferences, corrections, and facts that should be available in future sessions. Use workspace or project to write indexed workspace/project memory documents."})),
                     (
                         "workspace_path",
@@ -229,8 +237,8 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
                 vec![
                     ("content_text", json!({"type":"string","maxLength":8192})),
                     (
-                        "category",
-                        json!({"type":"string","enum":["durable_fact","preference","procedure"]}),
+                        "categories",
+                        json!({"type":"array","items":{"type":"string","enum":["facts","preferences","workflow_rules","risks","temporary_state"]},"maxItems":5,"description":"Optional structured reflection categories to apply to the supplied observations."}),
                     ),
                     ("confidence", json!({"type":"number","minimum":0.0,"maximum":1.0})),
                 ],
@@ -261,7 +269,7 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
         ),
         entry(
             "palyra.routines.control",
-            "Create, update, pause, resume, or manually dispatch routines through the approval-aware runtime. For new reminders and monitors, omit routine_id and use operation=upsert with trigger_kind=schedule, name, prompt, and natural_language_schedule such as 'every 30 minutes' or 'every 40 seconds'. For standing orders tied to an absolute user-owned OS file path, use trigger_kind=file_watch with trigger_payload.path and optional trigger_payload.poll_interval_ms. Use workdir for a scheduled project root that future runs should treat as their cwd and output base. Scheduled routines default to execution_posture=standard. File-watch routines default to fresh sessions and sensitive-tools posture because follow-up work often needs audited OS file tools. Set approval_mode=before_enable or before_first_run only when the user wants an approval gate.",
+            "Create, update, pause, resume, or manually dispatch routines through the approval-aware runtime. For new reminders and monitors, omit routine_id and use operation=upsert with trigger_kind=schedule, name, prompt, and structured schedule fields (schedule_type plus every_interval_ms, cron_expression, or at_timestamp_rfc3339) when the requested timing is clear. natural_language_schedule accepts a small English convenience grammar such as 'every 30 minutes' or 'every 40 seconds'. For standing orders tied to an absolute user-owned OS file path, use trigger_kind=file_watch with trigger_payload.path and optional trigger_payload.poll_interval_ms. Use workdir for a scheduled project root that future runs should treat as their cwd and output base. Scheduled routines default to execution_posture=standard. File-watch routines default to fresh sessions and sensitive-tools posture because follow-up work often needs audited OS file tools. Set approval_mode=before_enable or before_first_run only when the user wants an approval gate.",
             object_schema(
                 &["operation"],
                 vec![
@@ -298,6 +306,10 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
                     (
                         "delivery_mode",
                         json!({"type":"string","enum":["same_channel","specific_channel","local_only","logs_only"]}),
+                    ),
+                    (
+                        "success_visibility",
+                        json!({"type":"string","enum":["announce","artifact_only","audit_only"],"description":"Language-neutral successful-output intent. Use announce for reminders, monitors, and other routines whose success should be visible to the user; artifact_only when successful output is written to an explicit artifact or file; audit_only only when the user explicitly wants no success announcement."}),
                     ),
                     (
                         "execution_posture",

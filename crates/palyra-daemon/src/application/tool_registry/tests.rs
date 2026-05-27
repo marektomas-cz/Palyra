@@ -440,7 +440,11 @@ fn memory_retain_schema_explains_principal_scope_for_corrections() {
     assert!(entry.input_schema["properties"]["content_text"]["description"]
         .as_str()
         .unwrap_or_default()
-        .contains("old value"));
+        .contains("corrected durable statement"));
+    assert!(entry.input_schema["properties"]["replaces_terms"]["description"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("obsolete values"));
 }
 
 #[test]

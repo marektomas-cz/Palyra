@@ -212,8 +212,8 @@ impl MemoryWriteCategory {
     }
 
     #[must_use]
-    fn from_tag_value(value: &str) -> Option<Self> {
-        match value {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
             "fact" => Some(Self::Fact),
             "preference" => Some(Self::Preference),
             "procedure" => Some(Self::Procedure),
@@ -223,6 +223,10 @@ impl MemoryWriteCategory {
             "transient_runtime_fact" => Some(Self::TransientRuntimeFact),
             _ => None,
         }
+    }
+
+    fn from_tag_value(value: &str) -> Option<Self> {
+        Self::parse(value)
     }
 }
 
@@ -262,6 +266,7 @@ pub(crate) struct MemoryWriteClassificationInput {
     pub(crate) session_id: String,
     pub(crate) scope: MemoryLifecycleScope,
     pub(crate) content_text: String,
+    pub(crate) category_hint: Option<MemoryWriteCategory>,
     pub(crate) confidence: f64,
     pub(crate) ttl_unix_ms: Option<i64>,
     pub(crate) provenance: Value,
@@ -292,6 +297,8 @@ pub(crate) struct MemoryLifecycleRetainRequest {
     pub(crate) scope: MemoryLifecycleScope,
     pub(crate) source: MemorySource,
     pub(crate) content_text: String,
+    pub(crate) category_hint: Option<MemoryWriteCategory>,
+    pub(crate) replaces_terms: Vec<String>,
     pub(crate) tags: Vec<String>,
     pub(crate) confidence: Option<f64>,
     pub(crate) ttl_unix_ms: Option<i64>,
@@ -366,6 +373,9 @@ async fn retain_memory_candidate(
         session_id: request.session_id.clone(),
         scope: request.scope,
         content_text: request.content_text.clone(),
+        category_hint: request
+            .category_hint
+            .or_else(|| memory_write_category_from_tags(request.tags.as_slice())),
         confidence,
         ttl_unix_ms: request.ttl_unix_ms,
         provenance: request.provenance.clone(),
@@ -414,6 +424,7 @@ async fn retain_memory_candidate(
             &classification,
             &duplicate,
             request.content_text.as_str(),
+            request.replaces_terms.as_slice(),
         );
         let replaces_with_correction = replacement_content.is_some()
             && classification.category == MemoryWriteCategory::Correction;
@@ -518,7 +529,10 @@ async fn find_lifecycle_duplicate(
     channel_scope: Option<String>,
     session_scope: Option<String>,
 ) -> Result<Option<LifecycleDuplicate>, Status> {
-    for query in lifecycle_duplicate_search_queries(request.content_text.as_str()) {
+    for query in lifecycle_duplicate_search_queries(
+        request.content_text.as_str(),
+        request.replaces_terms.as_slice(),
+    ) {
         let hits = runtime_state
             .search_memory(MemorySearchRequest {
                 principal: request.principal.clone(),
@@ -555,6 +569,7 @@ async fn find_lifecycle_duplicate(
             }
             if lifecycle_conflict_matches(
                 classification.category,
+                request.replaces_terms.as_slice(),
                 request.content_text.as_str(),
                 lifecycle_item_write_category(&hit.item),
                 hit.item.content_text.as_str(),
@@ -606,6 +621,7 @@ async fn find_lifecycle_conflict_by_scope_scan(
     Ok(lifecycle_conflict_from_scope_items(
         items,
         classification.category,
+        request.replaces_terms.as_slice(),
         request.content_text.as_str(),
         channel_scope.as_deref(),
         session_scope.as_deref(),
@@ -615,6 +631,7 @@ async fn find_lifecycle_conflict_by_scope_scan(
 fn lifecycle_conflict_from_scope_items(
     items: Vec<MemoryItemRecord>,
     candidate_category: MemoryWriteCategory,
+    replaces_terms: &[String],
     content_text: &str,
     channel_scope: Option<&str>,
     session_scope: Option<&str>,
@@ -633,6 +650,7 @@ fn lifecycle_conflict_from_scope_items(
         }
         if !lifecycle_conflict_matches(
             candidate_category,
+            replaces_terms,
             content_text,
             lifecycle_item_write_category(&item),
             item.content_text.as_str(),
@@ -672,12 +690,18 @@ fn lifecycle_item_matches_scan_scope(
     }
 }
 
-fn lifecycle_duplicate_search_queries(content_text: &str) -> Vec<String> {
+fn lifecycle_duplicate_search_queries(
+    content_text: &str,
+    replaces_terms: &[String],
+) -> Vec<String> {
     let mut queries = vec![content_text.to_owned()];
-    if let Some(preference_context) = lifecycle_preference_context_query(content_text) {
-        if !queries.iter().any(|query| query == &preference_context) {
-            queries.push(preference_context);
-        }
+    let replacement_query = replaces_terms
+        .iter()
+        .flat_map(|term| lifecycle_duplicate_terms(term))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if !replacement_query.is_empty() && !queries.iter().any(|query| query == &replacement_query) {
+        queries.push(replacement_query);
     }
     if let Some(significant_context) = lifecycle_significant_context_query(content_text) {
         if !queries.iter().any(|query| query == &significant_context) {
@@ -687,82 +711,14 @@ fn lifecycle_duplicate_search_queries(content_text: &str) -> Vec<String> {
     queries
 }
 
-fn lifecycle_preference_context_query(content_text: &str) -> Option<String> {
-    let terms = lifecycle_duplicate_terms(content_text);
-    let preference_index =
-        terms.iter().position(|term| lifecycle_preference_term(term.as_str()))?;
-    let mut context = terms[..preference_index]
-        .iter()
-        .filter(|term| !lifecycle_duplicate_stopword(term.as_str()))
-        .rev()
-        .take(4)
-        .cloned()
-        .collect::<Vec<_>>();
-    context.reverse();
-    context.push("prefer".to_owned());
-    if context.len() >= 2 {
-        Some(context.join(" "))
-    } else {
-        None
-    }
-}
-
 fn lifecycle_duplicate_terms(input: &str) -> Vec<String> {
     input
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || character == '_' {
-                character.to_ascii_lowercase()
-            } else {
-                ' '
-            }
+        .split(|character: char| !(character.is_alphanumeric() || character == '_'))
+        .filter_map(|term| {
+            let normalized = term.trim().to_lowercase();
+            (normalized.len() >= 3).then_some(normalized)
         })
-        .collect::<String>()
-        .split_whitespace()
-        .map(ToOwned::to_owned)
         .collect()
-}
-
-fn lifecycle_preference_term(term: &str) -> bool {
-    matches!(
-        term,
-        "prefer"
-            | "prefers"
-            | "preferred"
-            | "preference"
-            | "preferences"
-            | "preferuj"
-            | "preferujeme"
-    )
-}
-
-fn lifecycle_duplicate_stopword(term: &str) -> bool {
-    matches!(
-        term,
-        "a" | "an"
-            | "actually"
-            | "correction"
-            | "for"
-            | "instead"
-            | "memory"
-            | "m"
-            | "of"
-            | "pou"
-            | "vat"
-            | "project"
-            | "pros"
-            | "si"
-            | "rather"
-            | "replace"
-            | "that"
-            | "the"
-            | "this"
-            | "to"
-            | "use"
-            | "used"
-            | "using"
-            | "uz"
-    )
 }
 
 fn lifecycle_significant_context_query(content_text: &str) -> Option<String> {
@@ -777,9 +733,6 @@ fn lifecycle_significant_context_query(content_text: &str) -> Option<String> {
 fn lifecycle_significant_terms(content_text: &str) -> Vec<String> {
     let mut terms = Vec::new();
     for term in lifecycle_duplicate_terms(content_text) {
-        if term.len() < 3 || lifecycle_duplicate_stopword(term.as_str()) {
-            continue;
-        }
         if !terms.iter().any(|existing| existing == &term) {
             terms.push(term);
         }
@@ -789,6 +742,7 @@ fn lifecycle_significant_terms(content_text: &str) -> Vec<String> {
 
 fn lifecycle_conflict_matches(
     category: MemoryWriteCategory,
+    replaces_terms: &[String],
     candidate_content: &str,
     existing_category: MemoryWriteCategory,
     existing_content: &str,
@@ -802,14 +756,14 @@ fn lifecycle_conflict_matches(
     ) {
         return false;
     }
-    if !lifecycle_correction_references_existing_value(candidate_content, existing_content) {
+    if !lifecycle_replacement_terms_reference_existing_value(replaces_terms, existing_content) {
         return false;
     }
     lifecycle_conflict_overlap_count(candidate_content, existing_content)
         >= LIFECYCLE_CONFLICT_MIN_OVERLAP
 }
 
-const LIFECYCLE_CONFLICT_MIN_OVERLAP: usize = 3;
+const LIFECYCLE_CONFLICT_MIN_OVERLAP: usize = 2;
 
 fn lifecycle_conflict_overlap_count(candidate_content: &str, existing_content: &str) -> usize {
     let candidate_terms =
@@ -824,75 +778,35 @@ fn lifecycle_item_write_category(item: &MemoryItemRecord) -> MemoryWriteCategory
         .iter()
         .find_map(|tag| tag.strip_prefix("memory_write:"))
         .and_then(MemoryWriteCategory::from_tag_value)
-        .unwrap_or_else(|| {
-            classify_memory_write_category(item.content_text.to_ascii_lowercase().as_str())
-        })
+        .unwrap_or(MemoryWriteCategory::Fact)
 }
 
-fn lifecycle_correction_references_existing_value(
-    candidate_content: &str,
+fn memory_write_category_from_tags(tags: &[String]) -> Option<MemoryWriteCategory> {
+    tags.iter()
+        .find_map(|tag| tag.strip_prefix("memory_write:"))
+        .and_then(MemoryWriteCategory::from_tag_value)
+}
+
+fn lifecycle_replacement_terms_reference_existing_value(
+    replaces_terms: &[String],
     existing_content: &str,
 ) -> bool {
-    let old_value_terms = lifecycle_correction_old_value_terms(candidate_content);
-    if old_value_terms.is_empty() {
+    if replaces_terms.is_empty() {
         return false;
     }
     let existing_terms =
         lifecycle_significant_terms(existing_content).into_iter().collect::<BTreeSet<_>>();
-    old_value_terms.iter().any(|term| existing_terms.contains(term))
-}
-
-fn lifecycle_correction_old_value_terms(content_text: &str) -> BTreeSet<String> {
-    let normalized = content_text.to_lowercase();
-    let mut terms = BTreeSet::new();
-    for marker in [", not ", "; not ", " - not ", " instead of ", " rather than "] {
-        collect_lifecycle_old_value_terms_after_marker(normalized.as_str(), marker, &mut terms);
-    }
-    for marker in [" uz nepou", " už nepou", " nepouz", " nepouž"] {
-        collect_lifecycle_old_value_terms_before_marker(normalized.as_str(), marker, &mut terms);
-    }
-    terms
-}
-
-fn collect_lifecycle_old_value_terms_after_marker(
-    normalized: &str,
-    marker: &str,
-    terms: &mut BTreeSet<String>,
-) {
-    let mut rest = normalized;
-    while let Some(marker_index) = rest.find(marker) {
-        let segment_start = marker_index + marker.len();
-        let tail = &rest[segment_start..];
-        let segment_end = tail.find(['.', ',', ';', ')', '(']).unwrap_or(tail.len());
-        collect_lifecycle_old_value_terms(&tail[..segment_end], terms);
-        rest = &tail[segment_end..];
-    }
-}
-
-fn collect_lifecycle_old_value_terms_before_marker(
-    normalized: &str,
-    marker: &str,
-    terms: &mut BTreeSet<String>,
-) {
-    let mut rest = normalized;
-    while let Some(marker_index) = rest.find(marker) {
-        let prefix = &rest[..marker_index];
-        let segment_start =
-            prefix.rfind(['.', ',', ';', ')', '(']).map(|index| index + 1).unwrap_or(0);
-        collect_lifecycle_old_value_terms(prefix[segment_start..].trim(), terms);
-        let next_start = marker_index + marker.len();
-        rest = &rest[next_start..];
-    }
-}
-
-fn collect_lifecycle_old_value_terms(segment: &str, terms: &mut BTreeSet<String>) {
-    terms.extend(lifecycle_significant_terms(segment));
+    replaces_terms
+        .iter()
+        .flat_map(|term| lifecycle_significant_terms(term))
+        .any(|term| existing_terms.contains(&term))
 }
 
 fn lifecycle_duplicate_replacement_content(
     classification: &MemoryWriteClassification,
     duplicate: &LifecycleDuplicate,
     content_text: &str,
+    replaces_terms: &[String],
 ) -> Option<String> {
     if duplicate.exact() {
         return None;
@@ -902,6 +816,7 @@ fn lifecycle_duplicate_replacement_content(
         MemoryWriteCategory::Correction
             if lifecycle_conflict_matches(
                 classification.category,
+                replaces_terms,
                 content_text,
                 existing_category,
                 duplicate.item.content_text.as_str(),
@@ -920,95 +835,10 @@ fn lifecycle_duplicate_replacement_content(
 }
 
 fn lifecycle_replacement_content(
-    classification: &MemoryWriteClassification,
+    _classification: &MemoryWriteClassification,
     content_text: &str,
 ) -> String {
-    if classification.category != MemoryWriteCategory::Correction {
-        return compact_memory_text(content_text);
-    }
-    let without_prefix =
-        strip_ascii_prefix_ignore_case(content_text.trim(), "Correction:").unwrap_or(content_text);
-    let without_parentheticals = remove_old_preference_parentheticals(without_prefix);
-    let without_negated_segments = remove_old_preference_segments(without_parentheticals.as_str());
-    let compact = compact_memory_text(without_negated_segments.as_str());
-    if compact.is_empty() {
-        compact_memory_text(content_text)
-    } else {
-        capitalize_first_ascii(compact)
-    }
-}
-
-fn strip_ascii_prefix_ignore_case<'a>(input: &'a str, prefix: &str) -> Option<&'a str> {
-    let trimmed = input.trim_start();
-    let candidate = trimmed.get(..prefix.len())?;
-    if candidate.eq_ignore_ascii_case(prefix) {
-        Some(trimmed[prefix.len()..].trim_start())
-    } else {
-        None
-    }
-}
-
-fn remove_old_preference_parentheticals(input: &str) -> String {
-    let mut output = String::with_capacity(input.len());
-    let mut rest = input;
-    while let Some(open_index) = rest.find('(') {
-        let Some(close_offset) = rest[open_index + 1..].find(')') else {
-            break;
-        };
-        let close_index = open_index + 1 + close_offset;
-        let note = &rest[open_index + 1..close_index];
-        let normalized_note = note.to_ascii_lowercase();
-        if normalized_note.contains("instead of ")
-            || normalized_note.contains("rather than ")
-            || normalized_note.trim_start().starts_with("not ")
-        {
-            output.push_str(rest[..open_index].trim_end());
-            rest = &rest[close_index + 1..];
-        } else {
-            output.push_str(&rest[..=close_index]);
-            rest = &rest[close_index + 1..];
-        }
-    }
-    output.push_str(rest);
-    output
-}
-
-fn remove_old_preference_segments(input: &str) -> String {
-    [", not ", "; not ", " - not ", " instead of ", " rather than "]
-        .into_iter()
-        .fold(input.to_owned(), |current, marker| {
-            remove_old_preference_segments_for_marker(current.as_str(), marker)
-        })
-}
-
-fn remove_old_preference_segments_for_marker(input: &str, marker: &str) -> String {
-    let mut current = input.to_owned();
-    loop {
-        let normalized = current.to_ascii_lowercase();
-        let Some(start_index) = normalized.find(marker) else {
-            break;
-        };
-        let segment_start = start_index + marker.len();
-        let mut segment_end = current.len();
-        let mut boundary = None;
-        for (offset, character) in current[segment_start..].char_indices() {
-            if matches!(character, '.' | ',' | ';') {
-                segment_end = segment_start + offset;
-                boundary = Some(character);
-                break;
-            }
-        }
-        let suffix_start = match boundary {
-            Some('.') => segment_end,
-            Some(character) => segment_end + character.len_utf8(),
-            None => segment_end,
-        };
-        let mut next = String::with_capacity(current.len());
-        next.push_str(current[..start_index].trim_end());
-        next.push_str(current[suffix_start..].trim_start_matches(' '));
-        current = next;
-    }
-    current
+    compact_memory_text(content_text)
 }
 
 fn compact_memory_text(input: &str) -> String {
@@ -1029,19 +859,6 @@ fn compact_memory_text(input: &str) -> String {
             character.is_whitespace() || matches!(character, ',' | ';' | '-' | ':')
         })
         .to_owned()
-}
-
-fn capitalize_first_ascii(input: String) -> String {
-    let Some(first) = input.chars().next() else {
-        return input;
-    };
-    if !first.is_ascii_lowercase() {
-        return input;
-    }
-    let mut output = String::with_capacity(input.len());
-    output.push(first.to_ascii_uppercase());
-    output.push_str(&input[first.len_utf8()..]);
-    output
 }
 
 fn resolve_lifecycle_write_scope(
@@ -1095,7 +912,7 @@ pub(crate) fn classify_memory_write(
 ) -> MemoryWriteClassification {
     let normalized = normalize_lifecycle_content(input.content_text.as_str());
     let lowered = normalized.to_ascii_lowercase();
-    let category = classify_memory_write_category(lowered.as_str());
+    let category = input.category_hint.unwrap_or_else(|| default_memory_write_category(&input));
     let sensitivity = classify_memory_write_sensitivity(lowered.as_str(), input.scope);
     let ttl_unix_ms = match (category, input.ttl_unix_ms) {
         (MemoryWriteCategory::TransientRuntimeFact, None) => {
@@ -1167,43 +984,8 @@ pub(crate) fn classify_memory_write(
     }
 }
 
-fn classify_memory_write_category(lowered: &str) -> MemoryWriteCategory {
-    if contains_any(
-        lowered,
-        &[
-            "correction",
-            "actually",
-            "instead of",
-            "replace ",
-            "should not",
-            "do not use",
-            "not use",
-            "not be used",
-            "no longer",
-            "misto",
-            "místo",
-            "nahra",
-            "nechceme",
-            "nepouzivat",
-            "nepoužívat",
-            "oprav",
-            "už ne",
-            "uz ne",
-        ],
-    ) {
-        MemoryWriteCategory::Correction
-    } else if contains_any(
-        lowered,
-        &["prefer", "preference", "likes ", "wants ", "preferuj", "preferujeme"],
-    ) {
-        MemoryWriteCategory::Preference
-    } else if contains_any(lowered, &["procedure", "runbook", "workflow", "steps:", "checklist"]) {
-        MemoryWriteCategory::Procedure
-    } else if contains_any(lowered, &["must ", "must not", "always ", "never ", "constraint"]) {
-        MemoryWriteCategory::Constraint
-    } else if contains_any(lowered, &["decision", "decided", "we chose", "selected "]) {
-        MemoryWriteCategory::Decision
-    } else if contains_any(lowered, &["temporary", "today", "current run", "for this run"]) {
+fn default_memory_write_category(input: &MemoryWriteClassificationInput) -> MemoryWriteCategory {
+    if input.ttl_unix_ms.is_some() {
         MemoryWriteCategory::TransientRuntimeFact
     } else {
         MemoryWriteCategory::Fact
@@ -1501,23 +1283,14 @@ pub(crate) fn reflect_memory_candidates(
 ) -> MemoryReflectionOutcome {
     let mut candidates = Vec::new();
     let allowed_categories = if request.allowed_categories.is_empty() {
-        vec![
-            MemoryReflectionCategory::Facts,
-            MemoryReflectionCategory::Preferences,
-            MemoryReflectionCategory::WorkflowRules,
-            MemoryReflectionCategory::Risks,
-            MemoryReflectionCategory::TemporaryState,
-        ]
+        vec![MemoryReflectionCategory::Facts]
     } else {
         request.allowed_categories.clone()
     };
+    let category = allowed_categories.first().copied().unwrap_or(MemoryReflectionCategory::Facts);
     for observation in request.observations {
         let content_text = normalize_lifecycle_content(observation.as_str());
         if content_text.is_empty() {
-            continue;
-        }
-        let category = classify_reflection_observation(content_text.as_str());
-        if !allowed_categories.contains(&category) {
             continue;
         }
         let confidence = reflection_confidence(category, content_text.as_str());
@@ -1528,6 +1301,7 @@ pub(crate) fn reflect_memory_candidates(
         let retain_input = json!({
             "content_text": content_text.as_str(),
             "scope": "session",
+            "category": memory_write_category_for_reflection(category).as_str(),
             "confidence": confidence,
             "tags": tags.clone(),
             "provenance": request.provenance.clone(),
@@ -1556,36 +1330,14 @@ pub(crate) fn reflect_memory_candidates(
     }
 }
 
-fn classify_reflection_observation(content_text: &str) -> MemoryReflectionCategory {
-    let lower = content_text.to_ascii_lowercase();
-    if lower.contains("prefer")
-        || lower.contains("preference")
-        || lower.contains("likes ")
-        || lower.contains("wants ")
-    {
-        MemoryReflectionCategory::Preferences
-    } else if lower.contains("always ")
-        || lower.contains("never ")
-        || lower.contains("workflow")
-        || lower.contains("runbook")
-        || lower.contains("rule")
-    {
-        MemoryReflectionCategory::WorkflowRules
-    } else if lower.contains("risk")
-        || lower.contains("blocked")
-        || lower.contains("failure")
-        || lower.contains("security")
-        || lower.contains("incident")
-    {
-        MemoryReflectionCategory::Risks
-    } else if lower.contains("today")
-        || lower.contains("temporary")
-        || lower.contains("current")
-        || lower.contains("for this run")
-    {
-        MemoryReflectionCategory::TemporaryState
-    } else {
-        MemoryReflectionCategory::Facts
+fn memory_write_category_for_reflection(category: MemoryReflectionCategory) -> MemoryWriteCategory {
+    match category {
+        MemoryReflectionCategory::Facts | MemoryReflectionCategory::Risks => {
+            MemoryWriteCategory::Fact
+        }
+        MemoryReflectionCategory::Preferences => MemoryWriteCategory::Preference,
+        MemoryReflectionCategory::WorkflowRules => MemoryWriteCategory::Procedure,
+        MemoryReflectionCategory::TemporaryState => MemoryWriteCategory::TransientRuntimeFact,
     }
 }
 
@@ -1724,6 +1476,7 @@ mod tests {
             session_id: "01H00000000000000000000001".to_owned(),
             scope: MemoryLifecycleScope::Session,
             content_text: content_text.to_owned(),
+            category_hint: None,
             confidence: 0.86,
             ttl_unix_ms: None,
             provenance: json!({ "run_id": "run-1", "seq": 7 }),
@@ -1749,6 +1502,7 @@ mod tests {
             "Workflow rules: never log secrets, redact tokens, follow approval policy, and do not bypass sandbox guardrails.",
         );
         input.scope = MemoryLifecycleScope::Principal;
+        input.category_hint = Some(MemoryWriteCategory::Procedure);
 
         let classification = classify_memory_write(input);
 
@@ -1769,6 +1523,7 @@ mod tests {
     fn write_classifier_requires_review_for_non_admin_principal_scope() {
         let mut input = classification_input("User prefers Vitest for frontend tests.");
         input.scope = MemoryLifecycleScope::Principal;
+        input.category_hint = Some(MemoryWriteCategory::Preference);
 
         let classification = classify_memory_write(input);
 
@@ -1783,9 +1538,11 @@ mod tests {
 
     #[test]
     fn write_classifier_allows_session_scoped_safe_runtime_rules() {
-        let classification = classify_memory_write(classification_input(
+        let mut input = classification_input(
             "Workflow rules for this session: inspect files, run available tests, and summarize results.",
-        ));
+        );
+        input.category_hint = Some(MemoryWriteCategory::Procedure);
+        let classification = classify_memory_write(input);
 
         assert_eq!(classification.sensitivity, MemoryWriteSensitivity::Normal);
         assert_eq!(classification.category, MemoryWriteCategory::Procedure);
@@ -1807,6 +1564,7 @@ mod tests {
         );
         input.principal = "admin:ops".to_owned();
         input.scope = MemoryLifecycleScope::Principal;
+        input.category_hint = Some(MemoryWriteCategory::Procedure);
 
         let classification = classify_memory_write(input);
 
@@ -1846,79 +1604,88 @@ mod tests {
 
     #[test]
     fn write_classifier_bounds_transient_runtime_facts_with_ttl() {
-        let classification = classify_memory_write(classification_input(
-            "Today the current run is waiting on a retry.",
-        ));
+        let mut input = classification_input("The current run is waiting on a retry.");
+        input.category_hint = Some(MemoryWriteCategory::TransientRuntimeFact);
+        let classification = classify_memory_write(input);
 
         assert_eq!(classification.category, MemoryWriteCategory::TransientRuntimeFact);
         assert_eq!(classification.ttl_unix_ms, Some(1_700_000_000_000 + MEMORY_TRANSIENT_TTL_MS));
     }
 
     #[test]
-    fn write_classifier_marks_czech_replacement_as_correction() {
-        let classification = classify_memory_write(classification_input(
-            "E2E testovací projekt má používat TypeScript a Playwright; Vitest už nepoužívat.",
-        ));
+    fn write_classifier_uses_structured_category_hint_for_corrections() {
+        let mut input =
+            classification_input("E2E test project should use TypeScript and Playwright.");
+        input.category_hint = Some(MemoryWriteCategory::Correction);
+        let classification = classify_memory_write(input);
 
         assert_eq!(classification.category, MemoryWriteCategory::Correction);
     }
 
     #[test]
-    fn duplicate_queries_include_stable_terms_for_correction_recall() {
+    fn duplicate_queries_include_structured_replacement_terms_for_correction_recall() {
+        let replacement_terms = vec!["Vitest".to_owned(), "E2E test project".to_owned()];
         let queries = lifecycle_duplicate_search_queries(
-            "E2E testovací projekt má používat TypeScript a Playwright; Vitest už nepoužívat.",
+            "E2E test project should use TypeScript and Playwright.",
+            replacement_terms.as_slice(),
         );
 
-        assert!(queries.iter().any(|query| {
-            query.contains("e2e") && query.contains("typescript") && query.contains("vitest")
-        }));
+        assert!(queries.iter().any(|query| query.contains("vitest")));
     }
 
     #[test]
     fn correction_conflict_matches_existing_project_preference() {
+        let replacement_terms = vec!["Vitest".to_owned(), "E2E test project".to_owned()];
         assert!(lifecycle_conflict_matches(
             MemoryWriteCategory::Correction,
-            "E2E testovací projekt má používat TypeScript a Playwright; Vitest už nepoužívat.",
+            replacement_terms.as_slice(),
+            "E2E test project should use TypeScript and Playwright with concise reports.",
             MemoryWriteCategory::Preference,
-            "E2E preference: for this test project use TypeScript, Vitest, and concise Czech reports.",
+            "E2E preference: for this test project use TypeScript, Vitest, and concise reports.",
         ));
     }
 
     #[test]
     fn lifecycle_conflict_rejects_ordinary_preference_overlap() {
+        let replacement_terms = Vec::new();
         assert!(!lifecycle_conflict_matches(
             MemoryWriteCategory::Preference,
+            replacement_terms.as_slice(),
             "I prefer TypeScript Playwright reports to be written in pirate voice for every project.",
             MemoryWriteCategory::Preference,
-            "Project preference: TypeScript Playwright reports should use concise Czech summaries.",
+            "Project preference: TypeScript Playwright reports should use concise summaries.",
         ));
     }
 
     #[test]
     fn lifecycle_conflict_rejects_untyped_status_note_overlap() {
+        let replacement_terms = vec!["pirate voice".to_owned()];
         assert!(!lifecycle_conflict_matches(
             MemoryWriteCategory::Correction,
-            "Correction: TypeScript Playwright reports should use concise prose, not pirate voice.",
+            replacement_terms.as_slice(),
+            "TypeScript Playwright reports should use concise prose.",
             MemoryWriteCategory::Fact,
             "Project status note: TypeScript Playwright reports document normal CI coverage and release notes.",
         ));
     }
 
     #[test]
-    fn lifecycle_conflict_requires_old_value_reference() {
+    fn lifecycle_conflict_requires_structured_replacement_term_reference() {
+        let replacement_terms = Vec::new();
         assert!(!lifecycle_conflict_matches(
             MemoryWriteCategory::Correction,
-            "Correction: TypeScript Playwright reports should use concise prose for every project.",
+            replacement_terms.as_slice(),
+            "TypeScript Playwright reports should use concise prose for every project.",
             MemoryWriteCategory::Preference,
-            "Project preference: TypeScript Playwright reports should use concise Czech summaries.",
+            "Project preference: TypeScript Playwright reports should use concise summaries.",
         ));
     }
 
     #[test]
     fn lifecycle_conflict_overlap_counts_all_shared_terms_for_ranking() {
         let overlap = lifecycle_conflict_overlap_count(
-            "Prefer TypeScript Vitest Czech reports sandbox workspace boundaries",
-            "Existing TypeScript Vitest Czech reports sandbox workspace boundaries preference",
+            "Prefer TypeScript Vitest concise reports sandbox workspace boundaries",
+            "Existing TypeScript Vitest concise reports sandbox workspace boundaries preference",
         );
 
         assert!(
@@ -1933,19 +1700,22 @@ mod tests {
             "01ARZ3NDEKTSV4RRFFQ69G5W01",
             None,
             None,
-            "Existing Vitest preference for TypeScript Czech note",
+            "Existing Vitest preference for TypeScript note",
         );
         let strong = lifecycle_test_memory_item(
             "01ARZ3NDEKTSV4RRFFQ69G5W02",
             None,
             None,
-            "Existing TypeScript Vitest Czech reports sandbox workspace boundaries preference",
+            "Existing TypeScript Vitest reports sandbox workspace boundaries preference",
         );
+        let replacement_terms =
+            vec!["Vitest".to_owned(), "sandbox workspace boundaries".to_owned()];
 
         let conflict = lifecycle_conflict_from_scope_items(
             vec![weak, strong],
             MemoryWriteCategory::Correction,
-            "Correction: Prefer TypeScript Playwright Czech reports sandbox workspace boundaries, not Vitest",
+            replacement_terms.as_slice(),
+            "Prefer TypeScript Playwright reports sandbox workspace boundaries.",
             None,
             None,
         )
@@ -1960,19 +1730,22 @@ mod tests {
             "01ARZ3NDEKTSV4RRFFQ69G5W03",
             Some("slack"),
             None,
-            "Existing TypeScript Vitest Czech reports sandbox workspace boundaries preference",
+            "Existing TypeScript Vitest reports sandbox workspace boundaries preference",
         );
         let session_item = lifecycle_test_memory_item(
             "01ARZ3NDEKTSV4RRFFQ69G5W04",
             None,
             Some("01ARZ3NDEKTSV4RRFFQ69G5S01"),
-            "Existing TypeScript Vitest Czech reports sandbox workspace boundaries preference",
+            "Existing TypeScript Vitest reports sandbox workspace boundaries preference",
         );
+        let replacement_terms =
+            vec!["Vitest".to_owned(), "sandbox workspace boundaries".to_owned()];
 
         let conflict = lifecycle_conflict_from_scope_items(
             vec![channel_item, session_item],
             MemoryWriteCategory::Correction,
-            "Correction: Prefer TypeScript Playwright Czech reports sandbox workspace boundaries, not Vitest",
+            replacement_terms.as_slice(),
+            "Prefer TypeScript Playwright reports sandbox workspace boundaries.",
             None,
             None,
         );
@@ -1981,24 +1754,17 @@ mod tests {
     }
 
     #[test]
-    fn replacement_content_removes_old_preference_markers() {
-        let classification = classify_memory_write(classification_input(
-            "Correction: for E2E tests use Playwright, not Vitest. Keep concise Czech reports.",
-        ));
+    fn correction_replacement_content_uses_structured_corrected_text() {
+        let mut input = classification_input("For E2E tests use Playwright.");
+        input.category_hint = Some(MemoryWriteCategory::Correction);
+        let classification = classify_memory_write(input);
 
         assert_eq!(
             lifecycle_replacement_content(
                 &classification,
-                "Correction: for E2E tests use Playwright, not Vitest. Keep concise Czech reports.",
+                "For E2E tests use Playwright. Keep concise reports.",
             ),
-            "For E2E tests use Playwright. Keep concise Czech reports."
-        );
-        assert_eq!(
-            lifecycle_replacement_content(
-                &classification,
-                "Prefer TypeScript, Playwright (instead of Vitest), and concise Czech summaries.",
-            ),
-            "Prefer TypeScript, Playwright, and concise Czech summaries."
+            "For E2E tests use Playwright. Keep concise reports."
         );
     }
 
@@ -2007,12 +1773,12 @@ mod tests {
         let classification = MemoryWriteClassification {
             category: MemoryWriteCategory::Preference,
             ..classify_memory_write(classification_input(
-                "E2E harness project rules (S035): 1) Czech concise reports. 2) Sandbox boundary tests write only inside workspace.",
+                "E2E harness project rules (S035): 1) Brief reports. 2) Sandbox boundary tests write only inside workspace.",
             ))
         };
         let replacement = lifecycle_replacement_content(
             &classification,
-            "E2E harness project rules (S035): 1) Czech concise reports. 2) Sandbox boundary tests write only inside workspace.",
+            "E2E harness project rules (S035): 1) Brief reports. 2) Sandbox boundary tests write only inside workspace.",
         );
 
         assert!(

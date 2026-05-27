@@ -2002,7 +2002,7 @@ pub fn natural_language_schedule_preview(
 
     Err(RoutineRegistryError::InvalidField {
         field: "phrase",
-        message: "supported phrases include 'in 30 minutes', 'za 30 minut', 'every 40 seconds', 'every 2h', 'každých 30 sekund', 'every Monday at 09:00', 'každé pondělí v 09:00', 'every weekday at 9', 'každý pracovní den v 9', or an RFC3339 timestamp".to_owned(),
+        message: "supported phrases include 'in 30 minutes', 'every 40 seconds', 'every 2h', 'every Monday at 09:00', 'every weekday at 9', 'daily at 9', or an RFC3339 timestamp".to_owned(),
     })
 }
 
@@ -2579,7 +2579,6 @@ fn parse_relative_phrase(
     let tokens = normalized.split_whitespace().collect::<Vec<_>>();
     let (quantity, unit) = match tokens.as_slice() {
         ["in", quantity, unit] => (*quantity, *unit),
-        ["za", quantity, unit] => (*quantity, *unit),
         _ => return Ok(None),
     };
     let duration_ms = parse_duration_to_ms(quantity, unit, "phrase")?;
@@ -2620,17 +2619,6 @@ fn parse_interval_phrase(
         ["every", unit @ ("minute" | "minutes")] => ("1", *unit),
         ["every", compact] => split_compact_duration(compact).unwrap_or(("", "")),
         ["every", quantity, unit] => (*quantity, *unit),
-        ["každou", unit @ ("minutu" | "minuty")] | ["kazdou", unit @ ("minutu" | "minuty")] => {
-            ("1", *unit)
-        }
-        ["každé", compact] | ["kazde", compact] => {
-            split_compact_duration(compact).unwrap_or(("", ""))
-        }
-        ["každé", quantity, unit] | ["kazde", quantity, unit] => (*quantity, *unit),
-        ["každých", compact] | ["kazdych", compact] => {
-            split_compact_duration(compact).unwrap_or(("", ""))
-        }
-        ["každých", quantity, unit] | ["kazdych", quantity, unit] => (*quantity, *unit),
         _ => return Ok(None),
     };
     if quantity.is_empty() || unit.is_empty() {
@@ -2641,7 +2629,7 @@ fn parse_interval_phrase(
         return Err(RoutineRegistryError::InvalidField {
             field: "phrase",
             message: format!(
-                "bounded recurring duration '{suffix}' is not supported; parsed the interval part as every {}. Use 'každých 30 sekund' or 'every 30 seconds' for an unbounded repeating schedule, then disable or delete the job after the desired duration.",
+                "bounded recurring duration '{suffix}' is not supported; parsed the interval part as every {}. Use 'every 30 seconds' for an unbounded repeating schedule, then disable or delete the job after the desired duration.",
                 humanize_duration(interval_ms)
             ),
         });
@@ -2669,7 +2657,7 @@ fn parse_interval_phrase(
 }
 
 fn split_bounded_duration_suffix(normalized: &str) -> (&str, Option<&str>) {
-    for marker in [" po dobu ", " for "] {
+    for marker in [" for "] {
         if let Some(index) = normalized.find(marker) {
             let suffix_start = index.saturating_add(1);
             return (normalized[..index].trim_end(), Some(normalized[suffix_start..].trim()));
@@ -2684,10 +2672,6 @@ fn parse_weekday_phrase(
     let normalized = normalize_phrase(phrase);
     let prefix = if normalized.starts_with("every weekday at ") {
         "every weekday at "
-    } else if normalized.starts_with("každý pracovní den v ") {
-        "každý pracovní den v "
-    } else if normalized.starts_with("kazdy pracovni den v ") {
-        "kazdy pracovni den v "
     } else {
         return Ok(None);
     };
@@ -2711,9 +2695,6 @@ fn parse_weekly_day_phrase(
     let tokens = normalized.split_whitespace().collect::<Vec<_>>();
     let (weekday_token, time_raw) = match tokens.as_slice() {
         ["every", weekday, "at", time @ ..] if !time.is_empty() => (*weekday, time.join(" ")),
-        ["každé" | "kazde" | "každý" | "kazdy", weekday, "v", time @ ..] if !time.is_empty() => {
-            (*weekday, time.join(" "))
-        }
         _ => return Ok(None),
     };
     let Some(weekday) = cron_weekday_number(weekday_token) else {
@@ -2745,10 +2726,6 @@ fn parse_daily_phrase(
     let normalized = normalize_phrase(phrase);
     let prefix = if normalized.starts_with("daily at ") {
         "daily at "
-    } else if normalized.starts_with("denně v ") {
-        "denně v "
-    } else if normalized.starts_with("denne v ") {
-        "denne v "
     } else {
         return Ok(None);
     };
@@ -2798,15 +2775,10 @@ fn parse_duration_to_ms(
     }
     let normalized = unit.trim().to_lowercase();
     let multiplier = match normalized.as_str() {
-        "s" | "sec" | "secs" | "second" | "seconds" | "sekunda" | "sekundu" | "sekundy"
-        | "sekund" => 1_000,
-        "m" | "min" | "mins" | "minute" | "minutes" | "minuta" | "minutu" | "minuty" | "minut" => {
-            60_000
-        }
-        "h" | "hr" | "hrs" | "hour" | "hours" | "hod" | "hodina" | "hodiny" | "hodin" => {
-            60 * 60_000
-        }
-        "d" | "day" | "days" | "den" | "dny" | "dni" => 24 * 60 * 60_000,
+        "s" | "sec" | "secs" | "second" | "seconds" => 1_000,
+        "m" | "min" | "mins" | "minute" | "minutes" => 60_000,
+        "h" | "hr" | "hrs" | "hour" | "hours" => 60 * 60_000,
+        "d" | "day" | "days" => 24 * 60 * 60_000,
         _ => {
             return Err(RoutineRegistryError::InvalidField {
                 field,
@@ -2855,13 +2827,13 @@ fn parse_time_components(
 
 fn cron_weekday_number(value: &str) -> Option<u8> {
     match value {
-        "sunday" | "sun" | "neděle" | "nedele" => Some(0),
-        "monday" | "mon" | "pondělí" | "pondeli" => Some(1),
-        "tuesday" | "tue" | "úterý" | "utery" => Some(2),
-        "wednesday" | "wed" | "středa" | "streda" => Some(3),
-        "thursday" | "thu" | "čtvrtek" | "ctvrtek" => Some(4),
-        "friday" | "fri" | "pátek" | "patek" => Some(5),
-        "saturday" | "sat" | "sobota" => Some(6),
+        "sunday" | "sun" => Some(0),
+        "monday" | "mon" => Some(1),
+        "tuesday" | "tue" => Some(2),
+        "wednesday" | "wed" => Some(3),
+        "thursday" | "thu" => Some(4),
+        "friday" | "fri" => Some(5),
+        "saturday" | "sat" => Some(6),
         _ => None,
     }
 }
@@ -3199,7 +3171,7 @@ mod tests {
     }
 
     #[test]
-    fn natural_language_preview_supports_english_and_czech_inputs() {
+    fn natural_language_preview_supports_english_inputs() {
         let now = 1_700_000_000_000_i64;
         let english = natural_language_schedule_preview("every 2h", CronTimezoneMode::Utc, now)
             .expect("english schedule preview should parse");
@@ -3222,24 +3194,6 @@ mod tests {
                 .expect("second interval schedule preview should parse");
         assert_eq!(every_seconds.schedule_payload["interval_ms"], json!(40_000_u64));
 
-        let czech_minute =
-            natural_language_schedule_preview("každou minutu", CronTimezoneMode::Utc, now)
-                .expect("czech minute interval schedule preview should parse");
-        assert_eq!(czech_minute.schedule_payload["interval_ms"], json!(60_000_u64));
-
-        let czech_plural_seconds =
-            natural_language_schedule_preview("každých 30 sekund", CronTimezoneMode::Utc, now)
-                .expect("czech plural second interval schedule preview should parse");
-        assert_eq!(czech_plural_seconds.schedule_type, "every");
-        assert_eq!(czech_plural_seconds.normalized_text, "every 30 second(s)");
-        assert_eq!(czech_plural_seconds.schedule_payload["interval_ms"], json!(30_000_u64));
-
-        let czech =
-            natural_language_schedule_preview("každý pracovní den v 9", CronTimezoneMode::Utc, now)
-                .expect("czech weekday schedule preview should parse");
-        assert_eq!(czech.schedule_type, "cron");
-        assert_eq!(czech.schedule_payload["expression"], json!("0 9 * * 1-5"));
-
         let saturday =
             DateTime::parse_from_rfc3339("2026-05-23T12:00:00Z").unwrap().timestamp_millis();
         let english_weekly = natural_language_schedule_preview(
@@ -3255,14 +3209,6 @@ mod tests {
             english_weekly.next_run_at_unix_ms,
             Some(DateTime::parse_from_rfc3339("2026-05-25T09:00:00Z").unwrap().timestamp_millis())
         );
-
-        let czech_weekly = natural_language_schedule_preview(
-            "každé pondělí v 09:00",
-            CronTimezoneMode::Utc,
-            saturday,
-        )
-        .expect("czech weekly schedule preview should parse");
-        assert_eq!(czech_weekly.schedule_payload["expression"], json!("0 9 * * 1"));
     }
 
     #[test]
@@ -3317,7 +3263,7 @@ mod tests {
     #[test]
     fn natural_language_preview_rejects_bounded_recurring_suffix_with_specific_hint() {
         let error = natural_language_schedule_preview(
-            "každých 30 sekund po dobu 2 minut",
+            "every 30 seconds for 2 minutes",
             CronTimezoneMode::Utc,
             0,
         )
@@ -3325,9 +3271,9 @@ mod tests {
         let rendered = error.to_string();
 
         assert!(rendered.contains("bounded recurring duration"), "{rendered}");
-        assert!(rendered.contains("po dobu 2 minut"), "{rendered}");
+        assert!(rendered.contains("for 2 minutes"), "{rendered}");
         assert!(rendered.contains("every 30 second(s)"), "{rendered}");
-        assert!(rendered.contains("každých 30 sekund"), "{rendered}");
+        assert!(rendered.contains("every 30 seconds"), "{rendered}");
     }
 
     #[test]
