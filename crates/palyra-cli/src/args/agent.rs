@@ -25,7 +25,7 @@ pub enum AgentCommand {
         require_existing: bool,
         #[arg(long, default_value_t = false)]
         reset_session: bool,
-        #[arg(long)]
+        #[arg(long, help = "Canonical 26-character ULID run id. Omit to generate one.")]
         run_id: Option<String>,
         #[arg(
             long,

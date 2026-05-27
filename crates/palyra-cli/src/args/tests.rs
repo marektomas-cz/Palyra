@@ -618,6 +618,22 @@ fn parse_agent_run_with_prompt() {
 }
 
 #[test]
+fn agent_run_help_documents_canonical_run_id_shape() {
+    let mut command = Cli::command();
+    let help = command
+        .find_subcommand_mut("agent")
+        .and_then(|agent| agent.find_subcommand_mut("run"))
+        .expect("agent run subcommand should be registered")
+        .render_long_help()
+        .to_string();
+
+    assert!(
+        help.contains("Canonical 26-character ULID run id"),
+        "agent run help should document canonical run id shape: {help}"
+    );
+}
+
+#[test]
 fn parse_agent_interactive_with_defaults() {
     let parsed = Cli::parse_from(["palyra", "agent", "interactive"]);
     assert_eq!(
