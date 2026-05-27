@@ -627,12 +627,21 @@ pub fn compute_misfire_recovery_plan(
 }
 
 #[must_use]
+pub fn visible_cron_job_enabled(job: &CronJobRecord) -> bool {
+    job.enabled && !one_shot_schedule_is_exhausted(job, job.next_run_at_unix_ms)
+}
+
+#[must_use]
 pub fn visible_next_run_at_unix_ms(job: &CronJobRecord) -> Option<i64> {
-    if job.enabled {
+    if visible_cron_job_enabled(job) {
         job.next_run_at_unix_ms
     } else {
         None
     }
+}
+
+fn one_shot_schedule_is_exhausted(job: &CronJobRecord, next_run_at_unix_ms: Option<i64>) -> bool {
+    matches!(job.schedule_type, CronScheduleType::At) && next_run_at_unix_ms.is_none()
 }
 
 #[must_use]
@@ -1413,6 +1422,9 @@ async fn process_due_jobs(
         state
             .set_cron_job_next_run(job.job_id.clone(), next_run_at_unix_ms, Some(reference_unix_ms))
             .await?;
+        if should_disable_exhausted_scheduled_one_shot(&job, next_run_at_unix_ms) {
+            disable_exhausted_scheduled_one_shot(Arc::clone(&state), &job).await?;
+        }
         state.record_cron_trigger_fired();
         if recovery_plan.action == CronMisfireRecoveryAction::RequireReview {
             record_misfire_review_required(
@@ -1438,6 +1450,31 @@ async fn process_due_jobs(
             wake_signal.notify_one();
         }
     }
+    Ok(())
+}
+
+fn should_disable_exhausted_scheduled_one_shot(
+    job: &CronJobRecord,
+    next_run_at_unix_ms: Option<i64>,
+) -> bool {
+    one_shot_schedule_is_exhausted(job, next_run_at_unix_ms)
+}
+
+async fn disable_exhausted_scheduled_one_shot(
+    state: Arc<GatewayRuntimeState>,
+    job: &CronJobRecord,
+) -> Result<(), Status> {
+    state
+        .update_cron_job(
+            job.job_id.clone(),
+            CronJobUpdatePatch {
+                enabled: Some(false),
+                next_run_at_unix_ms: Some(None),
+                queued_run: Some(false),
+                ..CronJobUpdatePatch::default()
+            },
+        )
+        .await?;
     Ok(())
 }
 
@@ -3091,8 +3128,9 @@ mod tests {
         now_unix_ms_or_fallback, parse_skill_reaudit_interval, periodic_reaudit_targets,
         routine_approval_subject_id, routines_automation_enabled,
         scheduled_routine_requires_first_run_approval, scheduled_routine_run_metadata_upsert,
-        scheduler_attempt_failure, should_pause_recurring_cron_after_policy_denied,
-        should_repair_stale_cron_run, ConcurrencyDecision, CronMatcher, CronMisfireRecoveryAction,
+        scheduler_attempt_failure, should_disable_exhausted_scheduled_one_shot,
+        should_pause_recurring_cron_after_policy_denied, should_repair_stale_cron_run,
+        visible_cron_job_enabled, ConcurrencyDecision, CronMatcher, CronMisfireRecoveryAction,
         CronTimezoneMode, InstalledSkillRecord, InstalledSkillsIndex, SchedulerHealthInput,
         TriggerJobOptions, CRON_MAX_RUNS_EXHAUSTED_ERROR_KIND,
         OBJECTIVE_BUDGET_EXHAUSTED_ERROR_KIND, SCHEDULER_STALE_RUN_AFTER_MS,
@@ -3489,6 +3527,26 @@ mod tests {
             CronRunStatus::Denied,
             true,
         ));
+    }
+
+    #[test]
+    fn exhausted_one_shot_jobs_are_not_visible_as_enabled() {
+        let mut at_job =
+            sample_every_job("01ARZ3NDEKTSV4RRFFQ69G5FAV", Some(1_000), CronMisfirePolicy::Skip);
+        at_job.schedule_type = CronScheduleType::At;
+        at_job.schedule_payload_json = json!({ "at_unix_ms": 1_000_i64 }).to_string();
+
+        assert!(visible_cron_job_enabled(&at_job));
+        assert!(!should_disable_exhausted_scheduled_one_shot(&at_job, at_job.next_run_at_unix_ms));
+
+        at_job.next_run_at_unix_ms = None;
+        assert!(!visible_cron_job_enabled(&at_job));
+        assert!(should_disable_exhausted_scheduled_one_shot(&at_job, None));
+
+        let recurring_job =
+            sample_every_job("01ARZ3NDEKTSV4RRFFQ69G5FAW", None, CronMisfirePolicy::Skip);
+        assert!(visible_cron_job_enabled(&recurring_job));
+        assert!(!should_disable_exhausted_scheduled_one_shot(&recurring_job, None));
     }
 
     #[test]

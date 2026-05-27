@@ -1621,8 +1621,8 @@ fn routine_approval_apply_outcome(
         None => json!({
             "action": action,
             "routine_id": job.job_id,
-            "enabled": job.enabled,
-            "next_run_at_unix_ms": job.next_run_at_unix_ms,
+            "enabled": cron::visible_cron_job_enabled(job),
+            "next_run_at_unix_ms": cron::visible_next_run_at_unix_ms(job),
         }),
     }))
 }
@@ -2172,7 +2172,7 @@ fn routine_view_from_parts(job: &CronJobRecord, metadata: &RoutineMetadataRecord
         "session_key": job.session_key,
         "session_label": job.session_label,
         "workdir": job.workdir,
-        "enabled": job.enabled,
+        "enabled": cron::visible_cron_job_enabled(job),
         "schedule_type": job.schedule_type.as_str(),
         "schedule_payload": serde_json::from_str::<Value>(job.schedule_payload_json.as_str()).unwrap_or_else(|_| json!({ "raw": job.schedule_payload_json })),
         "next_run_at_unix_ms": cron::visible_next_run_at_unix_ms(job),

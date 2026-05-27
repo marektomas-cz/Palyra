@@ -190,7 +190,7 @@ pub(crate) fn cron_job_message(job: &CronJobRecord) -> Result<cron_v1::Job, Stat
         session_key: job.session_key.clone().unwrap_or_default(),
         session_label: job.session_label.clone().unwrap_or_default(),
         schedule: Some(schedule),
-        enabled: job.enabled,
+        enabled: crate::cron::visible_cron_job_enabled(job),
         concurrency_policy: cron_concurrency_to_proto(job.concurrency_policy),
         retry_policy: Some(cron_v1::RetryPolicy {
             max_attempts: job.retry_policy.max_attempts,

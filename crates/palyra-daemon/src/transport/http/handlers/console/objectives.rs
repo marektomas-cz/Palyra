@@ -896,7 +896,7 @@ async fn load_objective_routine(
         "job_id": job.job_id,
         "name": job.name,
         "prompt": job.prompt,
-        "enabled": job.enabled,
+        "enabled": cron::visible_cron_job_enabled(&job),
         "channel": job.channel,
         "session_key": job.session_key,
         "session_label": job.session_label,
