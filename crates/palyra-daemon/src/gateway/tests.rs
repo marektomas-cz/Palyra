@@ -2151,10 +2151,9 @@ async fn default_memory_auto_inject_adds_manual_preference_to_fresh_session_prom
             channel: context.channel.clone(),
             session_id: None,
             source: MemorySource::Manual,
-            content_text:
-                "E2E preference: for this test project prefer TypeScript, Playwright, and concise reports."
-                    .to_owned(),
-            tags: vec!["e2e-preference".to_owned()],
+            content_text: "Project setup for the regression-testing harness: TypeScript, Playwright, and concise reports."
+                .to_owned(),
+            tags: vec!["regression-testing".to_owned()],
             confidence: Some(0.95),
             ttl_unix_ms: None,
         })
@@ -2171,7 +2170,7 @@ async fn default_memory_auto_inject_adds_manual_preference_to_fresh_session_prom
             session_id: current_session_id,
             previous_run_id: None,
             parameter_delta_json: None,
-            input_text: "For this E2E test project, what stack and report style should you prefer? Answer in one concise sentence. Do not use tools unless needed.",
+            input_text: "Create a small regression-testing utility in the sandbox. Answer in one concise sentence. Do not use tools unless needed.",
             attachments: &[],
             provider_kind_hint: None,
             provider_model_id_hint: None,
@@ -2191,7 +2190,7 @@ async fn default_memory_auto_inject_adds_manual_preference_to_fresh_session_prom
     );
     assert!(
         prepared.provider_input_text.contains("TypeScript, Playwright, and concise reports"),
-        "stored preference should be available to the next session through default auto-inject: {}",
+        "stored manual memory should be available to the next session through default auto-inject: {}",
         prepared.provider_input_text
     );
     let tape =

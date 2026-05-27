@@ -98,6 +98,9 @@ const MAX_APPROVALS_QUERY_LIMIT: usize = MAX_APPROVALS_LIST_LIMIT + 1;
 const MAX_MEMORY_ITEMS_LIST_LIMIT: usize = 500;
 const MAX_MEMORY_SEARCH_CANDIDATES: usize = 256;
 const MAX_MEMORY_VECTOR_SCAN_CANDIDATES: usize = 1_024;
+const MEMORY_FTS_SPARSE_PAIR_MIN_CHARS: usize = 4;
+const MEMORY_FTS_SPARSE_SINGLE_MIN_CHARS: usize = 8;
+const MEMORY_FTS_MAX_SPARSE_FALLBACKS: usize = 8;
 // Vector-only recall has no lexical seed, so require an absolute semantic signal
 // before relative score normalization can promote the candidate.
 const MIN_VECTOR_ONLY_COSINE_SIMILARITY: f64 = 0.25;
@@ -19269,16 +19272,14 @@ fn normalize_memory_tags(raw: &[String]) -> Vec<String> {
 fn normalized_fts_terms(query: &str) -> Vec<String> {
     let mut terms = Vec::new();
     for token in query.split_whitespace() {
-        let normalized = token
-            .chars()
-            .map(|ch| {
-                if ch.is_ascii_alphanumeric() || ch == '_' {
-                    ch.to_ascii_lowercase()
-                } else {
-                    ' '
-                }
-            })
-            .collect::<String>();
+        let mut normalized = String::new();
+        for ch in token.chars() {
+            if ch.is_alphanumeric() || ch == '_' {
+                normalized.extend(ch.to_lowercase());
+            } else {
+                normalized.push(' ');
+            }
+        }
         for term in normalized.split_whitespace() {
             if !term.is_empty() {
                 terms.push(term.to_owned());
@@ -19295,87 +19296,65 @@ fn build_fts_query(query: &str) -> String {
 fn build_memory_fts_queries(query: &str) -> Vec<String> {
     let primary = build_fts_query(query);
     let mut queries = Vec::new();
-    if !primary.is_empty() {
-        queries.push(primary.clone());
-    }
+    push_unique_fts_query(&mut queries, primary.clone());
 
-    for relaxed in build_relaxed_memory_fts_queries(query) {
-        if relaxed != primary && !queries.iter().any(|query| query == &relaxed) {
-            queries.push(relaxed);
-        }
-    }
-
-    for term in normalized_fts_terms(query)
-        .into_iter()
-        .filter(|term| {
-            term.len() >= 12 && (term.contains('_') || term.chars().any(|ch| ch.is_ascii_digit()))
-        })
-        .take(4)
-    {
-        if term != primary && !queries.iter().any(|query| query == &term) {
-            queries.push(term);
-        }
+    for fallback in build_sparse_memory_fts_queries(query) {
+        push_unique_fts_query(&mut queries, fallback);
     }
 
     queries
 }
 
-fn build_relaxed_memory_fts_queries(query: &str) -> Vec<String> {
-    let terms = normalized_fts_terms(query)
-        .into_iter()
-        .filter(|term| !relaxed_memory_query_stopword(term.as_str()))
-        .collect::<Vec<_>>();
-    if terms.len() < 2 {
-        return Vec::new();
-    }
-
-    let mut variants = Vec::new();
-    for preference_term in ["prefer", "preference"] {
-        let relaxed = terms
-            .iter()
-            .map(|term| {
-                if is_preference_query_term(term.as_str()) {
-                    preference_term
-                } else {
-                    term.as_str()
-                }
-            })
-            .collect::<Vec<_>>();
-        if relaxed.contains(&preference_term) {
-            let query = relaxed.join(" ");
-            if !variants.iter().any(|existing| existing == &query) {
-                variants.push(query);
-            }
+fn build_sparse_memory_fts_queries(query: &str) -> Vec<String> {
+    let mut terms = Vec::new();
+    for term in normalized_fts_terms(query) {
+        if !is_sparse_memory_fts_term(term.as_str()) {
+            continue;
+        }
+        if !terms.iter().any(|existing| existing == &term) {
+            terms.push(term);
+        }
+        if terms.len() >= MEMORY_FTS_MAX_SPARSE_FALLBACKS {
+            break;
         }
     }
-    variants
+
+    let mut queries = Vec::new();
+    for pair in terms.windows(2) {
+        if pair.iter().all(|term| term.chars().count() >= MEMORY_FTS_SPARSE_PAIR_MIN_CHARS) {
+            push_unique_fts_query(&mut queries, pair.join(" "));
+        }
+    }
+
+    for term in terms {
+        if is_distinctive_memory_fts_term(term.as_str()) {
+            let query = if term.contains('_') || term.chars().any(|ch| ch.is_ascii_digit()) {
+                term
+            } else {
+                format!("{term}*")
+            };
+            push_unique_fts_query(&mut queries, query);
+        }
+    }
+    queries
 }
 
-fn relaxed_memory_query_stopword(term: &str) -> bool {
-    matches!(
-        term,
-        "a" | "an"
-            | "are"
-            | "about"
-            | "for"
-            | "in"
-            | "is"
-            | "me"
-            | "my"
-            | "of"
-            | "our"
-            | "project"
-            | "stored"
-            | "the"
-            | "to"
-            | "what"
-            | "which"
-            | "your"
-    )
+fn is_sparse_memory_fts_term(term: &str) -> bool {
+    term.chars().count() >= MEMORY_FTS_SPARSE_PAIR_MIN_CHARS
+        && term.chars().any(|ch| ch.is_alphabetic() || ch.is_ascii_digit() || ch == '_')
 }
 
-fn is_preference_query_term(term: &str) -> bool {
-    matches!(term, "prefer" | "prefers" | "preferred" | "preference" | "preferences")
+fn is_distinctive_memory_fts_term(term: &str) -> bool {
+    let len = term.chars().count();
+    len >= MEMORY_FTS_SPARSE_SINGLE_MIN_CHARS
+        || (len >= MEMORY_FTS_SPARSE_PAIR_MIN_CHARS
+            && (term.contains('_') || term.chars().any(|ch| ch.is_ascii_digit())))
+}
+
+fn push_unique_fts_query(queries: &mut Vec<String>, query: String) {
+    if !query.is_empty() && !queries.iter().any(|existing| existing == &query) {
+        queries.push(query);
+    }
 }
 
 fn memory_source_matches(source: MemorySource, filter_sources: &[MemorySource]) -> bool {
@@ -23867,22 +23846,19 @@ mod tests {
         let fts_query = build_fts_query(query);
         assert_eq!(fts_query, "deploy or release near checklist rollback not path tmp");
         assert!(
-            fts_query
-                .chars()
-                .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_' || ch == ' '),
+            fts_query.chars().all(|ch| ch.is_alphanumeric() || ch == '_' || ch == ' '),
             "FTS query should only include normalized term characters"
         );
     }
 
     #[test]
     fn build_memory_fts_queries_adds_distinctive_identifier_fallback() {
-        let queries = build_memory_fts_queries(
-            "jaké preference jsou uložené pro projekt PALYRA_E2E_MEMORY_SMOKE?",
-        );
+        let queries =
+            build_memory_fts_queries("Which memory is stored for project PALYRA_E2E_MEMORY_SMOKE?");
 
         assert_eq!(
             queries.first().map(String::as_str),
-            Some("jak preference jsou ulo en pro projekt palyra_e2e_memory_smoke")
+            Some("which memory is stored for project palyra_e2e_memory_smoke")
         );
         assert!(
             queries.iter().any(|query| query == "palyra_e2e_memory_smoke"),
@@ -23891,16 +23867,12 @@ mod tests {
     }
 
     #[test]
-    fn build_memory_fts_queries_relaxes_preference_morphology() {
-        let queries = build_memory_fts_queries("What are the E2E project preferences?");
+    fn build_memory_fts_queries_adds_sparse_prefix_fallbacks() {
+        let queries = build_memory_fts_queries("Create a small regression-testing utility.");
 
         assert!(
-            queries.iter().any(|query| query == "e2e prefer"),
-            "preference queries should match memories phrased with 'prefer': {queries:?}"
-        );
-        assert!(
-            queries.iter().any(|query| query == "e2e preference"),
-            "preference queries should still match memories phrased as a preference: {queries:?}"
+            queries.iter().any(|query| query == "regression*"),
+            "distinctive terms should get standalone prefix fallback queries: {queries:?}"
         );
     }
 
@@ -23967,7 +23939,7 @@ mod tests {
                 None,
                 None,
                 MemorySource::Manual,
-                "E2E memory smoke preference: use TypeScript, Vitest, and concise Czech reports for project PALYRA_E2E_MEMORY_SMOKE.",
+                "E2E memory smoke setup: use TypeScript, Vitest, and concise reports for project PALYRA_E2E_MEMORY_SMOKE.",
             ))
             .expect("manual marker memory should be created");
         store
@@ -23986,8 +23958,7 @@ mod tests {
                 principal: "user:ops".to_owned(),
                 channel: None,
                 session_id: None,
-                query: "jaké preference jsou uložené pro projekt PALYRA_E2E_MEMORY_SMOKE?"
-                    .to_owned(),
+                query: "Which setup is stored for project PALYRA_E2E_MEMORY_SMOKE?".to_owned(),
                 top_k: 5,
                 min_score: 0.0,
                 tags: Vec::new(),
@@ -24003,7 +23974,7 @@ mod tests {
     }
 
     #[test]
-    fn memory_search_matches_preference_from_natural_language_without_marker() {
+    fn memory_search_matches_manual_memory_from_sparse_followup_query() {
         let db_path = temp_db_path();
         let store = JournalStore::open(test_journal_config(db_path, false))
             .expect("journal store should open");
@@ -24015,9 +23986,9 @@ mod tests {
                 None,
                 None,
                 MemorySource::Manual,
-                "For this E2E harness, prefer TypeScript and Playwright for UI smoke tests, and write the final report in Czech.",
+                "Project setup for the regression-testing harness: TypeScript, Playwright, concise reports.",
             ))
-            .expect("manual preference memory should be created");
+            .expect("manual memory should be created");
         store
             .create_memory_item(&sample_memory_request(
                 "01ARZ3NDEKTSV4RRFFQ69G5FCJ",
@@ -24034,18 +24005,18 @@ mod tests {
                 principal: "user:ops".to_owned(),
                 channel: None,
                 session_id: None,
-                query: "What are the E2E project preferences?".to_owned(),
+                query: "Create a small regression-testing utility in the sandbox.".to_owned(),
                 top_k: 5,
-                min_score: 0.0,
+                min_score: 0.2,
                 tags: Vec::new(),
-                sources: Vec::new(),
+                sources: vec![MemorySource::Manual],
             })
-            .expect("natural-language preference query should search memory");
+            .expect("sparse follow-up query should search memory");
 
         assert_eq!(hits.first().map(|hit| hit.item.memory_id.as_str()), Some(memory_id));
         assert!(
             hits.first().map(|hit| hit.item.content_text.contains("Playwright")).unwrap_or(false),
-            "manual preference should be the top hit: {hits:?}"
+            "manual memory should be the top hit: {hits:?}"
         );
     }
 
