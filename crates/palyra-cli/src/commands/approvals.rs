@@ -173,38 +173,53 @@ fn emit_approval_decision(
         );
     }
 
-    println!(
-        "approvals.decide id={} subject_type={} subject={} decision={} scope={} ttl_ms={} reason=\"{}\" dm_pairing={}",
-        approval_value_at(payload, "/approval/approval_id", "unknown"),
-        approval_value_at(payload, "/approval/subject_type", "unknown"),
-        approval_value_at(payload, "/approval/subject_id", "unknown"),
-        approval_value_at(payload, "/approval/decision", "unknown"),
-        approval_value_at(payload, "/approval/decision_scope", "unknown"),
-        approval_scalar_at(payload, "/approval/decision_scope_ttl_ms", "none"),
-        approval_value_at(payload, "/approval/decision_reason", "").replace('"', "'"),
-        payload.dm_pairing.as_deref().unwrap_or("none"),
-    );
+    println!("{}", approval_decision_line(payload));
     std::io::stdout().flush().context("stdout flush failed")
+}
+
+fn approval_decision_line(payload: &control_plane::ApprovalDecisionEnvelope) -> String {
+    format!(
+        "approvals.decide id={} subject_type={} subject={} decision={} scope={} ttl_ms={} reason=\"{}\" dm_pairing={}",
+        approval_value_at(payload, "approval_id", "unknown"),
+        approval_value_at(payload, "subject_type", "unknown"),
+        approval_value_at(payload, "subject_id", "unknown"),
+        approval_value_at(payload, "decision", "unknown"),
+        approval_value_at(payload, "decision_scope", "unknown"),
+        approval_scalar_at(payload, "decision_scope_ttl_ms", "none"),
+        approval_value_at(payload, "decision_reason", "").replace('"', "'"),
+        payload.dm_pairing.as_deref().unwrap_or("none"),
+    )
 }
 
 fn approval_value_at<'a>(
     payload: &'a control_plane::ApprovalDecisionEnvelope,
-    pointer: &str,
+    field: &str,
     fallback: &'a str,
 ) -> &'a str {
-    payload.approval.pointer(pointer).and_then(Value::as_str).unwrap_or(fallback)
+    approval_field(payload, field).and_then(Value::as_str).unwrap_or(fallback)
 }
 
 fn approval_scalar_at<'a>(
     payload: &'a control_plane::ApprovalDecisionEnvelope,
-    pointer: &str,
+    field: &str,
     fallback: &'a str,
 ) -> Cow<'a, str> {
-    match payload.approval.pointer(pointer) {
+    match approval_field(payload, field) {
         Some(Value::String(value)) => Cow::Borrowed(value.as_str()),
         Some(Value::Number(value)) => Cow::Owned(value.to_string()),
         _ => Cow::Borrowed(fallback),
     }
+}
+
+fn approval_field<'a>(
+    payload: &'a control_plane::ApprovalDecisionEnvelope,
+    field: &str,
+) -> Option<&'a Value> {
+    let current_pointer = format!("/{field}");
+    payload.approval.pointer(&current_pointer).or_else(|| {
+        let legacy_pointer = format!("/approval/{field}");
+        payload.approval.pointer(&legacy_pointer)
+    })
 }
 
 fn normalize_optional_reason(reason: Option<String>) -> Option<String> {
@@ -296,5 +311,31 @@ mod tests {
         let result =
             validate_approval_decision_scope(ApprovalDecisionScopeArg::Timeboxed, Some(60_000));
         assert!(result.is_ok(), "positive timeboxed TTL should be accepted");
+    }
+
+    #[test]
+    fn approval_decision_line_reads_current_envelope_shape() {
+        let payload = control_plane::ApprovalDecisionEnvelope {
+            approval: serde_json::json!({
+                "approval_id": "01ARZ3NDEKTSV4RRFFQ69G5FAW",
+                "subject_type": "tool_call",
+                "subject_id": "call-123",
+                "decision": "allowed",
+                "decision_scope": "timeboxed",
+                "decision_scope_ttl_ms": 60_000,
+                "decision_reason": "operator approved",
+            }),
+            dm_pairing: Some("not_required".to_owned()),
+        };
+
+        let line = approval_decision_line(&payload);
+
+        assert!(line.contains("id=01ARZ3NDEKTSV4RRFFQ69G5FAW"), "{line}");
+        assert!(line.contains("subject_type=tool_call"), "{line}");
+        assert!(line.contains("subject=call-123"), "{line}");
+        assert!(line.contains("decision=allowed"), "{line}");
+        assert!(line.contains("scope=timeboxed"), "{line}");
+        assert!(line.contains("ttl_ms=60000"), "{line}");
+        assert!(!line.contains("unknown"), "{line}");
     }
 }
