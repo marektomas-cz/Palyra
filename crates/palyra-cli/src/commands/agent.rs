@@ -52,6 +52,7 @@ pub(crate) fn run_agent(command: AgentCommand) -> Result<()> {
         } => {
             ensure_agent_run_approval_flags(allow_sensitive_tools, approval_mode)?;
             let input_prompt = resolve_prompt_input(prompt, prompt_stdin)?;
+            let parameter_delta_json = cli_launch_parameter_delta_json(input_prompt.as_str())?;
             let connection = root_context.resolve_grpc_connection(
                 app::ConnectionOverrides {
                     grpc_url,
@@ -75,7 +76,7 @@ pub(crate) fn run_agent(command: AgentCommand) -> Result<()> {
                 approval_mode: approval_mode.into(),
                 origin_kind: None,
                 origin_run_id: None,
-                parameter_delta_json: cli_launch_parameter_delta_json()?,
+                parameter_delta_json,
             })?;
             let run_id = request.run_id.clone();
             let outcome =
@@ -283,7 +284,7 @@ async fn run_agent_interactive_async(
             approval_mode: AgentApprovalMode::Prompt,
             origin_kind: None,
             origin_run_id: None,
-            parameter_delta_json: cli_launch_parameter_delta_json()?,
+            parameter_delta_json: cli_launch_parameter_delta_json(prompt)?,
         })?;
         last_run_id = Some(request.run_id.clone());
         let run_id = request.run_id.clone();
@@ -307,20 +308,176 @@ async fn run_agent_interactive_async(
     Ok(())
 }
 
-fn cli_launch_parameter_delta_json() -> Result<Option<String>> {
+const CLI_CONTEXT_MAX_PROMPT_WORKSPACE_ROOTS: usize = 8;
+
+fn cli_launch_parameter_delta_json(prompt: &str) -> Result<Option<String>> {
     let cwd = std::env::current_dir().context("failed to resolve CLI current working directory")?;
-    cli_launch_parameter_delta_json_for_cwd(cwd.as_path())
+    cli_launch_parameter_delta_json_for_cwd(cwd.as_path(), prompt)
 }
 
-fn cli_launch_parameter_delta_json_for_cwd(cwd: &std::path::Path) -> Result<Option<String>> {
+fn cli_launch_parameter_delta_json_for_cwd(
+    cwd: &std::path::Path,
+    prompt: &str,
+) -> Result<Option<String>> {
+    let workspace_roots = prompt_absolute_workspace_roots(prompt);
     let parameter_delta = serde_json::json!({
         "cli_context": {
-            "launch_cwd": cwd.to_string_lossy()
+            "launch_cwd": cwd.to_string_lossy(),
+            "workspace_roots": workspace_roots,
         }
     });
     serde_json::to_string(&parameter_delta)
         .map(Some)
         .context("failed to serialize CLI launch context")
+}
+
+fn prompt_absolute_workspace_roots(prompt: &str) -> Vec<String> {
+    let mut roots = Vec::<std::path::PathBuf>::new();
+    for token in prompt.split_whitespace() {
+        let Some(candidate) = prompt_path_candidate(token) else {
+            continue;
+        };
+        let Some(root) = prompt_workspace_root_from_candidate(candidate) else {
+            continue;
+        };
+        if roots.iter().any(|existing| same_cli_path(existing.as_path(), root.as_path())) {
+            continue;
+        }
+        roots.push(root);
+        if roots.len() >= CLI_CONTEXT_MAX_PROMPT_WORKSPACE_ROOTS {
+            break;
+        }
+    }
+    roots.into_iter().map(|root| root.to_string_lossy().into_owned()).collect()
+}
+
+fn prompt_path_candidate(token: &str) -> Option<&str> {
+    let trimmed = token
+        .trim_matches(|character: char| {
+            matches!(
+                character,
+                '`' | '"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | ',' | ';'
+            )
+        })
+        .trim_end_matches(|character: char| matches!(character, '.' | ',' | ';'));
+    (!trimmed.is_empty() && std::path::Path::new(trimmed).is_absolute()).then_some(trimmed)
+}
+
+fn prompt_workspace_root_from_candidate(candidate: &str) -> Option<std::path::PathBuf> {
+    if candidate.chars().any(char::is_control) {
+        return None;
+    }
+    let requested = std::path::PathBuf::from(candidate);
+    if requested.components().any(|component| {
+        matches!(component, std::path::Component::CurDir | std::path::Component::ParentDir)
+    }) {
+        return None;
+    }
+    let existing = nearest_existing_prompt_path(requested.as_path())?;
+    let directory = if existing.is_dir() {
+        existing
+    } else {
+        existing.parent().map(std::path::Path::to_path_buf)?
+    };
+    let canonical = std::fs::canonicalize(directory).ok()?;
+    if !canonical.is_dir() || protected_cli_workspace_root(canonical.as_path()) {
+        return None;
+    }
+    cli_user_owned_roots()
+        .iter()
+        .any(|root| cli_path_starts_with(canonical.as_path(), root.as_path()))
+        .then_some(canonical)
+}
+
+fn nearest_existing_prompt_path(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut cursor = path.to_path_buf();
+    loop {
+        if cursor.exists() {
+            return Some(cursor);
+        }
+        if !cursor.pop() {
+            return None;
+        }
+    }
+}
+
+fn cli_user_owned_roots() -> Vec<std::path::PathBuf> {
+    let mut roots = Vec::new();
+    for key in ["USERPROFILE", "HOME"] {
+        if let Some(value) = std::env::var_os(key) {
+            push_cli_root(&mut roots, std::path::PathBuf::from(value));
+        }
+    }
+    push_cli_root(&mut roots, std::env::temp_dir());
+    #[cfg(unix)]
+    {
+        push_cli_root(&mut roots, std::path::PathBuf::from("/var/tmp"));
+    }
+    roots
+}
+
+fn push_cli_root(roots: &mut Vec<std::path::PathBuf>, root: std::path::PathBuf) {
+    if let Ok(canonical) = std::fs::canonicalize(root) {
+        if canonical.is_dir()
+            && !roots.iter().any(|existing| same_cli_path(existing.as_path(), canonical.as_path()))
+        {
+            roots.push(canonical);
+        }
+    }
+}
+
+fn protected_cli_workspace_root(path: &std::path::Path) -> bool {
+    #[cfg(windows)]
+    {
+        let normalized = path.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+        normalized.ends_with(":/")
+            || normalized.contains(":/windows")
+            || normalized.contains(":/program files")
+            || normalized.contains(":/program files (x86)")
+            || normalized.contains(":/system volume information")
+    }
+    #[cfg(not(windows))]
+    {
+        let normalized = path.to_string_lossy().replace('\\', "/");
+        if normalized == "/" {
+            return true;
+        }
+        for prefix in ["/etc", "/bin", "/sbin", "/usr", "/lib", "/lib64", "/System", "/Library"] {
+            if normalized == prefix || normalized.starts_with(format!("{prefix}/").as_str()) {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+fn cli_path_starts_with(path: &std::path::Path, root: &std::path::Path) -> bool {
+    if path.starts_with(root) {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        let path = path.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+        let root = root.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+        path == root || path.starts_with(format!("{root}/").as_str())
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+fn same_cli_path(left: &std::path::Path, right: &std::path::Path) -> bool {
+    #[cfg(windows)]
+    {
+        left.to_string_lossy()
+            .replace('\\', "/")
+            .eq_ignore_ascii_case(&right.to_string_lossy().replace('\\', "/"))
+    }
+    #[cfg(not(windows))]
+    {
+        left == right
+    }
 }
 
 fn spawn_interactive_stdin_reader() -> mpsc::UnboundedReceiver<Result<String, String>> {
@@ -635,11 +792,12 @@ mod tests {
     use super::{
         cli_launch_parameter_delta_json_for_cwd, ensure_agent_run_approval_flags,
         interactive_interrupt_message, interactive_session_started_message,
-        normalize_interactive_prompt_line,
+        normalize_interactive_prompt_line, prompt_absolute_workspace_roots,
     };
     use crate::args::AgentApprovalModeArg;
     use crate::proto::palyra::{common::v1 as common_v1, gateway::v1 as gateway_v1};
     use serde_json::Value;
+    use std::fs;
 
     #[test]
     fn interactive_session_started_message_omits_session_identifier() {
@@ -705,7 +863,7 @@ mod tests {
     #[test]
     fn cli_launch_context_encodes_current_working_directory() {
         let tempdir = tempfile::tempdir().expect("tempdir should be created");
-        let parameter_delta = cli_launch_parameter_delta_json_for_cwd(tempdir.path())
+        let parameter_delta = cli_launch_parameter_delta_json_for_cwd(tempdir.path(), "")
             .expect("launch context should serialize")
             .expect("launch context should be present");
         let value =
@@ -718,5 +876,56 @@ mod tests {
                 .and_then(Value::as_str),
             Some(tempdir.path().to_string_lossy().as_ref())
         );
+    }
+
+    #[test]
+    fn cli_launch_context_includes_prompt_absolute_workspace_roots() {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let project = tempdir.path().join("scenario-s001-todo");
+        fs::create_dir_all(project.as_path()).expect("project directory should exist");
+        let prompt = format!("V projektu `{}` vytvoř Todo app.", project.display());
+        let parameter_delta =
+            cli_launch_parameter_delta_json_for_cwd(tempdir.path(), prompt.as_str())
+                .expect("launch context should serialize")
+                .expect("launch context should be present");
+        let value =
+            serde_json::from_str::<Value>(parameter_delta.as_str()).expect("JSON should parse");
+        let expected_project = fs::canonicalize(project.as_path())
+            .expect("project should canonicalize")
+            .to_string_lossy()
+            .into_owned();
+
+        let roots = value
+            .get("cli_context")
+            .and_then(|context| context.get("workspace_roots"))
+            .and_then(Value::as_array)
+            .expect("workspace roots should be encoded");
+
+        assert!(
+            roots.iter().filter_map(Value::as_str).any(|root| root == expected_project),
+            "workspace roots should include user prompt project: {roots:?}"
+        );
+    }
+
+    #[test]
+    fn prompt_absolute_workspace_roots_preserves_nested_existing_roots() {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let project = tempdir.path().join("scenario-s001-todo");
+        let nested = project.join("src");
+        fs::create_dir_all(nested.as_path()).expect("nested directory should exist");
+        let prompt = format!(
+            "Použij `{}` a pak znovu {}.",
+            project.display(),
+            nested.join("missing.js").display()
+        );
+
+        let roots = prompt_absolute_workspace_roots(prompt.as_str());
+        let expected_project = fs::canonicalize(project.as_path())
+            .expect("project should canonicalize")
+            .to_string_lossy()
+            .into_owned();
+
+        assert_eq!(roots.first().map(String::as_str), Some(expected_project.as_str()));
+        assert_eq!(roots.len(), 2);
     }
 }

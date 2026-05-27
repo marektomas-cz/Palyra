@@ -22,6 +22,7 @@ struct RunLaunchParameterDelta {
 #[derive(Debug, Deserialize)]
 struct RunLaunchCliContext {
     launch_cwd: Option<String>,
+    workspace_roots: Option<Vec<String>>,
 }
 
 pub(crate) async fn session_active_workspace_root(
@@ -38,47 +39,60 @@ pub(crate) async fn session_active_workspace_root(
     Ok(active_workspace_root_from_focus_paths(workspace_roots, state.focus_paths.as_slice()))
 }
 
-pub(crate) async fn workspace_roots_with_run_launch_cwd(
+pub(crate) async fn workspace_roots_with_run_launch_context(
     runtime_state: &Arc<GatewayRuntimeState>,
     run_id: &str,
     workspace_roots: &[PathBuf],
 ) -> Vec<PathBuf> {
-    let launch_cwd = run_launch_cwd_workspace_root(runtime_state, run_id).await;
-    merge_launch_cwd_workspace_root(workspace_roots, launch_cwd)
+    let launch_roots = run_launch_context_workspace_roots(runtime_state, run_id).await;
+    merge_launch_workspace_roots(workspace_roots, launch_roots)
 }
 
-async fn run_launch_cwd_workspace_root(
+async fn run_launch_context_workspace_roots(
     runtime_state: &Arc<GatewayRuntimeState>,
     run_id: &str,
-) -> Option<PathBuf> {
+) -> Vec<PathBuf> {
     let Some(run) =
         runtime_state.orchestrator_run_status_snapshot(run_id.to_owned()).await.ok().flatten()
     else {
-        return None;
+        return Vec::new();
     };
     let Some(parameter_delta_json) = run.parameter_delta_json.as_deref() else {
-        return None;
+        return Vec::new();
     };
     let Ok(parameter_delta) = serde_json::from_str::<RunLaunchParameterDelta>(parameter_delta_json)
     else {
-        return None;
+        return Vec::new();
     };
-    let Some(raw_cwd) = parameter_delta
-        .cli_context
-        .and_then(|context| context.launch_cwd)
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-    else {
-        return None;
-    };
-    canonical_launch_cwd_workspace_root(raw_cwd.as_str())
+    parameter_delta.cli_context.map(launch_workspace_roots_from_context).unwrap_or_default()
 }
 
-fn canonical_launch_cwd_workspace_root(raw_cwd: &str) -> Option<PathBuf> {
-    if raw_cwd.chars().any(char::is_control) {
+fn launch_workspace_roots_from_context(context: RunLaunchCliContext) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    for raw_root in context.workspace_roots.unwrap_or_default() {
+        push_launch_workspace_root(&mut roots, raw_root.as_str());
+    }
+    if let Some(raw_cwd) = context.launch_cwd {
+        push_launch_workspace_root(&mut roots, raw_cwd.as_str());
+    }
+    roots
+}
+
+fn push_launch_workspace_root(roots: &mut Vec<PathBuf>, raw_root: &str) {
+    let Some(root) = canonical_launch_workspace_root(raw_root) else {
+        return;
+    };
+    if !roots.iter().any(|existing| same_workspace_root(existing.as_path(), root.as_path())) {
+        roots.push(root);
+    }
+}
+
+fn canonical_launch_workspace_root(raw_root: &str) -> Option<PathBuf> {
+    let raw_root = raw_root.trim();
+    if raw_root.is_empty() || raw_root.chars().any(char::is_control) {
         return None;
     }
-    let requested = Path::new(raw_cwd);
+    let requested = Path::new(raw_root);
     if !requested.is_absolute() {
         return None;
     }
@@ -95,17 +109,25 @@ fn canonical_launch_cwd_workspace_root(raw_cwd: &str) -> Option<PathBuf> {
     Some(canonical)
 }
 
-fn merge_launch_cwd_workspace_root(
+fn merge_launch_workspace_roots(
     workspace_roots: &[PathBuf],
-    launch_cwd: Option<PathBuf>,
+    launch_roots: Vec<PathBuf>,
 ) -> Vec<PathBuf> {
-    let Some(launch_cwd) = launch_cwd else {
+    if launch_roots.is_empty() {
         return workspace_roots.to_vec();
-    };
-    let mut merged = Vec::with_capacity(workspace_roots.len().saturating_add(1));
-    merged.push(launch_cwd.clone());
+    }
+    let mut merged: Vec<PathBuf> =
+        Vec::with_capacity(workspace_roots.len().saturating_add(launch_roots.len()));
+    for launch_root in launch_roots {
+        if !merged
+            .iter()
+            .any(|existing| same_workspace_root(existing.as_path(), launch_root.as_path()))
+        {
+            merged.push(launch_root);
+        }
+    }
     for root in workspace_roots {
-        if same_workspace_root(root.as_path(), launch_cwd.as_path()) {
+        if merged.iter().any(|existing| same_workspace_root(existing.as_path(), root.as_path())) {
             continue;
         }
         merged.push(root.clone());
@@ -315,10 +337,11 @@ fn normalize_relative_workspace_path(path: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        active_workspace_root_from_focus_paths, canonical_launch_cwd_workspace_root,
-        merge_launch_cwd_workspace_root, relative_path_already_targets_active_root,
-        relative_path_should_use_active_root, same_workspace_root,
-        workspace_root_override_targets_active_root, ActiveWorkspaceRoot,
+        active_workspace_root_from_focus_paths, canonical_launch_workspace_root,
+        launch_workspace_roots_from_context, merge_launch_workspace_roots,
+        relative_path_already_targets_active_root, relative_path_should_use_active_root,
+        same_workspace_root, workspace_root_override_targets_active_root, ActiveWorkspaceRoot,
+        RunLaunchCliContext,
     };
     use std::fs;
 
@@ -430,13 +453,13 @@ mod tests {
         let canonical = fs::canonicalize(tempdir.path()).expect("tempdir should canonicalize");
 
         assert_eq!(
-            canonical_launch_cwd_workspace_root(tempdir.path().to_string_lossy().as_ref()),
+            canonical_launch_workspace_root(tempdir.path().to_string_lossy().as_ref()),
             Some(canonical)
         );
-        assert_eq!(canonical_launch_cwd_workspace_root("relative/project"), None);
-        assert_eq!(canonical_launch_cwd_workspace_root("bad\u{0000}path"), None);
+        assert_eq!(canonical_launch_workspace_root("relative/project"), None);
+        assert_eq!(canonical_launch_workspace_root("bad\u{0000}path"), None);
         assert_eq!(
-            canonical_launch_cwd_workspace_root(
+            canonical_launch_workspace_root(
                 tempdir.path().join("missing").to_string_lossy().as_ref()
             ),
             None
@@ -453,14 +476,43 @@ mod tests {
         let canonical_launch =
             fs::canonicalize(launch_root.as_path()).expect("launch root should canonicalize");
 
-        let roots = merge_launch_cwd_workspace_root(
+        let roots = merge_launch_workspace_roots(
             &[default_root.clone(), launch_root.clone()],
-            Some(canonical_launch.clone()),
+            vec![canonical_launch.clone()],
         );
 
         assert_eq!(roots.len(), 2);
         assert_eq!(roots.first(), Some(&canonical_launch));
         assert_eq!(roots.get(1), Some(&default_root));
         assert!(same_workspace_root(roots[0].as_path(), launch_root.as_path()));
+    }
+
+    #[test]
+    fn launch_context_workspace_roots_precede_launch_cwd() {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let explicit_root = tempdir.path().join("explicit");
+        let launch_cwd = tempdir.path().join("cwd");
+        let default_root = tempdir.path().join("default");
+        fs::create_dir_all(explicit_root.as_path()).expect("explicit root should exist");
+        fs::create_dir_all(launch_cwd.as_path()).expect("launch cwd should exist");
+        fs::create_dir_all(default_root.as_path()).expect("default root should exist");
+        let explicit_root =
+            fs::canonicalize(explicit_root.as_path()).expect("explicit root should canonicalize");
+        let launch_cwd =
+            fs::canonicalize(launch_cwd.as_path()).expect("launch cwd should canonicalize");
+
+        let launch_roots = launch_workspace_roots_from_context(RunLaunchCliContext {
+            launch_cwd: Some(launch_cwd.to_string_lossy().into_owned()),
+            workspace_roots: Some(vec![
+                explicit_root.to_string_lossy().into_owned(),
+                launch_cwd.to_string_lossy().into_owned(),
+            ]),
+        });
+        let roots = merge_launch_workspace_roots(&[default_root.clone()], launch_roots);
+
+        assert_eq!(roots.len(), 3);
+        assert_eq!(roots.first(), Some(&explicit_root));
+        assert_eq!(roots.get(1), Some(&launch_cwd));
+        assert_eq!(roots.get(2), Some(&default_root));
     }
 }
