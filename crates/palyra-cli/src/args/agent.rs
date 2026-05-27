@@ -36,7 +36,7 @@ pub enum AgentCommand {
         prompt_stdin: bool,
         #[arg(long, default_value_t = false)]
         allow_sensitive_tools: bool,
-        #[arg(long, value_enum, default_value_t = AgentApprovalModeArg::Prompt)]
+        #[arg(long, value_enum, default_value_t = AgentApprovalModeArg::AllowOnce)]
         approval_mode: AgentApprovalModeArg,
         #[arg(long, default_value_t = false)]
         ndjson: bool,

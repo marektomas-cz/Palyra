@@ -610,7 +610,7 @@ fn parse_agent_run_with_prompt() {
                 prompt: Some("hello".to_owned()),
                 prompt_stdin: false,
                 allow_sensitive_tools: true,
-                approval_mode: AgentApprovalModeArg::Prompt,
+                approval_mode: AgentApprovalModeArg::AllowOnce,
                 ndjson: true,
             }
         }
@@ -744,7 +744,7 @@ fn parse_agent_run_with_session_key_controls() {
                 prompt: Some("continue".to_owned()),
                 prompt_stdin: false,
                 allow_sensitive_tools: false,
-                approval_mode: AgentApprovalModeArg::Prompt,
+                approval_mode: AgentApprovalModeArg::AllowOnce,
                 ndjson: false,
             }
         }
