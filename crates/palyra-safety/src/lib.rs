@@ -821,9 +821,6 @@ fn classify_sensitive_assignment_key(key: &str) -> Option<&'static str> {
     if compact.contains("privatekey") {
         return Some("private_key");
     }
-    if compact.ends_with("key") {
-        return Some("key");
-    }
     for component in key.split(['_', '-']) {
         match component {
             "password" => return Some("password"),
@@ -832,6 +829,9 @@ fn classify_sensitive_assignment_key(key: &str) -> Option<&'static str> {
             "key" => return Some("key"),
             _ => {}
         }
+    }
+    if compact.ends_with("key") {
+        return Some("key");
     }
     SENSITIVE_ASSIGNMENT_KEYS.iter().copied().find(|candidate| key == *candidate)
 }
