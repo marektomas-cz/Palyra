@@ -1858,13 +1858,27 @@ fn option_consumes_non_path_value(arg: &str) -> bool {
 }
 
 fn command_option_consumes_non_path_value(command: &str, arg: &str) -> bool {
-    option_consumes_non_path_value(arg) || node_eval_option_consumes_non_path_value(command, arg)
+    option_consumes_non_path_value(arg)
+        || node_eval_option_consumes_non_path_value(command, arg)
+        || windows_acl_option_consumes_non_path_value(command, arg)
 }
 
 fn node_eval_option_consumes_non_path_value(command: &str, arg: &str) -> bool {
     let command = normalize_process_executable_token(command);
     matches!(command.as_str(), "node" | "nodejs")
         && matches!(arg.trim().to_ascii_lowercase().as_str(), "-e" | "-p")
+}
+
+fn windows_acl_option_consumes_non_path_value(command: &str, arg: &str) -> bool {
+    if !cfg!(windows) {
+        return false;
+    }
+    let command = normalized_process_command_name(command);
+    command == "icacls"
+        && matches!(
+            arg.trim().to_ascii_lowercase().as_str(),
+            "/grant" | "/grant:r" | "/deny" | "/remove" | "/remove:g" | "/remove:d" | "/setowner"
+        )
 }
 
 fn command_positional_arg_is_non_path_value(command: &str, arg: &str) -> bool {
@@ -1905,6 +1919,10 @@ fn is_windows_command_switch(command: &str, arg: &str) -> bool {
         "tasklist" => {
             matches!(arg.as_str(), "/FI" | "/FO" | "/NH" | "/V" | "/SVC" | "/M" | "/APPS")
         }
+        "icacls" => matches!(
+            arg.as_str(),
+            "/C" | "/L" | "/Q" | "/T" | "/INHERITANCE:E" | "/INHERITANCE:D" | "/INHERITANCE:R"
+        ),
         _ => false,
     }
 }
@@ -4274,6 +4292,32 @@ mod tests {
         .expect("tasklist filter switches should not be treated as absolute paths");
 
         let _ = fs::remove_dir_all(workspace.as_path());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn validate_host_argument_scope_allows_icacls_grant_principal() {
+        let workspace = unique_temp_dir("workspace-icacls-grant");
+        fs::create_dir_all(workspace.as_path()).expect("workspace directory should be created");
+        let canonical_workspace = canonical_workspace_root(workspace.as_path())
+            .expect("workspace root should canonicalize");
+        let target_root = unique_temp_dir("outside-icacls-grant");
+        let target = target_root.join("palyra-e2e-helper.exe");
+        fs::create_dir_all(target_root.as_path()).expect("target root should be created");
+        fs::write(target.as_path(), "test helper").expect("target file should be written");
+        let args =
+            vec![target.display().to_string(), "/grant".to_owned(), "%USERNAME%:RX".to_owned()];
+
+        validate_host_argument_scope(
+            canonical_workspace.as_path(),
+            canonical_workspace.as_path(),
+            "icacls",
+            args.as_slice(),
+        )
+        .expect("icacls ACL switches and principals should not be treated as host paths");
+
+        let _ = fs::remove_dir_all(workspace.as_path());
+        let _ = fs::remove_dir_all(target_root.as_path());
     }
 
     #[test]
