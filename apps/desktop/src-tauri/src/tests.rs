@@ -10,6 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde_json::json;
 use palyra_control_plane as control_plane;
 
@@ -777,6 +778,13 @@ fn state_file_migration_moves_plaintext_tokens_to_secret_store() {
             .as_str()
             .expect("legacy browser token fixture should be string")
     );
+    assert_eq!(
+        BASE64_STANDARD
+            .decode(runtime_secrets.browser_state_encryption_key.as_bytes())
+            .expect("browser state key should be base64")
+            .len(),
+        32
+    );
     assert!(!loaded.browser_service_enabled);
 
     let rewritten = std::fs::read_to_string(state_path.as_path())
@@ -798,6 +806,10 @@ fn state_file_migration_moves_plaintext_tokens_to_secret_store() {
         .expect("runtime secrets should reload from secret store");
     assert_eq!(runtime_secrets_again.admin_token, runtime_secrets.admin_token);
     assert_eq!(runtime_secrets_again.browser_auth_token, runtime_secrets.browser_auth_token);
+    assert_eq!(
+        runtime_secrets_again.browser_state_encryption_key,
+        runtime_secrets.browser_state_encryption_key
+    );
     assert_eq!(loaded_again.browser_service_enabled, loaded.browser_service_enabled);
 }
 
@@ -815,8 +827,17 @@ fn state_file_initialization_never_writes_plaintext_tokens() {
         std::fs::read_to_string(state_path.as_path()).expect("desktop state should be readable");
     assert!(!persisted_raw.contains(runtime_secrets.admin_token.as_str()));
     assert!(!persisted_raw.contains(runtime_secrets.browser_auth_token.as_str()));
+    assert!(!persisted_raw.contains(runtime_secrets.browser_state_encryption_key.as_str()));
+    assert_eq!(
+        BASE64_STANDARD
+            .decode(runtime_secrets.browser_state_encryption_key.as_bytes())
+            .expect("browser state key should be base64")
+            .len(),
+        32
+    );
     assert!(!persisted_raw.contains("admin_token"));
     assert!(!persisted_raw.contains("browser_auth_token"));
+    assert!(!persisted_raw.contains("browser_state_encryption_key"));
     assert_eq!(loaded.active_profile_name(), "desktop-local");
 }
 

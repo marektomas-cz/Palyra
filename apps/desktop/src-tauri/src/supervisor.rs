@@ -352,7 +352,7 @@ struct DesktopRuntimeAuthConfig {
 pub(crate) struct BrowserStateEncryptionKey(String);
 
 impl BrowserStateEncryptionKey {
-    fn parse(raw: impl Into<String>, source: &str) -> Result<Self> {
+    pub(crate) fn parse(raw: impl Into<String>, source: &str) -> Result<Self> {
         let raw = raw.into();
         let value = normalize_optional_text(raw.as_str())
             .with_context(|| format!("{source} resolved to an empty browser state key"))?;
@@ -384,7 +384,13 @@ fn runtime_auth_with_config_overrides(
         browser_auth_token: overrides
             .browser_auth_token
             .unwrap_or_else(|| fallback.browser_auth_token.clone()),
-        browser_state_encryption_key: overrides.browser_state_encryption_key,
+        browser_state_encryption_key: match overrides.browser_state_encryption_key {
+            Some(value) => Some(value),
+            None => Some(BrowserStateEncryptionKey::parse(
+                fallback.browser_state_encryption_key.clone(),
+                "desktop browser state encryption key",
+            )?),
+        },
     })
 }
 
@@ -411,6 +417,10 @@ fn runtime_secrets_with_config_overrides(
     Ok(DesktopRuntimeSecrets {
         admin_token: auth.admin_token,
         browser_auth_token: auth.browser_auth_token,
+        browser_state_encryption_key: auth
+            .browser_state_encryption_key
+            .map(|value| value.as_str().to_owned())
+            .unwrap_or_default(),
     })
 }
 
@@ -1950,6 +1960,8 @@ mod tests {
     use crate::desktop_state::DesktopRuntimeSecrets;
     use crate::profile_registry::implicit_profile;
 
+    const TEST_BROWSER_STATE_KEY: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+
     #[test]
     fn normalize_browser_open_url_accepts_http_and_https_urls() {
         let http = normalize_browser_open_url("http://127.0.0.1:7142/console")
@@ -1995,6 +2007,7 @@ auth_token = "config-browser-token"
         let fallback = DesktopRuntimeSecrets {
             admin_token: "desktop-admin-token".to_owned(),
             browser_auth_token: "desktop-browser-token".to_owned(),
+            browser_state_encryption_key: TEST_BROWSER_STATE_KEY.to_owned(),
         };
         let effective =
             runtime_secrets_with_config_overrides(&fallback, Some(config_path.as_path()))
@@ -2002,6 +2015,7 @@ auth_token = "config-browser-token"
 
         assert_eq!(effective.admin_token, "config-admin-token");
         assert_eq!(effective.browser_auth_token, "config-browser-token");
+        assert_eq!(effective.browser_state_encryption_key, TEST_BROWSER_STATE_KEY);
         let _ = fs::remove_dir_all(fixture.as_path());
     }
 
@@ -2017,6 +2031,7 @@ auth_token = "config-browser-token"
         let fallback = DesktopRuntimeSecrets {
             admin_token: "desktop-admin-token".to_owned(),
             browser_auth_token: "desktop-browser-token".to_owned(),
+            browser_state_encryption_key: TEST_BROWSER_STATE_KEY.to_owned(),
         };
         let effective =
             runtime_secrets_with_config_overrides(&fallback, Some(config_path.as_path()))
@@ -2024,6 +2039,7 @@ auth_token = "config-browser-token"
 
         assert_eq!(effective.admin_token, "desktop-admin-token");
         assert_eq!(effective.browser_auth_token, "desktop-browser-token");
+        assert_eq!(effective.browser_state_encryption_key, TEST_BROWSER_STATE_KEY);
         let _ = fs::remove_dir_all(fixture.as_path());
     }
 
@@ -2034,7 +2050,7 @@ auth_token = "config-browser-token"
         fs::create_dir_all(fixture.as_path()).expect("fixture dir should be created");
         let identity_root = fixture.join("identity");
         let vault_root = fixture.join("vault");
-        let browser_state_key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+        let browser_state_key = TEST_BROWSER_STATE_KEY;
         let vault = Vault::open_with_config(VaultConfig {
             root: Some(vault_root.clone()),
             identity_store_root: Some(identity_root.clone()),
@@ -2071,6 +2087,7 @@ state_key_vault_ref = "global/browser_state_key"
         let fallback = DesktopRuntimeSecrets {
             admin_token: "desktop-admin-token".to_owned(),
             browser_auth_token: "desktop-browser-token".to_owned(),
+            browser_state_encryption_key: "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=".to_owned(),
         };
         let effective = runtime_auth_with_config_overrides(&fallback, Some(config_path.as_path()))
             .expect("browser state key vault ref should resolve");
@@ -2086,11 +2103,9 @@ state_key_vault_ref = "global/browser_state_key"
     fn browserd_env_values_include_resolved_profile_state_key() {
         let fixture =
             env::temp_dir().join(format!("palyra-desktop-browser-env-test-{}", ulid::Ulid::new()));
-        let browser_state_key = BrowserStateEncryptionKey::parse(
-            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-            "fixture browser state key",
-        )
-        .expect("fixture browser state key should parse");
+        let browser_state_key =
+            BrowserStateEncryptionKey::parse(TEST_BROWSER_STATE_KEY, "fixture browser state key")
+                .expect("fixture browser state key should parse");
 
         let env = browserd_env_values(
             fixture.as_path(),
@@ -2164,6 +2179,7 @@ bound_principal = "admin:local"
         let fallback = DesktopRuntimeSecrets {
             admin_token: "desktop-admin-token".to_owned(),
             browser_auth_token: "desktop-browser-token".to_owned(),
+            browser_state_encryption_key: TEST_BROWSER_STATE_KEY.to_owned(),
         };
         let effective = runtime_auth_with_config_overrides(&fallback, Some(config_path.as_path()))
             .expect("config auth overrides should load");
@@ -2171,6 +2187,10 @@ bound_principal = "admin:local"
         assert_eq!(effective.admin_token, "config-admin-token");
         assert_eq!(effective.admin_bound_principal.as_deref(), Some("admin:local"));
         assert_eq!(effective.browser_auth_token, "desktop-browser-token");
+        assert_eq!(
+            effective.browser_state_encryption_key.as_ref().map(|key| key.as_str()),
+            Some(TEST_BROWSER_STATE_KEY)
+        );
         let _ = fs::remove_dir_all(fixture.as_path());
     }
 
@@ -2183,6 +2203,7 @@ bound_principal = "admin:local"
         let fallback = DesktopRuntimeSecrets {
             admin_token: "desktop-admin-token".to_owned(),
             browser_auth_token: "desktop-browser-token".to_owned(),
+            browser_state_encryption_key: TEST_BROWSER_STATE_KEY.to_owned(),
         };
 
         let effective = runtime_auth_with_config_overrides(&fallback, Some(config_path.as_path()))
@@ -2191,6 +2212,10 @@ bound_principal = "admin:local"
         assert_eq!(effective.admin_token, "desktop-admin-token");
         assert_eq!(effective.admin_bound_principal.as_deref(), Some(super::CONSOLE_PRINCIPAL));
         assert_eq!(effective.browser_auth_token, "desktop-browser-token");
+        assert_eq!(
+            effective.browser_state_encryption_key.as_ref().map(|key| key.as_str()),
+            Some(TEST_BROWSER_STATE_KEY)
+        );
         let _ = fs::remove_dir_all(fixture.as_path());
     }
 

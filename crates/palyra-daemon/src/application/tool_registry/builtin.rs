@@ -992,7 +992,18 @@ fn browser_tool_schema(tool_name: &str) -> Value {
                     "description":"Optional existing browser profile_id returned by a profile list/create flow. Omit it for ordinary one-off sessions; do not invent labels or reuse scenario names as profile_id."
                 }),
             ));
-            properties.push(("private_profile", json!({"type":"boolean"})));
+            properties.push((
+                "private_profile",
+                json!({"type":"boolean","description":"Set true only when the user asks for a non-persistent private browser session. Ordinary sessions persist state within the current agent session by default."}),
+            ));
+            properties.push((
+                "persistence_enabled",
+                json!({"type":"boolean","description":"Defaults to true for ordinary sessions so close/recreate recovery preserves browser state. Set false only for explicit ephemeral sessions."}),
+            ));
+            properties.push((
+                "persistence_id",
+                json!({"type":"string","description":"Optional advanced stable persistence id. Omit for ordinary sessions; the runtime uses the current agent session id."}),
+            ));
             properties.push(("allow_private_targets", json!({"type":"boolean"})));
             properties.push(("allow_downloads", json!({"type":"boolean"})));
             properties.push((

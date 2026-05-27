@@ -5,6 +5,8 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use getrandom::fill as fill_random_bytes;
 use palyra_vault::{BackendPreference, Vault, VaultConfig, VaultError, VaultScope};
 use serde::{Deserialize, Serialize};
 use ulid::Ulid;
@@ -13,7 +15,8 @@ pub(crate) use crate::features::onboarding::connectors::discord::DesktopDiscordO
 
 use super::{
     normalize_optional_text, DESKTOP_SECRET_KEY_ADMIN_TOKEN, DESKTOP_SECRET_KEY_BROWSER_AUTH_TOKEN,
-    DESKTOP_SECRET_MAX_BYTES, DESKTOP_STATE_SCHEMA_VERSION,
+    DESKTOP_SECRET_KEY_BROWSER_STATE_ENCRYPTION_KEY, DESKTOP_SECRET_MAX_BYTES,
+    DESKTOP_STATE_SCHEMA_VERSION,
 };
 
 const DESKTOP_ONBOARDING_EVENT_LIMIT: usize = 40;
@@ -851,6 +854,7 @@ impl PersistedDesktopStateEnvelope {
 pub(crate) struct DesktopRuntimeSecrets {
     pub(crate) admin_token: String,
     pub(crate) browser_auth_token: String,
+    pub(crate) browser_state_encryption_key: String,
 }
 
 impl std::fmt::Debug for DesktopRuntimeSecrets {
@@ -859,6 +863,7 @@ impl std::fmt::Debug for DesktopRuntimeSecrets {
             .debug_struct("DesktopRuntimeSecrets")
             .field("admin_token", &"<redacted>")
             .field("browser_auth_token", &"<redacted>")
+            .field("browser_state_encryption_key", &"<redacted>")
             .finish()
     }
 }
@@ -891,9 +896,10 @@ impl DesktopSecretStore {
             return Ok(value);
         }
 
-        let value = normalize_optional_text(legacy_value.unwrap_or_default())
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(generate_secret_token);
+        let value = match normalize_optional_text(legacy_value.unwrap_or_default()) {
+            Some(value) => value.to_owned(),
+            None => generate_desktop_secret(key)?,
+        };
         self.vault
             .put_secret(&scope, key, value.as_bytes())
             .map_err(|error| anyhow!("failed to persist desktop secret '{key}': {error}"))?;
@@ -1140,11 +1146,33 @@ fn load_desktop_runtime_secrets(
         DESKTOP_SECRET_KEY_BROWSER_AUTH_TOKEN,
         legacy_secrets.seed_for_browser_auth_token(),
     )?;
-    Ok(DesktopRuntimeSecrets { admin_token, browser_auth_token })
+    let browser_state_encryption_key = secret_store.load_or_create_secret(
+        DESKTOP_SECRET_KEY_BROWSER_STATE_ENCRYPTION_KEY,
+        None,
+    )?;
+    Ok(DesktopRuntimeSecrets {
+        admin_token,
+        browser_auth_token,
+        browser_state_encryption_key,
+    })
 }
 
 fn generate_secret_token() -> String {
     format!("{}{}", Ulid::new(), Ulid::new())
+}
+
+fn generate_desktop_secret(key: &str) -> Result<String> {
+    if key == DESKTOP_SECRET_KEY_BROWSER_STATE_ENCRYPTION_KEY {
+        return generate_browser_state_encryption_key();
+    }
+    Ok(generate_secret_token())
+}
+
+fn generate_browser_state_encryption_key() -> Result<String> {
+    let mut bytes = [0u8; 32];
+    fill_random_bytes(&mut bytes)
+        .map_err(|error| anyhow!("failed to generate browser state encryption key: {error}"))?;
+    Ok(BASE64_STANDARD.encode(bytes))
 }
 
 fn normalize_profile_name(raw: &str) -> String {

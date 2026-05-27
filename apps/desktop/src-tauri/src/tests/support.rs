@@ -8,7 +8,9 @@ use std::{
 use super::super::features::onboarding::connectors::discord::DiscordControlPlaneInputs;
 use super::super::openai_auth::OpenAiControlPlaneInputs;
 use super::super::profile_registry::{implicit_profile, DesktopProfileCatalog};
-use super::super::supervisor::{ConsolePayloadCache, DesktopConfigReloadWatchState};
+use super::super::supervisor::{
+    BrowserStateEncryptionKey, ConsolePayloadCache, DesktopConfigReloadWatchState,
+};
 use super::super::{
     mpsc, Client, ControlCenter, DesktopInstanceLock, DesktopRuntimeSecrets, DesktopStateFile,
     ManagedService, RuntimeConfig, Ulid, CONSOLE_PRINCIPAL, LOG_EVENT_CHANNEL_CAPACITY,
@@ -85,6 +87,7 @@ pub(super) fn build_test_control_center(root: &Path) -> ControlCenter {
     let runtime_secret_fallbacks = DesktopRuntimeSecrets {
         admin_token: format!("test-admin-{}", Ulid::new()),
         browser_auth_token: format!("test-browser-{}", Ulid::new()),
+        browser_state_encryption_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_owned(),
     };
     ControlCenter {
         desktop_state_root: root.to_path_buf(),
@@ -101,7 +104,13 @@ pub(super) fn build_test_control_center(root: &Path) -> ControlCenter {
         admin_token: runtime_secret_fallbacks.admin_token.clone(),
         admin_bound_principal: Some(CONSOLE_PRINCIPAL.to_owned()),
         browser_auth_token: runtime_secret_fallbacks.browser_auth_token.clone(),
-        browser_state_encryption_key: None,
+        browser_state_encryption_key: Some(
+            BrowserStateEncryptionKey::parse(
+                runtime_secret_fallbacks.browser_state_encryption_key.clone(),
+                "test browser state key",
+            )
+            .expect("test browser state key should parse"),
+        ),
         runtime_secret_fallbacks,
         runtime,
         gateway,

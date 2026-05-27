@@ -10,6 +10,8 @@ const DESKTOP_STATE_SCHEMA_VERSION: u32 = 7;
 const DESKTOP_SECRET_MAX_BYTES: usize = 4_096;
 const DESKTOP_SECRET_KEY_ADMIN_TOKEN: &str = "desktop_admin_token";
 const DESKTOP_SECRET_KEY_BROWSER_AUTH_TOKEN: &str = "desktop_browser_auth_token";
+const DESKTOP_SECRET_KEY_BROWSER_STATE_ENCRYPTION_KEY: &str =
+    "desktop_browser_state_encryption_key";
 
 use tokio::process::Command;
 

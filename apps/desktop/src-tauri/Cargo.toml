@@ -12,6 +12,8 @@ tauri-build = { version = "2.5.1", features = [] }
 
 [dependencies]
 anyhow = "1.0.102"
+base64 = "0.22.1"
+getrandom = "0.4.2"
 palyra-common = { path = "../../../crates/palyra-common" }
 palyra-control-plane = { path = "../../../crates/palyra-control-plane" }
 palyra-vault = { path = "../../../crates/palyra-vault" }
