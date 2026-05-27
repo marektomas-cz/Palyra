@@ -18,14 +18,15 @@ use crate::{
         service_authorization::authorize_memory_action,
         session_compaction::truncate_console_text,
     },
+    domain::workspace::normalize_workspace_path,
     gateway::{
         current_unix_ms, GatewayRuntimeState, ToolRuntimeExecutionContext, MAX_MEMORY_SEARCH_TOP_K,
         MAX_MEMORY_TOOL_QUERY_BYTES, MAX_MEMORY_TOOL_TAGS,
     },
     journal::{
         MemoryItemLifecycleUpdateRequest, MemoryItemRecord, MemorySearchHit, MemorySearchRequest,
-        MemorySource, SessionSearchOutcome, SessionSearchRequest, WorkspaceSearchHit,
-        WorkspaceSearchRequest,
+        MemorySource, SessionSearchOutcome, SessionSearchRequest, WorkspaceDocumentRecord,
+        WorkspaceDocumentWriteRequest, WorkspaceSearchHit, WorkspaceSearchRequest,
     },
     tool_protocol::{ToolAttestation, ToolExecutionOutcome},
     transport::grpc::auth::RequestContext,
@@ -240,18 +241,24 @@ pub(crate) async fn execute_memory_retain_tool(
             ),
         );
     }
-    let scope = match MemoryLifecycleScope::parse(parsed.get("scope").and_then(Value::as_str)) {
-        Ok(scope) => scope,
-        Err(error) => {
-            return memory_tool_execution_outcome(
-                namespace,
-                proposal_id,
-                input_json,
-                false,
-                b"{}".to_vec(),
-                format!("palyra.memory.retain {}", error.message()),
-            );
+    let scope_text = memory_retain_scope_text(&parsed);
+    let workspace_scope = WorkspaceMemoryRetainScope::parse(scope_text.as_str());
+    let lifecycle_scope = if workspace_scope.is_none() {
+        match MemoryLifecycleScope::parse(Some(scope_text.as_str())) {
+            Ok(scope) => Some(scope),
+            Err(error) => {
+                return memory_tool_execution_outcome(
+                    namespace,
+                    proposal_id,
+                    input_json,
+                    false,
+                    b"{}".to_vec(),
+                    format!("palyra.memory.retain {}", error.message()),
+                );
+            }
         }
+    } else {
+        None
     };
     let (source, source_normalization) = match parsed.get("source").and_then(Value::as_str) {
         Some(raw) => match parse_memory_source_literal(raw) {
@@ -313,6 +320,27 @@ pub(crate) async fn execute_memory_retain_tool(
     };
     let provenance = retain_tool_provenance(context, proposal_id);
 
+    if let Some(scope) = workspace_scope {
+        return execute_workspace_memory_retain_tool(
+            runtime_state,
+            context,
+            proposal_id,
+            input_json,
+            &parsed,
+            scope,
+            content_text,
+            source,
+            tags,
+            confidence,
+            ttl_unix_ms,
+            provenance,
+            source_normalization,
+        )
+        .await;
+    }
+
+    let scope = lifecycle_scope.expect("non-workspace memory retain scope should be parsed");
+
     let provider = MemoryLifecycleProvider::new(Arc::clone(runtime_state));
     let outcome = match provider
         .retain(MemoryLifecycleRetainRequest {
@@ -348,6 +376,195 @@ pub(crate) async fn execute_memory_retain_tool(
         &outcome,
         source_normalization,
     )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkspaceMemoryRetainScope {
+    Workspace,
+    Project,
+}
+
+impl WorkspaceMemoryRetainScope {
+    fn parse(scope: &str) -> Option<Self> {
+        match scope {
+            "workspace" => Some(Self::Workspace),
+            "project" => Some(Self::Project),
+            _ => None,
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Workspace => "workspace",
+            Self::Project => "project",
+        }
+    }
+
+    const fn default_path(self) -> &'static str {
+        match self {
+            Self::Workspace => "MEMORY.md",
+            Self::Project => "projects/default/MEMORY.md",
+        }
+    }
+
+    const fn default_title(self) -> &'static str {
+        match self {
+            Self::Workspace => "Workspace Memory",
+            Self::Project => "Project Memory",
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_workspace_memory_retain_tool(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    context: ToolRuntimeExecutionContext<'_>,
+    proposal_id: &str,
+    input_json: &[u8],
+    parsed: &Map<String, Value>,
+    scope: WorkspaceMemoryRetainScope,
+    content_text: String,
+    source: MemorySource,
+    tags: Vec<String>,
+    confidence: Option<f64>,
+    ttl_unix_ms: Option<i64>,
+    provenance: Value,
+    source_normalization: Option<Value>,
+) -> ToolExecutionOutcome {
+    let namespace = b"palyra.memory.retain.attestation.v1";
+    let content_text = normalize_lifecycle_content(content_text.as_str());
+    if content_text.is_empty() {
+        return memory_tool_execution_outcome(
+            namespace,
+            proposal_id,
+            input_json,
+            false,
+            b"{}".to_vec(),
+            "palyra.memory.retain memory content is empty after normalization".to_owned(),
+        );
+    }
+    let path = match workspace_memory_retain_path(parsed, scope) {
+        Ok(path) => path,
+        Err(error) => {
+            return memory_tool_execution_outcome(
+                namespace,
+                proposal_id,
+                input_json,
+                false,
+                b"{}".to_vec(),
+                format!("palyra.memory.retain {error}"),
+            );
+        }
+    };
+    if let Err(error) =
+        authorize_memory_action(context.principal, "memory.ingest", "memory:workspace")
+    {
+        return memory_tool_execution_outcome(
+            namespace,
+            proposal_id,
+            input_json,
+            false,
+            b"{}".to_vec(),
+            format!("palyra.memory.retain workspace policy denied: {}", error.message()),
+        );
+    }
+
+    let agent_id = optional_trimmed_string(parsed.get("agent_id"));
+    let existing = match runtime_state
+        .workspace_document_by_path(
+            context.principal.to_owned(),
+            context.channel.map(str::to_owned),
+            agent_id.clone(),
+            path.clone(),
+            false,
+        )
+        .await
+    {
+        Ok(document) => document,
+        Err(error) => {
+            return memory_tool_execution_outcome(
+                namespace,
+                proposal_id,
+                input_json,
+                false,
+                b"{}".to_vec(),
+                format!("palyra.memory.retain workspace document load failed: {}", error.message()),
+            );
+        }
+    };
+    let now_unix_ms = current_unix_ms();
+    let (content_text_next, appended) = workspace_memory_document_content(
+        existing.as_ref().map(|document| document.content_text.as_str()),
+        scope.default_title(),
+        content_text.as_str(),
+        source,
+        tags.as_slice(),
+        confidence,
+        ttl_unix_ms,
+        now_unix_ms,
+    );
+    let title = existing
+        .as_ref()
+        .map(|document| document.title.clone())
+        .unwrap_or_else(|| scope.default_title().to_owned());
+    let document = if appended {
+        match runtime_state
+            .upsert_workspace_document(WorkspaceDocumentWriteRequest {
+                document_id: existing.as_ref().map(|document| document.document_id.clone()),
+                principal: context.principal.to_owned(),
+                channel: context.channel.map(str::to_owned),
+                agent_id,
+                session_id: Some(context.session_id.to_owned()),
+                path: path.clone(),
+                title: Some(title),
+                content_text: content_text_next,
+                template_id: None,
+                template_version: None,
+                template_content_hash: None,
+                source_memory_id: None,
+                manual_override: false,
+            })
+            .await
+        {
+            Ok(document) => document,
+            Err(error) => {
+                return memory_tool_execution_outcome(
+                    namespace,
+                    proposal_id,
+                    input_json,
+                    false,
+                    b"{}".to_vec(),
+                    format!(
+                        "palyra.memory.retain workspace document write failed: {}",
+                        error.message()
+                    ),
+                );
+            }
+        }
+    } else if let Some(document) = existing {
+        document
+    } else {
+        return memory_tool_execution_outcome(
+            namespace,
+            proposal_id,
+            input_json,
+            false,
+            b"{}".to_vec(),
+            "palyra.memory.retain workspace document already contained memory but could not be loaded"
+                .to_owned(),
+        );
+    };
+
+    serialize_workspace_memory_retain_outcome(WorkspaceMemoryRetainSerialization {
+        namespace,
+        proposal_id,
+        input_json,
+        scope,
+        document: &document,
+        appended,
+        provenance,
+        source_normalization,
+    })
 }
 
 pub(crate) async fn execute_memory_delete_tool(
@@ -1722,6 +1939,128 @@ fn retain_tool_provenance(context: ToolRuntimeExecutionContext<'_>, proposal_id:
     })
 }
 
+fn workspace_memory_retain_path(
+    parsed: &Map<String, Value>,
+    scope: WorkspaceMemoryRetainScope,
+) -> Result<String, String> {
+    let raw_path = optional_trimmed_string(parsed.get("workspace_path"))
+        .or_else(|| optional_trimmed_string(parsed.get("workspace_prefix")))
+        .or_else(|| optional_trimmed_string(parsed.get("prefix")))
+        .unwrap_or_else(|| scope.default_path().to_owned());
+    let candidate = if workspace_memory_path_has_allowed_extension(raw_path.as_str()) {
+        raw_path
+    } else {
+        format!("{}/MEMORY.md", raw_path.trim_end_matches(&['/', '\\'][..]))
+    };
+    let normalized = normalize_workspace_path(candidate.as_str())
+        .map_err(|error| {
+            format!("workspace_path is not an allowed workspace document path: {error}")
+        })?
+        .normalized_path;
+    if scope == WorkspaceMemoryRetainScope::Project && !normalized.starts_with("projects/") {
+        return Err(
+            "scope=project requires workspace_path or workspace_prefix under projects/".to_owned()
+        );
+    }
+    Ok(normalized)
+}
+
+fn workspace_memory_path_has_allowed_extension(path: &str) -> bool {
+    let lower = path.trim().to_ascii_lowercase();
+    ["md", "txt", "json", "yml", "yaml"]
+        .iter()
+        .any(|extension| lower.ends_with(format!(".{extension}").as_str()))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn workspace_memory_document_content(
+    existing_content: Option<&str>,
+    title: &str,
+    content_text: &str,
+    source: MemorySource,
+    tags: &[String],
+    confidence: Option<f64>,
+    ttl_unix_ms: Option<i64>,
+    now_unix_ms: i64,
+) -> (String, bool) {
+    if let Some(existing) = existing_content {
+        if existing.contains(content_text) {
+            return (existing.to_owned(), false);
+        }
+        let mut next = existing.trim_end().to_owned();
+        if !next.is_empty() {
+            next.push_str("\n\n");
+        }
+        next.push_str(
+            workspace_memory_markdown_entry(
+                content_text,
+                source,
+                tags,
+                confidence,
+                ttl_unix_ms,
+                now_unix_ms,
+            )
+            .as_str(),
+        );
+        next.push('\n');
+        return (next, true);
+    }
+
+    let mut content = format!("# {title}\n\n");
+    content.push_str(
+        workspace_memory_markdown_entry(
+            content_text,
+            source,
+            tags,
+            confidence,
+            ttl_unix_ms,
+            now_unix_ms,
+        )
+        .as_str(),
+    );
+    content.push('\n');
+    (content, true)
+}
+
+fn workspace_memory_markdown_entry(
+    content_text: &str,
+    source: MemorySource,
+    tags: &[String],
+    confidence: Option<f64>,
+    ttl_unix_ms: Option<i64>,
+    now_unix_ms: i64,
+) -> String {
+    let mut metadata =
+        vec![format!("remembered_at_unix_ms={now_unix_ms}"), format!("source={}", source.as_str())];
+    if let Some(confidence) = confidence {
+        metadata.push(format!("confidence={confidence:.3}"));
+    }
+    if let Some(ttl_unix_ms) = ttl_unix_ms {
+        metadata.push(format!("ttl_unix_ms={ttl_unix_ms}"));
+    }
+    if !tags.is_empty() {
+        metadata.push(format!("tags={}", tags.join(",")));
+    }
+    let indented_content =
+        content_text.lines().map(|line| format!("  {}", line.trim_end())).collect::<Vec<_>>();
+    format!("- {}\n{}", metadata.join(" "), indented_content.join("\n"))
+}
+
+fn workspace_document_output_payload(document: &WorkspaceDocumentRecord) -> Value {
+    json!({
+        "document_id": document.document_id.as_str(),
+        "path": document.path.as_str(),
+        "parent_path": document.parent_path.as_deref(),
+        "title": document.title.as_str(),
+        "kind": document.kind.as_str(),
+        "document_class": document.document_class.as_str(),
+        "state": document.state.as_str(),
+        "prompt_binding": document.prompt_binding.as_str(),
+        "latest_version": document.latest_version,
+        "updated_at_unix_ms": document.updated_at_unix_ms,
+    })
+}
+
 fn memory_hit_provenance(hit: &MemorySearchHit) -> Value {
     json!({
         "memory_id": hit.item.memory_id.as_str(),
@@ -1751,6 +2090,67 @@ fn memory_item_write_resource(item: &MemoryItemRecord) -> String {
         format!("memory:channel:{channel}")
     } else {
         "memory:principal".to_owned()
+    }
+}
+
+struct WorkspaceMemoryRetainSerialization<'a> {
+    namespace: &'static [u8],
+    proposal_id: &'a str,
+    input_json: &'a [u8],
+    scope: WorkspaceMemoryRetainScope,
+    document: &'a WorkspaceDocumentRecord,
+    appended: bool,
+    provenance: Value,
+    source_normalization: Option<Value>,
+}
+
+fn serialize_workspace_memory_retain_outcome(
+    input: WorkspaceMemoryRetainSerialization<'_>,
+) -> ToolExecutionOutcome {
+    let mut payload = json!({
+        "status": if input.appended { "retained" } else { "updated_existing" },
+        "reason": if input.appended {
+            "memory retained in workspace document"
+        } else {
+            "workspace document already contained this memory content"
+        },
+        "scope": input.scope.as_str(),
+        "review_state": "written",
+        "approval_required": false,
+        "trust_label": "workspace_memory",
+        "durable_memory_write": true,
+        "content_appended": input.appended,
+        "workspace_prefix": input.document.parent_path.as_deref(),
+        "visibility": {
+            "scope": input.scope.as_str(),
+            "cross_session": true,
+            "claim_boundary": "workspace/project memory is stored in an indexed workspace document and is available through palyra.memory.search or palyra.memory.recall with workspace/project scope",
+        },
+        "provenance": input.provenance,
+        "document": workspace_document_output_payload(input.document),
+    });
+    if let Some(normalization) = input.source_normalization {
+        if let Some(fields) = payload.as_object_mut() {
+            fields.insert("source_normalization".to_owned(), normalization);
+        }
+    }
+    match serde_json::to_vec(&payload) {
+        Ok(output_json) => memory_tool_execution_outcome(
+            input.namespace,
+            input.proposal_id,
+            input.input_json,
+            true,
+            output_json,
+            String::new(),
+        ),
+        Err(error) => memory_tool_execution_outcome(
+            input.namespace,
+            input.proposal_id,
+            input.input_json,
+            false,
+            b"{}".to_vec(),
+            format!("palyra.memory.retain failed to serialize workspace output: {error}"),
+        ),
     }
 }
 
@@ -2025,6 +2425,16 @@ fn optional_trimmed_string(value: Option<&Value>) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+fn memory_retain_scope_text(parsed: &Map<String, Value>) -> String {
+    parsed
+        .get("scope")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_else(|| "session".to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2185,6 +2595,82 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .contains("future sessions"));
+    }
+
+    #[test]
+    fn workspace_memory_retain_path_defaults_and_validates_project_scope() {
+        let parsed = Map::new();
+        assert_eq!(
+            workspace_memory_retain_path(&parsed, WorkspaceMemoryRetainScope::Workspace)
+                .expect("workspace default should be valid"),
+            "MEMORY.md"
+        );
+        assert_eq!(
+            workspace_memory_retain_path(&parsed, WorkspaceMemoryRetainScope::Project)
+                .expect("project default should be valid"),
+            "projects/default/MEMORY.md"
+        );
+
+        let mut with_prefix = Map::new();
+        with_prefix.insert("workspace_prefix".to_owned(), json!("projects/palyra"));
+        assert_eq!(
+            workspace_memory_retain_path(&with_prefix, WorkspaceMemoryRetainScope::Project)
+                .expect("project prefix should write to nested MEMORY.md"),
+            "projects/palyra/MEMORY.md"
+        );
+
+        let mut outside_project = Map::new();
+        outside_project.insert("workspace_path".to_owned(), json!("MEMORY.md"));
+        let error =
+            workspace_memory_retain_path(&outside_project, WorkspaceMemoryRetainScope::Project)
+                .expect_err("project scope must stay under projects/");
+        assert!(error.contains("scope=project"), "{error}");
+    }
+
+    #[test]
+    fn workspace_memory_document_content_appends_without_exact_duplicates() {
+        let tags = vec!["project".to_owned(), "decision".to_owned()];
+        let (created, created_appended) = workspace_memory_document_content(
+            None,
+            "Project Memory",
+            "Use the local test harness state root for Windows E2E.",
+            MemorySource::Manual,
+            tags.as_slice(),
+            Some(0.9),
+            None,
+            1_747_000_000_000,
+        );
+        assert!(created_appended);
+        assert!(created.contains("# Project Memory"));
+        assert!(created.contains("source=manual"));
+        assert!(created.contains("confidence=0.900"));
+        assert!(created.contains("Use the local test harness state root"));
+
+        let (deduped, duplicate_appended) = workspace_memory_document_content(
+            Some(created.as_str()),
+            "Project Memory",
+            "Use the local test harness state root for Windows E2E.",
+            MemorySource::Manual,
+            tags.as_slice(),
+            Some(0.9),
+            None,
+            1_747_000_000_001,
+        );
+        assert!(!duplicate_appended);
+        assert_eq!(deduped, created);
+
+        let (updated, updated_appended) = workspace_memory_document_content(
+            Some(created.as_str()),
+            "Project Memory",
+            "Run MiniMax smoke before claiming onboarding success.",
+            MemorySource::Manual,
+            tags.as_slice(),
+            Some(0.8),
+            None,
+            1_747_000_000_002,
+        );
+        assert!(updated_appended);
+        assert!(updated.contains("Run MiniMax smoke"));
     }
 
     fn workspace_document_record(content_text: &str) -> WorkspaceDocumentRecord {

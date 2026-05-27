@@ -424,14 +424,19 @@ fn memory_retain_schema_explains_principal_scope_for_corrections() {
     let entry = registry_entry("palyra.memory.retain").expect("retain tool entry");
 
     assert!(entry.description.contains("scope=principal"));
+    assert!(entry.description.contains("scope=workspace"));
     assert_eq!(
         entry.input_schema["properties"]["scope"]["enum"],
-        serde_json::json!(["session", "channel", "principal"])
+        serde_json::json!(["session", "channel", "principal", "workspace", "project"])
     );
     assert!(entry.input_schema["properties"]["scope"]["description"]
         .as_str()
         .unwrap_or_default()
         .contains("future sessions"));
+    assert!(entry.input_schema["properties"]["workspace_prefix"]["description"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("MEMORY.md"));
     assert!(entry.input_schema["properties"]["content_text"]["description"]
         .as_str()
         .unwrap_or_default()

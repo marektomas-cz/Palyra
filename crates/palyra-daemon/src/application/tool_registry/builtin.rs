@@ -147,12 +147,24 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
         ),
         entry(
             "palyra.memory.retain",
-            "Write a reviewable scoped memory item with provenance. Use scope=principal for preferences or corrections that must affect future sessions.",
+            "Write a reviewable scoped memory item or workspace/project memory document with provenance. Use scope=principal for preferences or corrections that must affect future sessions, and scope=workspace or scope=project for durable project context.",
             object_schema(
                 &["content_text"],
                 vec![
                     ("content_text", json!({"type":"string","maxLength":8192,"description":"Memory content to retain. For corrections, include the corrected preference and the old value being replaced."})),
-                    ("scope", json!({"type":"string","enum":["session","channel","principal"],"description":"Defaults to session. Use principal for remembered preferences, corrections, and facts that should be available in future sessions."})),
+                    ("scope", json!({"type":"string","enum":["session","channel","principal","workspace","project"],"description":"Defaults to session. Use principal for remembered preferences, corrections, and facts that should be available in future sessions. Use workspace or project to write indexed workspace/project memory documents."})),
+                    (
+                        "workspace_path",
+                        json!({"type":"string","description":"Exact workspace document path for scope=workspace or scope=project. Defaults to MEMORY.md for workspace and projects/default/MEMORY.md for project."}),
+                    ),
+                    (
+                        "workspace_prefix",
+                        json!({"type":"string","description":"Workspace/project directory or document path for scope=workspace or scope=project. Directory prefixes write to MEMORY.md below that prefix."}),
+                    ),
+                    (
+                        "prefix",
+                        json!({"type":"string","description":"Alias for workspace_prefix used with scope=workspace or scope=project."}),
+                    ),
                     (
                         "source",
                         json!({"type":"string","enum":["manual","summary","import","tape:user_message","tape:tool_result"]}),
