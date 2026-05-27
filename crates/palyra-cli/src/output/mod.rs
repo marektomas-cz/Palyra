@@ -23,6 +23,7 @@ pub(crate) enum CliExitCode {
     Policy = 6,
     Precondition = 7,
     NotFound = 8,
+    Cancelled = 130,
     Internal = 1,
 }
 
@@ -41,6 +42,7 @@ impl CliExitCode {
             CliExitCode::Policy => "policy_denial",
             CliExitCode::Precondition => "precondition_failed",
             CliExitCode::NotFound => "not_found",
+            CliExitCode::Cancelled => "cancelled",
             CliExitCode::Internal => "internal_error",
         }
     }
@@ -219,6 +221,9 @@ pub(crate) fn classify_error(error: &anyhow::Error) -> CliExitCode {
     if let Some(exit_code) = error.chain().find_map(classify_reqwest_status) {
         return exit_code;
     }
+    if is_user_cancellation(&lower) {
+        return CliExitCode::Cancelled;
+    }
     if lower.contains("browser service is disabled")
         || lower.contains("tool_call.browser_service.enabled=false")
     {
@@ -287,6 +292,12 @@ fn is_provider_output_limit_stop(lower_error: &str) -> bool {
         || lower_error.contains("max output tokens")
 }
 
+fn is_user_cancellation(lower_error: &str) -> bool {
+    lower_error.contains("cancelled by request")
+        || lower_error.contains("canceled by request")
+        || lower_error.contains("run cancellation requested")
+}
+
 fn classify_control_plane_error(cause: &(dyn std::error::Error + 'static)) -> Option<CliExitCode> {
     match cause.downcast_ref::<palyra_control_plane::ControlPlaneClientError>()? {
         palyra_control_plane::ControlPlaneClientError::Http { status, envelope, .. } => {
@@ -331,6 +342,7 @@ fn classify_tonic_status(cause: &(dyn std::error::Error + 'static)) -> Option<Cl
         tonic::Code::Unauthenticated => CliExitCode::Auth,
         tonic::Code::PermissionDenied => CliExitCode::Policy,
         tonic::Code::NotFound => CliExitCode::NotFound,
+        tonic::Code::Cancelled => CliExitCode::Cancelled,
         tonic::Code::FailedPrecondition => CliExitCode::Precondition,
         tonic::Code::Unavailable
         | tonic::Code::DeadlineExceeded
@@ -473,6 +485,23 @@ mod tests {
         .context("failed to call ResolveSession");
 
         assert_eq!(classify_error(&error), CliExitCode::NotFound);
+    }
+
+    #[test]
+    fn classify_error_maps_run_cancellation_without_internal_error() {
+        assert_eq!(
+            classify_error(&anyhow!("agent run failed: cancelled by request")),
+            CliExitCode::Cancelled
+        );
+        assert_eq!(
+            classify_error(&anyhow!("agent run failed: canceled by request")),
+            CliExitCode::Cancelled
+        );
+
+        let error = anyhow::Error::new(tonic::Status::cancelled("run cancellation requested"))
+            .context("failed to read run stream");
+        assert_eq!(classify_error(&error), CliExitCode::Cancelled);
+        assert_eq!(CliExitCode::Cancelled.kind(), "cancelled");
     }
 
     #[test]
