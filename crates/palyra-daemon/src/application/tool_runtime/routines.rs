@@ -435,6 +435,7 @@ async fn upsert_routine(
     } else {
         existing_job.as_ref().and_then(|job| job.workdir.clone())
     };
+    let name = required_string_field(payload, "name")?;
     let prompt = required_string_field(payload, "prompt")?;
     let requested_execution_posture = optional_string_field(payload, "execution_posture");
     let execution_posture_was_requested = requested_execution_posture.is_some();
@@ -449,13 +450,17 @@ async fn upsert_routine(
     )?;
     validate_routine_prompt_self_contained(prompt.as_str(), &execution)
         .map_err(map_registry_error)?;
-    let delivery = parse_delivery(
-        optional_string_field(payload, "delivery_mode").as_deref(),
-        optional_string_field(payload, "delivery_channel"),
-        optional_string_field(payload, "delivery_failure_mode").as_deref(),
-        optional_string_field(payload, "delivery_failure_channel"),
-        optional_string_field(payload, "silent_policy").as_deref(),
-    )?;
+    let delivery = normalize_delivery_for_user_visible_prompt(
+        name.as_str(),
+        prompt.as_str(),
+        parse_delivery(
+            optional_string_field(payload, "delivery_mode").as_deref(),
+            optional_string_field(payload, "delivery_channel"),
+            optional_string_field(payload, "delivery_failure_mode").as_deref(),
+            optional_string_field(payload, "delivery_failure_channel"),
+            optional_string_field(payload, "silent_policy").as_deref(),
+        )?,
+    );
     let quiet_hours = parse_quiet_hours(
         optional_string_field(payload, "quiet_hours_start").as_deref(),
         optional_string_field(payload, "quiet_hours_end").as_deref(),
@@ -499,7 +504,7 @@ async fn upsert_routine(
         existing_job,
         RoutineJobUpsert {
             routine_id: routine_id.clone(),
-            name: required_string_field(payload, "name")?,
+            name,
             prompt: prompt.clone(),
             owner_principal: owner_principal.clone(),
             channel: channel.clone(),
@@ -1628,6 +1633,77 @@ fn output_delivered_for_outcome(
     !matches!(effective_mode, RoutineDeliveryMode::LocalOnly | RoutineDeliveryMode::LogsOnly)
 }
 
+fn normalize_delivery_for_user_visible_prompt(
+    name: &str,
+    prompt: &str,
+    mut delivery: RoutineDeliveryConfig,
+) -> RoutineDeliveryConfig {
+    if !prompt_requests_user_visible_delivery(name, prompt)
+        || output_delivered_for_outcome(&delivery, RoutineRunOutcomeKind::SuccessWithOutput)
+    {
+        return delivery;
+    }
+
+    if matches!(delivery.mode, RoutineDeliveryMode::LocalOnly | RoutineDeliveryMode::LogsOnly) {
+        delivery.mode = RoutineDeliveryMode::SameChannel;
+        delivery.channel = None;
+    }
+    if delivery.silent_policy != RoutineSilentPolicy::Noisy {
+        delivery.silent_policy = RoutineSilentPolicy::Noisy;
+    }
+    delivery
+}
+
+fn prompt_requests_user_visible_delivery(name: &str, prompt: &str) -> bool {
+    let text = normalized_delivery_intent_text(format!("{name} {prompt}").as_str());
+    let direct_phrases = [
+        " remind me ",
+        " notify me ",
+        " message me ",
+        " send me ",
+        " tell me ",
+        " write me ",
+        " ping me ",
+        " mi napis ",
+        " mi napiš ",
+        " napis mi ",
+        " napiš mi ",
+        " posli mi ",
+        " pošli mi ",
+        " upozorni me ",
+        " upozorni mě ",
+        " pripomen mi ",
+        " připomeň mi ",
+    ];
+    if direct_phrases.iter().any(|phrase| text.contains(phrase)) {
+        return true;
+    }
+
+    let asks_for_message = text.contains(" zpravu ")
+        || text.contains(" zprávu ")
+        || text.contains(" message ")
+        || text.contains(" notification ");
+    let targets_user = text.contains(" mi ") || text.contains(" me ") || text.contains(" mě ");
+    asks_for_message && targets_user
+}
+
+fn normalized_delivery_intent_text(input: &str) -> String {
+    let mut output = String::with_capacity(input.len().saturating_add(2));
+    output.push(' ');
+    for character in input.chars().flat_map(char::to_lowercase) {
+        if character.is_alphanumeric() {
+            output.push(character);
+        } else {
+            output.push(' ');
+        }
+    }
+    output.push(' ');
+    while output.contains("  ") {
+        output = output.replace("  ", " ");
+    }
+    output
+}
+
 fn delivery_reason_for_outcome(
     delivery: &RoutineDeliveryConfig,
     outcome_kind: RoutineRunOutcomeKind,
@@ -2036,8 +2112,9 @@ mod tests {
     use std::fs;
 
     use crate::routines::{
-        RoutineApprovalMode, RoutineApprovalPolicy, RoutineDeliveryConfig, RoutineExecutionConfig,
-        RoutineExecutionPosture, RoutineRunMode, RoutineRunOutcomeKind, RoutineTriggerKind,
+        RoutineApprovalMode, RoutineApprovalPolicy, RoutineDeliveryConfig, RoutineDeliveryMode,
+        RoutineExecutionConfig, RoutineExecutionPosture, RoutineRunMode, RoutineRunOutcomeKind,
+        RoutineSilentPolicy, RoutineTriggerKind,
     };
     use serde_json::json;
     use ulid::Ulid;
@@ -2263,6 +2340,50 @@ mod tests {
             &delivery,
             RoutineRunOutcomeKind::SuccessWithOutput
         ));
+    }
+
+    #[test]
+    fn user_visible_reminder_delivery_cannot_be_silent_local_only() {
+        let delivery = RoutineDeliveryConfig {
+            mode: RoutineDeliveryMode::LocalOnly,
+            channel: None,
+            failure_mode: None,
+            failure_channel: None,
+            silent_policy: RoutineSilentPolicy::AuditOnly,
+        };
+
+        let normalized = super::normalize_delivery_for_user_visible_prompt(
+            "Cron smoke reminder",
+            "Za 30 sekund mi napiš krátkou zprávu cron smoke test OK.",
+            delivery,
+        );
+
+        assert_eq!(normalized.mode, RoutineDeliveryMode::SameChannel);
+        assert_eq!(normalized.silent_policy, RoutineSilentPolicy::Noisy);
+        assert!(super::output_delivered_for_outcome(
+            &normalized,
+            RoutineRunOutcomeKind::SuccessWithOutput
+        ));
+    }
+
+    #[test]
+    fn report_file_routines_may_remain_logs_only() {
+        let delivery = RoutineDeliveryConfig {
+            mode: RoutineDeliveryMode::LogsOnly,
+            channel: None,
+            failure_mode: None,
+            failure_channel: None,
+            silent_policy: RoutineSilentPolicy::Noisy,
+        };
+
+        let normalized = super::normalize_delivery_for_user_visible_prompt(
+            "Scheduled report",
+            "Každou hodinu zapiš souhrn do reports/status.md.",
+            delivery,
+        );
+
+        assert_eq!(normalized.mode, RoutineDeliveryMode::LogsOnly);
+        assert_eq!(normalized.silent_policy, RoutineSilentPolicy::Noisy);
     }
 
     #[test]
