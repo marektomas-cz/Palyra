@@ -359,7 +359,7 @@ fn prompt_path_candidate(token: &str) -> Option<&str> {
                 '`' | '"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | ',' | ';'
             )
         })
-        .trim_end_matches(|character: char| matches!(character, '.' | ',' | ';'));
+        .trim_end_matches(['.', ',', ';']);
     (!trimmed.is_empty() && std::path::Path::new(trimmed).is_absolute()).then_some(trimmed)
 }
 

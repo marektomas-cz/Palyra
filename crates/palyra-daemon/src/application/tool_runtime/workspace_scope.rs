@@ -508,7 +508,7 @@ mod tests {
                 launch_cwd.to_string_lossy().into_owned(),
             ]),
         });
-        let roots = merge_launch_workspace_roots(&[default_root.clone()], launch_roots);
+        let roots = merge_launch_workspace_roots(std::slice::from_ref(&default_root), launch_roots);
 
         assert_eq!(roots.len(), 3);
         assert_eq!(roots.first(), Some(&explicit_root));
