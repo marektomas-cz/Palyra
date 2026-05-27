@@ -53,6 +53,8 @@ const BROWSER_GATEWAY_TOOL_NAMES: &[&str] = &[
     "palyra.browser.navigate",
     "palyra.browser.click",
     "palyra.browser.type",
+    "palyra.browser.fill",
+    "palyra.browser.upload",
     "palyra.browser.press",
     "palyra.browser.select",
     "palyra.browser.viewport",
@@ -72,6 +74,8 @@ const BROWSER_GATEWAY_TOOL_NAMES: &[&str] = &[
     "palyra.browser.tabs.close",
     "palyra.browser.permissions.get",
     "palyra.browser.permissions.set",
+    "palyra.browser.downloads.list",
+    "palyra.browser.downloads.get",
 ];
 
 #[cfg(windows)]
@@ -4988,6 +4992,21 @@ mod tests {
                 .as_deref(),
             Some("browser-token-for-test")
         );
+    }
+
+    #[test]
+    fn browser_gateway_allowlist_covers_form_file_and_download_tools() {
+        for expected in [
+            "palyra.browser.fill",
+            "palyra.browser.upload",
+            "palyra.browser.downloads.list",
+            "palyra.browser.downloads.get",
+        ] {
+            assert!(
+                super::BROWSER_GATEWAY_TOOL_NAMES.contains(&expected),
+                "browser setup/status allowlist should include registered agent tool {expected}"
+            );
+        }
     }
 
     #[test]
