@@ -75,7 +75,7 @@ pub(crate) fn run_agent(command: AgentCommand) -> Result<()> {
                 approval_mode: approval_mode.into(),
                 origin_kind: None,
                 origin_run_id: None,
-                parameter_delta_json: None,
+                parameter_delta_json: cli_launch_parameter_delta_json()?,
             })?;
             let run_id = request.run_id.clone();
             let outcome =
@@ -283,7 +283,7 @@ async fn run_agent_interactive_async(
             approval_mode: AgentApprovalMode::Prompt,
             origin_kind: None,
             origin_run_id: None,
-            parameter_delta_json: None,
+            parameter_delta_json: cli_launch_parameter_delta_json()?,
         })?;
         last_run_id = Some(request.run_id.clone());
         let run_id = request.run_id.clone();
@@ -305,6 +305,22 @@ async fn run_agent_interactive_async(
         }
     }
     Ok(())
+}
+
+fn cli_launch_parameter_delta_json() -> Result<Option<String>> {
+    let cwd = std::env::current_dir().context("failed to resolve CLI current working directory")?;
+    cli_launch_parameter_delta_json_for_cwd(cwd.as_path())
+}
+
+fn cli_launch_parameter_delta_json_for_cwd(cwd: &std::path::Path) -> Result<Option<String>> {
+    let parameter_delta = serde_json::json!({
+        "cli_context": {
+            "launch_cwd": cwd.to_string_lossy()
+        }
+    });
+    serde_json::to_string(&parameter_delta)
+        .map(Some)
+        .context("failed to serialize CLI launch context")
 }
 
 fn spawn_interactive_stdin_reader() -> mpsc::UnboundedReceiver<Result<String, String>> {
@@ -617,11 +633,13 @@ async fn ensure_interactive_session(
 #[cfg(test)]
 mod tests {
     use super::{
-        ensure_agent_run_approval_flags, interactive_interrupt_message,
-        interactive_session_started_message, normalize_interactive_prompt_line,
+        cli_launch_parameter_delta_json_for_cwd, ensure_agent_run_approval_flags,
+        interactive_interrupt_message, interactive_session_started_message,
+        normalize_interactive_prompt_line,
     };
     use crate::args::AgentApprovalModeArg;
     use crate::proto::palyra::{common::v1 as common_v1, gateway::v1 as gateway_v1};
+    use serde_json::Value;
 
     #[test]
     fn interactive_session_started_message_omits_session_identifier() {
@@ -682,5 +700,23 @@ mod tests {
             .expect("prompt mode remains valid with explicit sensitive-tool opt-in");
         ensure_agent_run_approval_flags(true, AgentApprovalModeArg::AllowOnce)
             .expect("allow-once remains valid with explicit sensitive-tool opt-in");
+    }
+
+    #[test]
+    fn cli_launch_context_encodes_current_working_directory() {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let parameter_delta = cli_launch_parameter_delta_json_for_cwd(tempdir.path())
+            .expect("launch context should serialize")
+            .expect("launch context should be present");
+        let value =
+            serde_json::from_str::<Value>(parameter_delta.as_str()).expect("JSON should parse");
+
+        assert_eq!(
+            value
+                .get("cli_context")
+                .and_then(|context| context.get("launch_cwd"))
+                .and_then(Value::as_str),
+            Some(tempdir.path().to_string_lossy().as_ref())
+        );
     }
 }

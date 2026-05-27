@@ -4,12 +4,24 @@ use std::{
     sync::Arc,
 };
 
+use serde::Deserialize;
+
 use crate::gateway::GatewayRuntimeState;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ActiveWorkspaceRoot {
     pub(crate) root: PathBuf,
     pub(crate) relative_path: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RunLaunchParameterDelta {
+    cli_context: Option<RunLaunchCliContext>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RunLaunchCliContext {
+    launch_cwd: Option<String>,
 }
 
 pub(crate) async fn session_active_workspace_root(
@@ -24,6 +36,124 @@ pub(crate) async fn session_active_workspace_root(
         return Ok(None);
     };
     Ok(active_workspace_root_from_focus_paths(workspace_roots, state.focus_paths.as_slice()))
+}
+
+pub(crate) async fn workspace_roots_with_run_launch_cwd(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    run_id: &str,
+    workspace_roots: &[PathBuf],
+) -> Vec<PathBuf> {
+    let launch_cwd = run_launch_cwd_workspace_root(runtime_state, run_id).await;
+    merge_launch_cwd_workspace_root(workspace_roots, launch_cwd)
+}
+
+async fn run_launch_cwd_workspace_root(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    run_id: &str,
+) -> Option<PathBuf> {
+    let Some(run) =
+        runtime_state.orchestrator_run_status_snapshot(run_id.to_owned()).await.ok().flatten()
+    else {
+        return None;
+    };
+    let Some(parameter_delta_json) = run.parameter_delta_json.as_deref() else {
+        return None;
+    };
+    let Ok(parameter_delta) = serde_json::from_str::<RunLaunchParameterDelta>(parameter_delta_json)
+    else {
+        return None;
+    };
+    let Some(raw_cwd) = parameter_delta
+        .cli_context
+        .and_then(|context| context.launch_cwd)
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    else {
+        return None;
+    };
+    canonical_launch_cwd_workspace_root(raw_cwd.as_str())
+}
+
+fn canonical_launch_cwd_workspace_root(raw_cwd: &str) -> Option<PathBuf> {
+    if raw_cwd.chars().any(char::is_control) {
+        return None;
+    }
+    let requested = Path::new(raw_cwd);
+    if !requested.is_absolute() {
+        return None;
+    }
+    let canonical = match fs::canonicalize(requested) {
+        Ok(path) => path,
+        Err(_) => return None,
+    };
+    let Ok(metadata) = fs::metadata(canonical.as_path()) else {
+        return None;
+    };
+    if !metadata.is_dir() || protected_launch_workspace_root(canonical.as_path()) {
+        return None;
+    }
+    Some(canonical)
+}
+
+fn merge_launch_cwd_workspace_root(
+    workspace_roots: &[PathBuf],
+    launch_cwd: Option<PathBuf>,
+) -> Vec<PathBuf> {
+    let Some(launch_cwd) = launch_cwd else {
+        return workspace_roots.to_vec();
+    };
+    let mut merged = Vec::with_capacity(workspace_roots.len().saturating_add(1));
+    merged.push(launch_cwd.clone());
+    for root in workspace_roots {
+        if same_workspace_root(root.as_path(), launch_cwd.as_path()) {
+            continue;
+        }
+        merged.push(root.clone());
+    }
+    merged
+}
+
+fn same_workspace_root(left: &Path, right: &Path) -> bool {
+    let left = fs::canonicalize(left).unwrap_or_else(|_| left.to_path_buf());
+    let right = fs::canonicalize(right).unwrap_or_else(|_| right.to_path_buf());
+    if left == right {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        let left = left.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+        let right = right.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+        left == right
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+fn protected_launch_workspace_root(path: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        let normalized = path.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+        normalized.ends_with(":/")
+            || normalized.contains(":/windows")
+            || normalized.contains(":/program files")
+            || normalized.contains(":/program files (x86)")
+            || normalized.contains(":/system volume information")
+    }
+    #[cfg(not(windows))]
+    {
+        let normalized = path.to_string_lossy().replace('\\', "/");
+        if normalized == "/" {
+            return true;
+        }
+        for prefix in ["/etc", "/bin", "/sbin", "/usr", "/lib", "/lib64", "/System", "/Library"] {
+            if normalized == prefix || normalized.starts_with(format!("{prefix}/").as_str()) {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 pub(crate) fn active_workspace_root_from_focus_paths(
@@ -185,9 +315,10 @@ fn normalize_relative_workspace_path(path: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        active_workspace_root_from_focus_paths, relative_path_already_targets_active_root,
-        relative_path_should_use_active_root, workspace_root_override_targets_active_root,
-        ActiveWorkspaceRoot,
+        active_workspace_root_from_focus_paths, canonical_launch_cwd_workspace_root,
+        merge_launch_cwd_workspace_root, relative_path_already_targets_active_root,
+        relative_path_should_use_active_root, same_workspace_root,
+        workspace_root_override_targets_active_root, ActiveWorkspaceRoot,
     };
     use std::fs;
 
@@ -291,5 +422,45 @@ mod tests {
             &active
         ));
         assert!(!workspace_root_override_targets_active_root(".", &active));
+    }
+
+    #[test]
+    fn launch_cwd_workspace_root_requires_existing_absolute_directory() {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let canonical = fs::canonicalize(tempdir.path()).expect("tempdir should canonicalize");
+
+        assert_eq!(
+            canonical_launch_cwd_workspace_root(tempdir.path().to_string_lossy().as_ref()),
+            Some(canonical)
+        );
+        assert_eq!(canonical_launch_cwd_workspace_root("relative/project"), None);
+        assert_eq!(canonical_launch_cwd_workspace_root("bad\u{0000}path"), None);
+        assert_eq!(
+            canonical_launch_cwd_workspace_root(
+                tempdir.path().join("missing").to_string_lossy().as_ref()
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn launch_cwd_workspace_root_is_prepended_without_duplicates() {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let default_root = tempdir.path().join("default");
+        let launch_root = tempdir.path().join("launch");
+        fs::create_dir_all(default_root.as_path()).expect("default root should exist");
+        fs::create_dir_all(launch_root.as_path()).expect("launch root should exist");
+        let canonical_launch =
+            fs::canonicalize(launch_root.as_path()).expect("launch root should canonicalize");
+
+        let roots = merge_launch_cwd_workspace_root(
+            &[default_root.clone(), launch_root.clone()],
+            Some(canonical_launch.clone()),
+        );
+
+        assert_eq!(roots.len(), 2);
+        assert_eq!(roots.first(), Some(&canonical_launch));
+        assert_eq!(roots.get(1), Some(&default_root));
+        assert!(same_workspace_root(roots[0].as_path(), launch_root.as_path()));
     }
 }

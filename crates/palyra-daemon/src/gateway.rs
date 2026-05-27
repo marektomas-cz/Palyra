@@ -59,7 +59,7 @@ use crate::{
         inbound_coalescer::InboundCoalescer,
         tool_runtime::workspace_scope::{
             relative_path_already_targets_active_root, session_active_workspace_root,
-            ActiveWorkspaceRoot,
+            workspace_roots_with_run_launch_cwd, ActiveWorkspaceRoot,
         },
     },
     channel_router::{
@@ -906,6 +906,12 @@ async fn process_runner_workspace_roots_for_session(
     };
     let workspace_roots =
         outcome.agent.workspace_roots.iter().map(PathBuf::from).collect::<Vec<_>>();
+    let workspace_roots = workspace_roots_with_run_launch_cwd(
+        runtime_state,
+        context.run_id,
+        workspace_roots.as_slice(),
+    )
+    .await;
     if workspace_roots.is_empty() {
         fallback
     } else {
