@@ -769,7 +769,8 @@ fn detect_sensitive_assignment(line: &str, _lowered: &str) -> Option<&'static st
         return None;
     }
     let classification = classify_sensitive_assignment_key(key.as_str())?;
-    if classification == "token" && !bare_token_assignment_value_looks_secret(value) {
+    if matches!(classification, "key" | "token") && !bare_token_assignment_value_looks_secret(value)
+    {
         return None;
     }
     Some(classification)
@@ -820,11 +821,15 @@ fn classify_sensitive_assignment_key(key: &str) -> Option<&'static str> {
     if compact.contains("privatekey") {
         return Some("private_key");
     }
+    if compact.ends_with("key") {
+        return Some("key");
+    }
     for component in key.split(['_', '-']) {
         match component {
             "password" => return Some("password"),
             "token" => return Some("token"),
             "secret" => return Some("secret"),
+            "key" => return Some("key"),
             _ => {}
         }
     }
@@ -1598,6 +1603,28 @@ mod tests {
             .finding_codes()
             .iter()
             .any(|code| code == "secret_leak.assignment.private_key"));
+    }
+
+    #[test]
+    fn generic_key_assignments_redact_secret_looking_values() {
+        let source = "provider_key = \"palyra_s097_os_secret_abcdef\"\n\
+                      harmless_key = \"dev\"";
+        let outcome = redact_text_for_export(
+            source,
+            SafetySourceKind::Workspace,
+            SafetyContentKind::WorkspaceDocument,
+            TrustLabel::TrustedLocal,
+        );
+
+        assert!(outcome.redacted);
+        assert!(outcome.redacted_text.contains("provider_key = \"[REDACTED_SECRET]\""));
+        assert!(outcome.redacted_text.contains("harmless_key = \"dev\""));
+        assert!(!outcome.redacted_text.contains("palyra_s097_os_secret_abcdef"));
+        assert!(outcome
+            .scan
+            .finding_codes()
+            .iter()
+            .any(|code| code == "secret_leak.assignment.key"));
     }
 
     #[test]

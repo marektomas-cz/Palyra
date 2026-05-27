@@ -1107,6 +1107,44 @@ mod tests {
     }
 
     #[test]
+    fn os_file_read_redacts_provider_key_values() {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let policy = test_policy(tempdir.path());
+        let target = tempdir.path().join("settings.toml");
+        fs::write(
+            target.as_path(),
+            "provider_key = \"palyra_s097_os_secret_abcdef\"\nmode = \"test\"\n",
+        )
+        .expect("secret-bearing OS file should be written");
+
+        let read = execute_os_file_operation(
+            &policy,
+            &OsFileInput {
+                operation: OsFileOperation::Read,
+                path: target.to_string_lossy().into_owned(),
+                target_path: None,
+                content_text: None,
+                bytes_base64: None,
+                create_parent_dirs: None,
+                overwrite: None,
+                dry_run: None,
+                offset_bytes: None,
+                max_bytes: None,
+                query: None,
+                case_sensitive: None,
+                max_entries: None,
+                max_matches: None,
+            },
+        )
+        .expect("absolute user path read should succeed");
+
+        let text = read.get("text").and_then(Value::as_str).expect("read text should be present");
+        assert_eq!(read.get("redacted").and_then(Value::as_bool), Some(true));
+        assert!(text.contains("provider_key = \"[REDACTED_SECRET]\""));
+        assert!(!text.contains("palyra_s097_os_secret_abcdef"));
+    }
+
+    #[test]
     fn os_file_rejects_path_outside_workspace_and_user_roots() {
         let allowed_root = tempfile::tempdir().expect("allowed root should be created");
         let outside_root = tempfile::tempdir().expect("outside root should be created");
