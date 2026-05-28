@@ -3311,6 +3311,10 @@ pub enum JournalError {
     DuplicateEventId { event_id: String },
     #[error("orchestrator run already exists: {run_id}")]
     DuplicateRunId { run_id: String },
+    #[error(
+        "orchestrator session {session_id} already has active run {active_run_id}; cannot start run {requested_run_id}"
+    )]
+    SessionRunAlreadyActive { session_id: String, active_run_id: String, requested_run_id: String },
     #[error("orchestrator tape sequence already exists for run {run_id} at seq {seq}")]
     DuplicateTapeSequence { run_id: String, seq: i64 },
     #[error("approval record already exists: {approval_id}")]
@@ -5488,6 +5492,32 @@ fn origin_kind_updates_session_last_run(origin_kind: &str) -> bool {
     !matches!(normalized.as_str(), "background" | "delegation")
 }
 
+fn active_session_last_run(
+    connection: &Connection,
+    session_id: &str,
+) -> Result<Option<String>, JournalError> {
+    connection
+        .query_row(
+            r#"
+                SELECT runs.run_ulid
+                FROM orchestrator_sessions sessions
+                JOIN orchestrator_runs runs
+                    ON runs.run_ulid = sessions.last_run_ulid
+                WHERE sessions.session_ulid = ?1
+                  AND runs.state IN (?2, ?3)
+                LIMIT 1
+            "#,
+            params![
+                session_id,
+                RunLifecycleState::Accepted.as_str(),
+                RunLifecycleState::InProgress.as_str(),
+            ],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(Into::into)
+}
+
 impl JournalStore {
     pub(crate) fn max_payload_bytes(&self) -> usize {
         self.config.max_payload_bytes
@@ -6875,6 +6905,18 @@ impl JournalStore {
         let updates_session_last_run =
             origin_kind_updates_session_last_run(request.origin_kind.as_str());
         let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        if updates_session_last_run {
+            if let Some(active_run_id) =
+                active_session_last_run(&guard, request.session_id.as_str())?
+                    .filter(|active_run_id| active_run_id != &request.run_id)
+            {
+                return Err(JournalError::SessionRunAlreadyActive {
+                    session_id: request.session_id.clone(),
+                    active_run_id,
+                    requested_run_id: request.run_id.clone(),
+                });
+            }
+        }
         match guard.execute(
             r#"
                 INSERT INTO orchestrator_runs (
@@ -20552,6 +20594,88 @@ mod tests {
             .expect("session should exist");
         assert_eq!(session.last_run_id.as_deref(), Some(foreground_run_id));
         assert_eq!(session.last_run_state.as_deref(), Some(RunLifecycleState::Done.as_str()));
+    }
+
+    #[test]
+    fn foreground_run_start_rejects_active_session_run() {
+        let db_path = temp_db_path();
+        let store = JournalStore::open(test_journal_config(db_path, false))
+            .expect("journal store should open");
+        let session_id = "01ARZ3NDEKTSV4RRFFQ69G5P07";
+        let active_run_id = "01ARZ3NDEKTSV4RRFFQ69G5P08";
+        let redirect_run_id = "01ARZ3NDEKTSV4RRFFQ69G5P09";
+        let background_run_id = "01ARZ3NDEKTSV4RRFFQ69G5P0A";
+        store
+            .upsert_orchestrator_session(&OrchestratorSessionUpsertRequest {
+                session_id: session_id.to_owned(),
+                session_key: "session:active-run-guard".to_owned(),
+                session_label: Some("Active run guard".to_owned()),
+                principal: "user:ops".to_owned(),
+                device_id: "device:local".to_owned(),
+                channel: Some("cli".to_owned()),
+            })
+            .expect("session should be created");
+
+        store
+            .start_orchestrator_run(&OrchestratorRunStartRequest {
+                run_id: active_run_id.to_owned(),
+                session_id: session_id.to_owned(),
+                origin_kind: "run_stream".to_owned(),
+                origin_run_id: None,
+                triggered_by_principal: Some("user:ops".to_owned()),
+                parameter_delta_json: None,
+            })
+            .expect("active foreground run should start");
+        store
+            .update_orchestrator_run_state(active_run_id, RunLifecycleState::InProgress, None)
+            .expect("active foreground run should enter progress");
+
+        let error = store
+            .start_orchestrator_run(&OrchestratorRunStartRequest {
+                run_id: redirect_run_id.to_owned(),
+                session_id: session_id.to_owned(),
+                origin_kind: "run_stream".to_owned(),
+                origin_run_id: None,
+                triggered_by_principal: Some("user:ops".to_owned()),
+                parameter_delta_json: None,
+            })
+            .expect_err("second foreground run in one session should be rejected");
+        match error {
+            JournalError::SessionRunAlreadyActive {
+                session_id: actual_session_id,
+                active_run_id: actual_active_run_id,
+                requested_run_id,
+            } => {
+                assert_eq!(actual_session_id, session_id);
+                assert_eq!(actual_active_run_id, active_run_id);
+                assert_eq!(requested_run_id, redirect_run_id);
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+
+        store
+            .start_orchestrator_run(&OrchestratorRunStartRequest {
+                run_id: background_run_id.to_owned(),
+                session_id: session_id.to_owned(),
+                origin_kind: "background".to_owned(),
+                origin_run_id: Some(active_run_id.to_owned()),
+                triggered_by_principal: Some("user:ops".to_owned()),
+                parameter_delta_json: None,
+            })
+            .expect("background child run should not replace or block foreground last run");
+        store
+            .update_orchestrator_run_state(active_run_id, RunLifecycleState::Done, None)
+            .expect("foreground run should complete");
+        store
+            .start_orchestrator_run(&OrchestratorRunStartRequest {
+                run_id: redirect_run_id.to_owned(),
+                session_id: session_id.to_owned(),
+                origin_kind: "run_stream".to_owned(),
+                origin_run_id: None,
+                triggered_by_principal: Some("user:ops".to_owned()),
+                parameter_delta_json: None,
+            })
+            .expect("foreground run should start after active run completes");
     }
 
     #[test]

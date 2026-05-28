@@ -5,6 +5,13 @@ pub(crate) fn map_orchestrator_store_error(operation: &str, error: JournalError)
         JournalError::DuplicateRunId { run_id } => {
             Status::already_exists(format!("orchestrator run already exists: {run_id}"))
         }
+        JournalError::SessionRunAlreadyActive {
+            session_id,
+            active_run_id,
+            requested_run_id,
+        } => Status::failed_precondition(format!(
+            "orchestrator session {session_id} already has active run {active_run_id}; wait for it, cancel it, or start a different session before starting run {requested_run_id}"
+        )),
         JournalError::DuplicateTapeSequence { run_id, seq } => Status::already_exists(format!(
             "orchestrator tape already contains seq={seq} for run {run_id}"
         )),
@@ -208,7 +215,7 @@ pub(crate) fn current_unix_ms_status() -> Result<i64, Status> {
 
 #[cfg(test)]
 mod tests {
-    use super::map_memory_store_error;
+    use super::{map_memory_store_error, map_orchestrator_store_error};
     use crate::journal::JournalError;
     use tonic::Code;
 
@@ -243,5 +250,21 @@ mod tests {
 
         assert_eq!(status.code(), Code::AlreadyExists);
         assert!(status.message().contains("docs/guide.md"));
+    }
+
+    #[test]
+    fn map_orchestrator_store_error_maps_active_session_run_to_failed_precondition() {
+        let status = map_orchestrator_store_error(
+            "start orchestrator run",
+            JournalError::SessionRunAlreadyActive {
+                session_id: "session-1".to_owned(),
+                active_run_id: "run-active".to_owned(),
+                requested_run_id: "run-next".to_owned(),
+            },
+        );
+
+        assert_eq!(status.code(), Code::FailedPrecondition);
+        assert!(status.message().contains("active run run-active"));
+        assert!(status.message().contains("run-next"));
     }
 }
