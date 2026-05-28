@@ -765,7 +765,10 @@ fn detect_sensitive_assignment(line: &str, _lowered: &str) -> Option<&'static st
     let separator_index = sensitive_assignment_separator_index(line)?;
     let key = assignment_key_identifier(line.get(..separator_index)?)?;
     let value = line.get(separator_index + 1..)?.trim();
-    if value.is_empty() || key.ends_with("_ref") || is_safe_secret_reference_value(value) {
+    if value.is_empty()
+        || key.ends_with("_ref")
+        || is_safe_secret_reference_value(key.as_str(), value)
+    {
         return None;
     }
     let classification = classify_sensitive_assignment_key(key.as_str())?;
@@ -836,7 +839,7 @@ fn classify_sensitive_assignment_key(key: &str) -> Option<&'static str> {
     SENSITIVE_ASSIGNMENT_KEYS.iter().copied().find(|candidate| key == *candidate)
 }
 
-fn is_safe_secret_reference_value(value: &str) -> bool {
+fn is_safe_secret_reference_value(key: &str, value: &str) -> bool {
     let normalized = value.trim().trim_end_matches(';').trim();
     if normalized.is_empty() {
         return false;
@@ -848,6 +851,7 @@ fn is_safe_secret_reference_value(value: &str) -> bool {
         || is_env_getter_reference(normalized, "env::var")
         || is_env_getter_reference(normalized, "os.getenv")
         || is_os_environ_index_reference(normalized)
+        || is_env_identifier_reference_expression(key, normalized)
         || is_dom_input_value_reference(normalized)
 }
 
@@ -873,6 +877,62 @@ fn is_os_environ_index_reference(value: &str) -> bool {
         return false;
     };
     is_quoted_env_identifier(inner.trim())
+}
+
+fn is_env_identifier_reference_expression(key: &str, value: &str) -> bool {
+    let literals = quoted_string_literals(value);
+    if literals.is_empty()
+        || !literals
+            .iter()
+            .all(|literal| literal.is_empty() || is_env_reference_identifier_literal(literal))
+    {
+        return false;
+    }
+    value.contains('(') || value.contains('[') || assignment_key_describes_env_identifier(key)
+}
+
+fn is_env_reference_identifier_literal(value: &str) -> bool {
+    is_env_identifier(value) && value.contains('_')
+}
+
+fn assignment_key_describes_env_identifier(key: &str) -> bool {
+    key.contains("name") || key.contains("var") || key.contains("env") || key.contains("identifier")
+}
+
+fn quoted_string_literals(value: &str) -> Vec<String> {
+    let mut literals = Vec::new();
+    let mut chars = value.char_indices().peekable();
+    while let Some((_, ch)) = chars.next() {
+        if !matches!(ch, '"' | '\'') {
+            continue;
+        }
+        let quote = ch;
+        let mut literal = String::new();
+        let mut escaped = false;
+        let mut closed = false;
+        for (_, next) in chars.by_ref() {
+            if escaped {
+                literal.push(next);
+                escaped = false;
+                continue;
+            }
+            if next == '\\' {
+                escaped = true;
+                continue;
+            }
+            if next == quote {
+                closed = true;
+                break;
+            }
+            literal.push(next);
+        }
+        if closed {
+            literals.push(literal);
+        } else {
+            return Vec::new();
+        }
+    }
+    literals
 }
 
 fn is_dom_input_value_reference(value: &str) -> bool {
@@ -1681,6 +1741,28 @@ mod tests {
 
         assert!(!outcome.redacted);
         assert_eq!(outcome.redacted_text, source);
+        assert!(!outcome
+            .scan
+            .finding_codes()
+            .iter()
+            .any(|code| code.starts_with("secret_leak.assignment.")));
+    }
+
+    #[test]
+    fn source_env_identifier_helper_references_are_not_redacted_as_secret_values() {
+        let source = "const apiKey = requireEnv(\"PALYRA_E2E_API_KEY\");\n\
+                      const clientSecretName = \"TEST_CLIENT_SECRET\";\n\
+                      const requiredEnv = [\"PALYRA_E2E_API_KEY\", \"TEST_CLIENT_SECRET\"];";
+        let outcome = redact_text_for_export(
+            source,
+            SafetySourceKind::Workspace,
+            SafetyContentKind::WorkspaceDocument,
+            TrustLabel::TrustedLocal,
+        );
+
+        assert!(!outcome.redacted);
+        assert_eq!(outcome.redacted_text, source);
+        assert!(!outcome.redacted_text.contains("[REDACTED_SECRET]"));
         assert!(!outcome
             .scan
             .finding_codes()
