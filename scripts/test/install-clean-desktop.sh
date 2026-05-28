@@ -8,6 +8,9 @@ Usage: scripts/test/install-clean-desktop.sh [options]
 Options:
   --workspace-root <path>  Override the clean desktop harness root.
   --skip-build            Reuse existing release binaries and web bundles.
+  --install-system-deps   Install missing Linux desktop build packages with apt-get. This is the default.
+  --no-system-deps-install
+                          Check Linux desktop build packages but do not install them.
   --launch                Launch the installed desktop app after install.
   --no-launch             Install only; do not launch the desktop app.
   -h, --help              Show this help.
@@ -23,6 +26,82 @@ die() {
 
 require_tool() {
   command -v "$1" >/dev/null 2>&1 || die "$1 is required for clean desktop install testing."
+}
+
+linux_apt_build_packages() {
+  cat <<'PACKAGES'
+build-essential
+pkg-config
+libssl-dev
+libgtk-3-dev
+libwebkit2gtk-4.1-dev
+libsoup-3.0-dev
+libjavascriptcoregtk-4.1-dev
+libxdo-dev
+libayatana-appindicator3-dev
+librsvg2-dev
+PACKAGES
+}
+
+linux_pkg_config_modules() {
+  cat <<'MODULES'
+openssl
+gtk+-3.0
+webkit2gtk-4.1
+libsoup-3.0
+javascriptcoregtk-4.1
+xdo
+ayatana-appindicator3-0.1
+librsvg-2.0
+MODULES
+}
+
+missing_debian_packages() {
+  local package status
+  while IFS= read -r package; do
+    [[ -n "$package" ]] || continue
+    status="$(dpkg-query -W -f='${db:Status-Abbrev}' "$package" 2>/dev/null || true)"
+    [[ "$status" == "ii "* ]] || printf '%s\n' "$package"
+  done < <(linux_apt_build_packages)
+}
+
+install_apt_packages() {
+  local packages=("$@")
+  [[ ${#packages[@]} -gt 0 ]] || return 0
+  if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y "${packages[@]}"
+  else
+    command -v sudo >/dev/null 2>&1 || die "Missing Linux desktop build packages: ${packages[*]}. Install them as root, or install sudo and rerun this script."
+    sudo -v || die "sudo authentication is required to install Linux desktop build packages: ${packages[*]}"
+    sudo apt-get update
+    sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y "${packages[@]}"
+  fi
+}
+
+ensure_linux_build_dependencies() {
+  [[ "$(uname -s)" == "Linux" ]] || return 0
+  if command -v apt-get >/dev/null 2>&1 && command -v dpkg-query >/dev/null 2>&1; then
+    local missing=()
+    mapfile -t missing < <(missing_debian_packages)
+    [[ ${#missing[@]} -eq 0 ]] && return 0
+    if [[ "$install_system_deps" == true ]]; then
+      echo "Installing missing Linux desktop build packages: ${missing[*]}" >&2
+      install_apt_packages "${missing[@]}"
+      return 0
+    fi
+    die "Missing Linux desktop build packages: ${missing[*]}
+Run: sudo apt-get update && sudo apt-get install -y ${missing[*]}
+Or rerun this script with --install-system-deps."
+  fi
+
+  command -v pkg-config >/dev/null 2>&1 || die "pkg-config is required for Linux desktop builds. Install your distribution's pkg-config/pkgconf package and OpenSSL development headers."
+  local module missing_modules=()
+  while IFS= read -r module; do
+    [[ -n "$module" ]] || continue
+    pkg-config --exists "$module" || missing_modules+=("$module")
+  done < <(linux_pkg_config_modules)
+  [[ ${#missing_modules[@]} -eq 0 ]] || die "Missing Linux pkg-config modules required for desktop builds: ${missing_modules[*]}. Install your distribution equivalents for OpenSSL, GTK 3, WebKitGTK 4.1, libsoup 3, xdo, Ayatana AppIndicator, and librsvg development packages."
 }
 
 require_value() {
@@ -354,6 +433,7 @@ require_tool git
 workspace_root=""
 skip_build=false
 launch_arg=""
+install_system_deps=true
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -368,6 +448,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-build)
       skip_build=true
+      shift
+      ;;
+    --install-system-deps)
+      install_system_deps=true
+      shift
+      ;;
+    --no-system-deps-install)
+      install_system_deps=false
       shift
       ;;
     --launch)
@@ -408,6 +496,7 @@ mkdir -p "$workspace_root"
 if [[ "$skip_build" == false ]]; then
   require_tool cargo
   require_tool npm
+  ensure_linux_build_dependencies
   mkdir -p "$cargo_target_root"
   (
     cd "$repo_root"
