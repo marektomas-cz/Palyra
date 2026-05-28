@@ -378,6 +378,11 @@ fn routines_control_schema_discourages_slug_ids_and_short_intervals() {
         .as_str()
         .unwrap_or_default()
         .contains("palyra.sleep"));
+    assert!(entry.description.contains("Europe/Prague"));
+    assert!(entry.input_schema["properties"]["timezone"]["description"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("IANA timezone"));
 }
 
 #[test]

@@ -383,12 +383,8 @@ fn preview_schedule(
     timezone_mode: CronTimezoneMode,
 ) -> Result<Value, String> {
     let phrase = required_string_field(payload, "phrase")?;
-    let timezone = match optional_string_field(payload, "timezone").as_deref() {
-        Some("utc") => CronTimezoneMode::Utc,
-        Some("local") => CronTimezoneMode::Local,
-        None => timezone_mode,
-        Some(_) => return Err("timezone must be one of local|utc".to_owned()),
-    };
+    let timezone =
+        parse_routine_timezone(optional_string_field(payload, "timezone"), timezone_mode)?;
     let preview =
         natural_language_schedule_preview(phrase.as_str(), timezone, unix_ms_now_string_safe()?)
             .map_err(map_registry_error)?;
@@ -1465,6 +1461,8 @@ fn resolve_routine_schedule(
     trigger_kind: RoutineTriggerKind,
     timezone_mode: CronTimezoneMode,
 ) -> Result<ScheduleResolution, String> {
+    let schedule_timezone =
+        parse_routine_timezone(optional_string_field(payload, "timezone"), timezone_mode)?;
     if trigger_kind == RoutineTriggerKind::FileWatch {
         let config = normalize_file_watch_trigger_payload(payload.get("trigger_payload"))
             .map_err(map_registry_error)?;
@@ -1499,7 +1497,7 @@ fn resolve_routine_schedule(
     if let Some(phrase) = optional_string_field(payload, "natural_language_schedule") {
         let preview = natural_language_schedule_preview(
             phrase.as_str(),
-            timezone_mode,
+            schedule_timezone,
             unix_ms_now_string_safe()?,
         )
         .map_err(map_registry_error)?;
@@ -1512,13 +1510,26 @@ fn resolve_routine_schedule(
     }
     let schedule = build_schedule(payload)?;
     let normalized =
-        cron::normalize_schedule(Some(schedule), unix_ms_now_string_safe()?, timezone_mode)
+        cron::normalize_schedule(Some(schedule), unix_ms_now_string_safe()?, schedule_timezone)
             .map_err(sanitize_status_message)?;
     Ok(ScheduleResolution {
         schedule_type: normalized.schedule_type,
         schedule_payload_json: normalized.schedule_payload_json,
         next_run_at_unix_ms: normalized.next_run_at_unix_ms,
         trigger_payload_json_override: None,
+    })
+}
+
+fn parse_routine_timezone(
+    requested: Option<String>,
+    default_timezone: CronTimezoneMode,
+) -> Result<CronTimezoneMode, String> {
+    let Some(requested) = requested else {
+        return Ok(default_timezone);
+    };
+    CronTimezoneMode::from_str(requested.as_str()).ok_or_else(|| {
+        "timezone must be one of local|utc or a valid IANA timezone such as Europe/Prague"
+            .to_owned()
     })
 }
 
@@ -2105,6 +2116,7 @@ mod tests {
         RoutineExecutionConfig, RoutineExecutionPosture, RoutineRunMode, RoutineRunOutcomeKind,
         RoutineSilentPolicy, RoutineTriggerKind,
     };
+    use chrono::{Datelike, TimeZone, Timelike};
     use serde_json::json;
     use ulid::Ulid;
 
@@ -2181,6 +2193,68 @@ mod tests {
         assert_eq!(trigger_payload["last_observed"]["exists"], true);
 
         let _ = fs::remove_file(watched_path);
+    }
+
+    #[test]
+    fn preview_schedule_accepts_named_timezone() {
+        let payload = json!({
+            "operation": "schedule_preview",
+            "phrase": "every Monday at 09:00",
+            "timezone": "Europe/Prague",
+        })
+        .as_object()
+        .expect("payload should be an object")
+        .clone();
+
+        let value = super::preview_schedule(&payload, crate::cron::CronTimezoneMode::Utc)
+            .expect("named timezone preview should succeed");
+        let preview = value.get("preview").expect("preview payload should exist");
+
+        assert_eq!(preview["schedule_payload"]["timezone"], json!("Europe/Prague"));
+        let next_run_at_unix_ms =
+            preview["next_run_at_unix_ms"].as_i64().expect("preview should include next run");
+        let local = chrono::Utc
+            .timestamp_millis_opt(next_run_at_unix_ms)
+            .single()
+            .expect("next run timestamp should be valid")
+            .with_timezone(&chrono_tz::Europe::Prague);
+        assert_eq!(local.weekday().num_days_from_sunday(), 1);
+        assert_eq!(local.hour(), 9);
+        assert_eq!(local.minute(), 0);
+    }
+
+    #[test]
+    fn resolve_routine_schedule_preserves_named_timezone_for_cron() {
+        let payload = json!({
+            "schedule_type": "cron",
+            "cron_expression": "0 9 * * 1",
+            "timezone": "Europe/Prague",
+        })
+        .as_object()
+        .expect("payload should be an object")
+        .clone();
+
+        let schedule = super::resolve_routine_schedule(
+            &payload,
+            RoutineTriggerKind::Schedule,
+            crate::cron::CronTimezoneMode::Utc,
+        )
+        .expect("cron schedule with named timezone should resolve");
+        let schedule_payload: serde_json::Value =
+            serde_json::from_str(schedule.schedule_payload_json.as_str())
+                .expect("schedule payload should parse");
+
+        assert_eq!(schedule_payload["timezone"], json!("Europe/Prague"));
+        let next_run_at_unix_ms =
+            schedule.next_run_at_unix_ms.expect("scheduled cron should have next run");
+        let local = chrono::Utc
+            .timestamp_millis_opt(next_run_at_unix_ms)
+            .single()
+            .expect("next run timestamp should be valid")
+            .with_timezone(&chrono_tz::Europe::Prague);
+        assert_eq!(local.weekday().num_days_from_sunday(), 1);
+        assert_eq!(local.hour(), 9);
+        assert_eq!(local.minute(), 0);
     }
 
     #[test]
