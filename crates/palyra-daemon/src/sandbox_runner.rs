@@ -1923,6 +1923,7 @@ fn is_windows_command_switch(command: &str, arg: &str) -> bool {
             arg.as_str(),
             "/C" | "/L" | "/Q" | "/T" | "/INHERITANCE:E" | "/INHERITANCE:D" | "/INHERITANCE:R"
         ),
+        "whoami" => matches!(arg.as_str(), "/ALL"),
         _ => false,
     }
 }
@@ -4318,6 +4319,33 @@ mod tests {
 
         let _ = fs::remove_dir_all(workspace.as_path());
         let _ = fs::remove_dir_all(target_root.as_path());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn validate_argument_scopes_allow_whoami_all_switch() {
+        let workspace = unique_temp_dir("workspace-whoami-switch");
+        fs::create_dir_all(workspace.as_path()).expect("workspace directory should be created");
+        let canonical_workspace = canonical_workspace_root(workspace.as_path())
+            .expect("workspace root should canonicalize");
+        let args = vec!["/all".to_owned()];
+
+        validate_argument_workspace_scope(
+            canonical_workspace.as_path(),
+            canonical_workspace.as_path(),
+            "whoami",
+            args.as_slice(),
+        )
+        .expect("whoami /all should be treated as a Windows switch, not a filesystem path");
+        validate_host_argument_scope(
+            canonical_workspace.as_path(),
+            canonical_workspace.as_path(),
+            "whoami",
+            args.as_slice(),
+        )
+        .expect("host access should also treat whoami /all as a Windows switch");
+
+        let _ = fs::remove_dir_all(workspace.as_path());
     }
 
     #[test]
