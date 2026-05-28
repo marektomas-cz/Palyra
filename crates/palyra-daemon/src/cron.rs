@@ -2581,20 +2581,8 @@ fn build_effective_cron_execution_request(
             .to_string()
         })
     });
-    let session_key = if run_mode == RoutineRunMode::FreshSession {
-        format!("cron:{}:{run_id}", job.job_id)
-    } else {
-        job.session_key.clone().unwrap_or_else(|| format!("cron:{}", job.job_id))
-    };
-    let session_label = if run_mode == RoutineRunMode::FreshSession {
-        format!(
-            "{} ({})",
-            job.session_label.clone().unwrap_or_else(|| job.name.clone()),
-            options.origin_kind.as_deref().unwrap_or("cron")
-        )
-    } else {
-        job.session_label.clone().unwrap_or_else(|| job.name.clone())
-    };
+    let session_key = effective_cron_session_key(job, run_id, run_mode);
+    let session_label = effective_cron_session_label(job, options, run_mode);
     Ok(EffectiveCronExecutionRequest {
         session_key,
         session_label,
@@ -2603,6 +2591,41 @@ fn build_effective_cron_execution_request(
         parameter_delta_json,
         origin_kind: options.origin_kind.clone().unwrap_or_else(|| "cron".to_owned()),
     })
+}
+
+fn effective_cron_session_key(
+    job: &CronJobRecord,
+    run_id: &str,
+    run_mode: RoutineRunMode,
+) -> String {
+    if let Some(session_key) =
+        job.session_key.as_deref().map(str::trim).filter(|key| !key.is_empty())
+    {
+        return session_key.to_owned();
+    }
+    if run_mode == RoutineRunMode::FreshSession {
+        format!("cron:{}:{run_id}", job.job_id)
+    } else {
+        format!("cron:{}", job.job_id)
+    }
+}
+
+fn effective_cron_session_label(
+    job: &CronJobRecord,
+    options: &TriggerJobOptions,
+    run_mode: RoutineRunMode,
+) -> String {
+    let uses_generated_fresh_session = run_mode == RoutineRunMode::FreshSession
+        && job.session_key.as_deref().map(str::trim).filter(|key| !key.is_empty()).is_none();
+    if uses_generated_fresh_session {
+        format!(
+            "{} ({})",
+            job.session_label.clone().unwrap_or_else(|| job.name.clone()),
+            options.origin_kind.as_deref().unwrap_or("cron")
+        )
+    } else {
+        job.session_label.clone().unwrap_or_else(|| job.name.clone())
+    }
 }
 
 async fn execute_single_job_attempt(
@@ -3124,10 +3147,10 @@ mod tests {
         budgeted_cron_run_count, budgeted_objective_run_count, build_cron_prompt,
         build_scheduler_health_snapshot, compute_misfire_recovery_plan, compute_next_run_after,
         cron_misfire_audit_payload, cron_successful_completion_tool,
-        cron_terminal_status_from_stream, decide_concurrency_policy,
-        load_periodic_reaudit_skills_index, max_runs_for_job, normalize_schedule,
-        now_unix_ms_or_fallback, parse_skill_reaudit_interval, periodic_reaudit_targets,
-        routine_approval_subject_id, routines_automation_enabled,
+        cron_terminal_status_from_stream, decide_concurrency_policy, effective_cron_session_key,
+        effective_cron_session_label, load_periodic_reaudit_skills_index, max_runs_for_job,
+        normalize_schedule, now_unix_ms_or_fallback, parse_skill_reaudit_interval,
+        periodic_reaudit_targets, routine_approval_subject_id, routines_automation_enabled,
         scheduled_routine_requires_first_run_approval, scheduled_routine_run_metadata_upsert,
         scheduler_attempt_failure, should_disable_exhausted_scheduled_one_shot,
         should_pause_recurring_cron_after_policy_denied, should_repair_stale_cron_run,
@@ -3145,7 +3168,8 @@ mod tests {
     };
     use crate::routines::{
         RoutineApprovalMode, RoutineApprovalPolicy, RoutineDeliveryConfig, RoutineDeliveryMode,
-        RoutineExecutionConfig, RoutineMetadataRecord, RoutineSilentPolicy, RoutineTriggerKind,
+        RoutineExecutionConfig, RoutineMetadataRecord, RoutineRunMode, RoutineSilentPolicy,
+        RoutineTriggerKind,
     };
     use serde_json::json;
     use tonic::{Code, Status};
@@ -3232,6 +3256,44 @@ mod tests {
         let runs = vec![succeeded, denied, active, skipped_without_orchestrator, cap_skip];
 
         assert_eq!(budgeted_cron_run_count(&runs), 2);
+    }
+
+    #[test]
+    fn explicit_cron_session_key_overrides_fresh_session_key_generation() {
+        let mut job = sample_every_job("job-direct", Some(1_000), CronMisfirePolicy::Skip);
+        job.session_key = Some("cron-direct-20260527".to_owned());
+        job.session_label = Some("Direct cron".to_owned());
+        let options = TriggerJobOptions {
+            origin_kind: Some("cron".to_owned()),
+            ..TriggerJobOptions::default()
+        };
+
+        assert_eq!(
+            effective_cron_session_key(&job, "run-1", RoutineRunMode::FreshSession),
+            "cron-direct-20260527"
+        );
+        assert_eq!(
+            effective_cron_session_label(&job, &options, RoutineRunMode::FreshSession),
+            "Direct cron"
+        );
+    }
+
+    #[test]
+    fn fresh_cron_without_explicit_session_key_keeps_per_run_lookup_key() {
+        let job = sample_every_job("job-generated", Some(1_000), CronMisfirePolicy::Skip);
+        let options = TriggerJobOptions {
+            origin_kind: Some("cron".to_owned()),
+            ..TriggerJobOptions::default()
+        };
+
+        assert_eq!(
+            effective_cron_session_key(&job, "run-2", RoutineRunMode::FreshSession),
+            "cron:job-generated:run-2"
+        );
+        assert_eq!(
+            effective_cron_session_label(&job, &options, RoutineRunMode::FreshSession),
+            "health-check (cron)"
+        );
     }
 
     #[test]
