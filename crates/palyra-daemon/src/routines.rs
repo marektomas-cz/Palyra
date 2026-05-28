@@ -32,7 +32,7 @@ const MAX_ROUTINE_RUN_METADATA_COUNT: usize = 8_192;
 const MIN_EVERY_INTERVAL_MS: u64 = 30 * 1_000;
 /// Recurring routine schedules below this interval require review before they
 /// can be enabled, even when the caller omits an approval policy.
-pub const MIN_AUTO_ENABLE_EVERY_INTERVAL_MS: u64 = 5 * 60 * 1_000;
+pub const MIN_AUTO_ENABLE_EVERY_INTERVAL_MS: u64 = 30_000;
 pub const SHADOW_AT_TIMESTAMP_RFC3339: &str = "2100-01-01T00:00:00Z";
 pub const ROUTINE_EXPORT_SCHEMA_ID: &str = "palyra.routine.export.v1";
 pub const ROUTINE_EXPORT_SCHEMA_VERSION: u32 = 1;
@@ -3223,7 +3223,7 @@ mod tests {
 
     #[test]
     fn schedule_auto_enable_guard_requires_before_enable_for_fast_every_schedules() {
-        let payload = json!({ "interval_ms": 60_000_u64 }).to_string();
+        let payload = json!({ "interval_ms": MIN_AUTO_ENABLE_EVERY_INTERVAL_MS - 1 }).to_string();
 
         assert!(schedule_requires_auto_enable_guard(CronScheduleType::Every, payload.as_str()));
 
@@ -3233,6 +3233,20 @@ mod tests {
             RoutineApprovalPolicy::default(),
         );
         assert_eq!(guarded.mode, RoutineApprovalMode::BeforeEnable);
+    }
+
+    #[test]
+    fn schedule_auto_enable_guard_preserves_one_minute_every_schedules() {
+        let payload = json!({ "interval_ms": 60_000_u64 }).to_string();
+
+        assert!(!schedule_requires_auto_enable_guard(CronScheduleType::Every, payload.as_str()));
+
+        let guarded = routine_approval_policy_with_auto_enable_guard(
+            CronScheduleType::Every,
+            payload.as_str(),
+            RoutineApprovalPolicy::default(),
+        );
+        assert_eq!(guarded.mode, RoutineApprovalMode::None);
     }
 
     #[test]
