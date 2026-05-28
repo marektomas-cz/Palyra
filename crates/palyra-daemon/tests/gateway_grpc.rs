@@ -6685,6 +6685,14 @@ async fn grpc_run_stream_reuses_timeboxed_approval_until_ttl_expiry() -> Result<
         saw_first_failed_result,
         "first run should produce failed tool result for unsupported tool"
     );
+    drop(first_sender);
+    while let Some(event) =
+        tokio::time::timeout(Duration::from_secs(5), first_response_stream.next())
+            .await
+            .context("first timeboxed stream did not finish after approval")?
+    {
+        let _event = event.context("failed to drain first timeboxed stream")?;
+    }
 
     let mut second_stream_request =
         tonic::Request::new(tokio_stream::iter(vec![sample_run_stream_request_with_ids(
@@ -6736,6 +6744,13 @@ async fn grpc_run_stream_reuses_timeboxed_approval_until_ttl_expiry() -> Result<
         saw_second_failed_result,
         "second run should still execute and fail unsupported tool without reprompt"
     );
+    while let Some(event) =
+        tokio::time::timeout(Duration::from_secs(5), second_response_stream.next())
+            .await
+            .context("second timeboxed stream did not finish after cache hit")?
+    {
+        let _event = event.context("failed to drain second timeboxed stream")?;
+    }
 
     tokio::time::sleep(Duration::from_millis(2_200)).await;
 
@@ -6804,6 +6819,14 @@ async fn grpc_run_stream_reuses_timeboxed_approval_until_ttl_expiry() -> Result<
         "approval should be requested again after timeboxed ttl expires"
     );
     assert!(saw_third_failed_result, "third run should complete after approval re-prompt");
+    drop(third_sender);
+    while let Some(event) =
+        tokio::time::timeout(Duration::from_secs(5), third_response_stream.next())
+            .await
+            .context("third timeboxed stream did not finish after approval")?
+    {
+        let _event = event.context("failed to drain third timeboxed stream")?;
+    }
 
     let status_snapshot = admin_get_json_async(admin_port, "/admin/v1/status".to_owned()).await?;
     assert_eq!(
