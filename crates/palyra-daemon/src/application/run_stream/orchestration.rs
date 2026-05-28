@@ -36,10 +36,13 @@ use crate::{
     },
     model_provider::{
         bounded_provider_turn_output_for_persistence, provider_events_from_output, ProviderEvent,
-        ProviderFinishReason, ProviderMessage, ProviderMessageRole, ProviderRawProviderRefs,
-        ProviderRequest, ProviderResponse, ProviderTurnOutput, ProviderUsage,
+        ProviderFinishReason, ProviderMessage, ProviderMessageContentPart, ProviderMessageRole,
+        ProviderRawProviderRefs, ProviderRequest, ProviderResponse, ProviderTurnOutput,
+        ProviderUsage,
     },
-    orchestrator::{is_cancel_command, RunLifecycleState, RunStateMachine, RunTransition},
+    orchestrator::{
+        estimate_token_count, is_cancel_command, RunLifecycleState, RunStateMachine, RunTransition,
+    },
     provider_leases::ProviderLeaseExecutionContext,
     self_healing::{WorkHeartbeatKind, WorkHeartbeatUpdate},
     tool_protocol::ToolRequestContext,
@@ -59,6 +62,29 @@ use super::{
 };
 
 const PROVIDER_PROGRESS_HEARTBEAT_MS: u64 = 20_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BackgroundBudgetGuardDecision {
+    budget_tokens: u64,
+    consumed_tokens: u64,
+    estimated_input_tokens: u64,
+    max_output_tokens: u64,
+}
+
+impl BackgroundBudgetGuardDecision {
+    fn tape_payload(self) -> String {
+        json!({
+            "schema_version": 1,
+            "event": "agent_loop.background_budget_guard",
+            "status": "applied",
+            "budget_tokens": self.budget_tokens,
+            "consumed_tokens": self.consumed_tokens,
+            "estimated_input_tokens": self.estimated_input_tokens,
+            "max_output_tokens": self.max_output_tokens,
+        })
+        .to_string()
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RunStreamPostProviderOutcome {
@@ -122,6 +148,112 @@ fn run_stream_attachment_metadata(attachments: &[common_v1::MessageAttachment]) 
             })
         })
         .collect()
+}
+
+fn background_run_budget_tokens(parameter_delta_json: Option<&str>) -> Option<u64> {
+    let parsed = serde_json::from_str::<Value>(parameter_delta_json?).ok()?;
+    parsed
+        .pointer("/background_task/budget_tokens")
+        .and_then(Value::as_u64)
+        .filter(|value| *value > 0)
+}
+
+fn apply_background_budget_guard(
+    request: &mut ProviderRequest,
+    budget_tokens: u64,
+    consumed_tokens: u64,
+) -> Result<BackgroundBudgetGuardDecision, String> {
+    let estimated_input_tokens = estimate_provider_request_input_tokens(request);
+    let committed_tokens = consumed_tokens.saturating_add(estimated_input_tokens);
+    if committed_tokens >= budget_tokens {
+        return Err(format!(
+            "background task token budget exhausted before provider turn: budget_tokens={budget_tokens} consumed_tokens={consumed_tokens} estimated_input_tokens={estimated_input_tokens}"
+        ));
+    }
+    let available_output_tokens = budget_tokens.saturating_sub(committed_tokens).max(1);
+    let max_output_tokens = request
+        .max_output_tokens
+        .unwrap_or(available_output_tokens)
+        .min(available_output_tokens)
+        .max(1);
+    request.max_output_tokens = Some(max_output_tokens);
+    Ok(BackgroundBudgetGuardDecision {
+        budget_tokens,
+        consumed_tokens,
+        estimated_input_tokens,
+        max_output_tokens,
+    })
+}
+
+fn background_budget_overrun_message(budget_tokens: u64, consumed_tokens: u64) -> Option<String> {
+    (consumed_tokens > budget_tokens).then(|| {
+        format!(
+            "background task token budget exhausted after provider turn: budget_tokens={budget_tokens} consumed_tokens={consumed_tokens}"
+        )
+    })
+}
+
+fn estimate_provider_request_input_tokens(request: &ProviderRequest) -> u64 {
+    let message_tokens = request
+        .effective_messages()
+        .iter()
+        .map(estimate_provider_message_input_tokens)
+        .fold(0_u64, u64::saturating_add);
+    let vision_tokens =
+        u64::try_from(request.vision_inputs.len()).unwrap_or(u64::MAX).saturating_mul(256);
+    message_tokens.saturating_add(vision_tokens)
+}
+
+fn estimate_provider_message_input_tokens(message: &ProviderMessage) -> u64 {
+    let content_tokens = message
+        .content
+        .iter()
+        .map(|part| match part {
+            ProviderMessageContentPart::Text { text } => {
+                estimate_background_budget_text_tokens(text)
+            }
+            ProviderMessageContentPart::Image { .. } => 256,
+        })
+        .fold(0_u64, u64::saturating_add);
+    let tool_call_tokens = message
+        .tool_calls
+        .iter()
+        .map(|tool_call| {
+            estimate_background_budget_text_tokens(tool_call.proposal_id.as_str())
+                .saturating_add(estimate_background_budget_text_tokens(
+                    tool_call.tool_name.as_str(),
+                ))
+                .saturating_add(estimate_background_budget_text_tokens(
+                    tool_call.input_json.to_string().as_str(),
+                ))
+        })
+        .fold(0_u64, u64::saturating_add);
+    content_tokens.saturating_add(tool_call_tokens).saturating_add(4)
+}
+
+fn estimate_background_budget_text_tokens(value: &str) -> u64 {
+    if value.is_empty() {
+        return 0;
+    }
+    let whitespace_tokens = estimate_token_count(value);
+    let character_tokens =
+        u64::try_from(value.chars().count()).unwrap_or(u64::MAX).saturating_add(3) / 4;
+    whitespace_tokens.max(character_tokens).max(1)
+}
+
+#[allow(clippy::result_large_err)]
+async fn record_run_stream_provider_usage(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    run_id: &str,
+    provider_response: &ProviderResponse,
+) -> Result<(), Status> {
+    runtime_state
+        .add_orchestrator_usage(OrchestratorUsageDelta {
+            run_id: run_id.to_owned(),
+            prompt_tokens_delta: provider_response.prompt_tokens,
+            completion_tokens_delta: provider_response.completion_tokens,
+        })
+        .await
 }
 
 struct RunStreamUserMessage<'a> {
@@ -628,6 +760,7 @@ pub(crate) async fn process_run_stream_message(
     in_progress_emitted: &mut bool,
     remaining_tool_budget: &mut u32,
     previous_session_run_id: &mut Option<String>,
+    active_background_budget_tokens: &mut Option<u64>,
     message: common_v1::RunStreamRequest,
 ) -> Result<RunStreamMessageProcessingOutcome, Status> {
     let session_id = canonical_id(message.session_id, "session_id")?;
@@ -646,6 +779,10 @@ pub(crate) async fn process_run_stream_message(
 
     let parameter_delta_json = (!message.parameter_delta_json.is_empty())
         .then(|| String::from_utf8_lossy(message.parameter_delta_json.as_slice()).into_owned());
+    if let Some(budget_tokens) = background_run_budget_tokens(parameter_delta_json.as_deref()) {
+        *active_background_budget_tokens = Some(budget_tokens);
+    }
+    let background_budget_tokens = *active_background_budget_tokens;
     if active_run_id.is_none() {
         run_state
             .transition(RunTransition::Accept)
@@ -980,6 +1117,40 @@ pub(crate) async fn process_run_stream_message(
         provider_request.context_trace_id = base_provider_request.context_trace_id.clone();
         provider_request.budget_profile = base_provider_request.budget_profile.clone();
         provider_request.max_output_tokens = base_provider_request.max_output_tokens;
+        if let Some(budget_tokens) = background_budget_tokens {
+            let consumed_tokens = loop_state.snapshot(run_id.as_str(), None).usage.total_tokens;
+            match apply_background_budget_guard(
+                &mut provider_request,
+                budget_tokens,
+                consumed_tokens,
+            ) {
+                Ok(decision) => {
+                    append_agent_loop_tape_event(
+                        runtime_state,
+                        run_id.as_str(),
+                        tape_seq,
+                        "agent_loop.background_budget_guard",
+                        decision.tape_payload(),
+                    )
+                    .await?;
+                }
+                Err(message) => {
+                    terminate_run_stream_with_agent_loop_reason(
+                        sender,
+                        runtime_state,
+                        run_state,
+                        run_id.as_str(),
+                        tape_seq,
+                        &loop_state,
+                        AgentLoopTerminationReason::ContextBudgetExhausted,
+                        message.as_str(),
+                        None,
+                    )
+                    .await?;
+                    return Ok(RunStreamMessageProcessingOutcome::Terminate);
+                }
+            }
+        }
         let provider_response = match execute_run_stream_provider_request(
             sender,
             runtime_state,
@@ -1020,6 +1191,31 @@ pub(crate) async fn process_run_stream_message(
             }
         };
         loop_state.record_provider_response(&provider_response);
+        if let Some(budget_tokens) = background_budget_tokens {
+            let consumed_tokens = loop_state.snapshot(run_id.as_str(), None).usage.total_tokens;
+            if let Some(message) = background_budget_overrun_message(budget_tokens, consumed_tokens)
+            {
+                record_run_stream_provider_usage(
+                    runtime_state,
+                    run_id.as_str(),
+                    &provider_response,
+                )
+                .await?;
+                terminate_run_stream_with_agent_loop_reason(
+                    sender,
+                    runtime_state,
+                    run_state,
+                    run_id.as_str(),
+                    tape_seq,
+                    &loop_state,
+                    AgentLoopTerminationReason::ContextBudgetExhausted,
+                    message.as_str(),
+                    provider_response.output.raw_provider_refs.provider_trace_ref.clone(),
+                )
+                .await?;
+                return Ok(RunStreamMessageProcessingOutcome::Terminate);
+            }
+        }
         let provider_output = provider_response.output.clone();
 
         let response_outcome = process_run_stream_provider_response(
@@ -2095,19 +2291,21 @@ async fn persist_run_stream_provider_turn_output(
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_loop_budget_exhausted_message, contains_raw_provider_tool_call_markup,
-        final_answer_recovery_prompt, incomplete_final_answer_without_tools,
-        incomplete_terminal_final_answer, is_run_stream_response_channel_closed,
-        length_recovery_prompt, repeated_tool_failure_signature,
-        terminal_tool_authorization_failure, tool_result_to_provider_message,
-        truncated_final_answer_without_tools, RepeatedToolFailureTracker,
-        RunStreamToolResultForModel,
+        agent_loop_budget_exhausted_message, apply_background_budget_guard,
+        background_budget_overrun_message, background_run_budget_tokens,
+        contains_raw_provider_tool_call_markup, final_answer_recovery_prompt,
+        incomplete_final_answer_without_tools, incomplete_terminal_final_answer,
+        is_run_stream_response_channel_closed, length_recovery_prompt,
+        repeated_tool_failure_signature, terminal_tool_authorization_failure,
+        tool_result_to_provider_message, truncated_final_answer_without_tools,
+        RepeatedToolFailureTracker, RunStreamToolResultForModel,
     };
     use super::{AgentLoopTerminationReason, AgentRunLoopState};
     use crate::application::run_stream::tape::RUN_STREAM_RESPONSE_CHANNEL_CLOSED_MESSAGE;
     use crate::model_provider::{
         ProviderFinishReason, ProviderMessage, ProviderMessageContentPart,
-        ProviderOutputContentPart, ProviderRawProviderRefs, ProviderTurnOutput, ProviderUsage,
+        ProviderOutputContentPart, ProviderRawProviderRefs, ProviderRequest, ProviderTurnOutput,
+        ProviderUsage,
     };
     use serde_json::{json, Value};
     use tonic::{Code, Status};
@@ -2144,6 +2342,64 @@ mod tests {
 
         let internal = Status::new(Code::Internal, RUN_STREAM_RESPONSE_CHANNEL_CLOSED_MESSAGE);
         assert!(!is_run_stream_response_channel_closed(&internal));
+    }
+
+    #[test]
+    fn background_run_budget_tokens_reads_background_parameter_delta() {
+        let parameter_delta = json!({
+            "background_task": {
+                "task_id": "task-01",
+                "budget_tokens": 1_000
+            }
+        })
+        .to_string();
+
+        assert_eq!(background_run_budget_tokens(Some(parameter_delta.as_str())), Some(1_000));
+        assert_eq!(background_run_budget_tokens(Some("{}")), None);
+        assert_eq!(background_run_budget_tokens(Some("not-json")), None);
+    }
+
+    #[test]
+    fn background_budget_guard_clamps_provider_output_tokens() {
+        let mut request = ProviderRequest::from_input_text(
+            "write a concise inventory report".to_owned(),
+            false,
+            Vec::new(),
+            None,
+        );
+        request.max_output_tokens = Some(900);
+
+        let decision = apply_background_budget_guard(&mut request, 1_000, 200)
+            .expect("small background task should fit inside budget");
+
+        assert_eq!(decision.budget_tokens, 1_000);
+        assert!(decision.estimated_input_tokens > 0);
+        assert_eq!(request.max_output_tokens, Some(decision.max_output_tokens));
+        assert!(decision.max_output_tokens < 900);
+    }
+
+    #[test]
+    fn background_budget_guard_rejects_over_budget_input() {
+        let mut request = ProviderRequest::from_input_text(
+            vec!["word"; 1_100].join(" "),
+            false,
+            Vec::new(),
+            None,
+        );
+
+        let message = apply_background_budget_guard(&mut request, 1_000, 0)
+            .expect_err("oversized background prompt must fail before provider execution");
+
+        assert!(message.contains("background task token budget exhausted"));
+        assert_eq!(request.max_output_tokens, None);
+    }
+
+    #[test]
+    fn background_budget_overrun_detects_provider_usage_after_turn() {
+        assert!(background_budget_overrun_message(1_000, 1_001)
+            .expect("usage above budget must be rejected")
+            .contains("budget_tokens=1000"));
+        assert!(background_budget_overrun_message(1_000, 1_000).is_none());
     }
 
     #[test]

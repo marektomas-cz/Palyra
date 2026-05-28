@@ -5457,6 +5457,7 @@ mod tests {
         assert_eq!(openai_payload["messages"][0]["role"], "system");
         assert_eq!(openai_payload["messages"][1]["role"], "user");
         assert_eq!(openai_payload["response_format"]["type"], "json_object");
+        assert_eq!(openai_payload["max_tokens"], 6_144);
 
         let anthropic_payload =
             AnthropicCompatibleChatAdapter.request_payload(&request, "claude-contract-test");

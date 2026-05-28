@@ -1362,6 +1362,48 @@ fn parse_sessions_retry_branch_search_and_export() {
 }
 
 #[test]
+fn parse_sessions_background_enqueue_with_stdin_budget() {
+    let parsed = Cli::parse_from([
+        "palyra",
+        "sessions",
+        "background-enqueue",
+        "01ARZ3NDEKTSV4RRFFQ69G5FB6",
+        "--text-stdin",
+        "--budget-tokens",
+        "1000",
+        "--json",
+    ]);
+
+    assert_eq!(
+        parsed.command,
+        Command::Sessions {
+            command: SessionsCommand::BackgroundEnqueue {
+                session_id: "01ARZ3NDEKTSV4RRFFQ69G5FB6".to_owned(),
+                text: None,
+                text_stdin: true,
+                priority: None,
+                max_attempts: None,
+                budget_tokens: Some(1000),
+                not_before_unix_ms: None,
+                expires_at_unix_ms: None,
+                json: true,
+            }
+        }
+    );
+
+    let conflict = Cli::try_parse_from([
+        "palyra",
+        "sessions",
+        "background-enqueue",
+        "01ARZ3NDEKTSV4RRFFQ69G5FB6",
+        "--text",
+        "one line",
+        "--text-stdin",
+    ]);
+    assert!(conflict.is_err(), "--text and --text-stdin must conflict");
+}
+
+#[test]
 fn parse_message_send_with_thread_id() {
     let status = Cli::parse_from(["palyra", "message", "status", "--json"]);
     assert_eq!(status.command, Command::Message { command: MessageCommand::Status { json: true } });

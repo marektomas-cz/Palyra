@@ -1,4 +1,4 @@
-use clap::Subcommand;
+use clap::{ArgGroup, Subcommand};
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum SessionsCommand {
@@ -207,10 +207,20 @@ pub enum SessionsCommand {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    #[command(group(
+        ArgGroup::new("background_enqueue_text_source")
+            .required(true)
+            .args(["text", "text_stdin"])
+    ))]
     BackgroundEnqueue {
         session_id: String,
-        #[arg(long)]
-        text: String,
+        #[arg(
+            long,
+            help = "Single-line task text. Use --text-stdin for multi-line or blank-line separated tasks."
+        )]
+        text: Option<String>,
+        #[arg(long, default_value_t = false)]
+        text_stdin: bool,
         #[arg(long)]
         priority: Option<i64>,
         #[arg(long)]

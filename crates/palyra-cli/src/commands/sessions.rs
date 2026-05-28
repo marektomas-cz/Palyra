@@ -1,5 +1,6 @@
 use crate::*;
 use palyra_common::runtime_contracts::{AuxiliaryTaskKind, AuxiliaryTaskState};
+use std::io::Read as _;
 
 pub(crate) fn run_sessions(command: SessionsCommand) -> Result<()> {
     let root_context = app::current_root_context()
@@ -863,13 +864,15 @@ pub(crate) async fn run_sessions_async(
         SessionsCommand::BackgroundEnqueue {
             session_id,
             text,
+            text_stdin,
             priority,
             max_attempts,
             budget_tokens,
             not_before_unix_ms,
             expires_at_unix_ms,
-            json: _,
+            json,
         } => {
+            let text = resolve_background_task_text(text, text_stdin)?;
             let context = connect_sessions_admin_console(&connection).await?;
             let payload = context
                 .client
@@ -998,6 +1001,34 @@ pub(crate) async fn run_sessions_async(
     }
 
     std::io::stdout().flush().context("stdout flush failed")
+}
+
+fn resolve_background_task_text(text: Option<String>, text_stdin: bool) -> Result<String> {
+    if text_stdin {
+        if text.is_some() {
+            anyhow::bail!("cannot use --text together with --text-stdin");
+        }
+        let mut input = Vec::new();
+        std::io::stdin()
+            .lock()
+            .read_to_end(&mut input)
+            .context("failed to read background task text from stdin")?;
+        let text = normalize_prompt_stdin_bytes(input.as_slice())
+            .context("failed to decode background task text from stdin")?;
+        if text.trim().is_empty() {
+            anyhow::bail!(
+                "background task text from stdin is empty; pipe text into stdin or use --text"
+            );
+        }
+        return Ok(text);
+    }
+
+    let text = text.context("missing background task text: use --text or --text-stdin")?;
+    let text = normalize_single_line_cli_text_arg(text, "--text", "--text-stdin")?;
+    if text.trim().is_empty() {
+        anyhow::bail!("background task text cannot be empty");
+    }
+    Ok(text)
 }
 
 fn build_resolve_session_request(

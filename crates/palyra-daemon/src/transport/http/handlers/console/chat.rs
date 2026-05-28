@@ -22,6 +22,7 @@ use serde::Serialize;
 
 const ATTACHMENT_DERIVED_INDEX_OMITTED_MESSAGE: &str =
     "attachment-derived content omitted; use device-scoped derived artifact endpoints";
+const DEFAULT_CONSOLE_BACKGROUND_TASK_BUDGET_TOKENS: u64 = 4_096;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, Default)]
 struct ConsoleChatCanvasTranscriptReference {
@@ -2095,9 +2096,8 @@ pub(crate) async fn console_chat_background_task_create_handler(
     let text = trim_to_option(payload.text).ok_or_else(|| {
         runtime_status_response(tonic::Status::invalid_argument("text cannot be empty"))
     })?;
-    let requested_budget_tokens = payload
-        .budget_tokens
-        .unwrap_or_else(|| crate::orchestrator::estimate_token_count(text.as_str()));
+    let requested_budget_tokens =
+        console_background_task_budget_tokens(payload.budget_tokens, text.as_str());
     let requested_max_attempts = payload.max_attempts.unwrap_or(3).clamp(1, 16);
     let delegation = if let Some(request) = payload.delegation.as_ref() {
         let parent_run_id = session_record.last_run_id.clone().ok_or_else(|| {
@@ -5705,6 +5705,14 @@ fn approval_scope_to_proto(scope: Option<ApprovalDecisionScope>) -> i32 {
     }
 }
 
+fn console_background_task_budget_tokens(requested: Option<u64>, text: &str) -> u64 {
+    requested.unwrap_or_else(|| {
+        DEFAULT_CONSOLE_BACKGROUND_TASK_BUDGET_TOKENS
+            .max(crate::orchestrator::estimate_token_count(text))
+            .max(1)
+    })
+}
+
 #[allow(clippy::result_large_err)]
 fn build_console_background_task_payload_json(
     parameter_delta: Option<&Value>,
@@ -5776,9 +5784,9 @@ mod tests {
     use super::{
         build_background_task_cancel_requested_result_json,
         build_background_task_cancelled_result_json, console_attachment_workspace_path,
-        derive_canvas_transcript_reference, derived_artifact_index_content,
-        derived_artifact_matches_console_context, extract_canvas_id_from_frame_reference,
-        run_matches_console_context,
+        console_background_task_budget_tokens, derive_canvas_transcript_reference,
+        derived_artifact_index_content, derived_artifact_matches_console_context,
+        extract_canvas_id_from_frame_reference, run_matches_console_context,
     };
     use crate::{domain::workspace::normalize_workspace_path, gateway, journal, media};
 
@@ -5880,6 +5888,17 @@ mod tests {
                 .normalized_path,
             path
         );
+    }
+
+    #[test]
+    fn background_task_budget_defaults_above_prompt_estimate() {
+        assert_eq!(console_background_task_budget_tokens(Some(1_000), "short task"), 1_000);
+        assert_eq!(
+            console_background_task_budget_tokens(None, "short task"),
+            super::DEFAULT_CONSOLE_BACKGROUND_TASK_BUDGET_TOKENS
+        );
+        let long_task = vec!["word"; 4_200].join(" ");
+        assert_eq!(console_background_task_budget_tokens(None, long_task.as_str()), 4_200);
     }
 
     #[test]

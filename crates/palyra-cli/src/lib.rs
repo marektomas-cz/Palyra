@@ -4419,16 +4419,24 @@ fn resolve_optional_prompt_input(
     prompt.map(normalize_prompt_arg).transpose()
 }
 
-fn normalize_prompt_arg(value: String) -> Result<String> {
+pub(crate) fn normalize_single_line_cli_text_arg(
+    value: String,
+    inline_flag: &str,
+    stdin_flag: &str,
+) -> Result<String> {
     if value.contains(['\r', '\n']) {
         anyhow::bail!(
-            "--prompt accepts single-line text only; pipe multi-line or blank-line separated prompts with --prompt-stdin to preserve the complete prompt"
+            "{inline_flag} accepts single-line text only; pipe multi-line or blank-line separated text with {stdin_flag} to preserve the complete input"
         );
     }
     Ok(value.trim().to_owned())
 }
 
-fn normalize_prompt_stdin_bytes(input: &[u8]) -> Result<String> {
+fn normalize_prompt_arg(value: String) -> Result<String> {
+    normalize_single_line_cli_text_arg(value, "--prompt", "--prompt-stdin")
+}
+
+pub(crate) fn normalize_prompt_stdin_bytes(input: &[u8]) -> Result<String> {
     let input = decode_prompt_stdin_bytes(input)?;
     Ok(input.trim_end_matches(['\r', '\n']).to_owned())
 }

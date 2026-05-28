@@ -1576,6 +1576,7 @@ fn build_parameter_delta_bytes(task: &OrchestratorBackgroundTaskRecord) -> Resul
                 "task_id": task.task_id,
                 "task_kind": task.task_kind,
                 "parent_run_id": task.parent_run_id,
+                "budget_tokens": task.budget_tokens,
             }),
         );
         if let Some(delegation) = task.delegation.as_ref() {
@@ -2932,9 +2933,9 @@ mod tests {
     use super::{
         append_artifact_references, build_background_task_child_run_attach_update,
         build_background_task_running_update, build_optional_delegated_run_context,
-        categorize_child_failure, child_merge_lifecycle_details, delegated_child_timeout_message,
-        evaluate_delegation_scheduler_limits, inject_background_metadata,
-        parent_merge_event_payload, replace_background_task_snapshot,
+        build_parameter_delta_bytes, categorize_child_failure, child_merge_lifecycle_details,
+        delegated_child_timeout_message, evaluate_delegation_scheduler_limits,
+        inject_background_metadata, parent_merge_event_payload, replace_background_task_snapshot,
         running_delegated_children_for_parent, running_task_should_wait_for_in_flight_work,
         should_emit_child_stream_progress, task_has_in_flight_work_without_target,
         ChildLifecycleTapeBudget, ChildLifecycleTapeDecision, ChildStreamProgress,
@@ -2953,7 +2954,7 @@ mod tests {
         journal::{OrchestratorBackgroundTaskRecord, OrchestratorRunStatusSnapshot},
     };
     use palyra_common::runtime_contracts::AuxiliaryTaskState;
-    use serde_json::json;
+    use serde_json::{json, Value};
     use tonic::metadata::MetadataMap;
 
     fn unauthenticated_gateway_auth() -> GatewayAuthConfig {
@@ -3150,6 +3151,30 @@ mod tests {
 
         assert!(delegated_run.is_none());
         assert!(graph_explain.is_none());
+    }
+
+    #[test]
+    fn background_run_parameter_delta_includes_task_budget() {
+        let task = sample_task(
+            "task-budget",
+            AuxiliaryTaskState::Queued.as_str(),
+            100,
+            "group-a",
+            DelegationRuntimeLimits {
+                child_budget_override: Some(1_234),
+                ..DelegationRuntimeLimits::default()
+            },
+        );
+
+        let bytes =
+            build_parameter_delta_bytes(&task).expect("background parameter delta should encode");
+        let parsed: Value =
+            serde_json::from_slice(bytes.as_slice()).expect("parameter delta should be JSON");
+
+        assert_eq!(
+            parsed.pointer("/background_task/budget_tokens").and_then(Value::as_u64),
+            Some(1_234)
+        );
     }
 
     #[test]

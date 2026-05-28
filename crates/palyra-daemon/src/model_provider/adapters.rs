@@ -204,6 +204,9 @@ impl ProviderChatAdapter for OpenAiCompatibleChatAdapter {
         if request.json_mode {
             body["response_format"] = json!({"type":"json_object"});
         }
+        if let Some(max_output_tokens) = request.max_output_tokens {
+            body["max_tokens"] = json!(max_output_tokens.max(1));
+        }
         body
     }
 }
