@@ -60,6 +60,38 @@ fn browser_text_entry_action_name(tool_name: &str) -> &'static str {
     }
 }
 
+fn browser_tool_requires_open_session(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        BROWSER_NAVIGATE_TOOL_NAME
+            | BROWSER_CLICK_TOOL_NAME
+            | BROWSER_TYPE_TOOL_NAME
+            | BROWSER_FILL_TOOL_NAME
+            | BROWSER_UPLOAD_TOOL_NAME
+            | BROWSER_PRESS_TOOL_NAME
+            | BROWSER_SELECT_TOOL_NAME
+            | BROWSER_VIEWPORT_TOOL_NAME
+            | BROWSER_HIGHLIGHT_TOOL_NAME
+            | BROWSER_SCROLL_TOOL_NAME
+            | BROWSER_WAIT_FOR_TOOL_NAME
+            | BROWSER_TITLE_TOOL_NAME
+            | BROWSER_SCREENSHOT_TOOL_NAME
+            | BROWSER_PDF_TOOL_NAME
+            | BROWSER_OBSERVE_TOOL_NAME
+            | BROWSER_NETWORK_LOG_TOOL_NAME
+            | BROWSER_CONSOLE_LOG_TOOL_NAME
+            | BROWSER_RESET_STATE_TOOL_NAME
+            | BROWSER_TABS_LIST_TOOL_NAME
+            | BROWSER_TABS_OPEN_TOOL_NAME
+            | BROWSER_TABS_SWITCH_TOOL_NAME
+            | BROWSER_TABS_CLOSE_TOOL_NAME
+            | BROWSER_PERMISSIONS_GET_TOOL_NAME
+            | BROWSER_PERMISSIONS_SET_TOOL_NAME
+            | BROWSER_DOWNLOADS_LIST_TOOL_NAME
+            | BROWSER_DOWNLOADS_GET_TOOL_NAME
+    )
+}
+
 fn browser_tool_allows_private_targets_for_url(
     runtime_state: &GatewayRuntimeState,
     payload: &serde_json::Map<String, Value>,
@@ -613,6 +645,38 @@ pub(crate) async fn execute_browser_tool(
         }
     };
 
+    if browser_tool_requires_open_session(tool_name) {
+        let session_id = match parse_browser_tool_session_id(&payload) {
+            Ok(value) => value,
+            Err(error) => {
+                return browser_tool_execution_outcome(
+                    proposal_id,
+                    input_json,
+                    false,
+                    b"{}".to_vec(),
+                    error,
+                );
+            }
+        };
+        if runtime_state.is_browser_session_closed(session_id.as_str()) {
+            let error = format!(
+                "{tool_name} failed: browser session {session_id} is closed; create a new browser session before retrying"
+            );
+            let output = json!({
+                "success": false,
+                "session_id": session_id,
+                "error": "browser_session_closed",
+            });
+            return browser_tool_execution_outcome(
+                proposal_id,
+                input_json,
+                false,
+                serde_json::to_vec(&output).unwrap_or_else(|_| b"{}".to_vec()),
+                error,
+            );
+        }
+    }
+
     let mut client =
         match connect_browser_service(runtime_state.config.browser_service.clone()).await {
             Ok(value) => value,
@@ -821,7 +885,7 @@ pub(crate) async fn execute_browser_tool(
             };
             let mut request = Request::new(browser_v1::CloseSessionRequest {
                 v: CANONICAL_PROTOCOL_MAJOR,
-                session_id: Some(common_v1::CanonicalId { ulid: session_id }),
+                session_id: Some(common_v1::CanonicalId { ulid: session_id.clone() }),
             });
             if let Err(error) = attach_browser_auth_metadata(
                 &mut request,
@@ -838,6 +902,9 @@ pub(crate) async fn execute_browser_tool(
             match client.close_session(request).await {
                 Ok(response) => {
                     let response = response.into_inner();
+                    if response.closed {
+                        runtime_state.record_closed_browser_session(session_id.as_str());
+                    }
                     let output = json!({
                         "closed": response.closed,
                         "reason": response.reason,
@@ -3565,10 +3632,15 @@ mod tests {
         browser_file_url_to_path, browser_network_log_entry_to_json,
         browser_observe_include_visible_text, browser_session_persistence_from_payload,
         browser_session_profile_id_from_payload, browser_tool_execution_outcome,
-        browser_url_targets_loopback, canonical_file_path_is_inside_workspace_roots,
-        normalize_browser_press_key_input, parse_browser_download_artifact_id,
-        resolve_browser_output_path, validate_browser_workspace_relative_path,
-        BROWSER_CALLER_PRINCIPAL_HEADER,
+        browser_tool_requires_open_session, browser_url_targets_loopback,
+        canonical_file_path_is_inside_workspace_roots, normalize_browser_press_key_input,
+        parse_browser_download_artifact_id, resolve_browser_output_path,
+        validate_browser_workspace_relative_path, BROWSER_CALLER_PRINCIPAL_HEADER,
+    };
+    use crate::gateway::{
+        BROWSER_CLICK_TOOL_NAME, BROWSER_DOWNLOADS_GET_TOOL_NAME, BROWSER_NAVIGATE_TOOL_NAME,
+        BROWSER_OBSERVE_TOOL_NAME, BROWSER_SESSION_CLOSE_TOOL_NAME,
+        BROWSER_SESSION_CREATE_TOOL_NAME, BROWSER_TABS_CLOSE_TOOL_NAME,
     };
     use crate::transport::grpc::proto::palyra::browser::v1 as browser_v1;
     use palyra_common::CANONICAL_PROTOCOL_MAJOR;
@@ -3648,6 +3720,17 @@ mod tests {
             .as_str()
             .is_some_and(|hint| hint.contains("pass either selector or text")));
         assert!(outcome.error.contains("recovery_hint=wait_for_input_required"));
+    }
+
+    #[test]
+    fn browser_action_tools_require_open_session_handles() {
+        assert!(!browser_tool_requires_open_session(BROWSER_SESSION_CREATE_TOOL_NAME));
+        assert!(!browser_tool_requires_open_session(BROWSER_SESSION_CLOSE_TOOL_NAME));
+        assert!(browser_tool_requires_open_session(BROWSER_NAVIGATE_TOOL_NAME));
+        assert!(browser_tool_requires_open_session(BROWSER_CLICK_TOOL_NAME));
+        assert!(browser_tool_requires_open_session(BROWSER_OBSERVE_TOOL_NAME));
+        assert!(browser_tool_requires_open_session(BROWSER_TABS_CLOSE_TOOL_NAME));
+        assert!(browser_tool_requires_open_session(BROWSER_DOWNLOADS_GET_TOOL_NAME));
     }
 
     #[test]

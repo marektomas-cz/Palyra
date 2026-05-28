@@ -3,7 +3,7 @@
 #[cfg(not(windows))]
 use std::process::Command;
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     fs,
     path::{Path, PathBuf},
     sync::{
@@ -114,6 +114,7 @@ pub(crate) const APPROVAL_CHANNEL_UNAVAILABLE_REASON: &str =
 pub(crate) const APPROVAL_DENIED_REASON: &str =
     "tool execution denied by explicit client approval response";
 pub(crate) const APPROVAL_DECISION_CACHE_CAPACITY: usize = 1_024;
+pub(crate) const CLOSED_BROWSER_SESSION_LEDGER_CAPACITY: usize = 4_096;
 pub(crate) const MAX_MODEL_TOKEN_TAPE_EVENTS_PER_RUN: usize = 1_024;
 pub(crate) const MAX_CRON_JOB_NAME_BYTES: usize = 128;
 pub(crate) const MAX_CRON_PROMPT_BYTES: usize = 16 * 1024;
@@ -802,6 +803,7 @@ fn record_run_cleanup_resource_from_tool_outcome(
         }
         BROWSER_SESSION_CLOSE_TOOL_NAME => {
             if let Some(session_id) = browser_session_id_from_tool_input(input_json) {
+                runtime_state.record_closed_browser_session(session_id.as_str());
                 runtime_state.forget_run_browser_session(context.run_id, session_id.as_str());
             }
         }
@@ -1228,7 +1230,9 @@ pub(crate) async fn cleanup_run_resources(
         )
         .await
         {
-            Ok(true) => {}
+            Ok(true) => {
+                runtime_state.record_closed_browser_session(session_id.as_str());
+            }
             Ok(false) => {
                 warn!(
                     run_id,

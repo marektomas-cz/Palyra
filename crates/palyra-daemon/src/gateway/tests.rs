@@ -3403,6 +3403,26 @@ fn cleanup_resource_registry_deduplicates_and_drains_by_run() {
     assert!(state.take_run_cleanup_resources(run_id.as_str()).is_empty());
 }
 
+#[test]
+fn closed_browser_session_registry_marks_and_clears_handles() {
+    let state = build_test_runtime_state(false);
+    let run_id = Ulid::new().to_string();
+    let session_id = Ulid::new().to_string();
+
+    assert!(!state.is_browser_session_closed(session_id.as_str()));
+    state.record_closed_browser_session(session_id.as_str());
+    state.record_closed_browser_session(session_id.as_str());
+    assert!(state.is_browser_session_closed(session_id.as_str()));
+
+    state.record_run_browser_session(run_id.as_str(), session_id.as_str());
+    assert!(
+        !state.is_browser_session_closed(session_id.as_str()),
+        "a newly-created session handle must clear stale closed-session markers"
+    );
+    state.forget_closed_browser_session(session_id.as_str());
+    assert!(!state.is_browser_session_closed(session_id.as_str()));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn successful_run_finalization_cleans_run_owned_resource_tracking() {
     let state = build_test_runtime_state(false);
@@ -3492,6 +3512,10 @@ fn tool_outcomes_record_and_forget_run_cleanup_resources() {
     let resources = state.take_run_cleanup_resources(run_id.as_str());
     assert!(resources.browser_session_ids.is_empty());
     assert_eq!(resources.background_process_pids, vec![1234]);
+    assert!(
+        state.is_browser_session_closed(session_id.as_str()),
+        "successful browser close outcomes must invalidate later action-channel reuse"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

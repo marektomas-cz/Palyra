@@ -476,6 +476,36 @@ impl RunCleanupResources {
     }
 }
 
+#[derive(Debug, Default)]
+struct ClosedBrowserSessionLedger {
+    ids: HashSet<String>,
+    order: VecDeque<String>,
+}
+
+impl ClosedBrowserSessionLedger {
+    fn insert(&mut self, session_id: String) {
+        if !self.ids.insert(session_id.clone()) {
+            return;
+        }
+        self.order.push_back(session_id);
+        while self.ids.len() > CLOSED_BROWSER_SESSION_LEDGER_CAPACITY {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            self.ids.remove(oldest.as_str());
+        }
+    }
+
+    fn remove(&mut self, session_id: &str) {
+        self.ids.remove(session_id);
+        self.order.retain(|existing| existing != session_id);
+    }
+
+    fn contains(&self, session_id: &str) -> bool {
+        self.ids.contains(session_id)
+    }
+}
+
 pub struct GatewayRuntimeState {
     pub(crate) started_at: Instant,
     pub(crate) build: BuildSnapshot,
@@ -495,6 +525,7 @@ pub struct GatewayRuntimeState {
     recent_context_assembly_traces: Mutex<Vec<Value>>,
     tool_approval_cache: Mutex<HashMap<String, CachedToolApprovalDecision>>,
     run_cleanup_resources: Mutex<HashMap<String, RunCleanupResources>>,
+    closed_browser_sessions: Mutex<ClosedBrowserSessionLedger>,
     worker_fleet: RwLock<WorkerFleetManager>,
     pub(crate) provider_leases: ProviderLeaseManager,
     pub(crate) retrieval_backend: Arc<dyn RetrievalBackend>,
@@ -1452,6 +1483,7 @@ impl GatewayRuntimeState {
             recent_context_assembly_traces: Mutex::new(Vec::new()),
             tool_approval_cache: Mutex::new(HashMap::new()),
             run_cleanup_resources: Mutex::new(HashMap::new()),
+            closed_browser_sessions: Mutex::new(ClosedBrowserSessionLedger::default()),
             worker_fleet: RwLock::new(WorkerFleetManager::default()),
             provider_leases: ProviderLeaseManager::default(),
             retrieval_backend,
@@ -1486,6 +1518,7 @@ impl GatewayRuntimeState {
             return;
         }
 
+        self.forget_closed_browser_session(session_id);
         match self.run_cleanup_resources.lock() {
             Ok(mut resources_by_run) => {
                 let resources = resources_by_run.entry(run_id.to_owned()).or_default();
@@ -1499,6 +1532,61 @@ impl GatewayRuntimeState {
                     error = %error,
                     "failed to record browser session for run cleanup"
                 );
+            }
+        }
+    }
+
+    pub(crate) fn record_closed_browser_session(&self, session_id: &str) {
+        let session_id = session_id.trim();
+        if session_id.is_empty() {
+            return;
+        }
+
+        match self.closed_browser_sessions.lock() {
+            Ok(mut ledger) => ledger.insert(session_id.to_owned()),
+            Err(error) => {
+                warn!(
+                    session_id,
+                    error = %error,
+                    "failed to record closed browser session"
+                );
+            }
+        }
+    }
+
+    pub(crate) fn forget_closed_browser_session(&self, session_id: &str) {
+        let session_id = session_id.trim();
+        if session_id.is_empty() {
+            return;
+        }
+
+        match self.closed_browser_sessions.lock() {
+            Ok(mut ledger) => ledger.remove(session_id),
+            Err(error) => {
+                warn!(
+                    session_id,
+                    error = %error,
+                    "failed to clear closed browser session marker"
+                );
+            }
+        }
+    }
+
+    pub(crate) fn is_browser_session_closed(&self, session_id: &str) -> bool {
+        let session_id = session_id.trim();
+        if session_id.is_empty() {
+            return false;
+        }
+
+        match self.closed_browser_sessions.lock() {
+            Ok(ledger) => ledger.contains(session_id),
+            Err(error) => {
+                warn!(
+                    session_id,
+                    error = %error,
+                    "failed to inspect closed browser session marker"
+                );
+                false
             }
         }
     }

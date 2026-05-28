@@ -349,6 +349,9 @@ pub(crate) async fn console_browser_session_create_handler(
         profile_id: maybe_canonical_id(response.profile_id),
         private_profile: response.private_profile,
     };
+    if let Some(session_id) = envelope.session_id.as_deref() {
+        state.runtime.forget_closed_browser_session(session_id);
+    }
 
     record_browser_console_event(
         &state,
@@ -472,6 +475,9 @@ pub(crate) async fn console_browser_session_close_handler(
         closed: response.closed,
         reason: response.reason.clone(),
     };
+    if envelope.closed {
+        state.runtime.record_closed_browser_session(session_id.as_str());
+    }
 
     record_browser_console_event(
         &state,
