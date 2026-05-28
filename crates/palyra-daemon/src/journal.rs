@@ -16314,7 +16314,7 @@ fn push_session_search_run_ref(
 fn session_search_terms(query: &str) -> Vec<String> {
     let mut terms = query
         .split_whitespace()
-        .map(|term| term.trim_matches(|ch: char| !ch.is_alphanumeric()).to_ascii_lowercase())
+        .map(|term| term.trim_matches(|ch: char| !ch.is_alphanumeric()).to_lowercase())
         .filter(|term| term.len() >= 2 && !session_search_is_stop_term(term.as_str()))
         .collect::<Vec<_>>();
     terms.sort();
@@ -16374,11 +16374,14 @@ fn session_search_is_stop_term(term: &str) -> bool {
 
 fn session_search_like_needles(query: &str, terms: &[String]) -> Vec<String> {
     let mut needles = Vec::new();
-    push_session_search_like_needle(&mut needles, query.to_ascii_lowercase());
+    push_session_search_like_needle(&mut needles, query.to_lowercase());
     for term in terms {
         push_session_search_like_needle(&mut needles, term.clone());
         if let Some(prefix) = session_search_term_prefix(term) {
             push_session_search_like_needle(&mut needles, prefix);
+        }
+        for alias in session_search_term_aliases(term.as_str()) {
+            push_session_search_like_needle(&mut needles, (*alias).to_owned());
         }
     }
     needles.truncate(12);
@@ -16404,8 +16407,8 @@ fn session_search_term_prefix(term: &str) -> Option<String> {
 }
 
 fn session_search_text_matches(text: &str, query: &str, terms: &[String]) -> bool {
-    let normalized_text = text.to_ascii_lowercase();
-    let normalized_query = query.to_ascii_lowercase();
+    let normalized_text = text.to_lowercase();
+    let normalized_query = query.to_lowercase();
     if !normalized_query.is_empty() && normalized_text.contains(normalized_query.as_str()) {
         return true;
     }
@@ -16434,6 +16437,20 @@ fn session_search_term_matches_text(normalized_text: &str, term: &str) -> bool {
         || session_search_term_prefix(term)
             .as_deref()
             .is_some_and(|prefix| normalized_text.contains(prefix))
+        || session_search_term_aliases(term).iter().any(|alias| normalized_text.contains(alias))
+}
+
+fn session_search_term_aliases(term: &str) -> &'static [&'static str] {
+    match term {
+        "temporary" | "temp" => &["dočas", "docas"],
+        "name" | "named" => &["jmenuje", "název", "nazev"],
+        "název" | "nazev" => &["name", "named"],
+        value if value.starts_with("dočas") || value.starts_with("docas") => {
+            &["temporary", "temp"]
+        }
+        value if value.starts_with("jmen") => &["name", "named"],
+        _ => &[],
+    }
 }
 
 fn score_session_search_match(
@@ -16444,8 +16461,8 @@ fn score_session_search_match(
     query: &str,
     terms: &[String],
 ) -> f64 {
-    let normalized_text = text.to_ascii_lowercase();
-    let normalized_query = query.to_ascii_lowercase();
+    let normalized_text = text.to_lowercase();
+    let normalized_query = query.to_lowercase();
     let phrase_score =
         if !normalized_query.is_empty() && normalized_text.contains(normalized_query.as_str()) {
             0.58
@@ -16483,8 +16500,8 @@ fn extract_session_search_text(event_type: &str, payload_json: &str) -> Option<S
 }
 
 fn session_search_snippet(text: &str, query: &str) -> String {
-    let normalized_query = query.to_ascii_lowercase();
-    let normalized_text = text.to_ascii_lowercase();
+    let normalized_query = query.to_lowercase();
+    let normalized_text = text.to_lowercase();
     let match_start = (!normalized_query.is_empty())
         .then(|| normalized_text.find(normalized_query.as_str()))
         .flatten()
@@ -21971,29 +21988,31 @@ mod tests {
             })
             .expect("current-session tape event should persist");
 
-        let outcome = store
-            .search_orchestrator_session_windows(&SessionSearchRequest {
-                principal: "user:ops".to_owned(),
-                device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
-                channel: Some("cli".to_owned()),
-                session_id: None,
-                exclude_session_id: Some("01ARZ3NDEKTSV4RRFFQ69G5SE2".to_owned()),
-                query: "název dočasného feature flagu".to_owned(),
-                top_k: 1,
-                min_score: 0.0,
-                window_before: 0,
-                window_after: 0,
-                max_windows_per_session: 1,
-                include_archived: false,
-            })
-            .expect("session search should succeed");
+        for query in ["název dočasného feature flagu", "feature flag temporary name dočasný"] {
+            let outcome = store
+                .search_orchestrator_session_windows(&SessionSearchRequest {
+                    principal: "user:ops".to_owned(),
+                    device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+                    channel: Some("cli".to_owned()),
+                    session_id: None,
+                    exclude_session_id: Some("01ARZ3NDEKTSV4RRFFQ69G5SE2".to_owned()),
+                    query: query.to_owned(),
+                    top_k: 1,
+                    min_score: 0.0,
+                    window_before: 0,
+                    window_after: 0,
+                    max_windows_per_session: 1,
+                    include_archived: false,
+                })
+                .expect("session search should succeed");
 
-        assert_eq!(outcome.groups.len(), 1);
-        let matched = &outcome.groups[0].windows[0].matched;
-        assert!(
-            matched.text.contains("PALYRA_E2E_BETA"),
-            "session recall should surface the prior feature flag"
-        );
+            assert_eq!(outcome.groups.len(), 1, "query: {query}");
+            let matched = &outcome.groups[0].windows[0].matched;
+            assert!(
+                matched.text.contains("PALYRA_E2E_BETA"),
+                "session recall should surface the prior feature flag for query {query}"
+            );
+        }
     }
 
     #[test]
