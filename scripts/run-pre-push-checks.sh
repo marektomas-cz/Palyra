@@ -54,6 +54,101 @@ run_js_workspace_checks() {
   npm run js:check
 }
 
+changed_files_for_pre_push() {
+  local upstream_ref
+  local diff_base
+
+  if upstream_ref="$(git -C "$ROOT_DIR" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null)" &&
+    diff_base="$(git -C "$ROOT_DIR" merge-base HEAD "$upstream_ref" 2>/dev/null)"; then
+    git -C "$ROOT_DIR" diff --name-only --diff-filter=ACMR "$diff_base" HEAD
+  elif git -C "$ROOT_DIR" rev-parse --verify --quiet HEAD^ >/dev/null; then
+    git -C "$ROOT_DIR" diff --name-only --diff-filter=ACMR HEAD^ HEAD
+  fi
+
+  git -C "$ROOT_DIR" diff --name-only --diff-filter=ACMR --cached
+  git -C "$ROOT_DIR" diff --name-only --diff-filter=ACMR
+}
+
+rust_package_dir_for_path() {
+  local changed_path="$1"
+  local package_dir
+
+  [[ "$changed_path" == crates/* ]] || return 1
+
+  package_dir="$ROOT_DIR/${changed_path%/*}"
+  while [[ "$package_dir" == "$ROOT_DIR"/crates* ]]; do
+    if [[ -f "$package_dir/Cargo.toml" ]]; then
+      printf '%s\n' "$package_dir"
+      return 0
+    fi
+    package_dir="$(dirname "$package_dir")"
+  done
+
+  return 1
+}
+
+rust_package_name_from_dir() {
+  local package_dir="$1"
+
+  sed -n 's/^[[:space:]]*name[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$package_dir/Cargo.toml" | head -n 1
+}
+
+changed_rust_package_names() {
+  local changed_path
+  local package_dir
+  local package_name
+
+  changed_files_for_pre_push | sort -u | while IFS= read -r changed_path; do
+    [[ -n "$changed_path" ]] || continue
+    if package_dir="$(rust_package_dir_for_path "$changed_path")"; then
+      package_name="$(rust_package_name_from_dir "$package_dir")"
+      if [[ -z "$package_name" ]]; then
+        echo "Failed to resolve Rust package name from $package_dir/Cargo.toml." >&2
+        exit 1
+      fi
+      printf '%s\n' "$package_name"
+    fi
+  done | sort -u
+}
+
+change_requires_workspace_rust_tests() {
+  local changed_path
+
+  while IFS= read -r changed_path; do
+    case "$changed_path" in
+      Cargo.toml | Cargo.lock | rust-toolchain.toml | .cargo/config.toml)
+        return 0
+        ;;
+    esac
+  done < <(changed_files_for_pre_push | sort -u)
+
+  return 1
+}
+
+run_changed_rust_package_tests() {
+  local package_names
+  local package_name
+
+  if change_requires_workspace_rust_tests; then
+    echo "Running Rust workspace tests because workspace-level Rust inputs changed..."
+    "$CARGO_BIN" test --workspace --locked
+    return
+  fi
+
+  package_names="$(changed_rust_package_names)"
+  if [[ -z "$package_names" ]]; then
+    echo "No changed Rust workspace packages detected; skipping Rust delta tests."
+    return
+  fi
+
+  echo "Running Rust delta tests for changed workspace packages..."
+  while IFS= read -r package_name; do
+    [[ -n "$package_name" ]] || continue
+    echo "Running cargo test -p $package_name --locked..."
+    "$CARGO_BIN" test -p "$package_name" --locked
+  done <<<"$package_names"
+}
+
 run_fast_profile() {
   run_js_workspace_checks
 
@@ -62,6 +157,8 @@ run_fast_profile() {
 
   echo "Running clippy..."
   "$CARGO_BIN" clippy --workspace --all-targets -- -D warnings
+
+  run_changed_rust_package_tests
 
   check_runtime_artifact_hygiene "Checking runtime artifact hygiene before local validation..."
 
