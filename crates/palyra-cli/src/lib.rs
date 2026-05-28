@@ -4673,6 +4673,8 @@ struct ToolApprovalDecision {
 }
 
 const NONINTERACTIVE_APPROVAL_HINT: &str = "noninteractive CLI cannot prompt for tool requests; rerun in an interactive terminal, use --approval-mode allow-once for per-request approval, or use --allow-sensitive-tools only after reviewing the requested tool risk";
+const PROCESS_RUN_TOOL_NAME: &str = "palyra.process.run";
+const WORKSPACE_PATCH_TOOL_NAME: &str = "palyra.fs.apply_patch";
 
 fn approval_required_cli_hint() -> &'static str {
     NONINTERACTIVE_APPROVAL_HINT
@@ -4688,11 +4690,147 @@ fn prompt_tool_approval_decision(
             approved: false,
             reason: "denied_by_cli_approval_mode_deny".to_owned(),
         }),
-        AgentApprovalMode::AllowOnce => Ok(ToolApprovalDecision {
-            approved: true,
-            reason: "approved_by_cli_approval_mode_allow_once".to_owned(),
-        }),
+        AgentApprovalMode::AllowOnce => {
+            if let Some(reason) = allow_once_manual_safety_stop_reason(approval) {
+                return Ok(ToolApprovalDecision {
+                    approved: false,
+                    reason: format!(
+                        "denied_by_cli_manual_safety_stop_{reason}; rerun with --approval-mode prompt for an interactive decision, or use --allow-sensitive-tools only after reviewing the requested source-control mutation"
+                    ),
+                });
+            }
+            Ok(ToolApprovalDecision {
+                approved: true,
+                reason: "approved_by_cli_approval_mode_allow_once".to_owned(),
+            })
+        }
     }
+}
+
+fn allow_once_manual_safety_stop_reason(
+    approval: &common_v1::ToolApprovalRequest,
+) -> Option<&'static str> {
+    if approval.tool_name == PROCESS_RUN_TOOL_NAME
+        && process_run_input_mutates_git_index(approval.input_json.as_slice())
+    {
+        return Some("git_index_mutation");
+    }
+    if approval.tool_name == WORKSPACE_PATCH_TOOL_NAME
+        && patch_input_hides_source_like_gitignore_paths(approval.input_json.as_slice())
+    {
+        return Some("source_hiding_gitignore_patch");
+    }
+    None
+}
+
+fn process_run_input_mutates_git_index(input_json: &[u8]) -> bool {
+    let Ok(Value::Object(payload)) = serde_json::from_slice::<Value>(input_json) else {
+        return false;
+    };
+    let command = payload
+        .get("command")
+        .or_else(|| payload.get("cmd"))
+        .and_then(Value::as_str)
+        .map(normalize_executable_name)
+        .unwrap_or_default();
+    if command != "git" {
+        return false;
+    }
+    let args = payload
+        .get("args")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(|value| value.trim().to_ascii_lowercase())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    git_args_mutate_index(args.as_slice())
+}
+
+fn normalize_executable_name(raw: &str) -> String {
+    let trimmed = raw.trim().replace('\\', "/");
+    let name = trimmed.rsplit('/').next().unwrap_or(trimmed.as_str()).to_ascii_lowercase();
+    for suffix in [".exe", ".cmd", ".bat"] {
+        if let Some(stripped) = name.strip_suffix(suffix) {
+            return stripped.to_owned();
+        }
+    }
+    name
+}
+
+fn git_args_mutate_index(args: &[String]) -> bool {
+    let has_arg = |expected: &str| args.iter().any(|arg| arg == expected);
+    ((has_arg("rm") || has_arg("remove")) && has_arg("--cached"))
+        || (has_arg("update-index")
+            && args.iter().any(|arg| {
+                matches!(arg.as_str(), "--assume-unchanged" | "--skip-worktree" | "--force-remove")
+            }))
+        || (has_arg("reset")
+            && args.iter().any(|arg| matches!(arg.as_str(), "--mixed" | "--soft" | "--hard")))
+        || (has_arg("restore") && has_arg("--staged"))
+}
+
+fn patch_input_hides_source_like_gitignore_paths(input_json: &[u8]) -> bool {
+    let Ok(Value::Object(payload)) = serde_json::from_slice::<Value>(input_json) else {
+        return false;
+    };
+    let Some(patch) = payload.get("patch").and_then(Value::as_str) else {
+        return false;
+    };
+    if !patch_targets_gitignore(patch) {
+        return false;
+    }
+    patch.lines().any(|line| {
+        line.strip_prefix('+').is_some_and(|added| gitignore_pattern_hides_source_like_path(added))
+    })
+}
+
+fn patch_targets_gitignore(patch: &str) -> bool {
+    patch.lines().any(|line| {
+        let Some(path) = line
+            .strip_prefix("*** Add File: ")
+            .or_else(|| line.strip_prefix("*** Replace File: "))
+            .or_else(|| line.strip_prefix("*** Update File: "))
+            .or_else(|| line.strip_prefix("*** Delete File: "))
+        else {
+            return false;
+        };
+        normalized_workspace_path(path).ends_with(".gitignore")
+    })
+}
+
+fn gitignore_pattern_hides_source_like_path(raw: &str) -> bool {
+    let pattern = normalized_workspace_path(raw.trim());
+    if pattern.is_empty() || pattern.starts_with('#') || pattern.starts_with('!') {
+        return false;
+    }
+    let source_scoped = pattern == "src"
+        || pattern.starts_with("src/")
+        || pattern.starts_with("apps/")
+        || pattern.starts_with("crates/");
+    if !source_scoped {
+        return false;
+    }
+    [
+        "*.js",
+        "*.jsx",
+        "*.ts",
+        "*.tsx",
+        "*.rs",
+        "*.wasm",
+        "*.bundle.js",
+        "*.bundle.ts",
+        "*.bundle.tsx",
+    ]
+    .iter()
+    .any(|suffix| pattern.ends_with(suffix))
+}
+
+fn normalized_workspace_path(raw: &str) -> String {
+    raw.trim().trim_start_matches('/').replace('\\', "/").to_ascii_lowercase()
 }
 
 fn prompt_tool_approval_decision_with_mode_state(
@@ -5838,6 +5976,63 @@ mod agent_stream_output_tests {
         assert_eq!(mode, AgentApprovalMode::AllowOnce);
         assert_eq!(first.reason, "approved_by_cli_approval_mode_allow_once");
         assert_eq!(second.reason, "approved_by_cli_approval_mode_allow_once");
+    }
+
+    #[test]
+    fn approval_mode_allow_once_denies_git_index_removals() {
+        let approval = common_v1::ToolApprovalRequest {
+            input_json: serde_json::to_vec(&json!({
+                "command": "git",
+                "args": ["rm", "--cached", "src/app.bundle.js"],
+                "cwd": "/workspace",
+            }))
+            .expect("approval input should serialize"),
+            ..approval_request()
+        };
+
+        let decision = prompt_tool_approval_decision(&approval, AgentApprovalMode::AllowOnce)
+            .expect("manual stop decision should not read stdin");
+
+        assert!(!decision.approved);
+        assert!(decision.reason.contains("manual_safety_stop_git_index_mutation"));
+        assert!(decision.reason.contains("--approval-mode prompt"));
+    }
+
+    #[test]
+    fn approval_mode_allow_once_denies_source_hiding_gitignore_patches() {
+        let approval = common_v1::ToolApprovalRequest {
+            tool_name: "palyra.fs.apply_patch".to_owned(),
+            input_json: serde_json::to_vec(&json!({
+                "patch": "*** Begin Patch\n*** Update File: .gitignore\n@@\n+src/*.bundle.js\n+src/*.wasm\n*** End Patch\n"
+            }))
+            .expect("approval input should serialize"),
+            ..approval_request()
+        };
+
+        let decision = prompt_tool_approval_decision(&approval, AgentApprovalMode::AllowOnce)
+            .expect("manual stop decision should not read stdin");
+
+        assert!(!decision.approved);
+        assert!(decision.reason.contains("manual_safety_stop_source_hiding_gitignore_patch"));
+    }
+
+    #[test]
+    fn approval_mode_allow_once_still_allows_ordinary_process_verification() {
+        let approval = common_v1::ToolApprovalRequest {
+            input_json: serde_json::to_vec(&json!({
+                "command": "npm",
+                "args": ["test"],
+                "cwd": "/workspace",
+            }))
+            .expect("approval input should serialize"),
+            ..approval_request()
+        };
+
+        let decision = prompt_tool_approval_decision(&approval, AgentApprovalMode::AllowOnce)
+            .expect("allow-once approval mode should not read stdin");
+
+        assert!(decision.approved);
+        assert_eq!(decision.reason, "approved_by_cli_approval_mode_allow_once");
     }
 
     #[test]
