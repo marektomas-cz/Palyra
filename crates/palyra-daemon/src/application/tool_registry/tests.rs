@@ -422,9 +422,12 @@ fn memory_session_search_schema_targets_prior_transcripts() {
 #[test]
 fn memory_retain_schema_explains_principal_scope_for_corrections() {
     let entry = registry_entry("palyra.memory.retain").expect("retain tool entry");
+    let alias = registry_entry("palyra.retain").expect("retain alias tool entry");
 
     assert!(entry.description.contains("scope=principal"));
     assert!(entry.description.contains("scope=workspace"));
+    assert!(alias.description.contains("Compatibility alias"));
+    assert_eq!(alias.input_schema["required"][0], "content_text");
     assert_eq!(
         entry.input_schema["properties"]["scope"]["enum"],
         serde_json::json!(["session", "channel", "principal", "workspace", "project"])

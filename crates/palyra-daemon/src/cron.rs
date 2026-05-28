@@ -2880,6 +2880,7 @@ fn cron_successful_completion_tool(tool_name: &str) -> bool {
         "palyra.fs.apply_patch"
             | "palyra.fs.os_file"
             | "palyra.memory.retain"
+            | "palyra.retain"
             | "palyra.memory.delete"
             | "palyra.memory.replace"
             | "palyra.routines.control"
@@ -3489,6 +3490,7 @@ mod tests {
         assert!(cron_successful_completion_tool("palyra.fs.apply_patch"));
         assert!(cron_successful_completion_tool("palyra.fs.os_file"));
         assert!(cron_successful_completion_tool("palyra.memory.retain"));
+        assert!(cron_successful_completion_tool("palyra.retain"));
         assert!(!cron_successful_completion_tool("palyra.fs.read_file"));
         assert!(!cron_successful_completion_tool("palyra.process.run"));
     }

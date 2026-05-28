@@ -62,7 +62,7 @@ pub fn tool_metadata(tool_name: &str) -> Option<ToolMetadata> {
         "palyra.memory.session_search" | "palyra.session_search" => {
             Some(ToolMetadata { capabilities: EMPTY_TOOL_CAPABILITIES, default_sensitive: true })
         }
-        "palyra.memory.retain" => {
+        "palyra.memory.retain" | "palyra.retain" => {
             Some(ToolMetadata { capabilities: EMPTY_TOOL_CAPABILITIES, default_sensitive: false })
         }
         "palyra.memory.delete" => {
@@ -258,5 +258,12 @@ mod tests {
     fn echo_is_not_approval_required() {
         assert!(!tool_requires_approval("palyra.echo"));
         assert!(tool_policy_capability_names("palyra.echo").is_empty());
+    }
+
+    #[test]
+    fn memory_retain_alias_matches_canonical_sensitivity() {
+        assert!(!tool_requires_approval("palyra.memory.retain"));
+        assert!(!tool_requires_approval("palyra.retain"));
+        assert!(tool_policy_capability_names("palyra.retain").is_empty());
     }
 }

@@ -1419,7 +1419,7 @@ fn failed_tool_claim_boundary(tool_name: &str) -> Option<&'static str> {
         crate::gateway::BROWSER_CONSOLE_LOG_TOOL_NAME => Some(
             "browser console diagnostics failed; console status is unknown, so do not claim the page has no console errors or that the console is clean unless a later successful console diagnostic verifies it",
         ),
-        crate::gateway::MEMORY_RETAIN_TOOL_NAME => Some(
+        crate::gateway::MEMORY_RETAIN_TOOL_NAME | crate::gateway::MEMORY_RETAIN_ALIAS_TOOL_NAME => Some(
             "memory retain did not complete as a durable write; do not claim the memory was stored or will be available for future recall unless a later successful retain or ingest verifies it",
         ),
         _ => None,

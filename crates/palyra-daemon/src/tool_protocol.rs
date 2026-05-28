@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use palyra_common::tool_catalog::{
@@ -205,10 +206,12 @@ pub fn decide_tool_call(
         skill_id: request_context.skill_id.clone(),
         capabilities: tool_policy_capability_names(tool_name),
     };
+    let policy_allowlisted_tools =
+        allowlisted_tools_with_compat_aliases(config.allowed_tools.as_slice());
     let policy_config = PolicyEvaluationConfig {
-        allowlisted_tools: config.allowed_tools.clone(),
+        allowlisted_tools: policy_allowlisted_tools.clone(),
         allow_sensitive_tools,
-        sensitive_tool_names: sensitive_allowlisted_tool_names(config.allowed_tools.as_slice()),
+        sensitive_tool_names: sensitive_allowlisted_tool_names(policy_allowlisted_tools.as_slice()),
         sensitive_capability_names: SENSITIVE_CAPABILITY_POLICY_NAMES
             .iter()
             .map(|value| (*value).to_string())
@@ -260,6 +263,29 @@ pub fn decide_tool_call(
         approval_required,
         policy_enforced: true,
     }
+}
+
+fn allowlisted_tools_with_compat_aliases(allowed_tools: &[String]) -> Vec<String> {
+    let mut names = BTreeSet::new();
+    for tool_name in allowed_tools {
+        let normalized = tool_name.trim().to_ascii_lowercase();
+        if normalized.is_empty() {
+            continue;
+        }
+        names.insert(normalized.clone());
+        match normalized.as_str() {
+            "palyra.memory.session_search" | "palyra.session_search" => {
+                names.insert("palyra.memory.session_search".to_owned());
+                names.insert("palyra.session_search".to_owned());
+            }
+            "palyra.memory.retain" | "palyra.retain" => {
+                names.insert("palyra.memory.retain".to_owned());
+                names.insert("palyra.retain".to_owned());
+            }
+            _ => {}
+        }
+    }
+    names.into_iter().collect()
 }
 
 fn format_policy_reason(
@@ -466,10 +492,10 @@ async fn run_allowlisted_tool(
             executor: "gateway_runtime".to_owned(),
             sandbox_enforcement: "none".to_owned(),
         },
-        "palyra.memory.retain" => ToolExecutionRawResult {
+        "palyra.memory.retain" | "palyra.retain" => ToolExecutionRawResult {
             success: false,
             output_json: b"{}".to_vec(),
-            error: "palyra.memory.retain requires gateway memory runtime context".to_owned(),
+            error: format!("{tool_name} requires gateway memory runtime context"),
             timed_out: false,
             executor: "gateway_runtime".to_owned(),
             sandbox_enforcement: "none".to_owned(),
@@ -637,6 +663,7 @@ fn is_runtime_supported_tool(tool_name: &str) -> bool {
             | "palyra.memory.session_search"
             | "palyra.session_search"
             | "palyra.memory.retain"
+            | "palyra.retain"
             | "palyra.memory.delete"
             | "palyra.memory.replace"
             | "palyra.memory.reflect"
@@ -708,6 +735,7 @@ fn tool_executor_name(config: &ToolCallConfig, tool_name: &str) -> String {
             | "palyra.memory.session_search"
             | "palyra.session_search"
             | "palyra.memory.retain"
+            | "palyra.retain"
             | "palyra.memory.delete"
             | "palyra.memory.replace"
             | "palyra.memory.reflect"
@@ -735,7 +763,7 @@ fn tool_input_limit_bytes(tool_name: &str) -> usize {
         "palyra.memory.session_search" | "palyra.session_search" => {
             MAX_MEMORY_SESSION_SEARCH_TOOL_INPUT_BYTES
         }
-        "palyra.memory.retain" => MAX_MEMORY_RETAIN_TOOL_INPUT_BYTES,
+        "palyra.memory.retain" | "palyra.retain" => MAX_MEMORY_RETAIN_TOOL_INPUT_BYTES,
         "palyra.memory.delete" => MAX_MEMORY_DELETE_TOOL_INPUT_BYTES,
         "palyra.memory.replace" => MAX_MEMORY_REPLACE_TOOL_INPUT_BYTES,
         "palyra.memory.reflect" => MAX_MEMORY_REFLECT_TOOL_INPUT_BYTES,
@@ -1186,9 +1214,13 @@ mod tests {
 
     #[test]
     fn decide_tool_call_session_search_requires_approval_when_allowlisted() {
-        for tool_name in ["palyra.memory.session_search", "palyra.session_search"] {
+        for (tool_name, allowlisted_tool) in [
+            ("palyra.memory.session_search", "palyra.memory.session_search"),
+            ("palyra.session_search", "palyra.session_search"),
+            ("palyra.session_search", "palyra.memory.session_search"),
+        ] {
             let config = ToolCallConfig {
-                allowed_tools: vec![tool_name.to_owned()],
+                allowed_tools: vec![allowlisted_tool.to_owned()],
                 max_calls_per_run: 1,
                 execution_timeout_ms: 250,
                 process_runner: default_process_runner_policy(),
@@ -1214,9 +1246,14 @@ mod tests {
 
     #[test]
     fn decide_tool_call_allows_memory_lifecycle_tools_when_allowlisted() {
-        for tool_name in ["palyra.memory.retain", "palyra.memory.reflect"] {
+        for (tool_name, allowlisted_tool) in [
+            ("palyra.memory.retain", "palyra.memory.retain"),
+            ("palyra.retain", "palyra.memory.retain"),
+            ("palyra.memory.retain", "palyra.retain"),
+            ("palyra.memory.reflect", "palyra.memory.reflect"),
+        ] {
             let config = ToolCallConfig {
-                allowed_tools: vec![tool_name.to_owned()],
+                allowed_tools: vec![allowlisted_tool.to_owned()],
                 max_calls_per_run: 1,
                 execution_timeout_ms: 250,
                 process_runner: default_process_runner_policy(),
@@ -1388,6 +1425,7 @@ mod tests {
         assert!(tool_requires_approval("palyra.memory.session_search"));
         assert!(tool_requires_approval("palyra.session_search"));
         assert!(!tool_requires_approval("palyra.memory.retain"));
+        assert!(!tool_requires_approval("palyra.retain"));
         assert!(tool_requires_approval("palyra.memory.delete"));
         assert!(tool_requires_approval("palyra.memory.replace"));
         assert!(!tool_requires_approval("palyra.memory.reflect"));
@@ -1741,6 +1779,7 @@ mod tests {
     async fn execute_tool_call_memory_lifecycle_tools_require_gateway_runtime_context() {
         for (tool_name, input_json) in [
             ("palyra.memory.retain", br#"{"content_text":"remember this"}"#.as_slice()),
+            ("palyra.retain", br#"{"content_text":"remember this"}"#.as_slice()),
             ("palyra.memory.delete", br#"{"memory_id":"01ARZ3NDEKTSV4RRFFQ69G5FAC"}"#.as_slice()),
             (
                 "palyra.memory.replace",

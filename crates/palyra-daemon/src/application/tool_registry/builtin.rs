@@ -192,6 +192,52 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
             ToolResultProjectionPolicy::InlineUnlessLarge,
         ),
         entry(
+            "palyra.retain",
+            "Compatibility alias for palyra.memory.retain; write a reviewable scoped memory item or workspace/project memory document with provenance.",
+            object_schema(
+                &["content_text"],
+                vec![
+                    ("content_text", json!({"type":"string","maxLength":8192,"description":"Memory content to retain. For corrections, include the corrected durable statement only and provide the obsolete values in replaces_terms."})),
+                    (
+                        "category",
+                        json!({"type":"string","enum":["fact","preference","procedure","constraint","decision","correction","transient_runtime_fact"],"description":"Structured lifecycle category. Set this explicitly instead of relying on natural-language wording."}),
+                    ),
+                    (
+                        "replaces_terms",
+                        json!({"type":"array","items":{"type":"string"},"maxItems":32,"description":"For category=correction, language-neutral obsolete values and context terms that identify the existing memory to replace."}),
+                    ),
+                    ("scope", json!({"type":"string","enum":["session","channel","principal","workspace","project"],"description":"Defaults to session. Use principal for remembered preferences, corrections, and facts that should be available in future sessions. Use workspace or project to write indexed workspace/project memory documents."})),
+                    (
+                        "workspace_path",
+                        json!({"type":"string","description":"Exact workspace document path for scope=workspace or scope=project. Defaults to MEMORY.md for workspace and projects/default/MEMORY.md for project."}),
+                    ),
+                    (
+                        "workspace_prefix",
+                        json!({"type":"string","description":"Workspace/project directory or document path for scope=workspace or scope=project. Directory prefixes write to MEMORY.md below that prefix."}),
+                    ),
+                    (
+                        "prefix",
+                        json!({"type":"string","description":"Alias for workspace_prefix used with scope=workspace or scope=project."}),
+                    ),
+                    (
+                        "source",
+                        json!({"type":"string","enum":["manual","summary","import","tape:user_message","tape:tool_result"]}),
+                    ),
+                    ("tags", json!({"type":"array","items":{"type":"string"},"maxItems":16})),
+                    ("confidence", json!({"type":"number","minimum":0.0,"maximum":1.0})),
+                    ("ttl_ms", json!({"type":"integer","minimum":0})),
+                    ("ttl_unix_ms", json!({"type":"integer","minimum":0})),
+                    (
+                        "provenance",
+                        json!({"type":"object","properties":{},"additionalProperties":true}),
+                    ),
+                ],
+                false,
+            ),
+            ToolParallelismPolicy::Exclusive,
+            ToolResultProjectionPolicy::InlineUnlessLarge,
+        ),
+        entry(
             "palyra.memory.delete",
             "Delete a scoped memory item by memory_id after the user asks to forget or remove it.",
             object_schema(
