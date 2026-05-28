@@ -1452,6 +1452,9 @@ fn should_project_tool_result_for_model(
     outcome: &ToolExecutionOutcome,
     budget: &ToolTurnBudget,
 ) -> bool {
+    if os_file_list_dir_result_can_stay_inline(tool_name, outcome.output_json.as_slice(), budget) {
+        return false;
+    }
     match projection_policy_for_tool(tool_name) {
         ToolResultProjectionPolicy::InlineUnlessLarge => {
             outcome.output_json.len() > budget.max_model_inline_bytes
@@ -1459,6 +1462,22 @@ fn should_project_tool_result_for_model(
         ToolResultProjectionPolicy::SummarizeAndArtifact
         | ToolResultProjectionPolicy::RedactedPreviewAndArtifact => true,
     }
+}
+
+fn os_file_list_dir_result_can_stay_inline(
+    tool_name: &str,
+    output_json: &[u8],
+    budget: &ToolTurnBudget,
+) -> bool {
+    if tool_name != crate::gateway::OS_FILE_TOOL_NAME
+        || output_json.len() > budget.max_model_inline_bytes
+    {
+        return false;
+    }
+    serde_json::from_slice::<Value>(output_json)
+        .ok()
+        .and_then(|value| value.get("operation").and_then(Value::as_str).map(str::to_owned))
+        .is_some_and(|operation| operation == "list_dir")
 }
 
 fn tool_result_sensitivity(tool_name: &str, default_sensitive: bool) -> ToolResultSensitivity {
@@ -1747,5 +1766,53 @@ mod tests {
             "{preview}"
         );
         assert!(!preview.contains("BBBB"), "{preview}");
+    }
+
+    #[test]
+    fn os_file_list_dir_results_stay_inline_when_under_model_budget() {
+        let output_json = serde_json::to_vec(&json!({
+            "operation": "list_dir",
+            "path": "/home/example/.cache/palyra/os-cache",
+            "entries": [
+                {
+                    "name": "zero-a.tmp",
+                    "path": "/home/example/.cache/palyra/os-cache/zero-a.tmp",
+                    "kind": "file",
+                    "size_bytes": 0
+                },
+                {
+                    "name": "f-newest.cache",
+                    "path": "/home/example/.cache/palyra/os-cache/f-newest.cache",
+                    "kind": "file",
+                    "size_bytes": 32
+                }
+            ],
+            "entry_count": 2,
+            "skipped_entries": 0,
+            "truncated": false
+        }))
+        .expect("test payload should serialize");
+        let outcome = ToolExecutionOutcome {
+            success: true,
+            output_json,
+            error: String::new(),
+            attestation: ToolAttestation {
+                attestation_id: "01ARZ3NDEKTSV4RRFFQ69G5FAB".to_owned(),
+                execution_sha256: "0".repeat(64),
+                executed_at_unix_ms: 0,
+                timed_out: false,
+                executor: "test".to_owned(),
+                sandbox_enforcement: "n/a".to_owned(),
+            },
+        };
+
+        assert!(
+            !super::should_project_tool_result_for_model(
+                crate::gateway::OS_FILE_TOOL_NAME,
+                &outcome,
+                &ToolTurnBudget::default()
+            ),
+            "small OS list_dir metadata must remain fully model-visible for cleanup workflows"
+        );
     }
 }
