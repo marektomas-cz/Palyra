@@ -27,7 +27,7 @@ use crate::{
     gateway::{
         canonical_id, cleanup_run_resources, current_unix_ms, ingest_memory_best_effort, non_empty,
         record_message_router_journal_event, security_requests_json_mode, truncate_with_ellipsis,
-        GatewayRuntimeState,
+        GatewayRuntimeState, CANCELLED_REASON,
     },
     journal::{
         MemorySource, OrchestratorCancelRequest, OrchestratorRunMetadataUpdateRequest,
@@ -233,6 +233,14 @@ pub(crate) async fn finalize_run_stream_after_provider_response(
         runtime_state
             .update_orchestrator_run_state(run_id.to_owned(), RunLifecycleState::Done, None)
             .await?;
+        if matches!(
+            runtime_state.orchestrator_run_status_snapshot(run_id.to_owned()).await,
+            Ok(Some(snapshot)) if snapshot.state == RunLifecycleState::Cancelled.as_str()
+        ) {
+            cleanup_run_resources(runtime_state, run_id, CANCELLED_REASON).await;
+            runtime_state.clear_self_healing_heartbeat(WorkHeartbeatKind::Run, run_id);
+            return Ok(RunStreamPostProviderOutcome::Cancelled);
+        }
         cleanup_run_resources(runtime_state, run_id, "completed").await;
         runtime_state.clear_self_healing_heartbeat(WorkHeartbeatKind::Run, run_id);
         send_status_with_tape(

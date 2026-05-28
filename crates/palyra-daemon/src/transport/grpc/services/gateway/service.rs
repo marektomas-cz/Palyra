@@ -41,9 +41,9 @@ use crate::{
     },
     gateway::{
         agent_binding_message, agent_message, agent_resolution_source_to_proto, canonical_id,
-        execution_backend_inventory_message, extract_pairing_code_command, finalize_run_failure,
-        non_empty, normalize_agent_identifier, optional_canonical_id, record_agent_journal_event,
-        record_message_router_journal_event, require_supported_version,
+        cleanup_run_resources, execution_backend_inventory_message, extract_pairing_code_command,
+        finalize_run_failure, non_empty, normalize_agent_identifier, optional_canonical_id,
+        record_agent_journal_event, record_message_router_journal_event, require_supported_version,
         security_requests_json_mode, session_summary_message, GatewayRuntimeState,
         ListOrchestratorSessionsRequest, RunFailureFinalization, APPROVAL_PROMPT_TIMEOUT_SECONDS,
     },
@@ -252,6 +252,8 @@ impl gateway_v1::gateway_service_server::GatewayService for GatewayServiceImpl {
                 reason: reason.clone(),
             })
             .await?;
+        cleanup_run_resources(&self.state, snapshot.run_id.as_str(), snapshot.reason.as_str())
+            .await;
         Ok(Response::new(gateway_v1::AbortRunResponse {
             v: CANONICAL_PROTOCOL_MAJOR,
             run_id: Some(common_v1::CanonicalId { ulid: snapshot.run_id }),

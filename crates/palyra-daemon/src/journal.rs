@@ -7102,6 +7102,11 @@ impl JournalStore {
         let Some((previous_state, session_id, parent_run_id)) = previous else {
             return Err(JournalError::RunNotFound { run_id: run_id.to_owned() });
         };
+        if RunLifecycleState::from_str(previous_state.as_str())
+            .is_some_and(RunLifecycleState::is_terminal)
+        {
+            return Ok(());
+        }
         let updated = guard.execute(
             r#"
                 UPDATE orchestrator_runs
@@ -7226,19 +7231,84 @@ impl JournalStore {
     ) -> Result<(), JournalError> {
         let now = current_unix_ms()?;
         let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
-        let updated = guard.execute(
-            r#"
-                UPDATE orchestrator_runs
-                SET
-                    cancel_requested = 1,
-                    cancel_reason = ?2,
-                    updated_at_unix_ms = ?3
-                WHERE run_ulid = ?1
-            "#,
-            params![request.run_id, request.reason, now],
-        )?;
+        let previous = guard
+            .query_row(
+                r#"
+                    SELECT state, session_ulid, parent_run_ulid
+                    FROM orchestrator_runs
+                    WHERE run_ulid = ?1
+                "#,
+                params![request.run_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((previous_state, session_id, parent_run_id)) = previous else {
+            return Err(JournalError::RunNotFound { run_id: request.run_id.clone() });
+        };
+        let previous_lifecycle = RunLifecycleState::from_str(previous_state.as_str());
+        let terminal_cancel = !previous_lifecycle.is_some_and(RunLifecycleState::is_terminal);
+        let updated = if terminal_cancel {
+            guard.execute(
+                r#"
+                    UPDATE orchestrator_runs
+                    SET
+                        state = ?4,
+                        cancel_requested = 1,
+                        cancel_reason = ?2,
+                        completed_at_unix_ms = COALESCE(completed_at_unix_ms, ?3),
+                        updated_at_unix_ms = ?3,
+                        last_error = COALESCE(?2, last_error)
+                    WHERE run_ulid = ?1
+                "#,
+                params![request.run_id, request.reason, now, RunLifecycleState::Cancelled.as_str()],
+            )?
+        } else {
+            guard.execute(
+                r#"
+                    UPDATE orchestrator_runs
+                    SET
+                        cancel_requested = 1,
+                        cancel_reason = ?2,
+                        updated_at_unix_ms = ?3
+                    WHERE run_ulid = ?1
+                "#,
+                params![request.run_id, request.reason, now],
+            )?
+        };
         if updated == 0 {
             return Err(JournalError::RunNotFound { run_id: request.run_id.clone() });
+        }
+        if terminal_cancel {
+            append_run_lifecycle_event_tx(
+                &guard,
+                &RunLifecycleEventAppendRequest {
+                    event_id: Ulid::new().to_string(),
+                    run_id: request.run_id.clone(),
+                    session_id,
+                    from_state: RunLifecyclePhase::parse(previous_state.as_str()),
+                    to_state: canonical_run_lifecycle_phase(RunLifecycleState::Cancelled),
+                    actor: RuntimeActorRef {
+                        kind: RuntimeActorKind::System,
+                        id: "system".to_owned(),
+                    },
+                    correlation_id: request.run_id.clone(),
+                    parent_run_id,
+                    idempotency_key: None,
+                    reason: request.reason.clone(),
+                    payload_json: json!({
+                        "legacy_state": RunLifecycleState::Cancelled.as_str(),
+                        "error": request.reason,
+                    })
+                    .to_string(),
+                },
+                now,
+            )?;
         }
         Ok(())
     }
@@ -22629,6 +22699,58 @@ mod tests {
                 .expect("cancel status should query"),
             "cancel request should persist"
         );
+    }
+
+    #[test]
+    fn orchestrator_cancel_terminalizes_active_run_and_prevents_done_race() {
+        let db_path = temp_db_path();
+        let store = JournalStore::open(test_journal_config(db_path, false))
+            .expect("journal store should open");
+
+        upsert_orchestrator_session(&store, "01ARZ3NDEKTSV4RRFFQ69G5FAW");
+        start_orchestrator_run(&store, "01ARZ3NDEKTSV4RRFFQ69G5FAW", "01ARZ3NDEKTSV4RRFFQ69G5FAX");
+        store
+            .update_orchestrator_run_state(
+                "01ARZ3NDEKTSV4RRFFQ69G5FAX",
+                RunLifecycleState::InProgress,
+                None,
+            )
+            .expect("run should transition to in_progress");
+
+        store
+            .request_orchestrator_cancel(&OrchestratorCancelRequest {
+                run_id: "01ARZ3NDEKTSV4RRFFQ69G5FAX".to_owned(),
+                reason: "operator_requested".to_owned(),
+            })
+            .expect("active cancel request should persist");
+
+        let cancelled = store
+            .orchestrator_run_status_snapshot("01ARZ3NDEKTSV4RRFFQ69G5FAX")
+            .expect("run snapshot query should succeed")
+            .expect("cancelled run should exist");
+        assert_eq!(cancelled.state, RunLifecycleState::Cancelled.as_str());
+        assert!(cancelled.cancel_requested);
+        assert_eq!(cancelled.cancel_reason.as_deref(), Some("operator_requested"));
+        assert_eq!(cancelled.last_error.as_deref(), Some("operator_requested"));
+        assert!(
+            cancelled.completed_at_unix_ms.is_some(),
+            "cancelled runs should be terminal immediately"
+        );
+
+        store
+            .update_orchestrator_run_state(
+                "01ARZ3NDEKTSV4RRFFQ69G5FAX",
+                RunLifecycleState::Done,
+                None,
+            )
+            .expect("late completion updates should be idempotently ignored");
+
+        let after_late_done = store
+            .orchestrator_run_status_snapshot("01ARZ3NDEKTSV4RRFFQ69G5FAX")
+            .expect("run snapshot query should succeed")
+            .expect("cancelled run should still exist");
+        assert_eq!(after_late_done.state, RunLifecycleState::Cancelled.as_str());
+        assert_eq!(after_late_done.completed_at_unix_ms, cancelled.completed_at_unix_ms);
     }
 
     #[test]

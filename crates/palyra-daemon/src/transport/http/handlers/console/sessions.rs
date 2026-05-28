@@ -904,6 +904,12 @@ pub(crate) async fn console_session_run_abort_handler(
         })
         .await
         .map_err(runtime_status_response)?;
+    gateway::cleanup_run_resources(
+        &state.runtime,
+        response.run_id.as_str(),
+        response.reason.as_str(),
+    )
+    .await;
     Ok(Json(SessionCatalogRunAbortEnvelope {
         contract: contract_descriptor(),
         run_id,
