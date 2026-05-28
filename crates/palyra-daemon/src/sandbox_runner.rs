@@ -3346,7 +3346,7 @@ fn build_tier_b_process_command(
 ) -> Result<Command, SandboxProcessRunError> {
     #[cfg(windows)]
     {
-        return build_windows_tier_b_process_command(program, args, cwd);
+        build_windows_tier_b_process_command(program, args, cwd)
     }
     #[cfg(not(windows))]
     {
