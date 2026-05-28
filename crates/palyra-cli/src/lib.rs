@@ -9256,6 +9256,14 @@ fn validate_secret_source_exclusivity(
 }
 
 fn load_document_from_existing_path(path: &Path) -> Result<(toml::Value, ConfigMigrationInfo)> {
+    let metadata = fs::metadata(path)
+        .with_context(|| format!("failed to inspect config path {}", path.display()))?;
+    if metadata.is_dir() {
+        anyhow::bail!("config path must be a readable file, not a directory: {}", path.display());
+    }
+    if !metadata.is_file() {
+        anyhow::bail!("config path must be a readable file: {}", path.display());
+    }
     let content =
         fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
     ensure_config_document_content_present(path, content.as_str())?;
@@ -9304,6 +9312,20 @@ mod config_document_read_tests {
             .expect_err("empty existing config should be invalid");
 
         assert!(error.to_string().contains("config file is empty"));
+        Ok(())
+    }
+
+    #[test]
+    fn existing_config_path_must_be_a_file() -> Result<()> {
+        let temp = tempdir()?;
+        let error = load_document_from_existing_path(temp.path())
+            .expect_err("directory config path should be invalid");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("config path must be a readable file"),
+            "unexpected validation error: {message}"
+        );
         Ok(())
     }
 
