@@ -56,6 +56,12 @@ const BACKGROUND_MONITOR_POLL_MS: u64 = 50;
 const BACKGROUND_TERMINATION_WAIT_MS: u64 = 1_000;
 const DEFAULT_BACKGROUND_PROCESS_LIFETIME_MS: u64 = 10 * 60_000;
 const MAX_BACKGROUND_PROCESS_LIFETIME_MS: u64 = 30 * 60_000;
+const PALYRA_CLI_PROFILE_ENV: &str = "PALYRA_CLI_PROFILE";
+const PALYRA_CLI_PROFILES_PATH_ENV: &str = "PALYRA_CLI_PROFILES_PATH";
+const PALYRA_STATE_ROOT_ENV: &str = "PALYRA_STATE_ROOT";
+const CLI_PROFILES_RELATIVE_PATH: &str = "cli/profiles.toml";
+const DESKTOP_CONTROL_CENTER_STATE_DIR: &str = "desktop-control-center";
+const DESKTOP_RUNTIME_STATE_DIR: &str = "runtime";
 const SENSITIVE_URL_PATH_MARKERS: &[&str] =
     &["token", "secret", "key", "password", "credential", "session"];
 #[cfg(windows)]
@@ -3279,6 +3285,7 @@ fn build_process_command(
         let args = rewrite_host_virtual_workspace_args(input.args.as_slice(), workspace_root)?;
         let mut command = Command::new(program.as_path());
         command.args(args.as_slice()).current_dir(cwd);
+        configure_host_access_process_environment(&mut command, program.as_path());
         return Ok(command);
     }
 
@@ -3338,6 +3345,53 @@ fn configure_tier_b_process_environment(
         let _ = policy;
         command.env("PATH", sandbox_process_path()).env("LANG", "C").env("LC_ALL", "C");
     }
+}
+
+fn configure_host_access_process_environment(command: &mut Command, program: &Path) {
+    if !is_palyra_cli_program(program) {
+        return;
+    }
+    if !should_repair_palyra_cli_profile_env(
+        std::env::var_os(PALYRA_CLI_PROFILE_ENV).as_deref(),
+        std::env::var_os(PALYRA_CLI_PROFILES_PATH_ENV).as_deref(),
+    ) {
+        return;
+    }
+    if let Some(profiles_path) = std::env::var_os(PALYRA_STATE_ROOT_ENV)
+        .map(PathBuf::from)
+        .and_then(|state_root| infer_desktop_cli_profiles_path(state_root.as_path()))
+        .filter(|profiles_path| profiles_path.is_file())
+    {
+        command.env(PALYRA_CLI_PROFILES_PATH_ENV, profiles_path);
+    } else {
+        command.env_remove(PALYRA_CLI_PROFILE_ENV);
+    }
+}
+
+fn is_palyra_cli_program(program: &Path) -> bool {
+    program
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .is_some_and(|stem| stem.eq_ignore_ascii_case("palyra"))
+}
+
+fn should_repair_palyra_cli_profile_env(
+    profile: Option<&std::ffi::OsStr>,
+    profiles_path: Option<&std::ffi::OsStr>,
+) -> bool {
+    profile.is_some_and(|value| !value.is_empty())
+        && profiles_path.is_none_or(|value| value.is_empty())
+}
+
+fn infer_desktop_cli_profiles_path(state_root: &Path) -> Option<PathBuf> {
+    let runtime_dir = state_root.file_name()?.to_str()?;
+    let desktop_dir = state_root.parent()?.file_name()?.to_str()?;
+    if !runtime_dir.eq_ignore_ascii_case(DESKTOP_RUNTIME_STATE_DIR)
+        || !desktop_dir.eq_ignore_ascii_case(DESKTOP_CONTROL_CENTER_STATE_DIR)
+    {
+        return None;
+    }
+    state_root.parent()?.parent().map(|root| root.join(CLI_PROFILES_RELATIVE_PATH))
 }
 
 fn resolve_tier_b_process_program(command: &str) -> PathBuf {
@@ -4596,6 +4650,33 @@ mod tests {
                 "npm".to_owned(),
             ]
         );
+    }
+
+    #[test]
+    fn palyra_cli_profile_repair_targets_only_dangling_profile_env() {
+        assert!(super::should_repair_palyra_cli_profile_env(
+            Some(std::ffi::OsStr::new("desktop-local")),
+            None,
+        ));
+        assert!(!super::should_repair_palyra_cli_profile_env(
+            Some(std::ffi::OsStr::new("desktop-local")),
+            Some(std::ffi::OsStr::new("C:/state/cli/profiles.toml")),
+        ));
+        assert!(!super::should_repair_palyra_cli_profile_env(
+            None,
+            Some(std::ffi::OsStr::new("C:/state/cli/profiles.toml")),
+        ));
+    }
+
+    #[test]
+    fn nested_desktop_runtime_profiles_path_infers_parent_cli_registry() {
+        let state_root = Path::new("C:/Palyra/state/desktop-control-center/runtime");
+
+        let inferred = super::infer_desktop_cli_profiles_path(state_root)
+            .expect("desktop runtime state root should infer profiles path");
+
+        assert_eq!(inferred, PathBuf::from("C:/Palyra/state/cli/profiles.toml"));
+        assert!(super::infer_desktop_cli_profiles_path(Path::new("C:/Palyra/state")).is_none());
     }
 
     #[test]
