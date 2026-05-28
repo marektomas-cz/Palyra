@@ -2338,6 +2338,20 @@ pub async fn run() -> Result<()> {
         return Ok(());
     }
 
+    let startup_run_recovery = runtime
+        .terminalize_orphaned_orchestrator_runs_on_startup(
+            "daemon startup detected an orphaned active run from a previous runtime; mark failed for explicit retry",
+        )
+        .await
+        .context("failed to terminalize orphaned orchestrator runs during startup")?;
+    if startup_run_recovery.terminalized_count > 0 {
+        warn!(
+            terminalized_count = startup_run_recovery.terminalized_count,
+            terminalized_run_ids = ?startup_run_recovery.terminalized_run_ids,
+            "terminalized orphaned active runs during startup"
+        );
+    }
+
     let build = build_metadata();
     info!(
         service = "palyrad",

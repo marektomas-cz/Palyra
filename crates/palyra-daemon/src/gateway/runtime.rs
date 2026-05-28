@@ -24,16 +24,16 @@ use crate::journal::{
     OrchestratorSessionPinRecord, OrchestratorSessionQueueControlRecord,
     OrchestratorSessionQueueControlUpdateRequest, OrchestratorSessionRecord,
     OrchestratorSessionTitleUpdateRequest, OrchestratorSessionTranscriptRecord,
-    OrchestratorUsageQuery, OrchestratorUsageRunRecord, OrchestratorUsageSessionRecord,
-    OrchestratorUsageSummary, RecallArtifactCreateRequest, RecallArtifactListFilter,
-    RecallArtifactRecord, RetrievalBranchDiagnostics, SessionProjectContextStateCopyRequest,
-    SessionProjectContextStateRecord, SessionProjectContextStateUpsertRequest,
-    SessionSearchOutcome, SessionSearchRequest, ToolJobAttachRequest, ToolJobCreateRequest,
-    ToolJobRecord, ToolJobRetryRequest, ToolJobTailAppendRequest, ToolJobTailPage,
-    ToolJobTailReadRequest, ToolJobTransitionRequest, ToolJobsListFilter,
-    ToolResultArtifactCreateRequest, ToolResultArtifactReadRequest, WorkspaceBootstrapOutcome,
-    WorkspaceBootstrapRequest, WorkspaceCheckpointCreateRequest, WorkspaceCheckpointFilePayload,
-    WorkspaceCheckpointFileRecord, WorkspaceCheckpointListFilter,
+    OrchestratorStartupRunRecoveryReport, OrchestratorUsageQuery, OrchestratorUsageRunRecord,
+    OrchestratorUsageSessionRecord, OrchestratorUsageSummary, RecallArtifactCreateRequest,
+    RecallArtifactListFilter, RecallArtifactRecord, RetrievalBranchDiagnostics,
+    SessionProjectContextStateCopyRequest, SessionProjectContextStateRecord,
+    SessionProjectContextStateUpsertRequest, SessionSearchOutcome, SessionSearchRequest,
+    ToolJobAttachRequest, ToolJobCreateRequest, ToolJobRecord, ToolJobRetryRequest,
+    ToolJobTailAppendRequest, ToolJobTailPage, ToolJobTailReadRequest, ToolJobTransitionRequest,
+    ToolJobsListFilter, ToolResultArtifactCreateRequest, ToolResultArtifactReadRequest,
+    WorkspaceBootstrapOutcome, WorkspaceBootstrapRequest, WorkspaceCheckpointCreateRequest,
+    WorkspaceCheckpointFilePayload, WorkspaceCheckpointFileRecord, WorkspaceCheckpointListFilter,
     WorkspaceCheckpointPairLinkRequest, WorkspaceCheckpointRecord,
     WorkspaceCheckpointRestoreMarkRequest, WorkspaceDocumentDeleteRequest,
     WorkspaceDocumentListFilter, WorkspaceDocumentMoveRequest, WorkspaceDocumentRecord,
@@ -4275,6 +4275,34 @@ impl GatewayRuntimeState {
         }
         self.orchestrator_run_notify.notify_waiters();
         Ok(())
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn terminalize_orphaned_orchestrator_runs_on_startup_blocking(
+        &self,
+        reason: &str,
+    ) -> Result<OrchestratorStartupRunRecoveryReport, Status> {
+        self.journal_store.terminalize_orphaned_orchestrator_runs_on_startup(reason).map_err(
+            |error| map_orchestrator_store_error("terminalize orphaned orchestrator runs", error),
+        )
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub async fn terminalize_orphaned_orchestrator_runs_on_startup(
+        self: &Arc<Self>,
+        reason: impl Into<String>,
+    ) -> Result<OrchestratorStartupRunRecoveryReport, Status> {
+        let state = Arc::clone(self);
+        let reason = reason.into();
+        let report = tokio::task::spawn_blocking(move || {
+            state.terminalize_orphaned_orchestrator_runs_on_startup_blocking(reason.as_str())
+        })
+        .await
+        .map_err(|_| Status::internal("orchestrator startup recovery worker panicked"))??;
+        if report.terminalized_count > 0 {
+            self.orchestrator_run_notify.notify_waiters();
+        }
+        Ok(report)
     }
 
     #[allow(clippy::result_large_err)]

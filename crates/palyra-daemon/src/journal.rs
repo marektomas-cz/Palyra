@@ -1541,6 +1541,12 @@ pub struct OrchestratorCancelRequest {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, Default)]
+pub struct OrchestratorStartupRunRecoveryReport {
+    pub terminalized_count: u64,
+    pub terminalized_run_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct OrchestratorTapeRecord {
     pub seq: i64,
@@ -7146,6 +7152,99 @@ impl JournalStore {
             now,
         )?;
         Ok(())
+    }
+
+    pub fn terminalize_orphaned_orchestrator_runs_on_startup(
+        &self,
+        reason: &str,
+    ) -> Result<OrchestratorStartupRunRecoveryReport, JournalError> {
+        let now = current_unix_ms()?;
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        let active_runs = {
+            let mut statement = guard.prepare(
+                r#"
+                    SELECT run_ulid, session_ulid, state, parent_run_ulid
+                    FROM orchestrator_runs
+                    WHERE state IN (?1, ?2)
+                    ORDER BY started_at_unix_ms ASC, run_ulid ASC
+                "#,
+            )?;
+            let rows = statement.query_map(
+                params![
+                    RunLifecycleState::Accepted.as_str(),
+                    RunLifecycleState::InProgress.as_str(),
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                },
+            )?;
+            let mut records = Vec::new();
+            for row in rows {
+                records.push(row?);
+            }
+            records
+        };
+        let mut terminalized_run_ids = Vec::new();
+        for (run_id, session_id, previous_state, parent_run_id) in active_runs {
+            let updated = guard.execute(
+                r#"
+                    UPDATE orchestrator_runs
+                    SET
+                        state = ?2,
+                        completed_at_unix_ms = COALESCE(completed_at_unix_ms, ?3),
+                        updated_at_unix_ms = ?3,
+                        last_error = COALESCE(last_error, ?4)
+                    WHERE run_ulid = ?1
+                      AND state IN (?5, ?6)
+                "#,
+                params![
+                    run_id,
+                    RunLifecycleState::Failed.as_str(),
+                    now,
+                    reason,
+                    RunLifecycleState::Accepted.as_str(),
+                    RunLifecycleState::InProgress.as_str(),
+                ],
+            )?;
+            if updated == 0 {
+                continue;
+            }
+            append_run_lifecycle_event_tx(
+                &guard,
+                &RunLifecycleEventAppendRequest {
+                    event_id: Ulid::new().to_string(),
+                    run_id: run_id.clone(),
+                    session_id,
+                    from_state: RunLifecyclePhase::parse(previous_state.as_str()),
+                    to_state: canonical_run_lifecycle_phase(RunLifecycleState::Failed),
+                    actor: RuntimeActorRef {
+                        kind: RuntimeActorKind::System,
+                        id: "system".to_owned(),
+                    },
+                    correlation_id: run_id.clone(),
+                    parent_run_id,
+                    idempotency_key: None,
+                    reason: reason.to_owned(),
+                    payload_json: json!({
+                        "legacy_state": RunLifecycleState::Failed.as_str(),
+                        "error": reason,
+                        "recovery": "startup_orphaned_run",
+                    })
+                    .to_string(),
+                },
+                now,
+            )?;
+            terminalized_run_ids.push(run_id);
+        }
+        Ok(OrchestratorStartupRunRecoveryReport {
+            terminalized_count: terminalized_run_ids.len() as u64,
+            terminalized_run_ids,
+        })
     }
 
     pub fn add_orchestrator_usage(
@@ -20242,6 +20341,73 @@ mod tests {
             0,
             "overflow audit rows must not increase pending depth"
         );
+    }
+
+    #[test]
+    fn startup_recovery_terminalizes_orphaned_active_runs() {
+        let db_path = temp_db_path();
+        let store = JournalStore::open(test_journal_config(db_path, false))
+            .expect("journal store should open");
+        let in_progress_session_id = "01ARZ3NDEKTSV4RRFFQ69G5SR1";
+        let in_progress_run_id = "01ARZ3NDEKTSV4RRFFQ69G5RR1";
+        let accepted_session_id = "01ARZ3NDEKTSV4RRFFQ69G5SR2";
+        let accepted_run_id = "01ARZ3NDEKTSV4RRFFQ69G5RR2";
+        let done_session_id = "01ARZ3NDEKTSV4RRFFQ69G5SR3";
+        let done_run_id = "01ARZ3NDEKTSV4RRFFQ69G5RR3";
+        let reason = "daemon startup detected an orphaned active run";
+
+        upsert_orchestrator_session(&store, in_progress_session_id);
+        start_orchestrator_run(&store, in_progress_session_id, in_progress_run_id);
+        store
+            .update_orchestrator_run_state(in_progress_run_id, RunLifecycleState::InProgress, None)
+            .expect("run should enter in_progress");
+
+        upsert_orchestrator_session(&store, accepted_session_id);
+        start_orchestrator_run(&store, accepted_session_id, accepted_run_id);
+
+        upsert_orchestrator_session(&store, done_session_id);
+        start_orchestrator_run(&store, done_session_id, done_run_id);
+        store
+            .update_orchestrator_run_state(done_run_id, RunLifecycleState::Done, None)
+            .expect("control run should complete");
+
+        let report = store
+            .terminalize_orphaned_orchestrator_runs_on_startup(reason)
+            .expect("startup recovery should terminalize active runs");
+
+        assert_eq!(report.terminalized_count, 2);
+        assert!(report.terminalized_run_ids.contains(&in_progress_run_id.to_owned()));
+        assert!(report.terminalized_run_ids.contains(&accepted_run_id.to_owned()));
+
+        let in_progress = store
+            .orchestrator_run_status_snapshot(in_progress_run_id)
+            .expect("snapshot lookup should succeed")
+            .expect("run should exist");
+        assert_eq!(in_progress.state, RunLifecycleState::Failed.as_str());
+        assert_eq!(in_progress.last_error.as_deref(), Some(reason));
+        assert!(in_progress.completed_at_unix_ms.is_some());
+
+        let accepted = store
+            .orchestrator_run_status_snapshot(accepted_run_id)
+            .expect("snapshot lookup should succeed")
+            .expect("run should exist");
+        assert_eq!(accepted.state, RunLifecycleState::Failed.as_str());
+        assert_eq!(accepted.last_error.as_deref(), Some(reason));
+        assert!(accepted.completed_at_unix_ms.is_some());
+
+        let done = store
+            .orchestrator_run_status_snapshot(done_run_id)
+            .expect("snapshot lookup should succeed")
+            .expect("run should exist");
+        assert_eq!(done.state, RunLifecycleState::Done.as_str());
+
+        let lifecycle = store
+            .list_run_lifecycle_events(in_progress_run_id)
+            .expect("lifecycle events should be readable");
+        let terminal = lifecycle.last().expect("startup recovery should append lifecycle event");
+        assert_eq!(terminal.from_state, Some(RunLifecyclePhase::Running));
+        assert_eq!(terminal.to_state, RunLifecyclePhase::Failed);
+        assert_eq!(terminal.reason, reason);
     }
 
     #[test]
