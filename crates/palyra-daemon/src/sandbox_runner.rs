@@ -3386,8 +3386,12 @@ fn windows_command_candidates(command: &str) -> Vec<String> {
         return vec![command.to_owned()];
     }
 
-    let mut candidates = vec![command.to_owned()];
     let raw_pathext = std::env::var("PATHEXT").unwrap_or_default();
+    windows_command_candidates_from_pathext(command, raw_pathext.as_str())
+}
+
+#[cfg(windows)]
+fn windows_command_candidates_from_pathext(command: &str, raw_pathext: &str) -> Vec<String> {
     let extensions = raw_pathext
         .split(';')
         .map(str::trim)
@@ -3395,6 +3399,7 @@ fn windows_command_candidates(command: &str) -> Vec<String> {
         .collect::<Vec<_>>();
     let extensions =
         if extensions.is_empty() { WINDOWS_DEFAULT_PATH_EXTENSIONS.to_vec() } else { extensions };
+    let mut candidates = Vec::with_capacity(extensions.len().saturating_add(1));
     candidates.extend(extensions.into_iter().map(|extension| {
         if extension.starts_with('.') {
             format!("{command}{extension}")
@@ -3402,6 +3407,7 @@ fn windows_command_candidates(command: &str) -> Vec<String> {
             format!("{command}.{extension}")
         }
     }));
+    candidates.push(command.to_owned());
     candidates
 }
 
@@ -4572,6 +4578,24 @@ mod tests {
                 "{key} should remain available for Windows process startup"
             );
         }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_command_candidates_prefer_pathext_before_extensionless_shims() {
+        let candidates =
+            super::windows_command_candidates_from_pathext("npm", ".COM;.EXE;.BAT;.CMD");
+
+        assert_eq!(
+            candidates,
+            vec![
+                "npm.COM".to_owned(),
+                "npm.EXE".to_owned(),
+                "npm.BAT".to_owned(),
+                "npm.CMD".to_owned(),
+                "npm".to_owned(),
+            ]
+        );
     }
 
     #[test]
