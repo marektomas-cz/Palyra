@@ -2384,18 +2384,10 @@ fn parse_chromium_viewport_metrics(
     requested_height: u32,
     requested_device_scale_factor: f64,
 ) -> (u32, u32, f64) {
-    let actual_width = value
-        .get("width")
-        .and_then(serde_json::Value::as_u64)
-        .and_then(|value| u32::try_from(value).ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(requested_width);
-    let actual_height = value
-        .get("height")
-        .and_then(serde_json::Value::as_u64)
-        .and_then(|value| u32::try_from(value).ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(requested_height);
+    let actual_width =
+        chromium_u32_metric_prefer(&value, "visual_width", "width").unwrap_or(requested_width);
+    let actual_height =
+        chromium_u32_metric_prefer(&value, "visual_height", "height").unwrap_or(requested_height);
     let actual_device_scale_factor = value
         .get("device_scale_factor")
         .and_then(serde_json::Value::as_f64)
@@ -2404,17 +2396,33 @@ fn parse_chromium_viewport_metrics(
     (actual_width, actual_height, actual_device_scale_factor)
 }
 
-fn chromium_u32_metric(value: &serde_json::Value, field: &str) -> u32 {
+fn chromium_u32_metric_option(value: &serde_json::Value, field: &str) -> Option<u32> {
     value
         .get(field)
         .and_then(serde_json::Value::as_u64)
         .and_then(|value| u32::try_from(value).ok())
-        .unwrap_or(0)
+        .filter(|value| *value > 0)
+}
+
+fn chromium_u32_metric_prefer(
+    value: &serde_json::Value,
+    preferred_field: &str,
+    fallback_field: &str,
+) -> Option<u32> {
+    chromium_u32_metric_option(value, preferred_field)
+        .or_else(|| chromium_u32_metric_option(value, fallback_field))
+}
+
+fn chromium_u32_metric(value: &serde_json::Value, field: &str) -> u32 {
+    chromium_u32_metric_option(value, field).unwrap_or(0)
 }
 
 fn parse_chromium_layout_metrics(value: serde_json::Value) -> ChromiumLayoutMetrics {
-    let viewport_width = chromium_u32_metric(&value, "viewport_width");
-    let viewport_height = chromium_u32_metric(&value, "viewport_height");
+    let viewport_width =
+        chromium_u32_metric_prefer(&value, "visual_viewport_width", "viewport_width").unwrap_or(0);
+    let viewport_height =
+        chromium_u32_metric_prefer(&value, "visual_viewport_height", "viewport_height")
+            .unwrap_or(0);
     let document_scroll_width = chromium_u32_metric(&value, "document_scroll_width");
     let document_scroll_height = chromium_u32_metric(&value, "document_scroll_height");
     let document_client_width = chromium_u32_metric(&value, "document_client_width");
@@ -2428,15 +2436,19 @@ fn parse_chromium_layout_metrics(value: serde_json::Value) -> ChromiumLayoutMetr
         .get("horizontal_overflow")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or_else(|| {
+            let comparison_width =
+                if viewport_width > 0 { viewport_width } else { document_client_width };
             document_scroll_width > 0
-                && document_client_width > 0
-                && document_scroll_width > document_client_width.saturating_add(1)
+                && comparison_width > 0
+                && document_scroll_width > comparison_width.saturating_add(1)
         });
     let vertical_overflow =
         value.get("vertical_overflow").and_then(serde_json::Value::as_bool).unwrap_or_else(|| {
+            let comparison_height =
+                if viewport_height > 0 { viewport_height } else { document_client_height };
             document_scroll_height > 0
-                && document_client_height > 0
-                && document_scroll_height > document_client_height.saturating_add(1)
+                && comparison_height > 0
+                && document_scroll_height > comparison_height.saturating_add(1)
         });
 
     ChromiumLayoutMetrics {
@@ -2618,16 +2630,25 @@ pub(crate) async fn chromium_layout_metrics(
               const scrollHeight = Math.max(doc.scrollHeight || 0, body.scrollHeight || 0);
               const clientWidth = Math.max(doc.clientWidth || 0, window.innerWidth || 0);
               const clientHeight = Math.max(doc.clientHeight || 0, window.innerHeight || 0);
+              const visualViewport = window.visualViewport || {};
+              const visualViewportWidth = Math.trunc(visualViewport.width || 0);
+              const visualViewportHeight = Math.trunc(visualViewport.height || 0);
+              const effectiveViewportWidth =
+                visualViewportWidth || Math.trunc(window.innerWidth || clientWidth || 0);
+              const effectiveViewportHeight =
+                visualViewportHeight || Math.trunc(window.innerHeight || clientHeight || 0);
               return {
                 viewport_width: Math.trunc(window.innerWidth || clientWidth || 0),
                 viewport_height: Math.trunc(window.innerHeight || clientHeight || 0),
+                visual_viewport_width: visualViewportWidth,
+                visual_viewport_height: visualViewportHeight,
                 device_scale_factor: Number(window.devicePixelRatio || 1),
                 document_scroll_width: Math.trunc(scrollWidth),
                 document_scroll_height: Math.trunc(scrollHeight),
                 document_client_width: Math.trunc(clientWidth),
                 document_client_height: Math.trunc(clientHeight),
-                horizontal_overflow: scrollWidth > clientWidth + 1,
-                vertical_overflow: scrollHeight > clientHeight + 1
+                horizontal_overflow: scrollWidth > effectiveViewportWidth + 1,
+                vertical_overflow: scrollHeight > effectiveViewportHeight + 1
               };
             })())"#,
                 false,
@@ -3708,6 +3729,8 @@ pub(crate) async fn set_viewport_with_chromium(
         let value = tab
             .evaluate(
                 r#"JSON.stringify({
+                    visual_width: Math.trunc((window.visualViewport && window.visualViewport.width) || 0),
+                    visual_height: Math.trunc((window.visualViewport && window.visualViewport.height) || 0),
                     width: Math.trunc(window.innerWidth || 0),
                     height: Math.trunc(window.innerHeight || 0),
                     device_scale_factor: Number(window.devicePixelRatio || 1)
@@ -4091,6 +4114,24 @@ mod tests {
     }
 
     #[test]
+    fn parse_chromium_viewport_metrics_prefers_visual_viewport_size() {
+        let raw = serde_json::json!({
+            "visual_width": 375,
+            "visual_height": 812,
+            "width": 1080,
+            "height": 2339,
+            "device_scale_factor": 2.0
+        });
+
+        let (width, height, device_scale_factor) =
+            parse_chromium_viewport_metrics(raw, 375, 812, 1.0);
+
+        assert_eq!(width, 375);
+        assert_eq!(height, 812);
+        assert_eq!(device_scale_factor, 2.0);
+    }
+
+    #[test]
     fn desktop_touch_emulation_omits_invalid_zero_touch_points() {
         assert_eq!(chromium_touch_emulation_max_touch_points(false), None);
         assert_eq!(chromium_touch_emulation_max_touch_points(true), Some(1));
@@ -4124,6 +4165,29 @@ mod tests {
                 vertical_overflow: true,
             }
         );
+    }
+
+    #[test]
+    fn parse_chromium_layout_metrics_prefers_visual_viewport_size() {
+        let raw = serde_json::json!({
+            "viewport_width": 1080,
+            "viewport_height": 2339,
+            "visual_viewport_width": 375,
+            "visual_viewport_height": 812,
+            "device_scale_factor": 2.0,
+            "document_scroll_width": 1080,
+            "document_scroll_height": 2339,
+            "document_client_width": 1080,
+            "document_client_height": 2339
+        });
+
+        let metrics = parse_chromium_layout_metrics(raw);
+
+        assert_eq!(metrics.viewport_width, 375);
+        assert_eq!(metrics.viewport_height, 812);
+        assert_eq!(metrics.document_client_width, 1080);
+        assert!(metrics.horizontal_overflow);
+        assert!(metrics.vertical_overflow);
     }
 
     #[test]
