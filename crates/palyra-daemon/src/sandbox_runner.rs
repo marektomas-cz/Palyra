@@ -2669,6 +2669,7 @@ fn spawn_background_process(
         )
         .unwrap_or(Duration::ZERO);
         let (stdout, stderr) = output_monitor.snapshot_after_startup_drain(startup_output_drain);
+        terminate_background_child(child);
         return Err(background_process_startup_failure(input, status, &stdout, &stderr));
     }
     let cleanup = background_cleanup_metadata(pid, lifetime_ms, windows_job_bound);
@@ -2686,6 +2687,7 @@ fn spawn_background_process(
     )
     .unwrap_or(Duration::ZERO);
     if let Some(status) = wait_for_background_process_exit(&mut child, post_output_exit_check)? {
+        terminate_background_child(child);
         return Err(background_process_startup_failure(input, status, &stdout, &stderr));
     }
     let Some(remaining_lifetime) =
@@ -3981,7 +3983,7 @@ mod tests {
         validate_process_termination_scope, validate_runtime_egress_enforcement,
         EgressEnforcementMode, ProcessRunnerInput, SandboxProcessRunErrorKind,
         SandboxProcessRunnerPolicy, SandboxProcessRunnerTier, StreamCapture,
-        BACKGROUND_MONITOR_POLL_MS,
+        BACKGROUND_MONITOR_POLL_MS, BACKGROUND_TERMINATION_WAIT_MS,
     };
 
     const BACKGROUND_TEST_EXECUTION_TIMEOUT_MS: u64 = 10_000;
@@ -5544,6 +5546,69 @@ mod tests {
         assert_eq!(error.kind, SandboxProcessRunErrorKind::RuntimeFailure);
         assert!(error.message.contains("exited before startup check"), "{}", error.message);
         assert!(error.message.contains("Unknown command"), "{}", error.message);
+
+        let _ = fs::remove_dir_all(workspace.as_path());
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn background_startup_failure_terminates_spawned_child_process_tree() {
+        let Some(python) = ["python3", "python"].into_iter().find(|command| {
+            Command::new(command)
+                .arg("--version")
+                .output()
+                .map(|output| output.status.success())
+                .unwrap_or(false)
+        }) else {
+            return;
+        };
+        let workspace = unique_temp_dir("workspace-background-escaped-child");
+        fs::create_dir_all(workspace.as_path()).expect("workspace directory should be created");
+        let child_script = workspace.join("child.py");
+        let launcher_script = workspace.join("launcher.py");
+        let child_pid_path = workspace.join("child.pid");
+        fs::write(
+            child_script.as_path(),
+            format!(
+                "import os, pathlib, sys, time\npathlib.Path(sys.argv[1]).write_text(str(os.getpid()), encoding='utf-8')\ntime.sleep({BACKGROUND_TEST_SCRIPT_SLEEP_SECS})\n"
+            ),
+        )
+        .expect("child script should be written");
+        fs::write(
+            launcher_script.as_path(),
+            "import pathlib, subprocess, sys, time\nroot = pathlib.Path(__file__).resolve().parent\npid_path = root / 'child.pid'\nchild = root / 'child.py'\nsubprocess.Popen([sys.executable, str(child), str(pid_path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\ndeadline = time.time() + 5\nwhile not pid_path.exists() and time.time() < deadline:\n    time.sleep(0.01)\nsys.exit(0)\n",
+        )
+        .expect("launcher script should be written");
+        let mut policy =
+            sandbox_policy_with_allowed_executables(workspace.clone(), vec![python.to_owned()]);
+        policy.allow_interpreters = true;
+        policy.egress_enforcement_mode = EgressEnforcementMode::Preflight;
+        let input = serde_json::to_vec(&serde_json::json!({
+            "command": python,
+            "args": [launcher_script.to_string_lossy()],
+            "background": true,
+            "timeout_ms": BACKGROUND_TEST_EXECUTION_TIMEOUT_MS
+        }))
+        .expect("input should serialize");
+
+        let error =
+            run_constrained_process(&policy, input.as_slice(), background_test_execution_timeout())
+                .expect_err("launcher should exit before the background startup check");
+
+        assert_eq!(error.kind, SandboxProcessRunErrorKind::RuntimeFailure);
+        assert!(error.message.contains("exited before startup check"), "{}", error.message);
+        let child_pid = fs::read_to_string(child_pid_path.as_path())
+            .expect("launcher should wait for child pid file")
+            .trim()
+            .parse::<u32>()
+            .expect("child pid should be numeric");
+        assert!(
+            super::wait_for_process_not_alive(
+                child_pid,
+                Duration::from_millis(BACKGROUND_TERMINATION_WAIT_MS)
+            ),
+            "child pid {child_pid} should be terminated after startup failure"
+        );
 
         let _ = fs::remove_dir_all(workspace.as_path());
     }
