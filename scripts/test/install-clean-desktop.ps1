@@ -240,13 +240,13 @@ if ($IsWindows) {
     }
 }
 
-$launcherPath = Join-Path $resolvedInstallRoot (
+$launcherFileName =
     if ($IsWindows) {
         "Launch-Palyra-Test.ps1"
     } else {
         "launch-palyra-test.sh"
     }
-)
+$launcherPath = Join-Path $resolvedInstallRoot $launcherFileName
 $shouldLaunch = $Launch -or -not $NoLaunch
 
 if ($IsWindows) {
