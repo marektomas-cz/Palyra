@@ -1949,7 +1949,7 @@ fn console_routine_approval_allow_enables_pending_routine() -> Result<()> {
             "prompt": "approval enable routine validation",
             "trigger_kind": "schedule",
             "schedule_type": "every",
-            "every_interval_ms": 60000,
+            "every_interval_ms": 1000,
             "enabled": true,
             "channel": "web",
         }))
