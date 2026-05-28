@@ -240,10 +240,17 @@ if ($IsWindows) {
     }
 }
 
-$launcherPath = Join-Path $resolvedInstallRoot "Launch-Palyra-Test.ps1"
+$launcherPath = Join-Path $resolvedInstallRoot (
+    if ($IsWindows) {
+        "Launch-Palyra-Test.ps1"
+    } else {
+        "launch-palyra-test.sh"
+    }
+)
 $shouldLaunch = $Launch -or -not $NoLaunch
 
-$launcherBody =
+if ($IsWindows) {
+    $launcherBody =
 @"
 param(
     [switch]`$Wait
@@ -279,8 +286,57 @@ if (`$Wait) {
     }
 }
 "@
+} else {
+    $shStateRoot = ConvertTo-PosixSingleQuotedLiteral -Value $stateRoot
+    $shConfigPath = ConvertTo-PosixSingleQuotedLiteral -Value $configPath
+    $launcherBody =
+@'
+#!/usr/bin/env bash
+set -euo pipefail
+
+install_root="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+state_root=__PALYRA_STATE_ROOT__
+config_path=__PALYRA_CONFIG_PATH__
+mkdir -p "$state_root"
+
+export PALYRA_STATE_ROOT="$state_root"
+export PALYRA_CONFIG="$config_path"
+export PALYRA_DESKTOP_PALYRAD_BIN="$install_root/__PALYRA_DAEMON_EXECUTABLE__"
+export PALYRA_DESKTOP_BROWSERD_BIN="$install_root/__PALYRA_BROWSER_EXECUTABLE__"
+export PALYRA_DESKTOP_PALYRA_BIN="$install_root/__PALYRA_CLI_EXECUTABLE__"
+
+desktop_binary="$install_root/__PALYRA_DESKTOP_EXECUTABLE__"
+if [[ "${1:-}" == "--wait" || "${1:-}" == "-w" ]]; then
+  exec "$desktop_binary"
+fi
+
+"$desktop_binary" >/dev/null 2>&1 &
+desktop_pid=$!
+sleep 2
+if ! kill -0 "$desktop_pid" 2>/dev/null; then
+  if wait "$desktop_pid"; then
+    echo "Palyra desktop exited cleanly before the launcher timeout. If no new window appeared, another instance may already be running."
+    exit 0
+  fi
+  exit_code=$?
+  echo "Palyra desktop exited immediately with code $exit_code. Re-run launch-palyra-test.sh with --wait to surface the startup error directly." >&2
+  exit "$exit_code"
+fi
+
+echo "Palyra desktop launched with pid=$desktop_pid"
+'@
+    $launcherBody = $launcherBody.Replace("__PALYRA_STATE_ROOT__", $shStateRoot)
+    $launcherBody = $launcherBody.Replace("__PALYRA_CONFIG_PATH__", $shConfigPath)
+    $launcherBody = $launcherBody.Replace("__PALYRA_DAEMON_EXECUTABLE__", $daemonExecutable)
+    $launcherBody = $launcherBody.Replace("__PALYRA_BROWSER_EXECUTABLE__", $browserExecutable)
+    $launcherBody = $launcherBody.Replace("__PALYRA_CLI_EXECUTABLE__", $cliExecutable)
+    $launcherBody = $launcherBody.Replace("__PALYRA_DESKTOP_EXECUTABLE__", $desktopExecutable)
+}
 
 Set-Content -LiteralPath $launcherPath -Value $launcherBody -NoNewline
+if (-not $IsWindows) {
+    Set-ExecutablePermissions -Path $launcherPath
+}
 
 $installSummary = [ordered]@{
     installed_at_utc = (Get-Date).ToUniversalTime().ToString("o")
