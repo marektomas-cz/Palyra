@@ -66,6 +66,8 @@ const PALYRA_STATE_ROOT_ENV: &str = "PALYRA_STATE_ROOT";
 const CLI_PROFILES_RELATIVE_PATH: &str = "cli/profiles.toml";
 const DESKTOP_CONTROL_CENTER_STATE_DIR: &str = "desktop-control-center";
 const DESKTOP_RUNTIME_STATE_DIR: &str = "runtime";
+const WORKSPACE_PYTHON_USER_BASE_RELATIVE_PATH: &[&str] = &[".palyra", "python-userbase"];
+const WORKSPACE_PIP_CACHE_RELATIVE_PATH: &[&str] = &[".palyra", "pip-cache"];
 const SENSITIVE_URL_PATH_MARKERS: &[&str] =
     &["token", "secret", "key", "password", "credential", "session"];
 #[cfg(windows)]
@@ -3284,7 +3286,12 @@ fn build_process_command(
         let program = resolve_tier_b_process_program(input.command.as_str(), cwd);
         let args = rewrite_host_virtual_workspace_args(input.args.as_slice(), workspace_root)?;
         let mut command = build_tier_b_process_command(program.as_path(), args.as_slice(), cwd)?;
-        configure_host_access_process_environment(&mut command, program.as_path());
+        configure_host_access_process_environment(
+            &mut command,
+            input.command.as_str(),
+            program.as_path(),
+            workspace_root,
+        );
         return Ok(command);
     }
 
@@ -3323,7 +3330,12 @@ fn build_process_command(
 
     let program = resolve_tier_b_process_program(input.command.as_str(), cwd);
     let mut command = build_tier_b_process_command(program.as_path(), scoped_args.as_slice(), cwd)?;
-    configure_tier_b_process_environment(&mut command, program.as_path(), policy);
+    configure_tier_b_process_environment(
+        &mut command,
+        input.command.as_str(),
+        program.as_path(),
+        policy,
+    );
     Ok(command)
 }
 
@@ -3346,6 +3358,7 @@ fn build_tier_b_process_command(
 
 fn configure_tier_b_process_environment(
     command: &mut Command,
+    process_command: &str,
     program: &Path,
     policy: &SandboxProcessRunnerPolicy,
 ) {
@@ -3360,9 +3373,20 @@ fn configure_tier_b_process_environment(
         let _ = policy;
         command.env("PATH", sandbox_process_path()).env("LANG", "C").env("LC_ALL", "C");
     }
+    configure_workspace_python_environment(
+        command,
+        process_command,
+        policy.workspace_root.as_path(),
+    );
 }
 
-fn configure_host_access_process_environment(command: &mut Command, program: &Path) {
+fn configure_host_access_process_environment(
+    command: &mut Command,
+    process_command: &str,
+    program: &Path,
+    workspace_root: &Path,
+) {
+    configure_workspace_python_environment(command, process_command, workspace_root);
     if !is_palyra_cli_program(program) {
         return;
     }
@@ -3381,6 +3405,55 @@ fn configure_host_access_process_environment(command: &mut Command, program: &Pa
     } else {
         command.env_remove(PALYRA_CLI_PROFILE_ENV);
     }
+}
+
+fn configure_workspace_python_environment(
+    command: &mut Command,
+    process_command: &str,
+    workspace_root: &Path,
+) {
+    let Some(environment) = workspace_python_environment(process_command, workspace_root) else {
+        return;
+    };
+    command
+        .env("PYTHONUSERBASE", environment.user_base)
+        .env("PIP_CACHE_DIR", environment.pip_cache)
+        .env("PIP_DISABLE_PIP_VERSION_CHECK", "1");
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkspacePythonEnvironment {
+    user_base: PathBuf,
+    pip_cache: PathBuf,
+}
+
+fn workspace_python_environment(
+    process_command: &str,
+    workspace_root: &Path,
+) -> Option<WorkspacePythonEnvironment> {
+    if !is_python_runtime_command(process_command) {
+        return None;
+    }
+
+    Some(WorkspacePythonEnvironment {
+        user_base: join_relative_components(
+            workspace_root,
+            WORKSPACE_PYTHON_USER_BASE_RELATIVE_PATH,
+        ),
+        pip_cache: join_relative_components(workspace_root, WORKSPACE_PIP_CACHE_RELATIVE_PATH),
+    })
+}
+
+fn join_relative_components(root: &Path, components: &[&str]) -> PathBuf {
+    components.iter().fold(root.to_path_buf(), |path, component| path.join(component))
+}
+
+fn is_python_runtime_command(process_command: &str) -> bool {
+    let command = normalized_process_command_name(process_command);
+    matches!(command.as_str(), "py" | "pip" | "pip3")
+        || command == "python"
+        || command == "python3"
+        || command.starts_with("python3.")
 }
 
 fn is_palyra_cli_program(program: &Path) -> bool {
@@ -4826,6 +4899,30 @@ mod tests {
         assert!(stdout.contains("batch-wrapper:world"), "{stdout:?}");
 
         let _ = fs::remove_dir_all(workspace.as_path());
+    }
+
+    #[test]
+    fn workspace_python_environment_scopes_userbase_and_cache_to_workspace() {
+        let workspace = PathBuf::from("workspace-root");
+        let environment = super::workspace_python_environment("python", workspace.as_path())
+            .expect("python commands should receive workspace-local Python environment");
+
+        assert_eq!(environment.user_base, workspace.join(".palyra").join("python-userbase"));
+        assert_eq!(environment.pip_cache, workspace.join(".palyra").join("pip-cache"));
+    }
+
+    #[test]
+    fn workspace_python_environment_covers_pip_and_versioned_python_commands() {
+        for command in ["python", "python3", "python3.14", "py", "pip", "pip3"] {
+            assert!(
+                super::workspace_python_environment(command, Path::new("workspace-root")).is_some(),
+                "{command} should be treated as a Python runtime command"
+            );
+        }
+        assert!(
+            super::workspace_python_environment("npm", Path::new("workspace-root")).is_none(),
+            "non-Python commands should not receive Python-specific environment"
+        );
     }
 
     #[test]
