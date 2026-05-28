@@ -43,14 +43,15 @@ use super::vault::vault_get_requires_approval;
 use super::{
     best_effort_mark_approval_error, common_v1, constant_time_eq,
     enforce_vault_get_approval_policy, enforce_vault_scope_access, ingest_memory_best_effort,
-    process_runner_input_should_use_active_root, process_runner_workspace_root_for_input,
-    resolve_cron_job_channel_for_create, tool_approval_response_proposal_id,
-    workspace_patch_metrics_from_output, CachedMemorySearchEntry, GatewayAuthConfig,
-    GatewayJournalConfigSnapshot, GatewayRuntimeConfigSnapshot, GatewayRuntimeState,
-    MemoryRuntimeConfig, ProviderRequest, RequestContext, ToolApprovalOutcome,
+    matching_tool_approval_response_id, process_runner_input_should_use_active_root,
+    process_runner_workspace_root_for_input, resolve_cron_job_channel_for_create,
+    tool_approval_response_proposal_id, workspace_patch_metrics_from_output,
+    CachedMemorySearchEntry, GatewayAuthConfig, GatewayJournalConfigSnapshot,
+    GatewayRuntimeConfigSnapshot, GatewayRuntimeState, MemoryRuntimeConfig, ProviderRequest,
+    RequestContext, ToolApprovalOutcome, APPROVAL_PROMPT_TIMEOUT_SECONDS,
     CANVAS_PATCH_HISTORY_RESPONSE_ROW_LIMIT, HEADER_CHANNEL, HEADER_DEVICE_ID, HEADER_PRINCIPAL,
-    MAX_APPROVAL_PAGE_LIMIT, VAULT_RATE_LIMIT_MAX_PRINCIPAL_BUCKETS,
-    VAULT_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW,
+    MAX_APPROVAL_PAGE_LIMIT, TOOL_APPROVAL_RESPONSE_TIMEOUT,
+    VAULT_RATE_LIMIT_MAX_PRINCIPAL_BUCKETS, VAULT_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW,
 };
 use crate::application::run_stream::orchestration::{
     finalize_run_stream_after_provider_response, RunStreamPostProviderOutcome,
@@ -3821,6 +3822,79 @@ fn tool_approval_response_proposal_id_accepts_provider_tool_call_ids() {
     .expect("provider tool-call ids should be treated as opaque proposal ids");
 
     assert_eq!(proposal_id, "toolu_01abcDEF_provider");
+}
+
+#[test]
+fn matching_tool_approval_response_id_ignores_stale_proposal_responses() {
+    let response = common_v1::ToolApprovalResponse {
+        proposal_id: Some(common_v1::CanonicalId { ulid: "previous-proposal".to_owned() }),
+        approved: true,
+        reason: "late approval".to_owned(),
+        approval_id: Some(common_v1::CanonicalId { ulid: "01ARZ3NDEKTSV4RRFFQ69G5FB0".to_owned() }),
+        decision_scope: common_v1::ApprovalDecisionScope::Once as i32,
+        decision_scope_ttl_ms: 0,
+    };
+
+    let matched = matching_tool_approval_response_id(
+        &response,
+        "current-proposal",
+        "01ARZ3NDEKTSV4RRFFQ69G5FB0",
+    )
+    .expect("stale proposal ids should not fail the active approval stream");
+
+    assert!(matched.is_none(), "stale responses should be ignored");
+}
+
+#[test]
+fn matching_tool_approval_response_id_ignores_stale_approval_responses() {
+    let response = common_v1::ToolApprovalResponse {
+        proposal_id: Some(common_v1::CanonicalId { ulid: "toolu_current".to_owned() }),
+        approved: true,
+        reason: "late approval".to_owned(),
+        approval_id: Some(common_v1::CanonicalId { ulid: "01ARZ3NDEKTSV4RRFFQ69G5FB0".to_owned() }),
+        decision_scope: common_v1::ApprovalDecisionScope::Once as i32,
+        decision_scope_ttl_ms: 0,
+    };
+
+    let matched = matching_tool_approval_response_id(
+        &response,
+        "toolu_current",
+        "01ARZ3NDEKTSV4RRFFQ69G5FB1",
+    )
+    .expect("stale approval ids should not fail the active approval stream");
+
+    assert!(matched.is_none(), "stale responses should be ignored");
+}
+
+#[test]
+fn matching_tool_approval_response_id_defaults_missing_approval_id_to_pending_id() {
+    let pending_approval_id = "01ARZ3NDEKTSV4RRFFQ69G5FB0";
+    let response = common_v1::ToolApprovalResponse {
+        proposal_id: Some(common_v1::CanonicalId { ulid: "toolu_current".to_owned() }),
+        approved: true,
+        reason: "approval".to_owned(),
+        approval_id: None,
+        decision_scope: common_v1::ApprovalDecisionScope::Once as i32,
+        decision_scope_ttl_ms: 0,
+    };
+
+    let matched =
+        matching_tool_approval_response_id(&response, "toolu_current", pending_approval_id)
+            .expect("legacy clients may omit approval_id for the active proposal");
+
+    assert_eq!(matched.as_deref(), Some(pending_approval_id));
+}
+
+#[test]
+fn tool_approval_prompt_timeout_allows_human_review() {
+    assert_eq!(
+        TOOL_APPROVAL_RESPONSE_TIMEOUT.as_secs(),
+        u64::from(APPROVAL_PROMPT_TIMEOUT_SECONDS)
+    );
+    assert!(
+        APPROVAL_PROMPT_TIMEOUT_SECONDS >= 15 * 60,
+        "interactive approvals should leave time for a real user to review a tool request"
+    );
 }
 
 #[test]

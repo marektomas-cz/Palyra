@@ -172,9 +172,10 @@ pub(crate) const MEMORY_SEARCH_LATENCY_BUDGET_MS: u128 = 75;
 pub(crate) const MEMORY_SEARCH_CACHE_CAPACITY: usize = 128;
 pub(crate) const MEMORY_AUTO_INJECT_MIN_SCORE: f64 = 0.2;
 pub(crate) const APPROVAL_POLICY_ID: &str = "tool_call_policy.v1";
-pub(crate) const APPROVAL_PROMPT_TIMEOUT_SECONDS: u32 = 60;
+pub(crate) const APPROVAL_PROMPT_TIMEOUT_SECONDS: u32 = 15 * 60;
 pub(crate) const APPROVAL_REQUEST_SUMMARY_MAX_BYTES: usize = 1024;
-pub(crate) const TOOL_APPROVAL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const TOOL_APPROVAL_RESPONSE_TIMEOUT: Duration =
+    Duration::from_secs(APPROVAL_PROMPT_TIMEOUT_SECONDS as u64);
 pub(crate) const SKILL_EXECUTION_DENY_REASON_PREFIX: &str =
     "skill execution blocked by security gate";
 pub(crate) const MEMORY_SEARCH_TOOL_NAME: &str = "palyra.memory.search";
@@ -361,6 +362,30 @@ pub(crate) fn tool_approval_response_proposal_id(
         .ok_or_else(|| Status::invalid_argument("tool_approval_response.proposal_id is required"))
 }
 
+pub(crate) fn matching_tool_approval_response_id(
+    response: &common_v1::ToolApprovalResponse,
+    proposal_id: &str,
+    approval_id: &str,
+) -> Result<Option<String>, Status> {
+    let response_proposal_id = tool_approval_response_proposal_id(response.proposal_id.clone())?;
+    if response_proposal_id != proposal_id {
+        return Ok(None);
+    }
+    if let Some(response_approval_id) =
+        response.approval_id.clone().and_then(|value| non_empty(value.ulid))
+    {
+        validate_canonical_id(response_approval_id.as_str()).map_err(|_| {
+            Status::invalid_argument("tool_approval_response.approval_id must be a canonical ULID")
+        })?;
+        if response_approval_id != approval_id {
+            return Ok(None);
+        }
+        Ok(Some(response_approval_id))
+    } else {
+        Ok(Some(approval_id.to_owned()))
+    }
+}
+
 #[allow(clippy::result_large_err)]
 pub(crate) async fn await_tool_approval_response(
     stream: &mut Streaming<common_v1::RunStreamRequest>,
@@ -398,28 +423,10 @@ pub(crate) async fn await_tool_approval_response(
         let Some(response) = message.tool_approval_response else {
             continue;
         };
-        let response_proposal_id = tool_approval_response_proposal_id(response.proposal_id)?;
-        if response_proposal_id != proposal_id {
-            return Err(Status::invalid_argument(
-                "tool approval response proposal_id does not match pending tool proposal",
-            ));
-        }
-        let response_approval_id = if let Some(response_approval_id) =
-            response.approval_id.and_then(|value| non_empty(value.ulid))
-        {
-            validate_canonical_id(response_approval_id.as_str()).map_err(|_| {
-                Status::invalid_argument(
-                    "tool_approval_response.approval_id must be a canonical ULID",
-                )
-            })?;
-            if response_approval_id != approval_id {
-                return Err(Status::invalid_argument(
-                    "tool approval response approval_id does not match pending approval record",
-                ));
-            }
-            response_approval_id
-        } else {
-            approval_id.to_owned()
+        let Some(response_approval_id) =
+            matching_tool_approval_response_id(&response, proposal_id, approval_id)?
+        else {
+            continue;
         };
 
         let reason = non_empty(response.reason).unwrap_or_else(|| {
