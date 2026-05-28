@@ -3409,7 +3409,7 @@ mod tests {
         let approval_policy = approval_policy_for_requested_schedule(
             RoutineTriggerKind::Schedule,
             CronScheduleType::Every,
-            json!({ "interval_ms": 60_000_u64 }).to_string().as_str(),
+            json!({ "interval_ms": 1_000_u64 }).to_string().as_str(),
             RoutineApprovalPolicy { mode: RoutineApprovalMode::None },
             true,
         );
@@ -3422,7 +3422,7 @@ mod tests {
         let approval_policy = approval_policy_for_requested_schedule(
             RoutineTriggerKind::Schedule,
             CronScheduleType::Every,
-            json!({ "interval_ms": 60_000_u64 }).to_string().as_str(),
+            json!({ "interval_ms": 1_000_u64 }).to_string().as_str(),
             RoutineApprovalPolicy { mode: RoutineApprovalMode::None },
             false,
         );

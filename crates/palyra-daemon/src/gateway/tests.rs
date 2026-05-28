@@ -4064,18 +4064,6 @@ async fn resolve_route_tool_approval_outcome_does_not_reuse_pending_record_acros
         })
         .await
         .expect("first run should be started for route approval test");
-    state
-        .start_orchestrator_run(OrchestratorRunStartRequest {
-            run_id: run_id_second.clone(),
-            session_id: session_id.clone(),
-            origin_kind: String::new(),
-            origin_run_id: None,
-            triggered_by_principal: None,
-            parameter_delta_json: None,
-        })
-        .await
-        .expect("second run should be started for route approval test");
-
     let backend_selection = default_backend_selection();
     let mut tape_seq_first = 1_i64;
     let first_resolution = resolve_route_tool_approval_outcome(
@@ -4095,6 +4083,26 @@ async fn resolve_route_tool_approval_outcome_does_not_reuse_pending_record_acros
     .expect("first route approval resolution should succeed");
     let first_approval_id =
         first_resolution.expect("expected pending approval resolution for first route");
+
+    state
+        .update_orchestrator_run_state(
+            run_id_first.clone(),
+            RunLifecycleState::Cancelled,
+            Some("route approval retry test cleanup".to_owned()),
+        )
+        .await
+        .expect("first run should be terminal before starting the retry run");
+    state
+        .start_orchestrator_run(OrchestratorRunStartRequest {
+            run_id: run_id_second.clone(),
+            session_id: session_id.clone(),
+            origin_kind: String::new(),
+            origin_run_id: None,
+            triggered_by_principal: None,
+            parameter_delta_json: None,
+        })
+        .await
+        .expect("second run should be started for route approval test");
 
     let mut tape_seq_second = 1_i64;
     let second_resolution = resolve_route_tool_approval_outcome(

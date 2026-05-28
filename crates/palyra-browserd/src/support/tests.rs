@@ -6441,7 +6441,9 @@ fn http_request_path(request: &str) -> String {
 
 fn read_http_request(stream: &mut TcpStream) -> String {
     stream
-        .set_read_timeout(Some(Duration::from_secs(2)))
+        // Chromium can open idle preconnect sockets before sending a request; keep fixture
+        // servers from blocking long enough to starve the real request behind that socket.
+        .set_read_timeout(Some(Duration::from_millis(250)))
         .expect("read timeout should be configured");
     let mut output = Vec::new();
     let mut buffer = [0_u8; 1024];
