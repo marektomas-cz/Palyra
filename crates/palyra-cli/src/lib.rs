@@ -4791,9 +4791,9 @@ fn patch_input_hides_source_like_gitignore_paths(input_json: &[u8]) -> bool {
     if !patch_targets_gitignore(patch) {
         return false;
     }
-    patch.lines().any(|line| {
-        line.strip_prefix('+').is_some_and(|added| gitignore_pattern_hides_source_like_path(added))
-    })
+    patch
+        .lines()
+        .any(|line| line.strip_prefix('+').is_some_and(gitignore_pattern_hides_source_like_path))
 }
 
 fn patch_targets_gitignore(patch: &str) -> bool {

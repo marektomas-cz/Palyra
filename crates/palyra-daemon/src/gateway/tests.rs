@@ -3891,8 +3891,9 @@ fn tool_approval_prompt_timeout_allows_human_review() {
         TOOL_APPROVAL_RESPONSE_TIMEOUT.as_secs(),
         u64::from(APPROVAL_PROMPT_TIMEOUT_SECONDS)
     );
+    let configured_timeout = TOOL_APPROVAL_RESPONSE_TIMEOUT.as_secs();
     assert!(
-        APPROVAL_PROMPT_TIMEOUT_SECONDS >= 15 * 60,
+        configured_timeout >= 15 * 60,
         "interactive approvals should leave time for a real user to review a tool request"
     );
 }
