@@ -1976,26 +1976,80 @@ fn workspace_memory_retain_path(
     parsed: &Map<String, Value>,
     scope: WorkspaceMemoryRetainScope,
 ) -> Result<String, String> {
-    let raw_path = optional_trimmed_string(parsed.get("workspace_path"))
+    let explicit_raw_path = optional_trimmed_string(parsed.get("workspace_path"))
         .or_else(|| optional_trimmed_string(parsed.get("workspace_prefix")))
-        .or_else(|| optional_trimmed_string(parsed.get("prefix")))
-        .unwrap_or_else(|| scope.default_path().to_owned());
-    let candidate = if workspace_memory_path_has_allowed_extension(raw_path.as_str()) {
-        raw_path
-    } else {
-        format!("{}/MEMORY.md", raw_path.trim_end_matches(&['/', '\\'][..]))
+        .or_else(|| optional_trimmed_string(parsed.get("prefix")));
+    let raw_path = explicit_raw_path.clone().unwrap_or_else(|| scope.default_path().to_owned());
+    let candidate = workspace_memory_document_candidate(raw_path.as_str());
+    let normalized = match normalize_workspace_path(candidate.as_str()) {
+        Ok(path_info) => path_info.normalized_path,
+        Err(error) => {
+            let Some(raw_path) = explicit_raw_path.as_deref() else {
+                return Err(format!(
+                    "workspace_path is not an allowed workspace document path: {error}"
+                ));
+            };
+            let Some(project_candidate) = workspace_memory_project_document_candidate(raw_path)
+            else {
+                return Err(format!(
+                    "workspace_path is not an allowed workspace document path: {error}"
+                ));
+            };
+            normalize_workspace_path(project_candidate.as_str())
+                .map_err(|fallback_error| {
+                    format!(
+                        "workspace_path is not an allowed workspace document path: {error}; \
+                         project/workspace prefix mapping failed: {fallback_error}"
+                    )
+                })?
+                .normalized_path
+        }
     };
-    let normalized = normalize_workspace_path(candidate.as_str())
-        .map_err(|error| {
-            format!("workspace_path is not an allowed workspace document path: {error}")
-        })?
-        .normalized_path;
     if scope == WorkspaceMemoryRetainScope::Project && !normalized.starts_with("projects/") {
         return Err(
             "scope=project requires workspace_path or workspace_prefix under projects/".to_owned()
         );
     }
     Ok(normalized)
+}
+
+fn workspace_memory_document_candidate(raw_path: &str) -> String {
+    if workspace_memory_path_has_allowed_extension(raw_path) {
+        raw_path.to_owned()
+    } else {
+        format!("{}/MEMORY.md", raw_path.trim_end_matches(&['/', '\\'][..]))
+    }
+}
+
+fn workspace_memory_project_document_candidate(raw_path: &str) -> Option<String> {
+    let target = workspace_memory_project_target(raw_path)?;
+    let candidate = if workspace_memory_path_has_allowed_extension(target.as_str()) {
+        format!("projects/{target}")
+    } else {
+        let project_target = format!("projects/{target}");
+        format!("{}/MEMORY.md", project_target.trim_end_matches('/'))
+    };
+    Some(candidate)
+}
+
+fn workspace_memory_project_target(raw_path: &str) -> Option<String> {
+    let trimmed = raw_path.trim().trim_matches('"').trim_matches('\'').trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let normalized = trimmed.replace('\\', "/");
+    let absolute_like = normalized.starts_with('/')
+        || normalized.as_bytes().get(1).is_some_and(|value| *value == b':')
+        || normalized.contains(":/");
+    let segments = normalized
+        .split('/')
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty() && *segment != ".")
+        .collect::<Vec<_>>();
+    if absolute_like {
+        return segments.last().map(|segment| (*segment).to_owned());
+    }
+    (!segments.is_empty()).then(|| segments.join("/"))
 }
 
 fn workspace_memory_path_has_allowed_extension(path: &str) -> bool {
@@ -2658,6 +2712,46 @@ mod tests {
             workspace_memory_retain_path(&outside_project, WorkspaceMemoryRetainScope::Project)
                 .expect_err("project scope must stay under projects/");
         assert!(error.contains("scope=project"), "{error}");
+    }
+
+    #[test]
+    fn workspace_memory_retain_path_accepts_unscoped_project_prefixes() {
+        let mut with_scenario_prefix = Map::new();
+        with_scenario_prefix.insert("workspace_prefix".to_owned(), json!("S035-20260527"));
+        assert_eq!(
+            workspace_memory_retain_path(
+                &with_scenario_prefix,
+                WorkspaceMemoryRetainScope::Project
+            )
+            .expect("bare project prefix should map under projects"),
+            "projects/S035-20260527/MEMORY.md"
+        );
+
+        let mut with_nested_workspace_file = Map::new();
+        with_nested_workspace_file
+            .insert("workspace_path".to_owned(), json!("scenario-s035/notes.md"));
+        assert_eq!(
+            workspace_memory_retain_path(
+                &with_nested_workspace_file,
+                WorkspaceMemoryRetainScope::Workspace
+            )
+            .expect("bare workspace document path should map under projects"),
+            "projects/scenario-s035/notes.md"
+        );
+    }
+
+    #[test]
+    fn workspace_memory_retain_path_maps_absolute_workspace_roots_to_project_basename() {
+        for raw_path in [r"C:\agent-workspaces\S035-20260527", "/agent-workspaces/S035-20260527"] {
+            let mut parsed = Map::new();
+            parsed.insert("workspace_path".to_owned(), json!(raw_path));
+
+            assert_eq!(
+                workspace_memory_retain_path(&parsed, WorkspaceMemoryRetainScope::Project)
+                    .expect("absolute workspace roots should map to logical project memory"),
+                "projects/S035-20260527/MEMORY.md"
+            );
+        }
     }
 
     #[test]

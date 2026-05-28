@@ -163,11 +163,11 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
                     ("scope", json!({"type":"string","enum":["session","channel","principal","workspace","project"],"description":"Defaults to session. Use principal for remembered preferences, corrections, and facts that should be available in future sessions. Use workspace or project to write indexed workspace/project memory documents."})),
                     (
                         "workspace_path",
-                        json!({"type":"string","description":"Exact workspace document path for scope=workspace or scope=project. Defaults to MEMORY.md for workspace and projects/default/MEMORY.md for project."}),
+                        json!({"type":"string","description":"Exact workspace document path for scope=workspace or scope=project. Defaults to MEMORY.md for workspace and projects/default/MEMORY.md for project. Bare project/workspace names and absolute workspace roots map to projects/<name>/MEMORY.md."}),
                     ),
                     (
                         "workspace_prefix",
-                        json!({"type":"string","description":"Workspace/project directory or document path for scope=workspace or scope=project. Directory prefixes write to MEMORY.md below that prefix."}),
+                        json!({"type":"string","description":"Workspace/project directory or document path for scope=workspace or scope=project. Directory prefixes write to MEMORY.md below that prefix; bare names and absolute workspace roots map under projects/."}),
                     ),
                     (
                         "prefix",
@@ -209,11 +209,11 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
                     ("scope", json!({"type":"string","enum":["session","channel","principal","workspace","project"],"description":"Defaults to session. Use principal for remembered preferences, corrections, and facts that should be available in future sessions. Use workspace or project to write indexed workspace/project memory documents."})),
                     (
                         "workspace_path",
-                        json!({"type":"string","description":"Exact workspace document path for scope=workspace or scope=project. Defaults to MEMORY.md for workspace and projects/default/MEMORY.md for project."}),
+                        json!({"type":"string","description":"Exact workspace document path for scope=workspace or scope=project. Defaults to MEMORY.md for workspace and projects/default/MEMORY.md for project. Bare project/workspace names and absolute workspace roots map to projects/<name>/MEMORY.md."}),
                     ),
                     (
                         "workspace_prefix",
-                        json!({"type":"string","description":"Workspace/project directory or document path for scope=workspace or scope=project. Directory prefixes write to MEMORY.md below that prefix."}),
+                        json!({"type":"string","description":"Workspace/project directory or document path for scope=workspace or scope=project. Directory prefixes write to MEMORY.md below that prefix; bare names and absolute workspace roots map under projects/."}),
                     ),
                     (
                         "prefix",
