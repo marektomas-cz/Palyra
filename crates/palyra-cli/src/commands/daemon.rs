@@ -46,10 +46,14 @@ fn proto_enum_label(name: &str, prefix: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        journal_event_actor_label, journal_event_kind_label, read_remote_dashboard_assist_payload,
+        enrich_gateway_service_action_error, gateway_runtime_root_selection,
+        is_desktop_runtime_state_root, journal_event_actor_label, journal_event_kind_label,
+        read_remote_dashboard_assist_payload,
     };
     use crate::common_v1;
     use serde_json::json;
+    use std::fs;
+    use tempfile::tempdir;
 
     #[test]
     fn journal_recent_labels_known_proto_enums() {
@@ -71,6 +75,56 @@ mod tests {
             "remote_assist": { "trust_state": "verified" }
         }))
         .is_some());
+    }
+
+    #[test]
+    fn gateway_runtime_root_selection_prefers_existing_desktop_runtime_child() {
+        let temp = tempdir().expect("tempdir should be created");
+        let state_root = temp.path().join("state");
+        let desktop_runtime = state_root.join("desktop-control-center").join("runtime");
+        fs::create_dir_all(desktop_runtime.as_path())
+            .expect("desktop runtime directory should be created");
+
+        let selection = gateway_runtime_root_selection(state_root.as_path());
+
+        assert_eq!(selection.requested, state_root);
+        assert_eq!(selection.effective, desktop_runtime);
+        assert!(selection.note.as_deref().is_some_and(|note| {
+            note.contains("desktop-control-center runtime state detected")
+        }));
+    }
+
+    #[test]
+    fn gateway_runtime_root_selection_keeps_explicit_desktop_runtime_root() {
+        let state_root =
+            std::path::PathBuf::from("state").join("desktop-control-center").join("runtime");
+
+        let selection = gateway_runtime_root_selection(state_root.as_path());
+
+        assert_eq!(selection.requested, state_root);
+        assert_eq!(selection.effective, selection.requested);
+        assert!(selection.note.is_none());
+        assert!(is_desktop_runtime_state_root(selection.effective.as_path()));
+    }
+
+    #[test]
+    fn gateway_service_action_error_mentions_desktop_runtime_root() {
+        let temp = tempdir().expect("tempdir should be created");
+        let state_root = temp.path().join("state");
+        let desktop_runtime = state_root.join("desktop-control-center").join("runtime");
+        fs::create_dir_all(desktop_runtime.as_path())
+            .expect("desktop runtime directory should be created");
+
+        let error = enrich_gateway_service_action_error(
+            state_root.as_path(),
+            "restart",
+            anyhow::anyhow!("precondition failed: no managed gateway service metadata exists"),
+        );
+        let message = error.to_string();
+
+        assert!(message.contains("desktop-control-center runtime state root"), "{message}");
+        assert!(message.contains("gateway restart"), "{message}");
+        assert!(message.contains("--state-root"), "{message}");
     }
 }
 
@@ -639,11 +693,22 @@ pub(crate) fn run_daemon(command: DaemonCommand) -> Result<()> {
 #[derive(Debug, Serialize)]
 struct GatewayStatusReport {
     daemon_url: String,
+    state_root: String,
+    effective_state_root: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state_root_note: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     health: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     health_error: Option<String>,
     service: support::service::GatewayServiceStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GatewayRuntimeRootSelection {
+    requested: PathBuf,
+    effective: PathBuf,
+    note: Option<String>,
 }
 
 pub(crate) fn resolve_palyrad_binary(bin_path: Option<String>) -> Result<PathBuf> {
@@ -676,12 +741,13 @@ pub(crate) fn resolve_palyrad_binary(bin_path: Option<String>) -> Result<PathBuf
 
 fn run_gateway_foreground(bin_path: Option<String>) -> Result<()> {
     let context = root_context()?;
+    let runtime_root = gateway_runtime_root_selection(context.state_root());
     let binary = resolve_palyrad_binary(bin_path)?;
     let mut command = std::process::Command::new(&binary);
     if let Some(config_path) = context.config_path() {
         command.env("PALYRA_CONFIG", config_path);
     }
-    command.env("PALYRA_STATE_ROOT", context.state_root());
+    command.env("PALYRA_STATE_ROOT", runtime_root.effective.as_path());
 
     let status = command.status().with_context(|| {
         format!("failed to start palyrad foreground process {}", binary.display())
@@ -718,12 +784,13 @@ fn run_gateway_install(
 fn run_gateway_service_action(action: &str) -> Result<()> {
     let context = root_context()?;
     let status = match action {
-        "start" => support::service::start_gateway_service(context.state_root())?,
-        "stop" => support::service::stop_gateway_service(context.state_root())?,
-        "restart" => support::service::restart_gateway_service(context.state_root())?,
-        "uninstall" => support::service::uninstall_gateway_service(context.state_root())?,
+        "start" => support::service::start_gateway_service(context.state_root()),
+        "stop" => support::service::stop_gateway_service(context.state_root()),
+        "restart" => support::service::restart_gateway_service(context.state_root()),
+        "uninstall" => support::service::uninstall_gateway_service(context.state_root()),
         _ => anyhow::bail!("unsupported gateway service action `{action}`"),
-    };
+    }
+    .map_err(|error| enrich_gateway_service_action_error(context.state_root(), action, error))?;
     emit_gateway_service_status(format!("gateway.{action}").as_str(), &status)
 }
 
@@ -778,6 +845,7 @@ fn emit_gateway_service_status(
 
 fn run_gateway_status(url: Option<String>, json: bool) -> Result<()> {
     let context = root_context()?;
+    let runtime_root = gateway_runtime_root_selection(context.state_root());
     let connection = context.resolve_http_connection(
         app::ConnectionOverrides { daemon_url: url, ..app::ConnectionOverrides::default() },
         app::ConnectionDefaults::USER,
@@ -787,8 +855,8 @@ fn run_gateway_status(url: Option<String>, json: bool) -> Result<()> {
         .timeout(std::time::Duration::from_secs(2))
         .build()
         .context("failed to build HTTP client")?;
-    let service = support::service::query_gateway_service_status(context.state_root()).unwrap_or(
-        support::service::GatewayServiceStatus {
+    let service = support::service::query_gateway_service_status(runtime_root.effective.as_path())
+        .unwrap_or(support::service::GatewayServiceStatus {
             installed: false,
             running: false,
             enabled: false,
@@ -798,8 +866,7 @@ fn run_gateway_status(url: Option<String>, json: bool) -> Result<()> {
             stdout_log_path: None,
             stderr_log_path: None,
             detail: Some("service status unavailable".to_owned()),
-        },
-    );
+        });
     let (health, health_error) = match fetch_health_with_retry(&client, &status_url) {
         Ok(response) => (
             Some(json!({
@@ -814,8 +881,15 @@ fn run_gateway_status(url: Option<String>, json: bool) -> Result<()> {
         Err(error) => (None, Some(sanitize_diagnostic_error(error.to_string().as_str()))),
     };
 
-    let report =
-        GatewayStatusReport { daemon_url: connection.base_url, health, health_error, service };
+    let report = GatewayStatusReport {
+        daemon_url: connection.base_url,
+        state_root: runtime_root.requested.display().to_string(),
+        effective_state_root: runtime_root.effective.display().to_string(),
+        state_root_note: runtime_root.note,
+        health,
+        health_error,
+        service,
+    };
     if output::preferred_json(json) {
         return output::print_json_pretty(
             &report,
@@ -834,8 +908,10 @@ fn run_gateway_status(url: Option<String>, json: bool) -> Result<()> {
         .and_then(Value::as_str)
         .unwrap_or("unavailable");
     println!(
-        "gateway.status daemon_url={} runtime_running={} runtime_health={} service_installed={} service_running={} service_enabled={} manager={} service_name={}",
+        "gateway.status daemon_url={} state_root={} effective_state_root={} runtime_running={} runtime_health={} service_installed={} service_running={} service_enabled={} manager={} service_name={}",
         report.daemon_url,
+        report.state_root,
+        report.effective_state_root,
         report.health.is_some(),
         runtime_health,
         report.service.installed,
@@ -860,7 +936,70 @@ fn run_gateway_status(url: Option<String>, json: bool) -> Result<()> {
     if let Some(detail) = report.service.detail.as_deref() {
         println!("gateway.status.service_detail={detail}");
     }
+    if let Some(note) = report.state_root_note.as_deref() {
+        println!("gateway.status.state_root_note={note}");
+    }
     std::io::stdout().flush().context("stdout flush failed")
+}
+
+fn gateway_runtime_root_selection(requested: &Path) -> GatewayRuntimeRootSelection {
+    if is_desktop_runtime_state_root(requested) {
+        return GatewayRuntimeRootSelection {
+            requested: requested.to_path_buf(),
+            effective: requested.to_path_buf(),
+            note: None,
+        };
+    }
+    let desktop_runtime = desktop_runtime_state_root(requested);
+    if desktop_runtime.is_dir() {
+        return GatewayRuntimeRootSelection {
+            requested: requested.to_path_buf(),
+            effective: desktop_runtime.clone(),
+            note: Some(format!(
+                "desktop-control-center runtime state detected under {}; gateway foreground/status commands target {}",
+                requested.display(),
+                desktop_runtime.display()
+            )),
+        };
+    }
+    GatewayRuntimeRootSelection {
+        requested: requested.to_path_buf(),
+        effective: requested.to_path_buf(),
+        note: None,
+    }
+}
+
+fn enrich_gateway_service_action_error(
+    requested_state_root: &Path,
+    action: &str,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    let desktop_runtime = desktop_runtime_state_root(requested_state_root);
+    if !desktop_runtime.is_dir() {
+        return error;
+    }
+    anyhow!(
+        "{error:#}\nDetected desktop-control-center runtime state root at {}. `palyra gateway {action}` controls only a managed service installed with `palyra gateway install`; for this desktop-managed runtime, restart the desktop app/test harness or run `palyra --state-root \"{}\" gateway run`.",
+        desktop_runtime.display(),
+        desktop_runtime.display()
+    )
+}
+
+fn desktop_runtime_state_root(state_root: &Path) -> PathBuf {
+    state_root.join("desktop-control-center").join("runtime")
+}
+
+fn is_desktop_runtime_state_root(state_root: &Path) -> bool {
+    let Some(runtime_dir) = state_root.file_name().and_then(|value| value.to_str()) else {
+        return false;
+    };
+    let Some(desktop_dir) =
+        state_root.parent().and_then(|parent| parent.file_name()).and_then(|value| value.to_str())
+    else {
+        return false;
+    };
+    runtime_dir.eq_ignore_ascii_case("runtime")
+        && desktop_dir.eq_ignore_ascii_case("desktop-control-center")
 }
 
 fn collect_gateway_health(
