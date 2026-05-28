@@ -14,7 +14,11 @@ use std::{
 };
 
 #[cfg(windows)]
-use std::{collections::HashMap, os::windows::io::AsRawHandle, sync::OnceLock};
+use std::{
+    collections::HashMap,
+    os::windows::{io::AsRawHandle, process::CommandExt},
+    sync::OnceLock,
+};
 
 #[cfg(windows)]
 use windows_sys::Win32::{
@@ -1176,19 +1180,15 @@ fn normalize_process_executable_token(value: &str) -> String {
 
 fn validate_cmd_invocation_shape(
     command: &str,
-    args: &[String],
+    _args: &[String],
 ) -> Result<(), SandboxProcessRunError> {
     if normalized_process_command_name(command) != "cmd" {
-        return Ok(());
-    }
-    let first_arg = args.first().map(|arg| arg.trim().to_ascii_lowercase());
-    if matches!(first_arg.as_deref(), Some("/c" | "/k")) {
         return Ok(());
     }
 
     Err(SandboxProcessRunError {
         kind: SandboxProcessRunErrorKind::InvalidInput,
-        message: "palyra.process.run command='cmd' requires an explicit /c or /k mode; for ordinary commands, call the executable directly with split args instead of routing through cmd".to_owned(),
+        message: "palyra.process.run does not accept explicit command='cmd'; call the target executable directly with split args. On Windows, .cmd and .bat shims resolved from the workspace cwd or PATH are wrapped safely by the process runner.".to_owned(),
     })
 }
 
@@ -3281,10 +3281,9 @@ fn build_process_command(
     cwd: &Path,
 ) -> Result<Command, SandboxProcessRunError> {
     if process_runner_allows_host_access(policy) {
-        let program = resolve_tier_b_process_program(input.command.as_str());
+        let program = resolve_tier_b_process_program(input.command.as_str(), cwd);
         let args = rewrite_host_virtual_workspace_args(input.args.as_slice(), workspace_root)?;
-        let mut command = Command::new(program.as_path());
-        command.args(args.as_slice()).current_dir(cwd);
+        let mut command = build_tier_b_process_command(program.as_path(), args.as_slice(), cwd)?;
         configure_host_access_process_environment(&mut command, program.as_path());
         return Ok(command);
     }
@@ -3322,11 +3321,27 @@ fn build_process_command(
         return Ok(command);
     }
 
-    let program = resolve_tier_b_process_program(input.command.as_str());
-    let mut command = Command::new(program.as_path());
-    command.args(scoped_args.as_slice()).current_dir(cwd);
+    let program = resolve_tier_b_process_program(input.command.as_str(), cwd);
+    let mut command = build_tier_b_process_command(program.as_path(), scoped_args.as_slice(), cwd)?;
     configure_tier_b_process_environment(&mut command, program.as_path(), policy);
     Ok(command)
+}
+
+fn build_tier_b_process_command(
+    program: &Path,
+    args: &[String],
+    cwd: &Path,
+) -> Result<Command, SandboxProcessRunError> {
+    #[cfg(windows)]
+    {
+        return build_windows_tier_b_process_command(program, args, cwd);
+    }
+    #[cfg(not(windows))]
+    {
+        let mut command = Command::new(program);
+        command.args(args).current_dir(cwd);
+        Ok(command)
+    }
 }
 
 fn configure_tier_b_process_environment(
@@ -3394,25 +3409,30 @@ fn infer_desktop_cli_profiles_path(state_root: &Path) -> Option<PathBuf> {
     state_root.parent()?.parent().map(|root| root.join(CLI_PROFILES_RELATIVE_PATH))
 }
 
-fn resolve_tier_b_process_program(command: &str) -> PathBuf {
+fn resolve_tier_b_process_program(command: &str, cwd: &Path) -> PathBuf {
     #[cfg(windows)]
     {
-        resolve_windows_path_program(command).unwrap_or_else(|| PathBuf::from(command))
+        resolve_windows_process_program(command, cwd).unwrap_or_else(|| PathBuf::from(command))
     }
     #[cfg(not(windows))]
     {
+        let _ = cwd;
         PathBuf::from(command)
     }
 }
 
 #[cfg(windows)]
-fn resolve_windows_path_program(command: &str) -> Option<PathBuf> {
+fn resolve_windows_process_program(command: &str, cwd: &Path) -> Option<PathBuf> {
     let command_path = Path::new(command);
     if command_path.components().count() != 1 {
         return None;
     }
 
-    windows_path_program_candidates(command).into_iter().next()
+    windows_command_candidates(command)
+        .into_iter()
+        .map(|candidate| cwd.join(candidate))
+        .find(|candidate| candidate.is_file())
+        .or_else(|| windows_path_program_candidates(command).into_iter().next())
 }
 
 #[cfg(windows)]
@@ -3463,6 +3483,96 @@ fn windows_command_candidates_from_pathext(command: &str, raw_pathext: &str) -> 
     }));
     candidates.push(command.to_owned());
     candidates
+}
+
+#[cfg(windows)]
+fn build_windows_tier_b_process_command(
+    program: &Path,
+    args: &[String],
+    cwd: &Path,
+) -> Result<Command, SandboxProcessRunError> {
+    if windows_program_requires_cmd_wrapper(program) {
+        let mut command = Command::new(windows_command_processor());
+        command.raw_arg(format!("/D /S /C {}", windows_cmd_wrapper_command_line(program, args)?));
+        command.current_dir(cwd);
+        return Ok(command);
+    }
+
+    let mut command = Command::new(program);
+    command.args(args).current_dir(cwd);
+    Ok(command)
+}
+
+#[cfg(windows)]
+fn windows_program_requires_cmd_wrapper(program: &Path) -> bool {
+    program.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| {
+        extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
+    })
+}
+
+#[cfg(windows)]
+fn windows_command_processor() -> PathBuf {
+    std::env::var_os("COMSPEC")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows\System32\cmd.exe"))
+}
+
+#[cfg(windows)]
+fn windows_cmd_wrapper_command_line(
+    program: &Path,
+    args: &[String],
+) -> Result<String, SandboxProcessRunError> {
+    let program = windows_cmd_compatible_path_string(program);
+    let mut command_line = String::from("\"");
+    command_line.push_str(windows_cmd_wrapper_quote_arg(program.as_str())?.as_str());
+    for arg in args {
+        command_line.push(' ');
+        command_line.push_str(windows_cmd_wrapper_quote_arg(arg.as_str())?.as_str());
+    }
+    command_line.push('"');
+    Ok(command_line)
+}
+
+#[cfg(windows)]
+fn windows_cmd_compatible_path_string(path: &Path) -> String {
+    windows_deverbatim_path_string(path).unwrap_or_else(|| path.to_string_lossy().into_owned())
+}
+
+#[cfg(windows)]
+fn windows_deverbatim_path_string(path: &Path) -> Option<String> {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    let lower = normalized.to_ascii_lowercase();
+    let deverbatim = if lower.starts_with("//?/unc/") {
+        format!("//{}", &normalized[8..])
+    } else if lower.starts_with("//?/") || lower.starts_with("//./") {
+        normalized[4..].to_owned()
+    } else {
+        return None;
+    };
+    Some(deverbatim.replace('/', "\\"))
+}
+
+#[cfg(windows)]
+fn windows_cmd_wrapper_quote_arg(raw: &str) -> Result<String, SandboxProcessRunError> {
+    if raw.chars().any(|ch| matches!(ch, '\0' | '\r' | '\n' | '"' | '%' | '!')) {
+        return Err(SandboxProcessRunError {
+            kind: SandboxProcessRunErrorKind::InvalidInput,
+            message: "sandbox denied: Windows .cmd/.bat wrapper arguments cannot contain quotes, environment expansion markers, or newlines; pass safe split args or write a workspace script file".to_owned(),
+        });
+    }
+
+    let mut quoted = String::with_capacity(raw.len().saturating_add(2));
+    quoted.push('"');
+    for ch in raw.chars() {
+        if ch == '^' {
+            quoted.push_str("^^");
+        } else {
+            quoted.push(ch);
+        }
+    }
+    quoted.push('"');
+    Ok(quoted)
 }
 
 #[cfg(windows)]
@@ -4476,13 +4586,18 @@ mod tests {
     }
 
     #[test]
-    fn validate_cmd_invocation_rejects_missing_mode() {
-        let args = vec!["echo".to_owned(), "hello".to_owned()];
+    fn validate_cmd_invocation_rejects_explicit_shell_dispatch() {
+        let args = vec!["/c".to_owned(), "echo".to_owned(), "hello".to_owned()];
         let error = validate_cmd_invocation_shape("cmd", args.as_slice())
-            .expect_err("cmd without /c or /k should not look successful");
+            .expect_err("explicit cmd shell dispatch should not look successful");
 
         assert_eq!(error.kind, SandboxProcessRunErrorKind::InvalidInput);
-        assert!(error.message.contains("requires an explicit /c or /k"), "{}", error.message);
+        assert!(
+            error.message.contains("does not accept explicit command='cmd'"),
+            "{}",
+            error.message
+        );
+        assert!(error.message.contains(".cmd and .bat shims"), "{}", error.message);
     }
 
     #[test]
@@ -4650,6 +4765,67 @@ mod tests {
                 "npm".to_owned(),
             ]
         );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_cmd_wrapper_command_line_quotes_script_and_split_args() {
+        let command_line = super::windows_cmd_wrapper_command_line(
+            Path::new(r"C:\Tools\nodejs\npm.cmd"),
+            &["run".to_owned(), "test suite".to_owned()],
+        )
+        .expect("ordinary package-manager args should be representable for cmd wrapper");
+
+        assert_eq!(command_line, r#"""C:\Tools\nodejs\npm.cmd" "run" "test suite"""#);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_cmd_wrapper_deverbatims_canonical_script_paths() {
+        let command_line = super::windows_cmd_wrapper_command_line(
+            Path::new(r"\\?\C:\Tools\nodejs\npm.cmd"),
+            &["test".to_owned()],
+        )
+        .expect("canonical Windows paths should be representable for cmd wrapper");
+
+        assert_eq!(command_line, r#"""C:\Tools\nodejs\npm.cmd" "test"""#);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_cmd_wrapper_rejects_env_expansion_arguments() {
+        let error = super::windows_cmd_wrapper_command_line(
+            Path::new(r"C:\Tools\nodejs\npm.cmd"),
+            &["%USERPROFILE%".to_owned()],
+        )
+        .expect_err("cmd wrapper args should not permit environment expansion");
+
+        assert_eq!(error.kind, SandboxProcessRunErrorKind::InvalidInput);
+        assert!(error.message.contains("environment expansion markers"), "{}", error.message);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn host_access_process_runner_executes_workspace_cmd_script_through_wrapper() {
+        let workspace = unique_temp_dir("workspace-cmd-wrapper");
+        fs::create_dir_all(workspace.as_path()).expect("workspace directory should be created");
+        fs::write(workspace.join("hello.cmd"), b"@echo off\r\necho batch-wrapper:%~1\r\n")
+            .expect("workspace batch script should be written");
+        let policy = host_access_policy(workspace.clone());
+        let input = br#"{"command":"hello.cmd","args":["world"]}"#;
+
+        let result = run_constrained_process(&policy, input, Duration::from_millis(2_000))
+            .expect("workspace .cmd scripts should run through the safe cmd wrapper");
+        let output: serde_json::Value =
+            serde_json::from_slice(&result.output_json).expect("output should parse");
+        let stdout = output
+            .get("stdout")
+            .and_then(serde_json::Value::as_str)
+            .expect("stdout should be present in process output");
+
+        assert!(stdout.contains("batch-wrapper:world"), "{stdout:?}");
+
+        let _ = fs::remove_dir_all(workspace.as_path());
     }
 
     #[test]
