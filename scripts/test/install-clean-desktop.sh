@@ -8,9 +8,9 @@ Usage: scripts/test/install-clean-desktop.sh [options]
 Options:
   --workspace-root <path>  Override the clean desktop harness root.
   --skip-build            Reuse existing release binaries and web bundles.
-  --install-system-deps   Install missing Linux desktop build packages with apt-get. This is the default.
+  --install-system-deps   Install missing desktop build dependencies with apt-get/rustup. This is the default.
   --no-system-deps-install
-                          Check Linux desktop build packages but do not install them.
+                          Check desktop build dependencies but do not install them.
   --launch                Launch the installed desktop app after install.
   --no-launch             Install only; do not launch the desktop app.
   -h, --help              Show this help.
@@ -77,6 +77,28 @@ install_apt_packages() {
     sudo apt-get update
     sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y "${packages[@]}"
   fi
+}
+
+rustfmt_is_available() {
+  command -v rustfmt >/dev/null 2>&1 && rustfmt --version >/dev/null 2>&1
+}
+
+ensure_rustfmt_available() {
+  rustfmt_is_available && return 0
+  if [[ "$install_system_deps" == true ]] && command -v rustup >/dev/null 2>&1; then
+    echo "Installing missing Rust rustfmt component with rustup..." >&2
+    (
+      cd "$repo_root"
+      rustup component add rustfmt
+    )
+    rustfmt_is_available && return 0
+  fi
+  if command -v rustup >/dev/null 2>&1; then
+    die "rustfmt is required for release builds because headless_chrome generates CDP bindings during compilation.
+Run: rustup component add rustfmt
+Or rerun this script with --install-system-deps."
+  fi
+  die "rustfmt is required for release builds because headless_chrome generates CDP bindings during compilation. Install rustfmt for the active Rust toolchain and ensure it is on PATH."
 }
 
 ensure_linux_build_dependencies() {
@@ -496,6 +518,7 @@ mkdir -p "$workspace_root"
 if [[ "$skip_build" == false ]]; then
   require_tool cargo
   require_tool npm
+  ensure_rustfmt_available
   ensure_linux_build_dependencies
   mkdir -p "$cargo_target_root"
   (
