@@ -845,6 +845,7 @@ fn browser_tool_names() -> &'static [&'static str] {
         "palyra.browser.session.create",
         "palyra.browser.session.close",
         "palyra.browser.navigate",
+        "palyra.browser.reload",
         "palyra.browser.click",
         "palyra.browser.type",
         "palyra.browser.fill",
@@ -878,6 +879,7 @@ fn browser_tool_description(tool_name: &str) -> &'static str {
         "palyra.browser.session.create" => "Create a brokered browser session.",
         "palyra.browser.session.close" => "Close a brokered browser session.",
         "palyra.browser.navigate" => "Navigate a brokered browser session to a URL.",
+        "palyra.browser.reload" => "Reload the active tab in a brokered browser session.",
         "palyra.browser.click" => "Click an element in a brokered browser session.",
         "palyra.browser.type" => "Type text in a brokered browser session.",
         "palyra.browser.fill" => "Replace an element value in a brokered browser session.",
@@ -948,6 +950,23 @@ fn browser_tool_schema(tool_name: &str) -> Value {
                 }),
             ));
             required.push("url");
+        }
+        "palyra.browser.reload" => {
+            properties.push((
+                "allow_private_targets",
+                json!({
+                    "type":"boolean",
+                    "description":"Optional private-target access override for reloading a current URL that is explicitly authorized by runtime policy."
+                }),
+            ));
+            properties.push((
+                "allow_redirects",
+                json!({"type":"boolean","description":"Whether reload navigation may follow redirects. Defaults to true."}),
+            ));
+            properties.push((
+                "max_redirects",
+                json!({"type":"integer","minimum":0,"description":"Maximum redirects for reload navigation. Defaults to 3."}),
+            ));
         }
         "palyra.browser.click" | "palyra.browser.highlight" => {
             properties.push((
@@ -1328,6 +1347,15 @@ mod tests {
             .expect("private-target override description should be visible to models");
         assert!(private_override_description.contains("explicitly authorized by runtime policy"));
         assert!(!private_override_description.contains("Required when"));
+
+        let reload = registry_entry("palyra.browser.reload").expect("reload entry exists");
+        assert_eq!(
+            reload.input_schema.pointer("/required/0").and_then(serde_json::Value::as_str),
+            Some("session_id")
+        );
+        assert!(reload.input_schema.pointer("/properties/url").is_none());
+        assert!(reload.input_schema.pointer("/properties/allow_redirects").is_some());
+        assert!(reload.input_schema.pointer("/properties/max_redirects").is_some());
 
         let screenshot =
             registry_entry("palyra.browser.screenshot").expect("screenshot entry exists");

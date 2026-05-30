@@ -203,6 +203,7 @@ pub(crate) const TOOL_PROGRAM_RUN_TOOL_NAME: &str = "palyra.tool_program.run";
 pub(crate) const BROWSER_SESSION_CREATE_TOOL_NAME: &str = "palyra.browser.session.create";
 pub(crate) const BROWSER_SESSION_CLOSE_TOOL_NAME: &str = "palyra.browser.session.close";
 pub(crate) const BROWSER_NAVIGATE_TOOL_NAME: &str = "palyra.browser.navigate";
+pub(crate) const BROWSER_RELOAD_TOOL_NAME: &str = "palyra.browser.reload";
 pub(crate) const BROWSER_CLICK_TOOL_NAME: &str = "palyra.browser.click";
 pub(crate) const BROWSER_TYPE_TOOL_NAME: &str = "palyra.browser.type";
 pub(crate) const BROWSER_FILL_TOOL_NAME: &str = "palyra.browser.fill";

@@ -29,13 +29,13 @@ use crate::{
         BROWSER_DOWNLOADS_GET_TOOL_NAME, BROWSER_DOWNLOADS_LIST_TOOL_NAME, BROWSER_FILL_TOOL_NAME,
         BROWSER_HIGHLIGHT_TOOL_NAME, BROWSER_NAVIGATE_TOOL_NAME, BROWSER_NETWORK_LOG_TOOL_NAME,
         BROWSER_OBSERVE_TOOL_NAME, BROWSER_PDF_TOOL_NAME, BROWSER_PERMISSIONS_GET_TOOL_NAME,
-        BROWSER_PERMISSIONS_SET_TOOL_NAME, BROWSER_PRESS_TOOL_NAME, BROWSER_RESET_STATE_TOOL_NAME,
-        BROWSER_SCREENSHOT_TOOL_NAME, BROWSER_SCROLL_TOOL_NAME, BROWSER_SELECT_TOOL_NAME,
-        BROWSER_SESSION_CLOSE_TOOL_NAME, BROWSER_SESSION_CREATE_TOOL_NAME,
-        BROWSER_TABS_CLOSE_TOOL_NAME, BROWSER_TABS_LIST_TOOL_NAME, BROWSER_TABS_OPEN_TOOL_NAME,
-        BROWSER_TABS_SWITCH_TOOL_NAME, BROWSER_TITLE_TOOL_NAME, BROWSER_TYPE_TOOL_NAME,
-        BROWSER_UPLOAD_TOOL_NAME, BROWSER_VIEWPORT_TOOL_NAME, BROWSER_WAIT_FOR_TOOL_NAME,
-        MAX_BROWSER_TOOL_INPUT_BYTES,
+        BROWSER_PERMISSIONS_SET_TOOL_NAME, BROWSER_PRESS_TOOL_NAME, BROWSER_RELOAD_TOOL_NAME,
+        BROWSER_RESET_STATE_TOOL_NAME, BROWSER_SCREENSHOT_TOOL_NAME, BROWSER_SCROLL_TOOL_NAME,
+        BROWSER_SELECT_TOOL_NAME, BROWSER_SESSION_CLOSE_TOOL_NAME,
+        BROWSER_SESSION_CREATE_TOOL_NAME, BROWSER_TABS_CLOSE_TOOL_NAME,
+        BROWSER_TABS_LIST_TOOL_NAME, BROWSER_TABS_OPEN_TOOL_NAME, BROWSER_TABS_SWITCH_TOOL_NAME,
+        BROWSER_TITLE_TOOL_NAME, BROWSER_TYPE_TOOL_NAME, BROWSER_UPLOAD_TOOL_NAME,
+        BROWSER_VIEWPORT_TOOL_NAME, BROWSER_WAIT_FOR_TOOL_NAME, MAX_BROWSER_TOOL_INPUT_BYTES,
     },
     sandbox_runner::process_runner_allows_host_access,
     tool_protocol::{ToolAttestation, ToolExecutionOutcome},
@@ -64,6 +64,7 @@ fn browser_tool_requires_open_session(tool_name: &str) -> bool {
     matches!(
         tool_name,
         BROWSER_NAVIGATE_TOOL_NAME
+            | BROWSER_RELOAD_TOOL_NAME
             | BROWSER_CLICK_TOOL_NAME
             | BROWSER_TYPE_TOOL_NAME
             | BROWSER_FILL_TOOL_NAME
@@ -1021,6 +1022,180 @@ pub(crate) async fn execute_browser_tool(
                     false,
                     b"{}".to_vec(),
                     format!("palyra.browser.navigate failed: {}", sanitize_status_message(&error)),
+                ),
+            }
+        }
+        BROWSER_RELOAD_TOOL_NAME => {
+            let session_id = match parse_browser_tool_session_id(&payload) {
+                Ok(value) => value,
+                Err(error) => {
+                    return browser_tool_execution_outcome(
+                        proposal_id,
+                        input_json,
+                        false,
+                        b"{}".to_vec(),
+                        error,
+                    );
+                }
+            };
+            let mut get_request = Request::new(browser_v1::GetSessionRequest {
+                v: CANONICAL_PROTOCOL_MAJOR,
+                session_id: Some(common_v1::CanonicalId { ulid: session_id.clone() }),
+            });
+            if let Err(error) = attach_browser_auth_metadata(
+                &mut get_request,
+                runtime_state.config.browser_service.auth_token.as_deref(),
+            ) {
+                return browser_tool_execution_outcome(
+                    proposal_id,
+                    input_json,
+                    false,
+                    b"{}".to_vec(),
+                    error,
+                );
+            }
+            if let Err(error) =
+                attach_browser_caller_principal_metadata(&mut get_request, principal)
+            {
+                return browser_tool_execution_outcome(
+                    proposal_id,
+                    input_json,
+                    false,
+                    b"{}".to_vec(),
+                    error,
+                );
+            }
+            let current_url = match client.get_session(get_request).await {
+                Ok(response) => {
+                    let response = response.into_inner();
+                    if !response.success {
+                        let error = if response.error.trim().is_empty() {
+                            "session_not_found".to_owned()
+                        } else {
+                            response.error
+                        };
+                        return browser_tool_execution_outcome(
+                            proposal_id,
+                            input_json,
+                            false,
+                            json!({"success": false, "session_id": session_id, "error": error.clone()})
+                                .to_string()
+                                .into_bytes(),
+                            format!("palyra.browser.reload failed: {error}"),
+                        );
+                    }
+                    let Some(summary) = response.session.and_then(|session| session.summary) else {
+                        return browser_tool_execution_outcome(
+                            proposal_id,
+                            input_json,
+                            false,
+                            b"{}".to_vec(),
+                            "palyra.browser.reload failed: session response did not include active tab state"
+                                .to_owned(),
+                        );
+                    };
+                    let active_url = summary.active_tab_url.trim().to_owned();
+                    if active_url.is_empty() {
+                        return browser_tool_execution_outcome(
+                            proposal_id,
+                            input_json,
+                            false,
+                            json!({
+                                "success": false,
+                                "session_id": session_id,
+                                "error": "active_tab_url_missing"
+                            })
+                            .to_string()
+                            .into_bytes(),
+                            "palyra.browser.reload requires a previously navigated active tab"
+                                .to_owned(),
+                        );
+                    }
+                    active_url
+                }
+                Err(error) => {
+                    return browser_tool_execution_outcome(
+                        proposal_id,
+                        input_json,
+                        false,
+                        b"{}".to_vec(),
+                        format!(
+                            "palyra.browser.reload failed: {}",
+                            sanitize_status_message(&error)
+                        ),
+                    );
+                }
+            };
+            if let Err(error) = validate_browser_file_url_workspace_scope(
+                runtime_state,
+                context,
+                current_url.as_str(),
+            )
+            .await
+            {
+                return browser_tool_execution_outcome(
+                    proposal_id,
+                    input_json,
+                    false,
+                    b"{}".to_vec(),
+                    error,
+                );
+            }
+            let allow_private_targets = browser_tool_allows_private_targets_for_url(
+                runtime_state,
+                &payload,
+                current_url.as_str(),
+            ) || browser_url_uses_file_scheme(current_url.as_str());
+            let requested_url = redact_url(current_url.as_str());
+            let mut request = Request::new(browser_v1::NavigateRequest {
+                v: CANONICAL_PROTOCOL_MAJOR,
+                session_id: Some(common_v1::CanonicalId { ulid: session_id }),
+                url: current_url,
+                timeout_ms: payload.get("timeout_ms").and_then(Value::as_u64).unwrap_or(0),
+                allow_redirects: payload
+                    .get("allow_redirects")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
+                max_redirects: payload.get("max_redirects").and_then(Value::as_u64).unwrap_or(3)
+                    as u32,
+                allow_private_targets,
+            });
+            if let Err(error) = attach_browser_auth_metadata(
+                &mut request,
+                runtime_state.config.browser_service.auth_token.as_deref(),
+            ) {
+                return browser_tool_execution_outcome(
+                    proposal_id,
+                    input_json,
+                    false,
+                    b"{}".to_vec(),
+                    error,
+                );
+            }
+            match client.navigate(request).await {
+                Ok(response) => {
+                    let response = response.into_inner();
+                    let output = json!({
+                        "success": response.success,
+                        "reloaded": response.success,
+                        "requested_url": requested_url,
+                        "final_url": response.final_url,
+                        "status_code": response.status_code,
+                        "title": response.title,
+                        "body_bytes": response.body_bytes,
+                        "latency_ms": response.latency_ms,
+                        "error": response.error,
+                    });
+                    (
+                        response.success,
+                        serde_json::to_vec(&output).unwrap_or_else(|_| b"{}".to_vec()),
+                        if response.success { String::new() } else { response.error },
+                    )
+                }
+                Err(error) => (
+                    false,
+                    b"{}".to_vec(),
+                    format!("palyra.browser.reload failed: {}", sanitize_status_message(&error)),
                 ),
             }
         }
@@ -3639,7 +3814,7 @@ mod tests {
     };
     use crate::gateway::{
         BROWSER_CLICK_TOOL_NAME, BROWSER_DOWNLOADS_GET_TOOL_NAME, BROWSER_NAVIGATE_TOOL_NAME,
-        BROWSER_OBSERVE_TOOL_NAME, BROWSER_SESSION_CLOSE_TOOL_NAME,
+        BROWSER_OBSERVE_TOOL_NAME, BROWSER_RELOAD_TOOL_NAME, BROWSER_SESSION_CLOSE_TOOL_NAME,
         BROWSER_SESSION_CREATE_TOOL_NAME, BROWSER_TABS_CLOSE_TOOL_NAME,
     };
     use crate::transport::grpc::proto::palyra::browser::v1 as browser_v1;
@@ -3727,6 +3902,7 @@ mod tests {
         assert!(!browser_tool_requires_open_session(BROWSER_SESSION_CREATE_TOOL_NAME));
         assert!(!browser_tool_requires_open_session(BROWSER_SESSION_CLOSE_TOOL_NAME));
         assert!(browser_tool_requires_open_session(BROWSER_NAVIGATE_TOOL_NAME));
+        assert!(browser_tool_requires_open_session(BROWSER_RELOAD_TOOL_NAME));
         assert!(browser_tool_requires_open_session(BROWSER_CLICK_TOOL_NAME));
         assert!(browser_tool_requires_open_session(BROWSER_OBSERVE_TOOL_NAME));
         assert!(browser_tool_requires_open_session(BROWSER_TABS_CLOSE_TOOL_NAME));
@@ -3758,7 +3934,7 @@ mod tests {
 
     #[test]
     fn browser_session_profile_id_rejects_friendly_labels() {
-        let payload = json!({"profile_id": "scenario-s005-chat-demo"});
+        let payload = json!({"profile_id": "friendly-browser-profile"});
 
         let error = browser_session_profile_id_from_payload(
             payload.as_object().expect("payload must be an object"),
@@ -3786,11 +3962,11 @@ mod tests {
 
         let (enabled, persistence_id) = browser_session_persistence_from_payload(
             payload.as_object().expect("payload must be an object"),
-            "scenario-S100-browser-recovery-export-20260527",
+            "browser-recovery-export-20260527",
         );
 
         assert!(enabled);
-        assert_eq!(persistence_id, "agent-session-scenario-S100-browser-recovery-export-20260527");
+        assert_eq!(persistence_id, "agent-session-browser-recovery-export-20260527");
     }
 
     #[test]

@@ -51,6 +51,7 @@ const BROWSER_GATEWAY_TOOL_NAMES: &[&str] = &[
     "palyra.browser.session.create",
     "palyra.browser.session.close",
     "palyra.browser.navigate",
+    "palyra.browser.reload",
     "palyra.browser.click",
     "palyra.browser.type",
     "palyra.browser.fill",
@@ -4995,8 +4996,9 @@ mod tests {
     }
 
     #[test]
-    fn browser_gateway_allowlist_covers_form_file_and_download_tools() {
+    fn browser_gateway_allowlist_covers_agent_browser_tools() {
         for expected in [
+            "palyra.browser.reload",
             "palyra.browser.fill",
             "palyra.browser.upload",
             "palyra.browser.downloads.list",

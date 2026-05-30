@@ -126,7 +126,7 @@ pub fn tool_metadata(tool_name: &str) -> Option<ToolMetadata> {
         "palyra.browser.session.close" => {
             Some(ToolMetadata { capabilities: NETWORK_TOOL_CAPABILITIES, default_sensitive: true })
         }
-        "palyra.browser.navigate" => {
+        "palyra.browser.navigate" | "palyra.browser.reload" => {
             Some(ToolMetadata { capabilities: NETWORK_TOOL_CAPABILITIES, default_sensitive: true })
         }
         "palyra.browser.click" => {
@@ -265,5 +265,11 @@ mod tests {
         assert!(!tool_requires_approval("palyra.memory.retain"));
         assert!(!tool_requires_approval("palyra.retain"));
         assert!(tool_policy_capability_names("palyra.retain").is_empty());
+    }
+
+    #[test]
+    fn browser_reload_matches_browser_network_sensitivity() {
+        assert!(tool_requires_approval("palyra.browser.reload"));
+        assert_eq!(tool_policy_capability_names("palyra.browser.reload"), vec!["network"]);
     }
 }

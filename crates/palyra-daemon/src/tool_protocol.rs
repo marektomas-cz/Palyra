@@ -609,6 +609,7 @@ async fn run_allowlisted_tool(
         "palyra.browser.session.create"
         | "palyra.browser.session.close"
         | "palyra.browser.navigate"
+        | "palyra.browser.reload"
         | "palyra.browser.click"
         | "palyra.browser.type"
         | "palyra.browser.fill"
@@ -683,6 +684,7 @@ fn is_runtime_supported_tool(tool_name: &str) -> bool {
             | "palyra.browser.session.create"
             | "palyra.browser.session.close"
             | "palyra.browser.navigate"
+            | "palyra.browser.reload"
             | "palyra.browser.click"
             | "palyra.browser.type"
             | "palyra.browser.fill"
@@ -783,6 +785,7 @@ fn tool_input_limit_bytes(tool_name: &str) -> usize {
         "palyra.browser.session.create"
         | "palyra.browser.session.close"
         | "palyra.browser.navigate"
+        | "palyra.browser.reload"
         | "palyra.browser.click"
         | "palyra.browser.type"
         | "palyra.browser.fill"
@@ -1372,6 +1375,38 @@ mod tests {
     }
 
     #[test]
+    fn decide_tool_call_allows_browser_reload_with_explicit_approval() {
+        let config = ToolCallConfig {
+            allowed_tools: vec!["palyra.browser.reload".to_owned()],
+            max_calls_per_run: 2,
+            execution_timeout_ms: 250,
+            process_runner: default_process_runner_policy(),
+            wasm_runtime: default_wasm_runtime_policy(),
+        };
+        let mut budget = config.max_calls_per_run;
+        let request_context = tool_request_context("user:ops");
+
+        let without_approval = decide_tool_call(
+            &config,
+            &mut budget,
+            &request_context,
+            "palyra.browser.reload",
+            false,
+        );
+
+        assert!(!without_approval.allowed, "browser reload should require explicit approval");
+        assert!(without_approval.approval_required);
+        assert_eq!(budget, 2, "denied decision must not consume budget");
+
+        let with_approval =
+            decide_tool_call(&config, &mut budget, &request_context, "palyra.browser.reload", true);
+
+        assert!(with_approval.allowed, "approved browser reload should pass policy gate");
+        assert!(with_approval.approval_required);
+        assert_eq!(budget, 1, "allowed decision should consume budget");
+    }
+
+    #[test]
     fn decide_tool_call_workspace_patch_requires_explicit_approval() {
         let config = ToolCallConfig {
             allowed_tools: vec!["palyra.fs.apply_patch".to_owned()],
@@ -1442,6 +1477,7 @@ mod tests {
         assert!(tool_requires_approval("palyra.tool_program.run"));
         assert!(tool_requires_approval("palyra.browser.session.create"));
         assert!(tool_requires_approval("palyra.browser.navigate"));
+        assert!(tool_requires_approval("palyra.browser.reload"));
         assert!(tool_requires_approval("palyra.browser.click"));
         assert!(tool_requires_approval("palyra.browser.type"));
         assert!(tool_requires_approval("palyra.browser.fill"));
