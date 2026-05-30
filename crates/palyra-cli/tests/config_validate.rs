@@ -20,6 +20,16 @@ fn run_cli(workdir: &TempDir, args: &[&str]) -> Result<Output> {
     command.output().with_context(|| format!("failed to execute palyra {}", args.join(" ")))
 }
 
+fn run_cli_with_env(workdir: &TempDir, args: &[&str], envs: &[(&str, &str)]) -> Result<Output> {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_palyra"));
+    command.current_dir(workdir.path()).args(args);
+    configure_cli_env(&mut command, workdir);
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    command.output().with_context(|| format!("failed to execute palyra {}", args.join(" ")))
+}
+
 #[test]
 fn config_validate_without_path_uses_defaults_when_file_is_missing() -> Result<()> {
     let workdir = TempDir::new().context("failed to create temporary workdir")?;
@@ -32,6 +42,35 @@ fn config_validate_without_path_uses_defaults_when_file_is_missing() -> Result<(
     );
     let stdout = String::from_utf8(output.stdout).context("stdout was not UTF-8")?;
     assert!(stdout.contains("config=valid source=defaults"));
+    Ok(())
+}
+
+#[test]
+fn config_path_with_explicit_state_root_uses_state_root_config_slot() -> Result<()> {
+    let workdir = TempDir::new().context("failed to create temporary workdir")?;
+    let state_root = workdir.path().join("alternate-state");
+    let state_root_arg = state_root.to_string_lossy().into_owned();
+    let managed_config = state_root.join("config").join("palyra.toml");
+    let env_config = workdir.path().join("installed").join("palyra.toml");
+    fs::create_dir_all(env_config.parent().expect("env config parent"))?;
+    fs::write(env_config.as_path(), "version = 1\n")?;
+    let env_config_arg = env_config.to_string_lossy().into_owned();
+
+    let output = run_cli_with_env(
+        &workdir,
+        &["--state-root", state_root_arg.as_str(), "config", "path"],
+        &[("PALYRA_CONFIG", env_config_arg.as_str())],
+    )?;
+
+    assert!(
+        output.status.success(),
+        "config path should report the explicit state-root slot: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).context("stdout was not UTF-8")?;
+    let managed_config_text = managed_config.to_string_lossy();
+    assert!(stdout.contains(managed_config_text.as_ref()), "unexpected stdout: {stdout}");
+    assert!(!stdout.contains(env_config_arg.as_str()), "unexpected stdout: {stdout}");
     Ok(())
 }
 

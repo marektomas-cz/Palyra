@@ -35,6 +35,7 @@ const PROFILE_CONFIG_FILE_NAME: &str = "palyra.toml";
 pub(crate) struct RootCommandContext {
     cli_state_root: PathBuf,
     state_root: PathBuf,
+    state_root_explicit: bool,
     config_path: Option<PathBuf>,
     profile_name: Option<String>,
     output_format: OutputFormatArg,
@@ -241,6 +242,10 @@ impl RootCommandContext {
 
     pub(crate) fn cli_state_root(&self) -> &Path {
         self.cli_state_root.as_path()
+    }
+
+    pub(crate) fn state_root_explicit(&self) -> bool {
+        self.state_root_explicit
     }
 
     pub(crate) fn config_path(&self) -> Option<&Path> {
@@ -583,7 +588,12 @@ fn build_root_context(
     let expected_profile_name = normalize_owned_text(root.expect_profile.clone());
     let profile = resolve_profile(profile_name.as_deref(), &profiles)?;
     let state_root = resolve_final_state_root(&root, profile.as_ref())?;
-    let config_path = resolve_config_path(&root, profile.as_ref(), explicit_config_path_policy)?;
+    let config_path = resolve_config_path(
+        &root,
+        profile.as_ref(),
+        state_root.as_path(),
+        explicit_config_path_policy,
+    )?;
     let config_defaults = load_config_defaults(config_path.as_deref())?;
     validate_expected_profile(
         expected_profile_name.as_deref(),
@@ -598,6 +608,7 @@ fn build_root_context(
         no_color: root.no_color,
         trace_id: format!("cli:{}", Ulid::new()),
         state_root,
+        state_root_explicit: normalize_optional_text(root.state_root.as_deref()).is_some(),
         config_path,
         profile_name,
         profile,
@@ -1013,6 +1024,7 @@ fn resolve_final_state_root(
 fn resolve_config_path(
     root: &RootOptions,
     profile: Option<&CliConnectionProfile>,
+    state_root: &Path,
     explicit_config_path_policy: ExplicitConfigPathPolicy,
 ) -> Result<Option<PathBuf>> {
     if let Some(explicit) = normalize_optional_text(root.config_path.as_deref()) {
@@ -1028,6 +1040,21 @@ fn resolve_config_path(
             anyhow::bail!("config file does not exist: {}", parsed.display());
         }
         return Ok(Some(parsed));
+    }
+
+    if normalize_optional_text(root.state_root.as_deref()).is_some() {
+        if let Some(profile_path) =
+            profile.and_then(|profile| normalize_optional_text(profile.config_path.as_deref()))
+        {
+            let parsed = parse_config_path(profile_path)
+                .with_context(|| format!("profile config_path is invalid: {profile_path}"))?;
+            if !parsed.exists() {
+                anyhow::bail!("profile config file does not exist: {}", parsed.display());
+            }
+            return Ok(Some(parsed));
+        }
+        let managed_path = state_root_config_path(state_root);
+        return Ok(managed_path.exists().then_some(managed_path));
     }
 
     if let Ok(raw) = env::var("PALYRA_CONFIG") {
@@ -1052,6 +1079,10 @@ fn resolve_config_path(
     }
 
     Ok(default_config_search_paths().into_iter().find(|candidate| candidate.exists()))
+}
+
+pub(crate) fn state_root_config_path(state_root: &Path) -> PathBuf {
+    state_root.join(PROFILE_CONFIG_RELATIVE_DIR).join(PROFILE_CONFIG_FILE_NAME)
 }
 
 fn load_config_defaults(config_path: Option<&Path>) -> Result<ConfigConnectionDefaults> {
@@ -1170,9 +1201,9 @@ fn read_normalized_env_var(name: &str) -> Option<String> {
 mod tests {
     use super::{
         build_active_profile_context, build_root_context, cli_profiles_registry_path, context_cell,
-        ensure_bootstrap_local_profile, CliConnectionProfile, ConnectionDefaults,
-        ConnectionOverrides, ExplicitConfigPathPolicy, RootOptions, CLI_PROFILES_PATH_ENV,
-        CLI_PROFILES_RELATIVE_PATH, CLI_PROFILE_ENV,
+        ensure_bootstrap_local_profile, state_root_config_path, CliConnectionProfile,
+        ConnectionDefaults, ConnectionOverrides, ExplicitConfigPathPolicy, RootOptions,
+        CLI_PROFILES_PATH_ENV, CLI_PROFILES_RELATIVE_PATH, CLI_PROFILE_ENV,
     };
     use crate::args::{LogLevelArg, OutputFormatArg};
     use anyhow::Result;
@@ -1497,6 +1528,45 @@ port = 9222
         let http = context
             .resolve_http_connection(ConnectionOverrides::default(), ConnectionDefaults::ADMIN)?;
         assert_eq!(http.base_url, "http://127.0.0.1:9222");
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_state_root_does_not_reuse_environment_config_path() -> Result<()> {
+        let _guard = super::test_env_lock_for_tests().lock().expect("env lock");
+        clear_env();
+        let temp = tempdir()?;
+        let state_root = temp.path().join("isolated-state");
+        let env_config = temp.path().join("installed").join("palyra.toml");
+        fs::create_dir_all(env_config.parent().expect("env config parent"))?;
+        fs::write(&env_config, "version = 1\n")?;
+        env::set_var("PALYRA_CONFIG", &env_config);
+
+        let context = build_root_context(
+            RootOptions {
+                state_root: Some(state_root.display().to_string()),
+                ..RootOptions::default()
+            },
+            ExplicitConfigPathPolicy::RequireExisting,
+        )?;
+
+        assert_eq!(context.state_root(), state_root.as_path());
+        assert!(context.state_root_explicit());
+        assert_eq!(context.config_path(), None);
+
+        let managed_config = state_root_config_path(state_root.as_path());
+        fs::create_dir_all(managed_config.parent().expect("managed config parent"))?;
+        fs::write(managed_config.as_path(), "version = 1\n")?;
+
+        let context = build_root_context(
+            RootOptions {
+                state_root: Some(state_root.display().to_string()),
+                ..RootOptions::default()
+            },
+            ExplicitConfigPathPolicy::RequireExisting,
+        )?;
+
+        assert_eq!(context.config_path(), Some(managed_config.as_path()));
         Ok(())
     }
 

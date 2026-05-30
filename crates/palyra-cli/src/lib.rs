@@ -9586,10 +9586,15 @@ fn find_default_config_path() -> Option<String> {
 }
 
 fn effective_config_path() -> Option<String> {
-    if let Some(path) = app::current_root_context()
-        .and_then(|context| context.config_path().map(|path| path.to_string_lossy().into_owned()))
-    {
-        return Some(path);
+    if let Some(context) = app::current_root_context() {
+        if let Some(path) = context.config_path() {
+            return Some(path.to_string_lossy().into_owned());
+        }
+        if context.state_root_explicit() {
+            return Some(
+                app::state_root_config_path(context.state_root()).to_string_lossy().into_owned(),
+            );
+        }
     }
     find_default_config_path()
 }

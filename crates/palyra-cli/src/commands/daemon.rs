@@ -47,8 +47,8 @@ fn proto_enum_label(name: &str, prefix: &str) -> String {
 mod tests {
     use super::{
         enrich_gateway_service_action_error, gateway_runtime_root_selection,
-        is_desktop_runtime_state_root, journal_event_actor_label, journal_event_kind_label,
-        read_remote_dashboard_assist_payload,
+        gateway_status_state_root_scope_note, is_desktop_runtime_state_root,
+        journal_event_actor_label, journal_event_kind_label, read_remote_dashboard_assist_payload,
     };
     use crate::common_v1;
     use serde_json::json;
@@ -125,6 +125,27 @@ mod tests {
         assert!(message.contains("desktop-control-center runtime state root"), "{message}");
         assert!(message.contains("gateway restart"), "{message}");
         assert!(message.contains("--state-root"), "{message}");
+    }
+
+    #[test]
+    fn gateway_status_scope_note_marks_default_endpoint_for_empty_state_root() {
+        let temp = tempdir().expect("tempdir should be created");
+        let state_root = temp.path().join("state");
+
+        let note = gateway_status_state_root_scope_note(
+            true,
+            None,
+            state_root.as_path(),
+            false,
+            "http://127.0.0.1:7142",
+            true,
+            false,
+        )
+        .expect("empty explicit state root should produce a scope note");
+
+        assert!(note.contains("requested state root has no config"), "{note}");
+        assert!(note.contains("default daemon_url"), "{note}");
+        assert!(note.contains("different running runtime"), "{note}");
     }
 }
 
@@ -846,11 +867,13 @@ fn emit_gateway_service_status(
 fn run_gateway_status(url: Option<String>, json: bool) -> Result<()> {
     let context = root_context()?;
     let runtime_root = gateway_runtime_root_selection(context.state_root());
+    let explicit_url = url.is_some();
     let connection = context.resolve_http_connection(
         app::ConnectionOverrides { daemon_url: url, ..app::ConnectionOverrides::default() },
         app::ConnectionDefaults::USER,
     )?;
     let status_url = format!("{}/healthz", connection.base_url.trim_end_matches('/'));
+    let daemon_url = connection.base_url.clone();
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(2))
         .build()
@@ -882,10 +905,20 @@ fn run_gateway_status(url: Option<String>, json: bool) -> Result<()> {
     };
 
     let report = GatewayStatusReport {
-        daemon_url: connection.base_url,
+        daemon_url: daemon_url.clone(),
         state_root: runtime_root.requested.display().to_string(),
         effective_state_root: runtime_root.effective.display().to_string(),
-        state_root_note: runtime_root.note,
+        state_root_note: runtime_root.note.or_else(|| {
+            gateway_status_state_root_scope_note(
+                context.state_root_explicit(),
+                context.config_path(),
+                runtime_root.requested.as_path(),
+                explicit_url,
+                daemon_url.as_str(),
+                health.is_some(),
+                service.installed,
+            )
+        }),
         health,
         health_error,
         service,
@@ -940,6 +973,30 @@ fn run_gateway_status(url: Option<String>, json: bool) -> Result<()> {
         println!("gateway.status.state_root_note={note}");
     }
     std::io::stdout().flush().context("stdout flush failed")
+}
+
+fn gateway_status_state_root_scope_note(
+    state_root_explicit: bool,
+    config_path: Option<&Path>,
+    state_root: &Path,
+    explicit_url: bool,
+    daemon_url: &str,
+    health_present: bool,
+    service_installed: bool,
+) -> Option<String> {
+    if explicit_url
+        || !state_root_explicit
+        || !health_present
+        || service_installed
+        || config_path.is_some()
+    {
+        return None;
+    }
+    Some(format!(
+        "requested state root has no config at {}; health check used default daemon_url {} and may reflect a different running runtime",
+        app::state_root_config_path(state_root).display(),
+        daemon_url
+    ))
 }
 
 fn gateway_runtime_root_selection(requested: &Path) -> GatewayRuntimeRootSelection {
