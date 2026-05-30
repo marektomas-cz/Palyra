@@ -846,12 +846,14 @@ fn is_safe_secret_reference_value(key: &str, value: &str) -> bool {
     }
     let normalized = normalized.trim_matches(|ch| ch == '(' || ch == ')').trim();
     is_env_member_reference(normalized)
+        || is_env_reference_with_safe_fallback(normalized)
         || is_env_getter_reference(normalized, "Deno.env.get")
         || is_env_getter_reference(normalized, "std::env::var")
         || is_env_getter_reference(normalized, "env::var")
         || is_env_getter_reference(normalized, "os.getenv")
         || is_os_environ_index_reference(normalized)
         || is_env_identifier_reference_expression(key, normalized)
+        || is_obvious_placeholder_secret_value(normalized)
         || is_dom_input_value_reference(normalized)
 }
 
@@ -859,6 +861,33 @@ fn is_env_member_reference(value: &str) -> bool {
     ["import.meta.env.", "process.env.", "env."]
         .iter()
         .any(|prefix| value.strip_prefix(prefix).is_some_and(is_env_identifier))
+}
+
+fn is_env_reference_with_safe_fallback(value: &str) -> bool {
+    for operator in ["||", "??"] {
+        let Some((left, right)) = value.split_once(operator) else {
+            continue;
+        };
+        let left = left.trim().trim_matches(['(', ')']).trim();
+        let right = right.trim().trim_end_matches([',', ';']).trim();
+        if is_env_reference_value(left) && is_safe_empty_fallback_value(right) {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_env_reference_value(value: &str) -> bool {
+    is_env_member_reference(value)
+        || is_env_getter_reference(value, "Deno.env.get")
+        || is_env_getter_reference(value, "std::env::var")
+        || is_env_getter_reference(value, "env::var")
+        || is_env_getter_reference(value, "os.getenv")
+        || is_os_environ_index_reference(value)
+}
+
+fn is_safe_empty_fallback_value(value: &str) -> bool {
+    matches!(value, "\"\"" | "''" | "``" | "None" | "none" | "null" | "undefined")
 }
 
 fn is_env_getter_reference(value: &str, prefix: &str) -> bool {
@@ -897,6 +926,28 @@ fn is_env_reference_identifier_literal(value: &str) -> bool {
 
 fn assignment_key_describes_env_identifier(key: &str) -> bool {
     key.contains("name") || key.contains("var") || key.contains("env") || key.contains("identifier")
+}
+
+fn is_obvious_placeholder_secret_value(value: &str) -> bool {
+    let normalized = value
+        .trim()
+        .trim_end_matches([',', ';'])
+        .trim()
+        .trim_matches(['"', '\'', '`'])
+        .trim_matches(['<', '>'])
+        .to_ascii_lowercase()
+        .replace(['-', ' '], "_");
+    matches!(
+        normalized.as_str(),
+        "todo"
+            | "todo_here"
+            | "your_api_key"
+            | "your_api_key_here"
+            | "api_key_here"
+            | "replace_with_api_key"
+            | "replace_with_your_api_key"
+            | "insert_api_key_here"
+    )
 }
 
 fn quoted_string_literals(value: &str) -> Vec<String> {
@@ -1746,6 +1797,46 @@ mod tests {
             .finding_codes()
             .iter()
             .any(|code| code.starts_with("secret_leak.assignment.")));
+    }
+
+    #[test]
+    fn source_env_secret_references_with_empty_fallbacks_are_not_redacted() {
+        let source = "function readConfig(env = process.env) {\n\
+                      return {\n\
+                      apiKey: env.PALYRA_API_KEY || '',\n\
+                      accessToken: process.env.ACCESS_TOKEN ?? \"\",\n\
+                      clientSecret: Deno.env.get(\"CLIENT_SECRET\") || null,\n\
+                      };\n\
+                      }";
+        let outcome = redact_text_for_export(
+            source,
+            SafetySourceKind::Workspace,
+            SafetyContentKind::WorkspaceDocument,
+            TrustLabel::TrustedLocal,
+        );
+
+        assert!(!outcome.redacted);
+        assert_eq!(outcome.redacted_text, source);
+        assert!(!outcome.redacted_text.contains("[REDACTED_SECRET]"));
+        assert!(!outcome
+            .scan
+            .finding_codes()
+            .iter()
+            .any(|code| code.starts_with("secret_leak.assignment.")));
+    }
+
+    #[test]
+    fn obvious_api_key_placeholders_are_not_redacted_as_secret_values() {
+        let source = "PALYRA_API_KEY=TODO\nSERVICE_API_KEY=your_api_key_here";
+        let outcome = redact_text_for_export(
+            source,
+            SafetySourceKind::Workspace,
+            SafetyContentKind::WorkspaceDocument,
+            TrustLabel::TrustedLocal,
+        );
+
+        assert!(!outcome.redacted);
+        assert_eq!(outcome.redacted_text, source);
     }
 
     #[test]

@@ -97,6 +97,10 @@ struct WorkspaceReadFileOutput {
     bytes_base64: Option<String>,
     #[serde(skip_serializing_if = "is_false")]
     redacted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text_authoritative: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    redaction_notice: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1553,6 +1557,10 @@ fn read_workspace_file_chunk(
         }
         Err(error) => (None, Some(BASE64_STANDARD.encode(error.into_bytes())), false),
     };
+    let text_authoritative = redacted.then_some(false);
+    let redaction_notice = redacted.then(|| {
+        "text contains redacted secret placeholders; use it for structure only and do not write the redacted text back verbatim".to_owned()
+    });
 
     Ok(WorkspaceReadFileOutput {
         path: display_path,
@@ -1565,6 +1573,8 @@ fn read_workspace_file_chunk(
         text,
         bytes_base64,
         redacted,
+        text_authoritative,
+        redaction_notice,
     })
 }
 
@@ -2029,7 +2039,7 @@ mod tests {
         let tempdir = tempfile::tempdir().expect("tempdir should be created");
         let file_path = tempdir.path().join("app.js");
         let contents = "const publicValue = 'visible';\n\
-             const privateValue = 'S020_DUMMY_SECRET_SHOULD_NOT_APPEAR';\n\
+             const privateValue = 'DUMMY_SECRET_SHOULD_NOT_APPEAR';\n\
              const modelToken = 'palyra_test_secret_123456';\n";
         fs::write(file_path, contents).expect("workspace file should be written");
         let input = WorkspaceReadFileInput {
@@ -2047,7 +2057,7 @@ mod tests {
         assert!(text.contains("publicValue"));
         assert!(text.contains("[REDACTED_SECRET]"));
         assert!(
-            !text.contains("S020_DUMMY_SECRET_SHOULD_NOT_APPEAR"),
+            !text.contains("DUMMY_SECRET_SHOULD_NOT_APPEAR"),
             "source literal should be redacted from tool output: {text}"
         );
         assert!(
@@ -2075,6 +2085,81 @@ mod tests {
 
         assert!(!output.redacted);
         assert_eq!(output.text.as_deref(), Some(contents));
+    }
+
+    #[test]
+    fn read_workspace_file_preserves_env_reference_fallback_expressions() {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let file_path = tempdir.path().join("config.js");
+        let contents = "function readConfig(env = process.env) {\n\
+                        return {\n\
+                        apiKey: env.PALYRA_API_KEY || '',\n\
+                        accessToken: process.env.ACCESS_TOKEN ?? \"\",\n\
+                        };\n\
+                        }\n";
+        fs::write(file_path, contents).expect("workspace file should be written");
+        let input = WorkspaceReadFileInput {
+            path: "config.js".to_owned(),
+            workspace_root: None,
+            offset_bytes: 0,
+            max_bytes: None,
+        };
+
+        let output = read_workspace_file_from_roots(&[tempdir.path().to_path_buf()], &input)
+            .expect("workspace file should be readable");
+
+        assert!(!output.redacted);
+        assert_eq!(output.text.as_deref(), Some(contents));
+        assert_eq!(output.text_authoritative, None);
+        assert_eq!(output.redaction_notice, None);
+    }
+
+    #[test]
+    fn read_workspace_file_preserves_obvious_api_key_placeholders() {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let file_path = tempdir.path().join(".env.example");
+        let contents = "PORT=3000\nPALYRA_API_KEY=TODO\nSERVICE_API_KEY=your_api_key_here\n";
+        fs::write(file_path, contents).expect("workspace file should be written");
+        let input = WorkspaceReadFileInput {
+            path: ".env.example".to_owned(),
+            workspace_root: None,
+            offset_bytes: 0,
+            max_bytes: None,
+        };
+
+        let output = read_workspace_file_from_roots(&[tempdir.path().to_path_buf()], &input)
+            .expect("workspace file should be readable");
+
+        assert!(!output.redacted);
+        assert_eq!(output.text.as_deref(), Some(contents));
+    }
+
+    #[test]
+    fn read_workspace_file_marks_redacted_text_as_non_authoritative() {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let file_path = tempdir.path().join(".env");
+        let contents = "APP_SECRET=server-only-demo-secret\nVITE_PUBLIC_LABEL=Palyra Preview\n";
+        fs::write(file_path, contents).expect("workspace file should be written");
+        let input = WorkspaceReadFileInput {
+            path: ".env".to_owned(),
+            workspace_root: None,
+            offset_bytes: 0,
+            max_bytes: None,
+        };
+
+        let output = read_workspace_file_from_roots(&[tempdir.path().to_path_buf()], &input)
+            .expect("workspace file should be readable");
+        let text = output.text.as_deref().expect("utf8 text should be returned");
+
+        assert!(output.redacted);
+        assert_eq!(output.text_authoritative, Some(false));
+        assert!(output
+            .redaction_notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("do not write")));
+        assert!(text.contains("APP_SECRET=[REDACTED_SECRET]"));
+        assert!(text.contains("VITE_PUBLIC_LABEL=Palyra Preview"));
+        assert!(!text.contains("server-only-demo-secret"));
     }
 
     #[test]
