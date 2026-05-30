@@ -58,6 +58,7 @@ const BACKGROUND_POST_OUTPUT_EXIT_CHECK_MS: u64 = 250;
 const BACKGROUND_METADATA_RETURN_RESERVE_MS: u64 = 100;
 const BACKGROUND_MONITOR_POLL_MS: u64 = 50;
 const BACKGROUND_TERMINATION_WAIT_MS: u64 = 1_000;
+const DEFAULT_FOREGROUND_PROCESS_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_BACKGROUND_PROCESS_LIFETIME_MS: u64 = 10 * 60_000;
 const MAX_BACKGROUND_PROCESS_LIFETIME_MS: u64 = 30 * 60_000;
 const PALYRA_CLI_PROFILE_ENV: &str = "PALYRA_CLI_PROFILE";
@@ -382,11 +383,7 @@ pub fn run_constrained_process(
         );
     }
 
-    let per_call_timeout = input
-        .timeout_ms
-        .map(Duration::from_millis)
-        .unwrap_or(execution_timeout)
-        .min(execution_timeout);
+    let per_call_timeout = foreground_process_timeout(input.timeout_ms, execution_timeout);
 
     let capture = execute_process(
         policy,
@@ -3203,6 +3200,11 @@ fn background_process_lifetime(timeout_ms: Option<u64>, execution_timeout: Durat
     timeout_ms.map(Duration::from_millis).unwrap_or(default_lifetime).min(lifetime_limit)
 }
 
+fn foreground_process_timeout(timeout_ms: Option<u64>, execution_timeout: Duration) -> Duration {
+    let default_timeout = Duration::from_millis(DEFAULT_FOREGROUND_PROCESS_TIMEOUT_MS);
+    timeout_ms.map(Duration::from_millis).unwrap_or(default_timeout).min(execution_timeout)
+}
+
 fn background_process_lifetime_limit(execution_timeout: Duration) -> Duration {
     execution_timeout.min(Duration::from_millis(MAX_BACKGROUND_PROCESS_LIFETIME_MS))
 }
@@ -5682,6 +5684,26 @@ mod tests {
             Some("taskkill.exe")
         );
         assert!(taskkill_path.is_file(), "{}", taskkill_path.display());
+    }
+
+    #[test]
+    fn foreground_process_timeout_caps_implicit_timeout() {
+        let timeout = super::foreground_process_timeout(None, Duration::from_millis(120_000));
+
+        assert_eq!(timeout, Duration::from_millis(super::DEFAULT_FOREGROUND_PROCESS_TIMEOUT_MS));
+    }
+
+    #[test]
+    fn foreground_process_timeout_honors_explicit_timeout_and_execution_cap() {
+        let short = super::foreground_process_timeout(Some(100), Duration::from_millis(750));
+        let execution_capped =
+            super::foreground_process_timeout(Some(60_000), Duration::from_millis(750));
+        let implicit_execution_capped =
+            super::foreground_process_timeout(None, Duration::from_millis(750));
+
+        assert_eq!(short, Duration::from_millis(100));
+        assert_eq!(execution_capped, Duration::from_millis(750));
+        assert_eq!(implicit_execution_capped, Duration::from_millis(750));
     }
 
     #[test]
