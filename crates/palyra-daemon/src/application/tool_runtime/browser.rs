@@ -1718,16 +1718,16 @@ pub(crate) async fn execute_browser_tool(
                     "palyra.browser.viewport requires integer field 'height'".to_owned(),
                 );
             };
+            let device_scale_factor =
+                payload.get("device_scale_factor").and_then(Value::as_f64).unwrap_or(0.0);
+            let mobile = payload.get("mobile").and_then(Value::as_bool).unwrap_or(false);
             let mut request = Request::new(browser_v1::SetViewportRequest {
                 v: CANONICAL_PROTOCOL_MAJOR,
                 session_id: Some(common_v1::CanonicalId { ulid: session_id }),
                 width,
                 height,
-                device_scale_factor: payload
-                    .get("device_scale_factor")
-                    .and_then(Value::as_f64)
-                    .unwrap_or(0.0),
-                mobile: payload.get("mobile").and_then(Value::as_bool).unwrap_or(false),
+                device_scale_factor,
+                mobile,
                 timeout_ms: payload.get("timeout_ms").and_then(Value::as_u64).unwrap_or(0),
             });
             if let Err(error) = attach_browser_auth_metadata(
@@ -1745,19 +1745,31 @@ pub(crate) async fn execute_browser_tool(
             match client.set_viewport(request).await {
                 Ok(response) => {
                     let response = response.into_inner();
-                    let output = json!({
+                    let success = response.success;
+                    let response_width = response.width;
+                    let response_height = response.height;
+                    let error = response.error.clone();
+                    let mut output = json!({
                         "success": response.success,
                         "width": response.width,
                         "height": response.height,
+                        "requested_width": width,
+                        "requested_height": height,
                         "device_scale_factor": response.device_scale_factor,
                         "mobile": response.mobile,
+                        "requested_mobile": mobile,
                         "error": response.error,
                         "action_log": response.action_log.map(browser_action_log_to_json),
                     });
+                    if success && (response_width != width || response_height != height) {
+                        output["viewport_warning"] = json!(
+                            "reported viewport differs from requested viewport; use requested_width/requested_height for layout assertions and treat screenshot overflow metrics as authoritative"
+                        );
+                    }
                     (
-                        response.success,
+                        success,
                         serde_json::to_vec(&output).unwrap_or_else(|_| b"{}".to_vec()),
-                        if response.success { String::new() } else { response.error },
+                        if success { String::new() } else { error },
                     )
                 }
                 Err(error) => (
