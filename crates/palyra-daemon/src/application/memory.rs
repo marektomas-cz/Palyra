@@ -1627,7 +1627,7 @@ mod tests {
     #[test]
     fn write_classifier_uses_structured_category_hint_for_corrections() {
         let mut input =
-            classification_input("E2E test project should use TypeScript and Playwright.");
+            classification_input("Browser test project should use TypeScript and Playwright.");
         input.category_hint = Some(MemoryWriteCategory::Correction);
         let classification = classify_memory_write(input);
 
@@ -1636,9 +1636,9 @@ mod tests {
 
     #[test]
     fn duplicate_queries_include_structured_replacement_terms_for_correction_recall() {
-        let replacement_terms = vec!["Vitest".to_owned(), "E2E test project".to_owned()];
+        let replacement_terms = vec!["Vitest".to_owned(), "browser test project".to_owned()];
         let queries = lifecycle_duplicate_search_queries(
-            "E2E test project should use TypeScript and Playwright.",
+            "Browser test project should use TypeScript and Playwright.",
             replacement_terms.as_slice(),
         );
 
@@ -1647,13 +1647,13 @@ mod tests {
 
     #[test]
     fn correction_conflict_matches_existing_project_preference() {
-        let replacement_terms = vec!["Vitest".to_owned(), "E2E test project".to_owned()];
+        let replacement_terms = vec!["Vitest".to_owned(), "browser test project".to_owned()];
         assert!(lifecycle_conflict_matches(
             MemoryWriteCategory::Correction,
             replacement_terms.as_slice(),
-            "E2E test project should use TypeScript and Playwright with concise reports.",
+            "Browser test project should use TypeScript and Playwright with concise reports.",
             MemoryWriteCategory::Preference,
-            "E2E preference: for this test project use TypeScript, Vitest, and concise reports.",
+            "Project preference: for this browser test project use TypeScript, Vitest, and concise reports.",
         ));
     }
 
@@ -1783,16 +1783,16 @@ mod tests {
 
     #[test]
     fn correction_replacement_content_uses_structured_corrected_text() {
-        let mut input = classification_input("For E2E tests use Playwright.");
+        let mut input = classification_input("For browser checks use Playwright.");
         input.category_hint = Some(MemoryWriteCategory::Correction);
         let classification = classify_memory_write(input);
 
         assert_eq!(
             lifecycle_replacement_content(
                 &classification,
-                "For E2E tests use Playwright. Keep concise reports.",
+                "For browser checks use Playwright. Keep concise reports.",
             ),
-            "For E2E tests use Playwright. Keep concise reports."
+            "For browser checks use Playwright. Keep concise reports."
         );
     }
 
@@ -1801,16 +1801,16 @@ mod tests {
         let classification = MemoryWriteClassification {
             category: MemoryWriteCategory::Preference,
             ..classify_memory_write(classification_input(
-                "E2E harness project rules (S035): 1) Brief reports. 2) Sandbox boundary tests write only inside workspace.",
+                "Harness project rules: 1) Brief reports. 2) Sandbox boundary tests write only inside workspace.",
             ))
         };
         let replacement = lifecycle_replacement_content(
             &classification,
-            "E2E harness project rules (S035): 1) Brief reports. 2) Sandbox boundary tests write only inside workspace.",
+            "Harness project rules: 1) Brief reports. 2) Sandbox boundary tests write only inside workspace.",
         );
 
         assert!(
-            replacement.contains("S035") && replacement.contains("Sandbox boundary tests"),
+            replacement.contains("Brief reports") && replacement.contains("Sandbox boundary tests"),
             "replacement preference should include requested rules: {replacement}"
         );
         assert!(!replacement.contains("TypeScript"));

@@ -881,7 +881,7 @@ mod tests {
     #[test]
     fn cli_launch_context_includes_prompt_absolute_workspace_roots() {
         let tempdir = tempfile::tempdir().expect("tempdir should be created");
-        let project = tempdir.path().join("scenario-s001-todo");
+        let project = tempdir.path().join("todo-app");
         fs::create_dir_all(project.as_path()).expect("project directory should exist");
         let prompt = format!("V projektu `{}` vytvoř Todo app.", project.display());
         let parameter_delta =
@@ -910,7 +910,7 @@ mod tests {
     #[test]
     fn prompt_absolute_workspace_roots_preserves_nested_existing_roots() {
         let tempdir = tempfile::tempdir().expect("tempdir should be created");
-        let project = tempdir.path().join("scenario-s001-todo");
+        let project = tempdir.path().join("todo-app");
         let nested = project.join("src");
         fs::create_dir_all(nested.as_path()).expect("nested directory should exist");
         let prompt = format!(

@@ -2716,40 +2716,40 @@ mod tests {
 
     #[test]
     fn workspace_memory_retain_path_accepts_unscoped_project_prefixes() {
-        let mut with_scenario_prefix = Map::new();
-        with_scenario_prefix.insert("workspace_prefix".to_owned(), json!("S035-20260527"));
+        let mut with_project_prefix = Map::new();
+        with_project_prefix.insert("workspace_prefix".to_owned(), json!("client-audit-20260527"));
         assert_eq!(
-            workspace_memory_retain_path(
-                &with_scenario_prefix,
-                WorkspaceMemoryRetainScope::Project
-            )
-            .expect("bare project prefix should map under projects"),
-            "projects/S035-20260527/MEMORY.md"
+            workspace_memory_retain_path(&with_project_prefix, WorkspaceMemoryRetainScope::Project)
+                .expect("bare project prefix should map under projects"),
+            "projects/client-audit-20260527/MEMORY.md"
         );
 
         let mut with_nested_workspace_file = Map::new();
         with_nested_workspace_file
-            .insert("workspace_path".to_owned(), json!("scenario-s035/notes.md"));
+            .insert("workspace_path".to_owned(), json!("project-notes/notes.md"));
         assert_eq!(
             workspace_memory_retain_path(
                 &with_nested_workspace_file,
                 WorkspaceMemoryRetainScope::Workspace
             )
             .expect("bare workspace document path should map under projects"),
-            "projects/scenario-s035/notes.md"
+            "projects/project-notes/notes.md"
         );
     }
 
     #[test]
     fn workspace_memory_retain_path_maps_absolute_workspace_roots_to_project_basename() {
-        for raw_path in [r"C:\agent-workspaces\S035-20260527", "/agent-workspaces/S035-20260527"] {
+        for raw_path in [
+            r"C:\agent-workspaces\client-audit-20260527",
+            "/agent-workspaces/client-audit-20260527",
+        ] {
             let mut parsed = Map::new();
             parsed.insert("workspace_path".to_owned(), json!(raw_path));
 
             assert_eq!(
                 workspace_memory_retain_path(&parsed, WorkspaceMemoryRetainScope::Project)
                     .expect("absolute workspace roots should map to logical project memory"),
-                "projects/S035-20260527/MEMORY.md"
+                "projects/client-audit-20260527/MEMORY.md"
             );
         }
     }

@@ -2700,15 +2700,15 @@ mod tests {
 
     #[test]
     fn incomplete_final_answer_without_tools_allows_requested_reply_only_ack_sentinel() {
-        let messages = vec![ProviderMessage::user_text("Reply ACK-S086-4 only.".to_owned())];
+        let messages = vec![ProviderMessage::user_text("Reply ACK-READY-4 only.".to_owned())];
 
-        assert!(incomplete_final_answer_without_tools(Some("ACK-S086-4"), messages.as_slice())
+        assert!(incomplete_final_answer_without_tools(Some("ACK-READY-4"), messages.as_slice())
             .is_none());
     }
 
     #[test]
     fn incomplete_final_answer_without_tools_rejects_unrequested_ack_sentinel() {
-        let message = incomplete_final_answer_without_tools(Some("ACK-S086-4"), &[])
+        let message = incomplete_final_answer_without_tools(Some("ACK-READY-4"), &[])
             .expect("unrequested ACK sentinel must not be accepted as a final answer");
 
         assert!(message.contains("bare acknowledgement"));

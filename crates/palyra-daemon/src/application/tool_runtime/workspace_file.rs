@@ -2187,7 +2187,7 @@ mod tests {
     fn read_workspace_file_preserves_cookie_regex_and_benign_token_fixture() {
         let tempdir = tempfile::tempdir().expect("tempdir should be created");
         let file_path = tempdir.path().join("app.js");
-        let contents = "const match = document.cookie.match(/(?:^|; )s057_user=([^;]*)/);\n\
+        let contents = "const match = document.cookie.match(/(?:^|; )theme=([^;]*)/);\n\
                         const fixture = 'token=a%3Db%3Dc';\n\
                         const selector = '#password';\n";
         fs::write(file_path, contents).expect("workspace file should be written");
@@ -2557,14 +2557,14 @@ mod tests {
     fn list_workspace_dir_accepts_workspace_root_override() {
         let tempdir = tempfile::tempdir().expect("tempdir should be created");
         let workspace = tempdir.path().join("workspace");
-        let project = workspace.join("scenario-s002-notes-api");
+        let project = workspace.join("notes-api");
         fs::create_dir_all(project.join("tests")).expect("project dirs should exist");
         fs::write(project.join("server.js"), "console.log('ok');\n")
             .expect("server file should exist");
         fs::write(project.join("tests").join("api.test.js"), "console.log('test');\n")
             .expect("test file should exist");
         let input = parse_workspace_list_dir_input(
-            br#"{"path":".","workspace_root":"scenario-s002-notes-api","max_entries":10}"#,
+            br#"{"path":".","workspace_root":"notes-api","max_entries":10}"#,
         )
         .expect("list input should parse");
         let roots = resolve_workspace_file_roots_for_override(
@@ -2628,7 +2628,7 @@ mod tests {
     #[test]
     fn search_workspace_redacts_secret_like_matching_lines() {
         let tempdir = tempfile::tempdir().expect("tempdir should be created");
-        fs::write(tempdir.path().join("config.txt"), "token=S020_DUMMY_SECRET_SHOULD_NOT_APPEAR\n")
+        fs::write(tempdir.path().join("config.txt"), "token=DUMMY_SECRET_SHOULD_NOT_APPEAR\n")
             .expect("workspace file should be written");
         let input = parse_workspace_search_input(br#"{"query":"token"}"#)
             .expect("search input should parse");
@@ -2639,7 +2639,7 @@ mod tests {
         assert_eq!(output.matches.len(), 1);
         assert!(output.matches[0].redacted);
         assert!(output.matches[0].line_text.contains("[REDACTED_SECRET]"));
-        assert!(!output.matches[0].line_text.contains("S020_DUMMY_SECRET_SHOULD_NOT_APPEAR"));
+        assert!(!output.matches[0].line_text.contains("DUMMY_SECRET_SHOULD_NOT_APPEAR"));
     }
 
     #[test]

@@ -348,21 +348,18 @@ mod tests {
     #[test]
     fn active_workspace_root_uses_existing_session_focus_directory() {
         let tempdir = tempfile::tempdir().expect("tempdir should be created");
-        let project = tempdir.path().join("scenario-s002-notes-api");
+        let project = tempdir.path().join("notes-api");
         fs::create_dir_all(project.as_path()).expect("project directory should exist");
 
         let active = active_workspace_root_from_focus_paths(
             &[tempdir.path().to_path_buf()],
-            &["scenario-s002-notes-api".to_owned()],
+            &["notes-api".to_owned()],
         )
         .expect("active workspace root should resolve");
 
         assert_eq!(active.root, fs::canonicalize(project).expect("project should canonicalize"));
-        assert_eq!(active.relative_path, "scenario-s002-notes-api");
-        assert!(relative_path_already_targets_active_root(
-            "scenario-s002-notes-api/package.json",
-            &active
-        ));
+        assert_eq!(active.relative_path, "notes-api");
+        assert!(relative_path_already_targets_active_root("notes-api/package.json", &active));
         assert!(!relative_path_already_targets_active_root("package.json", &active));
     }
 
@@ -408,31 +405,31 @@ mod tests {
     #[test]
     fn active_workspace_root_uses_nearest_existing_parent_for_file_focus() {
         let tempdir = tempfile::tempdir().expect("tempdir should be created");
-        let project = tempdir.path().join("scenario-s027-routine");
+        let project = tempdir.path().join("routine-workspace");
         fs::create_dir_all(project.as_path()).expect("project directory should exist");
 
         let active = active_workspace_root_from_focus_paths(
             &[tempdir.path().to_path_buf()],
-            &["scenario-s027-routine/reports/cron-edit.log".to_owned()],
+            &["routine-workspace/reports/cron-edit.log".to_owned()],
         )
         .expect("active workspace root should resolve to nearest existing parent");
 
         assert_eq!(active.root, fs::canonicalize(project).expect("project should canonicalize"));
-        assert_eq!(active.relative_path, "scenario-s027-routine");
+        assert_eq!(active.relative_path, "routine-workspace");
     }
 
     #[test]
     fn workspace_root_override_accepts_active_root_relative_path_or_basename() {
         let tempdir = tempfile::tempdir().expect("tempdir should be created");
-        let active_dir = tempdir.path().join("e2e-workspaces").join("harness-smoke-20260525");
+        let active_dir = tempdir.path().join("agent-workspaces").join("harness-smoke-20260525");
         fs::create_dir_all(active_dir.as_path()).expect("active directory should exist");
         let active = ActiveWorkspaceRoot {
             root: fs::canonicalize(active_dir.as_path()).expect("active dir should canonicalize"),
-            relative_path: "e2e-workspaces/harness-smoke-20260525".to_owned(),
+            relative_path: "agent-workspaces/harness-smoke-20260525".to_owned(),
         };
 
         assert!(workspace_root_override_targets_active_root(
-            "e2e-workspaces/harness-smoke-20260525",
+            "agent-workspaces/harness-smoke-20260525",
             &active
         ));
         assert!(workspace_root_override_targets_active_root("harness-smoke-20260525", &active));

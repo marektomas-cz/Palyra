@@ -121,8 +121,8 @@ const PARITY_TRICKY_DOM_HTML: &str = include_str!("../../../../fixtures/parity/t
 
 fn active_workspace_root_for_gateway_test() -> ActiveWorkspaceRoot {
     ActiveWorkspaceRoot {
-        root: PathBuf::from("C:/workspace/scenario-s002-notes-api"),
-        relative_path: "scenario-s002-notes-api".to_owned(),
+        root: PathBuf::from("C:/workspace/notes-api"),
+        relative_path: "notes-api".to_owned(),
     }
 }
 
@@ -145,15 +145,15 @@ fn process_runner_input_preserves_explicit_active_root_paths() {
     let active_root = active_workspace_root_for_gateway_test();
 
     assert!(!process_runner_input_should_use_active_root(
-        br#"{"command":"npm","args":["test"],"cwd":"scenario-s002-notes-api"}"#,
+        br#"{"command":"npm","args":["test"],"cwd":"notes-api"}"#,
         &active_root,
     ));
     assert!(!process_runner_input_should_use_active_root(
-        br#"{"command":"node","args":["scenario-s002-notes-api/server.js"]}"#,
+        br#"{"command":"node","args":["notes-api/server.js"]}"#,
         &active_root,
     ));
     assert!(!process_runner_input_should_use_active_root(
-        br#"{"command":"npm","args":["--prefix=scenario-s002-notes-api","test"]}"#,
+        br#"{"command":"npm","args":["--prefix=notes-api","test"]}"#,
         &active_root,
     ));
 }
@@ -5375,7 +5375,7 @@ async fn memory_retain_tool_principal_scope_writes_admin_preferences() {
 #[tokio::test(flavor = "multi_thread")]
 async fn memory_retain_tool_principal_scope_requires_review_for_workflow_rules() {
     let state = build_test_runtime_state(false);
-    let input_json = br#"{"content_text":"Workflow rules for E2E memory capacity: inspect files, run available tests, protect secrets, follow approval policy, preserve sandbox guardrails, and write concise reports.","category":"procedure","scope":"principal","confidence":0.9,"tags":["e2e-s035-rules"]}"#;
+    let input_json = br#"{"content_text":"Workflow rules for memory capacity: inspect files, run available tests, protect secrets, follow approval policy, preserve sandbox guardrails, and write concise reports.","category":"procedure","scope":"principal","confidence":0.9,"tags":["memory-capacity-rules"]}"#;
     let outcome = execute_memory_retain_tool(
         &state,
         routines_tool_test_context(),

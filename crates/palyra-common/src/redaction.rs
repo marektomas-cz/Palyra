@@ -599,7 +599,7 @@ mod tests {
 
     #[test]
     fn url_segments_in_text_preserves_regex_query_syntax() {
-        let source = "document.cookie.match(/(?:^|; )s057_user=([^;]*)/)";
+        let source = "document.cookie.match(/(?:^|; )theme=([^;]*)/)";
 
         assert_eq!(redact_url_segments_in_text(source), source);
     }

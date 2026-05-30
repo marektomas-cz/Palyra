@@ -1710,7 +1710,7 @@ mod tests {
 
     #[test]
     fn tool_result_projection_preview_preserves_benign_source_structure() {
-        let source = "const match = document.cookie.match(/(?:^|; )s057_user=([^;]*)/);\n\
+        let source = "const match = document.cookie.match(/(?:^|; )theme=([^;]*)/);\n\
                       const fixture = 'token=a%3Db%3Dc';\n\
                       const selector = '#password';\n";
         let output_json = serde_json::to_vec(&json!({
@@ -1722,10 +1722,7 @@ mod tests {
 
         let preview = super::redacted_tool_result_preview(output_json.as_slice(), 2048);
 
-        assert!(
-            preview.contains("document.cookie.match(/(?:^|; )s057_user=([^;]*)/)"),
-            "{preview}"
-        );
+        assert!(preview.contains("document.cookie.match(/(?:^|; )theme=([^;]*)/)"), "{preview}");
         assert!(preview.contains("token=a%3Db%3Dc"), "{preview}");
         assert!(preview.contains("#password"), "{preview}");
         assert!(!preview.contains("<redacted>"), "{preview}");

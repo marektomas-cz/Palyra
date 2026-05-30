@@ -3828,7 +3828,7 @@ mod tests {
     #[test]
     fn chromium_observe_state_summary_exposes_safe_form_and_storage_values() {
         let raw = serde_json::json!({
-            "html": "<html><body><input id=\"owner\" name=\"owner\" value=\"owner-s024@example.test\"></body></html>",
+            "html": "<html><body><input id=\"owner\" name=\"owner\" value=\"owner@example.test\"></body></html>",
             "origin": "http://127.0.0.1:8786",
             "form_controls": [{
                 "tag": "input",
@@ -3836,14 +3836,14 @@ mod tests {
                 "id": "owner",
                 "name": "owner",
                 "selector": "#owner",
-                "value": "owner-s024@example.test",
+                "value": "owner@example.test",
                 "checked": null,
                 "selected_options": []
             }],
             "local_storage": {
                 "ok": true,
                 "origin": "http://127.0.0.1:8786",
-                "entries": {"wizard": "{\"owner\":\"owner-s024@example.test\"}"}
+                "entries": {"wizard": "{\"owner\":\"owner@example.test\"}"}
             },
             "session_storage": {
                 "ok": true,
@@ -3858,8 +3858,7 @@ mod tests {
         let page_body = page_body_with_chromium_observe_state(payload);
 
         assert!(
-            page_body.contains("browser_form_control")
-                && page_body.contains("owner-s024@example.test"),
+            page_body.contains("browser_form_control") && page_body.contains("owner@example.test"),
             "form state summary should expose safe current values: {page_body}"
         );
         assert!(

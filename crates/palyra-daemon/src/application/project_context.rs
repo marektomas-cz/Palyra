@@ -1204,29 +1204,29 @@ mod tests {
     #[test]
     fn derives_focus_path_from_absolute_workspace_prompt_path() {
         let root = temp_project_context_root();
-        let project = root.join("scenario-s002-notes-api");
+        let project = root.join("notes-api");
         fs::create_dir_all(project.as_path()).expect("project directory should exist");
         let prompt = format!("Work only inside {}. Create package.json there.", project.display());
 
         let focus = derive_focus_paths_from_prompt(prompt.as_str(), std::slice::from_ref(&root));
 
         assert_eq!(focus.len(), 1);
-        assert_eq!(focus[0].path, "scenario-s002-notes-api");
+        assert_eq!(focus[0].path, "notes-api");
         assert_eq!(focus[0].reason, "prompt_workspace_path");
     }
 
     #[test]
     fn derives_focus_path_from_relative_workspace_prompt_path() {
         let root = temp_project_context_root();
-        let project = root.join("fixtures").join("S016-scope-limited-replace");
+        let project = root.join("fixtures").join("scope-limited-replace");
         fs::create_dir_all(project.join("src").as_path()).expect("project directory should exist");
-        let prompt = "Work only in fixtures/S016-scope-limited-replace. \
-            Update src/public/banner.txt and create reports/s016-scope-report.md.";
+        let prompt = "Work only in fixtures/scope-limited-replace. \
+            Update src/public/banner.txt and create reports/scope-report.md.";
 
         let focus = derive_focus_paths_from_prompt(prompt, std::slice::from_ref(&root));
 
         assert_eq!(focus.len(), 1);
-        assert_eq!(focus[0].path, "fixtures/S016-scope-limited-replace");
+        assert_eq!(focus[0].path, "fixtures/scope-limited-replace");
         assert_eq!(focus[0].reason, "prompt_workspace_path");
     }
 

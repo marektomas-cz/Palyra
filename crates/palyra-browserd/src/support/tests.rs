@@ -2836,8 +2836,8 @@ async fn browser_service_observe_returns_stable_sanitized_snapshot() {
 fn dom_snapshot_exposes_safe_form_values_and_state_flags() {
     let html = r#"
 <html><body>
-  <input id="project" name="project" type="text" value="Palyra S024">
-  <input id="owner" name="owner" type="email" value="owner-s024@example.test">
+  <input id="project" name="project" type="text" value="Palyra Portal">
+  <input id="owner" name="owner" type="email" value="owner@example.test">
   <input id="remember" name="remember" type="checkbox" value="yes" checked="true">
   <select id="region" name="region" value="eu"><option value="us">US</option><option value="eu" selected="true">EU</option></select>
 </body></html>
@@ -2847,7 +2847,7 @@ fn dom_snapshot_exposes_safe_form_values_and_state_flags() {
 
     assert!(!truncated);
     assert!(
-        snapshot.contains("id=\"owner\"") && snapshot.contains("value=\"owner-s024@example.test\""),
+        snapshot.contains("id=\"owner\"") && snapshot.contains("value=\"owner@example.test\""),
         "safe current input values should be visible in observe snapshots: {snapshot}"
     );
     assert!(

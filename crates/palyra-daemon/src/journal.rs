@@ -20413,12 +20413,12 @@ mod tests {
     #[test]
     fn redact_payload_json_masks_secret_like_marker_tokens_inside_text() {
         let redacted = super::redact_payload_json(
-            br#"{"tool_output":"README says S013_DUMMY_SECRET_SHOULD_NOT_APPEAR must be printed."}"#,
+            br#"{"tool_output":"README says DUMMY_SECRET_SHOULD_NOT_APPEAR must be printed."}"#,
         )
         .expect("payload redaction should succeed");
 
         assert!(redacted.contains("<redacted>"));
-        assert!(!redacted.contains("S013_DUMMY_SECRET_SHOULD_NOT_APPEAR"));
+        assert!(!redacted.contains("DUMMY_SECRET_SHOULD_NOT_APPEAR"));
         assert!(redacted.contains("README says"));
         assert!(redacted.contains("must be printed"));
     }
@@ -20437,22 +20437,22 @@ mod tests {
     #[test]
     fn redact_payload_json_fully_masks_mixed_secret_and_marker_text() {
         let redacted = super::redact_payload_json(
-            br#"{"tool_output":"token=real-secret S013_DUMMY_SECRET_SHOULD_NOT_APPEAR"}"#,
+            br#"{"tool_output":"token=real-secret DUMMY_SECRET_SHOULD_NOT_APPEAR"}"#,
         )
         .expect("payload redaction should succeed");
 
         assert!(redacted.contains(r#""tool_output":"<redacted>""#), "{redacted}");
         assert!(!redacted.contains("real-secret"), "{redacted}");
-        assert!(!redacted.contains("S013_DUMMY_SECRET_SHOULD_NOT_APPEAR"), "{redacted}");
+        assert!(!redacted.contains("DUMMY_SECRET_SHOULD_NOT_APPEAR"), "{redacted}");
 
         let redacted = super::redact_payload_json(
-            br#"{"tool_output":"Authorization: Bearer real-secret S013_DUMMY_SECRET_SHOULD_NOT_APPEAR"}"#,
+            br#"{"tool_output":"Authorization: Bearer real-secret DUMMY_SECRET_SHOULD_NOT_APPEAR"}"#,
         )
         .expect("payload redaction should succeed");
 
         assert!(redacted.contains(r#""tool_output":"<redacted>""#), "{redacted}");
         assert!(!redacted.contains("real-secret"), "{redacted}");
-        assert!(!redacted.contains("S013_DUMMY_SECRET_SHOULD_NOT_APPEAR"), "{redacted}");
+        assert!(!redacted.contains("DUMMY_SECRET_SHOULD_NOT_APPEAR"), "{redacted}");
     }
 
     #[test]
@@ -22099,7 +22099,7 @@ mod tests {
                 seq: 0,
                 event_type: "message.received".to_owned(),
                 payload_json:
-                    r#"{"text":"Feature flag note PALYRA_E2E_BETA belonged to an unrelated rollout."}"#
+                    r#"{"text":"Feature flag note PALYRA_TRANSIENT_BETA belonged to an unrelated rollout."}"#
                         .to_owned(),
             })
             .expect("tape event should persist");
@@ -22140,7 +22140,7 @@ mod tests {
                 run_id: "01ARZ3NDEKTSV4RRFFQ69G5RE1".to_owned(),
                 seq: 0,
                 event_type: "message.received".to_owned(),
-                payload_json: r#"{"text":"Scénář S036. Dočasný feature flag se jmenuje PALYRA_E2E_BETA. Neukládej to do trvalé memory."}"#.to_owned(),
+                payload_json: r#"{"text":"Poznámka z předchozí session. Dočasný feature flag se jmenuje PALYRA_TRANSIENT_BETA. Neukládej to do trvalé memory."}"#.to_owned(),
             })
             .expect("tape event should persist");
         upsert_orchestrator_session(&store, "01ARZ3NDEKTSV4RRFFQ69G5SE2");
@@ -22175,7 +22175,7 @@ mod tests {
             assert_eq!(outcome.groups.len(), 1, "query: {query}");
             let matched = &outcome.groups[0].windows[0].matched;
             assert!(
-                matched.text.contains("PALYRA_E2E_BETA"),
+                matched.text.contains("PALYRA_TRANSIENT_BETA"),
                 "session recall should surface the prior feature flag for query {query}"
             );
         }
@@ -25630,14 +25630,14 @@ mod tests {
 
         store
             .upsert_workspace_document(&sample_workspace_write_request(
-                "projects/s079-a/build-target.md",
-                "Project A private build target for S079 is alpha.",
+                "projects/client-a/build-target.md",
+                "Project A private build target is alpha.",
             ))
             .expect("project A workspace document should be created");
         store
             .upsert_workspace_document(&sample_workspace_write_request(
-                "projects/s079-b/build-target.md",
-                "Project B private build target for S079 is beta.",
+                "projects/client-b/build-target.md",
+                "Project B private build target is beta.",
             ))
             .expect("project B workspace document should be created");
 
@@ -25646,8 +25646,8 @@ mod tests {
                 principal: "user:ops".to_owned(),
                 channel: Some("cli".to_owned()),
                 agent_id: Some("agent:writer".to_owned()),
-                query: "S079 build target".to_owned(),
-                prefix: Some("projects/s079-a/".to_owned()),
+                query: "client build target".to_owned(),
+                prefix: Some("projects/client-a/".to_owned()),
                 top_k: 5,
                 min_score: 0.0,
                 include_historical: false,
@@ -25656,11 +25656,11 @@ mod tests {
             .expect("workspace search should accept a directory prefix");
 
         assert!(
-            hits.iter().any(|hit| hit.document.path == "projects/s079-a/build-target.md"),
+            hits.iter().any(|hit| hit.document.path == "projects/client-a/build-target.md"),
             "directory prefix should include matching project A document"
         );
         assert!(
-            hits.iter().all(|hit| hit.document.path != "projects/s079-b/build-target.md"),
+            hits.iter().all(|hit| hit.document.path != "projects/client-b/build-target.md"),
             "directory prefix must not leak sibling project documents"
         );
     }

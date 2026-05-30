@@ -1589,7 +1589,7 @@ fn parse_cron_add() {
         "--session-label",
         "Health",
         "--workdir",
-        "scenarios/S028-cron-workdir",
+        "workspaces/cron-workdir",
     ]);
     assert_eq!(
         parsed.command,
@@ -1612,7 +1612,7 @@ fn parse_cron_add() {
                 channel: Some("system:cron".to_owned()),
                 session_key: Some("cron:health".to_owned()),
                 session_label: Some("Health".to_owned()),
-                workdir: Some("scenarios/S028-cron-workdir".to_owned()),
+                workdir: Some("workspaces/cron-workdir".to_owned()),
                 execution_posture: None,
                 approval_mode: None,
                 json: false,

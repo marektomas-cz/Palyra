@@ -4057,17 +4057,14 @@ mod tests {
 
         let output = resolve_browser_output_path(
             "palyra.browser.screenshot",
-            "artifacts/s022-visual-smoke.png",
+            "artifacts/visual-smoke.png",
             std::slice::from_ref(&canonical_workspace),
             &[],
         )
         .expect("relative browser output path should resolve");
 
         assert!(output.starts_with(canonical_workspace.as_path()));
-        assert_eq!(
-            output.file_name().and_then(|value| value.to_str()),
-            Some("s022-visual-smoke.png")
-        );
+        assert_eq!(output.file_name().and_then(|value| value.to_str()), Some("visual-smoke.png"));
         assert!(
             output.parent().is_some_and(|parent| parent.is_dir()),
             "output parent should be created"

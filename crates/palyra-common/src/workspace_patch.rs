@@ -2640,7 +2640,7 @@ mod tests {
         let temp = tempdir().expect("tempdir should be created");
         let workspace = temp.path().join("workspace");
         fs::create_dir_all(workspace.join("reports")).expect("workspace reports dir should exist");
-        let patch = "*** Begin Patch\n*** Add File: reports/seen.json\n+***\n+{\"seen_ids\":[\"s032-alpha\"]}\n*** End Patch\n";
+        let patch = "*** Begin Patch\n*** Add File: reports/seen.json\n+***\n+{\"seen_ids\":[\"alpha\"]}\n*** End Patch\n";
 
         let error = apply_workspace_patch(
             std::slice::from_ref(&workspace),
@@ -2662,7 +2662,7 @@ mod tests {
         let workspace = temp.path().join("workspace");
         fs::create_dir_all(workspace.join("reports")).expect("workspace reports dir should exist");
         let patch = format!(
-            "*** Begin Patch\n*** Add File: reports/seen.json{}\n+***\n+{{\"seen_ids\":[\"s032-alpha\"]}}\n*** End Patch\n",
+            "*** Begin Patch\n*** Add File: reports/seen.json{}\n+***\n+{{\"seen_ids\":[\"alpha\"]}}\n*** End Patch\n",
             '\u{00a0}'
         );
 
@@ -2688,7 +2688,7 @@ mod tests {
         let target = workspace.join("reports").join("seen.json");
         fs::write(&target, "{\"seen_ids\":[]}\n").expect("initial JSON should be written");
         let patch = format!(
-            "*** Begin Patch\n*** Replace File: reports/seen.json{}\n+***\n+{{\"seen_ids\":[\"s032-alpha\"]}}\n*** End Patch\n",
+            "*** Begin Patch\n*** Replace File: reports/seen.json{}\n+***\n+{{\"seen_ids\":[\"alpha\"]}}\n*** End Patch\n",
             '\u{00a0}'
         );
 

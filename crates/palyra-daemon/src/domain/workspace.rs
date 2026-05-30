@@ -831,14 +831,14 @@ mod tests {
     #[test]
     fn normalize_workspace_prefix_accepts_project_directory_prefixes() {
         assert_eq!(
-            normalize_workspace_prefix("projects/s079-a/")
+            normalize_workspace_prefix("projects/client-a/")
                 .expect("project directory prefix should normalize"),
-            "projects/s079-a"
+            "projects/client-a"
         );
         assert_eq!(
-            normalize_workspace_prefix("projects/s079-a/build-target.md")
+            normalize_workspace_prefix("projects/client-a/build-target.md")
                 .expect("exact project document prefix should normalize"),
-            "projects/s079-a/build-target.md"
+            "projects/client-a/build-target.md"
         );
     }
 

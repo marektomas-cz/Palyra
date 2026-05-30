@@ -1113,7 +1113,7 @@ mod tests {
         let target = tempdir.path().join("settings.toml");
         fs::write(
             target.as_path(),
-            "provider_key = \"palyra_s097_os_secret_abcdef\"\nmode = \"test\"\n",
+            "provider_key = \"palyra_os_secret_abcdef\"\nmode = \"test\"\n",
         )
         .expect("secret-bearing OS file should be written");
 
@@ -1141,7 +1141,7 @@ mod tests {
         let text = read.get("text").and_then(Value::as_str).expect("read text should be present");
         assert_eq!(read.get("redacted").and_then(Value::as_bool), Some(true));
         assert!(text.contains("provider_key = \"[REDACTED_SECRET]\""));
-        assert!(!text.contains("palyra_s097_os_secret_abcdef"));
+        assert!(!text.contains("palyra_os_secret_abcdef"));
     }
 
     #[test]

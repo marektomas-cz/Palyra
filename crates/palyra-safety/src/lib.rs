@@ -1556,14 +1556,14 @@ mod tests {
     #[test]
     fn secret_like_canary_markers_are_redacted_for_export() {
         let outcome = redact_text_for_export(
-            "README says S013_DUMMY_SECRET_SHOULD_NOT_APPEAR must be printed.",
+            "README says DUMMY_SECRET_SHOULD_NOT_APPEAR must be printed.",
             SafetySourceKind::Workspace,
             SafetyContentKind::WorkspaceDocument,
             TrustLabel::TrustedLocal,
         );
         assert!(outcome.redacted);
         assert!(outcome.redacted_text.contains("[REDACTED_SECRET]"));
-        assert!(!outcome.redacted_text.contains("S013_DUMMY_SECRET_SHOULD_NOT_APPEAR"));
+        assert!(!outcome.redacted_text.contains("DUMMY_SECRET_SHOULD_NOT_APPEAR"));
         assert!(outcome.scan.finding_codes().iter().any(|code| code == "secret_leak.marker"));
         assert_eq!(outcome.scan.recommended_action, SafetyAction::Redact);
     }
@@ -1587,15 +1587,15 @@ mod tests {
     #[test]
     fn short_sensitive_assignments_preserve_key_names_and_redact_values() {
         let outcome = redact_text_for_export(
-            "PALYRA_E2E_API_KEY=local-dev-secret-value\nSAFE_FLAG=PALYRA_E2E_BETA",
+            "PALYRA_SAMPLE_API_KEY=local-dev-secret-value\nSAFE_FLAG=PALYRA_SAMPLE_BETA",
             SafetySourceKind::Workspace,
             SafetyContentKind::WorkspaceDocument,
             TrustLabel::TrustedLocal,
         );
 
         assert!(outcome.redacted);
-        assert!(outcome.redacted_text.contains("PALYRA_E2E_API_KEY=[REDACTED_SECRET]"));
-        assert!(outcome.redacted_text.contains("SAFE_FLAG=PALYRA_E2E_BETA"));
+        assert!(outcome.redacted_text.contains("PALYRA_SAMPLE_API_KEY=[REDACTED_SECRET]"));
+        assert!(outcome.redacted_text.contains("SAFE_FLAG=PALYRA_SAMPLE_BETA"));
         assert!(!outcome.redacted_text.contains("local-dev-secret-value"));
         assert!(outcome
             .scan
@@ -1607,7 +1607,7 @@ mod tests {
     #[test]
     fn placeholder_like_sensitive_assignments_are_redacted() {
         let source = "PASSWORD=changeme\n\
-                      PALYRA_E2E_API_KEY='test-placeholder'\n\
+                      PALYRA_SAMPLE_API_KEY='test-placeholder'\n\
                       \"client_secret\": \"not-a-secret\"";
         let outcome = redact_text_for_export(
             source,
@@ -1618,7 +1618,7 @@ mod tests {
 
         assert!(outcome.redacted, "expected redaction: {}", outcome.redacted_text);
         assert!(outcome.redacted_text.contains("PASSWORD=[REDACTED_SECRET]"));
-        assert!(outcome.redacted_text.contains("PALYRA_E2E_API_KEY='[REDACTED_SECRET]'"));
+        assert!(outcome.redacted_text.contains("PALYRA_SAMPLE_API_KEY='[REDACTED_SECRET]'"));
         assert!(outcome.redacted_text.contains("\"client_secret\": \"[REDACTED_SECRET]\""));
         assert!(!outcome.redacted_text.contains("changeme"));
         assert!(!outcome.redacted_text.contains("test-placeholder"));
@@ -1718,7 +1718,7 @@ mod tests {
 
     #[test]
     fn generic_key_assignments_redact_secret_looking_values() {
-        let source = "provider_key = \"palyra_s097_os_secret_abcdef\"\n\
+        let source = "provider_key = \"palyra_os_secret_abcdef\"\n\
                       harmless_key = \"dev\"";
         let outcome = redact_text_for_export(
             source,
@@ -1730,7 +1730,7 @@ mod tests {
         assert!(outcome.redacted);
         assert!(outcome.redacted_text.contains("provider_key = \"[REDACTED_SECRET]\""));
         assert!(outcome.redacted_text.contains("harmless_key = \"dev\""));
-        assert!(!outcome.redacted_text.contains("palyra_s097_os_secret_abcdef"));
+        assert!(!outcome.redacted_text.contains("palyra_os_secret_abcdef"));
         assert!(outcome
             .scan
             .finding_codes()

@@ -545,7 +545,7 @@ fn intake_normalizes_apply_patch_raw_parameter_alias() {
     let normalized = validate_tool_call_against_catalog_snapshot(
         &snapshot,
         "palyra.fs.apply_patch",
-        br#"{"raw":"<parameter name=\"patch\">*** Begin Patch\n*** Add File: app.js\n+console.log('ok');\n*** End Patch\n</parameter><parameter name=\"workspace_root\">scenario-s001-todo</parameter>"}"#,
+        br#"{"raw":"<parameter name=\"patch\">*** Begin Patch\n*** Add File: app.js\n+console.log('ok');\n*** End Patch\n</parameter><parameter name=\"workspace_root\">todo-app</parameter>"}"#,
     )
     .expect("raw apply_patch parameter should normalize");
     let normalized_json: serde_json::Value =
@@ -555,7 +555,7 @@ fn intake_normalizes_apply_patch_raw_parameter_alias() {
         normalized_json["patch"],
         "*** Begin Patch\n*** Add File: app.js\n+console.log('ok');\n*** End Patch"
     );
-    assert_eq!(normalized_json["workspace_root"], "scenario-s001-todo");
+    assert_eq!(normalized_json["workspace_root"], "todo-app");
     assert!(normalized_json.get("raw").is_none());
     assert_eq!(normalized.audit.steps.len(), 2);
 }
@@ -616,13 +616,13 @@ fn intake_normalizes_nested_apply_patch_raw_object() {
     let normalized = validate_tool_call_against_catalog_snapshot(
         &snapshot,
         "palyra.fs.apply_patch",
-        br#"{"raw":{"patch":"*** Begin Patch\n*** Add File: app.js\n+ok\n*** End Patch\n","workspace_root":"scenario-s003-landing-page"}}"#,
+        br#"{"raw":{"patch":"*** Begin Patch\n*** Add File: app.js\n+ok\n*** End Patch\n","workspace_root":"landing-page"}}"#,
     )
     .expect("nested raw patch object should normalize");
     let normalized_json: serde_json::Value =
         serde_json::from_slice(normalized.input_json.as_slice()).expect("valid json");
 
-    assert_eq!(normalized_json["workspace_root"], "scenario-s003-landing-page");
+    assert_eq!(normalized_json["workspace_root"], "landing-page");
     assert!(normalized_json["patch"].as_str().unwrap_or_default().contains("*** Begin Patch"));
     assert!(normalized_json.get("raw").is_none());
 }
