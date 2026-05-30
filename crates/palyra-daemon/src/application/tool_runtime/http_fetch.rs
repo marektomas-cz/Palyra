@@ -24,6 +24,9 @@ use crate::{
     tool_protocol::{ToolAttestation, ToolExecutionOutcome},
 };
 
+const HTTP_FETCH_HTML_SKIP_TAGS: &[&str] =
+    &["head", "script", "style", "noscript", "template", "svg"];
+
 pub(crate) async fn execute_http_fetch_tool(
     runtime_state: &Arc<GatewayRuntimeState>,
     proposal_id: &str,
@@ -593,7 +596,8 @@ pub(crate) async fn execute_http_fetch_tool(
         let status_code = response.status().as_u16();
         let success = response.status().is_success();
         let body_text = String::from_utf8_lossy(body_bytes.as_slice()).to_string();
-        let body_export = export_http_fetch_body(body_text.as_str());
+        let model_body = http_fetch_model_body_text(content_type.as_str(), body_text.as_str());
+        let body_export = export_http_fetch_body(model_body.body_text.as_str());
         let output_json = json!({
             "url": redact_url(current_url.as_str()),
             "method": method,
@@ -604,6 +608,7 @@ pub(crate) async fn execute_http_fetch_tool(
             "max_response_bytes": max_response_bytes,
             "truncated": body_truncated,
             "body_text": body_export.body_text,
+            "body_text_format": model_body.format,
             "latency_ms": started_at.elapsed().as_millis() as u64,
             "request_headers": redacted_http_headers(request_headers.as_slice()),
             "cache": {
@@ -988,6 +993,233 @@ fn http_fetch_tool_execution_outcome(
     }
 }
 
+struct HttpFetchModelBody {
+    body_text: String,
+    format: &'static str,
+}
+
+fn http_fetch_model_body_text(content_type: &str, raw_body_text: &str) -> HttpFetchModelBody {
+    if !is_html_content_type(content_type) {
+        return HttpFetchModelBody { body_text: raw_body_text.to_owned(), format: "plain_text" };
+    }
+
+    let extracted = extract_html_visible_text(raw_body_text);
+    if extracted.is_empty() {
+        return HttpFetchModelBody { body_text: raw_body_text.to_owned(), format: "html_raw" };
+    }
+
+    HttpFetchModelBody { body_text: extracted, format: "html_text" }
+}
+
+fn is_html_content_type(content_type: &str) -> bool {
+    content_type.split(';').next().unwrap_or_default().trim().eq_ignore_ascii_case("text/html")
+}
+
+fn extract_html_visible_text(html: &str) -> String {
+    let mut output = String::new();
+    let mut index = 0_usize;
+    let mut skipped_tags = Vec::<String>::new();
+
+    while index < html.len() {
+        let Some(relative_tag_start) = html[index..].find('<') else {
+            if skipped_tags.is_empty() {
+                append_html_text(&mut output, &html[index..]);
+            }
+            break;
+        };
+        let tag_start = index.saturating_add(relative_tag_start);
+        if skipped_tags.is_empty() {
+            append_html_text(&mut output, &html[index..tag_start]);
+        }
+        if html[tag_start..].starts_with("<!--") {
+            let Some(relative_comment_end) = html[tag_start + 4..].find("-->") else {
+                break;
+            };
+            index =
+                tag_start.saturating_add(4).saturating_add(relative_comment_end).saturating_add(3);
+            continue;
+        }
+        let Some(relative_tag_end) = html[tag_start..].find('>') else {
+            break;
+        };
+        let tag_end = tag_start.saturating_add(relative_tag_end);
+        let tag_source = &html[tag_start + 1..tag_end];
+        handle_html_tag(tag_source, &mut output, &mut skipped_tags);
+        index = tag_end.saturating_add(1);
+    }
+
+    normalize_html_text(output.as_str())
+}
+
+fn handle_html_tag(tag_source: &str, output: &mut String, skipped_tags: &mut Vec<String>) {
+    let trimmed = tag_source.trim();
+    if trimmed.starts_with("!--") || trimmed.starts_with('!') || trimmed.starts_with('?') {
+        return;
+    }
+    let closing = trimmed.starts_with('/');
+    let self_closing = trimmed.ends_with('/');
+    let Some(tag_name) = html_tag_name(trimmed) else {
+        return;
+    };
+
+    if closing {
+        if let Some(position) = skipped_tags.iter().rposition(|tag| tag == &tag_name) {
+            skipped_tags.truncate(position);
+        }
+        if skipped_tags.is_empty() && html_tag_adds_boundary(tag_name.as_str()) {
+            append_html_boundary(output);
+        }
+        return;
+    }
+
+    if HTTP_FETCH_HTML_SKIP_TAGS.iter().any(|tag| *tag == tag_name) && !self_closing {
+        skipped_tags.push(tag_name);
+        return;
+    }
+    if skipped_tags.is_empty() && html_tag_adds_boundary(tag_name.as_str()) {
+        append_html_boundary(output);
+    }
+}
+
+fn html_tag_name(tag_source: &str) -> Option<String> {
+    let source = tag_source.trim_start_matches('/').trim_start();
+    let name = source
+        .split(|ch: char| ch.is_ascii_whitespace() || ch == '/' || ch == '>')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    (!name.is_empty()).then_some(name)
+}
+
+fn html_tag_adds_boundary(tag_name: &str) -> bool {
+    matches!(
+        tag_name,
+        "address"
+            | "article"
+            | "aside"
+            | "blockquote"
+            | "br"
+            | "dd"
+            | "div"
+            | "dl"
+            | "dt"
+            | "fieldset"
+            | "figcaption"
+            | "figure"
+            | "footer"
+            | "form"
+            | "h1"
+            | "h2"
+            | "h3"
+            | "h4"
+            | "h5"
+            | "h6"
+            | "header"
+            | "hr"
+            | "li"
+            | "main"
+            | "nav"
+            | "ol"
+            | "p"
+            | "pre"
+            | "section"
+            | "table"
+            | "tbody"
+            | "td"
+            | "tfoot"
+            | "th"
+            | "thead"
+            | "tr"
+            | "ul"
+    )
+}
+
+fn append_html_text(output: &mut String, text: &str) {
+    let decoded = decode_basic_html_entities(text);
+    let collapsed = decoded.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return;
+    }
+    if !output.is_empty() && !output.chars().last().is_some_and(char::is_whitespace) {
+        output.push(' ');
+    }
+    output.push_str(collapsed.as_str());
+}
+
+fn append_html_boundary(output: &mut String) {
+    if output.trim().is_empty() {
+        return;
+    }
+    if !output.ends_with('\n') {
+        output.push('\n');
+    }
+}
+
+fn normalize_html_text(text: &str) -> String {
+    text.lines().map(str::trim).filter(|line| !line.is_empty()).collect::<Vec<_>>().join("\n")
+}
+
+fn decode_basic_html_entities(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut index = 0_usize;
+
+    while index < text.len() {
+        let Some(relative_ampersand) = text[index..].find('&') else {
+            output.push_str(&text[index..]);
+            break;
+        };
+        let ampersand = index.saturating_add(relative_ampersand);
+        output.push_str(&text[index..ampersand]);
+        let entity_start = ampersand.saturating_add(1);
+        let Some(relative_semicolon) = text[entity_start..].find(';') else {
+            output.push('&');
+            index = entity_start;
+            continue;
+        };
+        let semicolon = entity_start.saturating_add(relative_semicolon);
+        let entity = &text[entity_start..semicolon];
+        if entity.len() > 32 {
+            output.push('&');
+            index = entity_start;
+            continue;
+        }
+        if let Some(decoded) = decode_basic_html_entity(entity) {
+            output.push_str(decoded.as_str());
+        } else {
+            output.push('&');
+            output.push_str(entity);
+            output.push(';');
+        }
+        index = semicolon.saturating_add(1);
+    }
+
+    output
+}
+
+fn decode_basic_html_entity(entity: &str) -> Option<String> {
+    match entity {
+        "amp" => Some("&".to_owned()),
+        "apos" => Some("'".to_owned()),
+        "gt" => Some(">".to_owned()),
+        "lt" => Some("<".to_owned()),
+        "nbsp" => Some(" ".to_owned()),
+        "quot" => Some("\"".to_owned()),
+        value if value.strip_prefix("#x").or_else(|| value.strip_prefix("#X")).is_some() => {
+            let digits = value.strip_prefix("#x").or_else(|| value.strip_prefix("#X"))?;
+            decode_numeric_html_entity(digits, 16)
+        }
+        value if value.starts_with('#') => decode_numeric_html_entity(&value[1..], 10),
+        _ => None,
+    }
+}
+
+fn decode_numeric_html_entity(digits: &str, radix: u32) -> Option<String> {
+    let value = u32::from_str_radix(digits, radix).ok()?;
+    let character = char::from_u32(value)?;
+    Some(character.to_string())
+}
+
 struct HttpFetchBodyExport {
     body_text: String,
     safety_json: Value,
@@ -1021,7 +1253,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 mod tests {
     use serde_json::json;
 
-    use super::{export_http_fetch_body, parse_credential_bindings};
+    use super::{export_http_fetch_body, http_fetch_model_body_text, parse_credential_bindings};
 
     #[test]
     fn http_fetch_export_redacts_sensitive_body_text() {
@@ -1040,6 +1272,42 @@ mod tests {
             findings.contains(&"secret_leak.header.authorization"),
             "authorization header leak should be reported"
         );
+    }
+
+    #[test]
+    fn http_fetch_html_body_text_skips_asset_markup_and_extracts_visible_text() {
+        let html = r#"<!doctype html>
+            <html>
+                <head>
+                    <title>Preload bundle</title>
+                    <link rel="preload" href="/assets/app.js">
+                    <script>window.__BOOT="secret-looking-token";</script>
+                    <style>body { display: grid; }</style>
+                </head>
+                <body>
+                    <main>
+                        <h1>Release notes</h1>
+                        <p>Node.js v22.18.0 &amp; v24.9.0 are available.</p>
+                    </main>
+                </body>
+            </html>"#;
+
+        let model_body = http_fetch_model_body_text("text/html", html);
+
+        assert_eq!(model_body.format, "html_text");
+        assert!(model_body.body_text.contains("Release notes"));
+        assert!(model_body.body_text.contains("Node.js v22.18.0 & v24.9.0 are available."));
+        assert!(!model_body.body_text.contains("Preload bundle"));
+        assert!(!model_body.body_text.contains("window.__BOOT"));
+        assert!(!model_body.body_text.contains("display: grid"));
+    }
+
+    #[test]
+    fn http_fetch_non_html_body_text_keeps_plain_text_format() {
+        let model_body = http_fetch_model_body_text("application/json", r#"{"ok":true}"#);
+
+        assert_eq!(model_body.format, "plain_text");
+        assert_eq!(model_body.body_text, r#"{"ok":true}"#);
     }
 
     #[test]
