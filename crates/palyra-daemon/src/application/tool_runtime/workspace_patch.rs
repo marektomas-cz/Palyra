@@ -414,6 +414,18 @@ fn resolve_workspace_root_override(
         });
     }
     validate_relative_workspace_root_override(requested, workspace_root)?;
+    if let Some(root) = workspace_root_override_matching_existing_root_basename(
+        requested,
+        canonical_roots.as_slice(),
+    ) {
+        let risk_path_prefixes =
+            workspace_root_risk_path_prefixes_from_canonical(root.as_path(), &canonical_roots);
+        return Ok(ResolvedWorkspacePatchRoots {
+            roots: vec![root],
+            canonical_constraint_roots: canonical_roots,
+            risk_path_prefixes,
+        });
+    }
     for canonical_root in &canonical_roots {
         let candidate = canonical_root.join(requested);
         match canonicalize_workspace_root_override(
@@ -457,6 +469,36 @@ fn resolve_workspace_root_override(
     Err(format!(
         "palyra.fs.apply_patch workspace_root does not exist inside agent workspace roots: {workspace_root}"
     ))
+}
+
+fn workspace_root_override_matching_existing_root_basename(
+    requested: &Path,
+    canonical_roots: &[PathBuf],
+) -> Option<PathBuf> {
+    let mut components = requested.components();
+    let Some(Component::Normal(component)) = components.next() else {
+        return None;
+    };
+    if components.next().is_some() {
+        return None;
+    }
+    canonical_roots
+        .iter()
+        .find(|root| {
+            root.file_name().is_some_and(|basename| path_component_eq(basename, component))
+        })
+        .cloned()
+}
+
+fn path_component_eq(left: &std::ffi::OsStr, right: &std::ffi::OsStr) -> bool {
+    #[cfg(windows)]
+    {
+        left.to_string_lossy().eq_ignore_ascii_case(&right.to_string_lossy())
+    }
+    #[cfg(not(windows))]
+    {
+        left == right
+    }
 }
 
 fn resolved_active_workspace_patch_roots(
@@ -841,6 +883,26 @@ mod tests {
 
         assert!(project.join("calc.js").is_file());
         assert!(!workspace.join("calc.js").exists());
+    }
+
+    #[test]
+    fn workspace_root_override_basename_targets_existing_launch_root() {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let project = tempdir.path().join("task-workspace");
+        std::fs::create_dir_all(&project).expect("project directory should exist");
+
+        let roots =
+            resolve_workspace_root_override(std::slice::from_ref(&project), "task-workspace", true)
+                .expect("workspace root basename should resolve to the existing project root");
+
+        assert_eq!(
+            roots.roots,
+            vec![std::fs::canonicalize(&project).expect("project should canonicalize")]
+        );
+        assert!(
+            !project.join("task-workspace").exists(),
+            "basename override must not create a nested duplicate project directory"
+        );
     }
 
     #[test]

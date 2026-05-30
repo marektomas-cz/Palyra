@@ -625,6 +625,12 @@ fn resolve_workspace_root_override(
         );
     }
     validate_relative_workspace_root_override(tool_name, requested, workspace_root)?;
+    if let Some(root) = workspace_root_override_matching_existing_root_basename(
+        requested,
+        canonical_roots.as_slice(),
+    ) {
+        return Ok(root);
+    }
     for (_, canonical_root) in &canonical_roots {
         let candidate = canonical_root.join(requested);
         match canonicalize_workspace_root_override(
@@ -641,6 +647,36 @@ fn resolve_workspace_root_override(
     Err(format!(
         "{tool_name} workspace_root does not exist inside agent workspace roots: {workspace_root}"
     ))
+}
+
+fn workspace_root_override_matching_existing_root_basename(
+    requested: &Path,
+    canonical_roots: &[(usize, PathBuf)],
+) -> Option<PathBuf> {
+    let mut components = requested.components();
+    let Some(Component::Normal(component)) = components.next() else {
+        return None;
+    };
+    if components.next().is_some() {
+        return None;
+    }
+    canonical_roots
+        .iter()
+        .find(|(_, root)| {
+            root.file_name().is_some_and(|basename| path_component_eq(basename, component))
+        })
+        .map(|(_, root)| root.clone())
+}
+
+fn path_component_eq(left: &std::ffi::OsStr, right: &std::ffi::OsStr) -> bool {
+    #[cfg(windows)]
+    {
+        left.to_string_lossy().eq_ignore_ascii_case(&right.to_string_lossy())
+    }
+    #[cfg(not(windows))]
+    {
+        left == right
+    }
 }
 
 fn canonicalize_workspace_root_override(
@@ -2186,6 +2222,31 @@ mod tests {
         assert_eq!(output.path, "calculator.js");
         assert_eq!(output.text.as_deref(), Some("export const add = (a, b) => a + b;\n"));
         assert_eq!(output.workspace_root_index, 0);
+    }
+
+    #[test]
+    fn read_workspace_file_workspace_root_basename_targets_existing_launch_root() {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let project = tempdir.path().join("task-workspace");
+        fs::create_dir_all(project.join("reports")).expect("project report dir should exist");
+        fs::write(project.join("reports").join("summary.md"), "ok\n")
+            .expect("workspace file should be written");
+        let input = parse_workspace_read_file_input(
+            br#"{"path":"reports/summary.md","workspace_root":"task-workspace"}"#,
+        )
+        .expect("workspace_root override should parse");
+        let roots = resolve_workspace_file_roots_for_override(
+            WORKSPACE_READ_FILE_TOOL_NAME,
+            std::slice::from_ref(&project),
+            input.workspace_root.as_deref(),
+        )
+        .expect("workspace_root basename should resolve to the existing project root");
+
+        let output =
+            read_workspace_file_from_roots(roots.as_slice(), &input).expect("file should read");
+
+        assert_eq!(output.text.as_deref(), Some("ok\n"));
+        assert!(!project.join("task-workspace").exists());
     }
 
     #[test]
