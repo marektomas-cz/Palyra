@@ -919,11 +919,33 @@ fn user_owned_os_roots() -> Vec<PathBuf> {
         }
     }
     push_canonical_root(&mut roots, std::env::temp_dir());
+    #[cfg(windows)]
+    push_windows_drive_temp_roots(&mut roots);
     #[cfg(unix)]
     {
         push_canonical_root(&mut roots, PathBuf::from("/var/tmp"));
     }
     roots
+}
+
+#[cfg(windows)]
+fn push_windows_drive_temp_roots(roots: &mut Vec<PathBuf>) {
+    let Some(system_drive) = std::env::var_os("SystemDrive") else {
+        return;
+    };
+    for candidate in windows_drive_temp_root_candidates(system_drive.to_string_lossy().as_ref()) {
+        push_canonical_root(roots, candidate);
+    }
+}
+
+#[cfg(windows)]
+fn windows_drive_temp_root_candidates(system_drive: &str) -> Vec<PathBuf> {
+    let drive = system_drive.trim().trim_end_matches(|ch| ch == '\\' || ch == '/');
+    let bytes = drive.as_bytes();
+    if bytes.len() != 2 || bytes[1] != b':' || !bytes[0].is_ascii_alphabetic() {
+        return Vec::new();
+    }
+    vec![PathBuf::from(format!("{drive}\\var\\tmp"))]
 }
 
 fn push_canonical_root(roots: &mut Vec<PathBuf>, root: PathBuf) {
@@ -1283,5 +1305,14 @@ mod tests {
                 .any(|value| value.get("kind").and_then(Value::as_str) == Some("content")),
             "search should find matching cache contents: {searched}"
         );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_drive_temp_root_candidates_include_drive_var_tmp() {
+        assert_eq!(windows_drive_temp_root_candidates("C:"), vec![PathBuf::from(r"C:\var\tmp")]);
+        assert_eq!(windows_drive_temp_root_candidates(r"C:\"), vec![PathBuf::from(r"C:\var\tmp")]);
+        assert!(windows_drive_temp_root_candidates("").is_empty());
+        assert!(windows_drive_temp_root_candidates(r"\\server\share").is_empty());
     }
 }
