@@ -24,9 +24,10 @@ use std::{
 use windows_sys::Win32::{
     Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE},
     System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-        SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicAccountingInformation,
+        JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
+        TerminateJobObject, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     },
 };
 
@@ -207,6 +208,19 @@ struct BackgroundOutputMonitor {
     stderr: Arc<Mutex<StreamCapture>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BackgroundProcessRuntimeStatus {
+    direct_pid_alive: bool,
+    process_tree_alive: bool,
+    tracked_process_count: Option<u32>,
+}
+
+impl BackgroundProcessRuntimeStatus {
+    fn alive(self) -> bool {
+        self.process_tree_alive || self.direct_pid_alive
+    }
+}
+
 #[cfg(windows)]
 #[derive(Debug)]
 struct WindowsBackgroundJob {
@@ -232,6 +246,25 @@ impl WindowsBackgroundJob {
             return Err(io::Error::last_os_error());
         }
         Ok(())
+    }
+
+    fn active_process_count(&self) -> io::Result<u32> {
+        let mut accounting = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
+        // SAFETY: `accounting` is a valid writable buffer for the requested information class and
+        // `handle` is owned by this wrapper until Drop.
+        let queried = unsafe {
+            QueryInformationJobObject(
+                self.handle,
+                JobObjectBasicAccountingInformation,
+                (&mut accounting as *mut JOBOBJECT_BASIC_ACCOUNTING_INFORMATION).cast(),
+                std::mem::size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                std::ptr::null_mut(),
+            )
+        };
+        if queried == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(accounting.ActiveProcesses)
     }
 }
 
@@ -679,12 +712,14 @@ fn builtin_stop_process_success(
     args: &[String],
 ) -> Result<SandboxProcessRunSuccess, SandboxProcessRunError> {
     let pid = parse_builtin_pid_arg(command, args)?;
-    let was_running = process_id_is_alive(pid).map_err(|error| SandboxProcessRunError {
-        kind: SandboxProcessRunErrorKind::RuntimeFailure,
-        message: format!(
-            "palyra.process.run builtin '{command}' failed to inspect pid {pid}: {error}"
-        ),
-    })?;
+    let before_status =
+        background_process_runtime_status(pid).map_err(|error| SandboxProcessRunError {
+            kind: SandboxProcessRunErrorKind::RuntimeFailure,
+            message: format!(
+                "palyra.process.run builtin '{command}' failed to inspect pid {pid}: {error}"
+            ),
+        })?;
+    let was_running = before_status.alive();
     let mut stop_error = None;
     if was_running {
         if let Err(error) = terminate_background_process_tree(pid) {
@@ -693,7 +728,8 @@ fn builtin_stop_process_success(
     }
     let stopped = !was_running
         || wait_for_process_not_alive(pid, Duration::from_millis(BACKGROUND_TERMINATION_WAIT_MS));
-    let alive = !stopped && process_id_is_alive(pid).unwrap_or(true);
+    let after_status = background_process_runtime_status(pid).ok();
+    let alive = !stopped && after_status.map(BackgroundProcessRuntimeStatus::alive).unwrap_or(true);
     if let Some(error) = stop_error.as_ref().filter(|_| !stopped) {
         return Err(SandboxProcessRunError {
             kind: SandboxProcessRunErrorKind::RuntimeFailure,
@@ -715,6 +751,12 @@ fn builtin_stop_process_success(
         "was_running": was_running,
         "stopped": stopped,
         "alive": alive,
+        "direct_pid_alive_before_stop": before_status.direct_pid_alive,
+        "process_tree_alive_before_stop": before_status.process_tree_alive,
+        "tracked_process_count_before_stop": before_status.tracked_process_count,
+        "direct_pid_alive": after_status.map(|status| status.direct_pid_alive),
+        "process_tree_alive": after_status.map(|status| status.process_tree_alive),
+        "tracked_process_count": after_status.and_then(|status| status.tracked_process_count),
         "tier": "builtin",
         "sandbox_backend": "builtin_portable",
     }))
@@ -730,15 +772,21 @@ fn builtin_process_status_success(
     args: &[String],
 ) -> Result<SandboxProcessRunSuccess, SandboxProcessRunError> {
     let pid = parse_builtin_pid_arg(command, args)?;
-    let alive = process_id_is_alive(pid).map_err(|error| SandboxProcessRunError {
-        kind: SandboxProcessRunErrorKind::RuntimeFailure,
-        message: format!(
-            "palyra.process.run builtin '{command}' failed to inspect pid {pid}: {error}"
-        ),
-    })?;
+    let status =
+        background_process_runtime_status(pid).map_err(|error| SandboxProcessRunError {
+            kind: SandboxProcessRunErrorKind::RuntimeFailure,
+            message: format!(
+                "palyra.process.run builtin '{command}' failed to inspect pid {pid}: {error}"
+            ),
+        })?;
+    let alive = status.alive();
     let output_json = serde_json::to_vec(&json!({
         "exit_code": 0,
-        "stdout": format!("pid={pid} alive={alive}\n"),
+        "stdout": format!(
+            "pid={pid} alive={alive} direct_pid_alive={} process_tree_alive={}\n",
+            status.direct_pid_alive,
+            status.process_tree_alive
+        ),
         "stderr": "",
         "stdout_truncated": false,
         "stderr_truncated": false,
@@ -747,6 +795,9 @@ fn builtin_process_status_success(
         "duration_ms": 0,
         "pid": pid,
         "alive": alive,
+        "direct_pid_alive": status.direct_pid_alive,
+        "process_tree_alive": status.process_tree_alive,
+        "tracked_process_count": status.tracked_process_count,
         "tier": "builtin",
         "sandbox_backend": "builtin_portable",
     }))
@@ -772,15 +823,46 @@ pub(crate) fn background_process_status_by_pid(
 }
 
 pub(crate) fn background_process_is_alive(pid: u32) -> io::Result<bool> {
-    process_id_is_alive(pid)
+    background_process_runtime_status(pid).map(BackgroundProcessRuntimeStatus::alive)
+}
+
+fn background_process_runtime_status(pid: u32) -> io::Result<BackgroundProcessRuntimeStatus> {
+    let direct_pid_alive = process_id_is_alive(pid)?;
+    let (process_tree_alive, tracked_process_count) =
+        background_process_tree_status(pid, direct_pid_alive)?;
+    Ok(BackgroundProcessRuntimeStatus {
+        direct_pid_alive,
+        process_tree_alive,
+        tracked_process_count,
+    })
+}
+
+#[cfg(windows)]
+fn background_process_tree_status(
+    pid: u32,
+    direct_pid_alive: bool,
+) -> io::Result<(bool, Option<u32>)> {
+    match windows_background_job_active_process_count(pid) {
+        Some(Ok(active_count)) => Ok((active_count > 0, Some(active_count))),
+        Some(Err(error)) if !direct_pid_alive => Err(error),
+        Some(Err(_)) | None => Ok((direct_pid_alive, None)),
+    }
+}
+
+#[cfg(not(windows))]
+fn background_process_tree_status(
+    _pid: u32,
+    direct_pid_alive: bool,
+) -> io::Result<(bool, Option<u32>)> {
+    Ok((direct_pid_alive, None))
 }
 
 fn wait_for_process_not_alive(pid: u32, max_wait: Duration) -> bool {
     let started_at = Instant::now();
     loop {
-        match process_id_is_alive(pid) {
-            Ok(false) => return true,
-            Ok(true) => {}
+        match background_process_runtime_status(pid) {
+            Ok(status) if !status.alive() => return true,
+            Ok(_) => {}
             Err(_) => return false,
         }
         if started_at.elapsed() >= max_wait {
@@ -2988,6 +3070,19 @@ fn take_windows_background_job(pid: u32) -> Option<Arc<WindowsBackgroundJob>> {
         Ok(mut jobs) => jobs.remove(&pid),
         Err(_) => None,
     }
+}
+
+#[cfg(windows)]
+fn windows_background_job_active_process_count(pid: u32) -> Option<io::Result<u32>> {
+    let job = match windows_background_jobs().lock() {
+        Ok(jobs) => jobs.get(&pid).cloned(),
+        Err(error) => {
+            return Some(Err(io::Error::other(format!(
+                "windows background job registry lock poisoned for pid {pid}: {error}"
+            ))));
+        }
+    }?;
+    Some(job.active_process_count())
 }
 
 #[cfg(windows)]
@@ -5498,6 +5593,115 @@ mod tests {
         }
 
         let _ = fs::remove_dir_all(workspace.as_path());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn background_status_tracks_windows_job_after_launcher_exits() {
+        let Some(python) = ["python", "py", "python3"].into_iter().find(|command| {
+            Command::new(command)
+                .arg("--version")
+                .output()
+                .map(|output| output.status.success())
+                .unwrap_or(false)
+        }) else {
+            return;
+        };
+        let workspace = unique_temp_dir("workspace-background-windows-job-child");
+        fs::create_dir_all(workspace.as_path()).expect("workspace directory should be created");
+        fs::write(workspace.join("child.py"), "import time\ntime.sleep(30)\n")
+            .expect("child script should be written");
+        fs::write(
+            workspace.join("launcher.py"),
+            "import os, subprocess, sys, time\nsubprocess.Popen([sys.executable, 'child.py'], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)\nprint('ready', flush=True)\ntime.sleep(6)\nos._exit(0)\n",
+        )
+        .expect("launcher script should be written");
+        let mut policy = sandbox_policy_with_allowed_executables(
+            workspace.clone(),
+            vec![
+                python.to_owned(),
+                "palyra.process.stop".to_owned(),
+                "palyra.process.status".to_owned(),
+            ],
+        );
+        policy.allow_interpreters = true;
+        policy.egress_enforcement_mode = EgressEnforcementMode::Preflight;
+
+        let start_input = serde_json::to_vec(&serde_json::json!({
+            "command": python,
+            "args": ["launcher.py"],
+            "background": true,
+            "timeout_ms": BACKGROUND_TEST_EXECUTION_TIMEOUT_MS
+        }))
+        .expect("input should serialize");
+        let started = run_constrained_process(
+            &policy,
+            start_input.as_slice(),
+            background_test_execution_timeout(),
+        )
+        .expect("launcher should start as a bounded background process");
+        let started_output: serde_json::Value =
+            serde_json::from_slice(&started.output_json).expect("output should parse");
+        let pid = started_output
+            .get("pid")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .expect("background process should return pid");
+        assert_eq!(
+            started_output
+                .pointer("/process_handle/windows_job_object")
+                .and_then(serde_json::Value::as_bool),
+            Some(true),
+            "windows background process should be bound to a cleanup job: {started_output}"
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(9);
+        loop {
+            if super::process_id_is_alive(pid).map(|alive| !alive).unwrap_or(false) {
+                break;
+            }
+            if Instant::now() >= deadline {
+                let _ = super::stop_background_process_by_pid(pid);
+                let _ = fs::remove_dir_all(workspace.as_path());
+                panic!("launcher pid {pid} should exit while child remains in the job");
+            }
+            thread::sleep(Duration::from_millis(BACKGROUND_MONITOR_POLL_MS));
+        }
+
+        let status = super::background_process_status_by_pid(pid);
+        let stopped = super::stop_background_process_by_pid(pid);
+        let _ = fs::remove_dir_all(workspace.as_path());
+
+        let status = status.expect("status should inspect the Windows job after direct pid exits");
+        let status_output: serde_json::Value =
+            serde_json::from_slice(&status.output_json).expect("status output should parse");
+        assert_eq!(
+            status_output.get("direct_pid_alive").and_then(serde_json::Value::as_bool),
+            Some(false),
+            "direct launcher should have exited: {status_output}"
+        );
+        assert_eq!(
+            status_output.get("process_tree_alive").and_then(serde_json::Value::as_bool),
+            Some(true),
+            "job should still report the child process as alive: {status_output}"
+        );
+        assert_eq!(status_output.get("alive").and_then(serde_json::Value::as_bool), Some(true));
+
+        let stopped = stopped.expect("stop should terminate the Windows job");
+        let stopped_output: serde_json::Value =
+            serde_json::from_slice(&stopped.output_json).expect("stop output should parse");
+        assert_eq!(
+            stopped_output.get("stopped").and_then(serde_json::Value::as_bool),
+            Some(true),
+            "stop should terminate the child process tree: {stopped_output}"
+        );
+        assert_eq!(
+            stopped_output
+                .get("process_tree_alive_before_stop")
+                .and_then(serde_json::Value::as_bool),
+            Some(true),
+            "stop should recognize the tree as running before termination: {stopped_output}"
+        );
     }
 
     #[test]
