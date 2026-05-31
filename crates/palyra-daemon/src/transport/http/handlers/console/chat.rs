@@ -2194,8 +2194,28 @@ pub(crate) async fn console_chat_background_task_create_handler(
     Ok(Json(json!({
         "session": session_record,
         "task": task,
+        "live_steering": background_task_live_steering_status(&session_record),
         "contract": contract_descriptor(),
     })))
+}
+
+fn background_task_live_steering_status(
+    session: &journal::OrchestratorSessionRecord,
+) -> serde_json::Value {
+    let parent_run_state = session.last_run_state.as_deref().unwrap_or("unknown");
+    let parent_run_active = matches!(parent_run_state, "accepted" | "in_progress");
+    json!({
+        "supported": false,
+        "mode": "background_task",
+        "parent_run_id": session.last_run_id.as_deref(),
+        "parent_run_state": parent_run_state,
+        "parent_run_active": parent_run_active,
+        "message": if parent_run_active {
+            "background-enqueue creates an independent follow-up task; it does not live-redirect the active run"
+        } else {
+            "background-enqueue creates an independent follow-up task for the session"
+        },
+    })
 }
 
 fn resolve_console_delegation_task_kind(value: Option<&str>) -> Result<String, tonic::Status> {

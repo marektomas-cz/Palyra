@@ -897,7 +897,7 @@ pub(crate) async fn run_sessions_async(
                 let task =
                     payload.pointer("/task").context("background task payload is missing")?;
                 println!(
-                    "sessions.background.enqueue task_id={} kind={} state={} priority={} max_attempts={} topology={} delegation={} limits={} diagnostic={}",
+                    "sessions.background.enqueue task_id={} kind={} state={} priority={} max_attempts={} topology={} delegation={} limits={} live_steering={} diagnostic={}",
                     redacted_optional_identifier_for_output(
                         task.pointer("/task_id").and_then(Value::as_str)
                     ),
@@ -908,6 +908,7 @@ pub(crate) async fn run_sessions_async(
                     render_background_task_topology(task),
                     render_background_task_delegation(task),
                     render_background_task_limits(task),
+                    render_background_enqueue_live_steering(payload.pointer("/live_steering")),
                     render_background_task_diagnostic(task, None)
                 );
             }
@@ -1407,6 +1408,21 @@ fn render_background_task_limits(task: &Value) -> String {
         limits.pointer("/child_timeout_ms").and_then(Value::as_u64).unwrap_or_default(),
         budget_override
     )
+}
+
+fn render_background_enqueue_live_steering(value: Option<&Value>) -> String {
+    let Some(value) = value else {
+        return "unknown".to_owned();
+    };
+    let supported = value.pointer("/supported").and_then(Value::as_bool).unwrap_or(false);
+    let parent_active =
+        value.pointer("/parent_run_active").and_then(Value::as_bool).unwrap_or(false);
+    let parent_state =
+        value.pointer("/parent_run_state").and_then(Value::as_str).unwrap_or("unknown");
+    if parent_active && !supported {
+        return format!("unsupported_active_parent_state={parent_state}");
+    }
+    format!("supported={supported} parent_state={parent_state}")
 }
 
 fn render_background_task_diagnostic(task: &Value, run: Option<&Value>) -> String {

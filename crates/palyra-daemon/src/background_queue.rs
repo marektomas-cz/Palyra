@@ -2777,6 +2777,15 @@ async fn append_parent_tape_event(
         else {
             return Ok(());
         };
+        if !parent_tape_accepts_background_event(run.state.as_str()) {
+            warn!(
+                parent_run_id,
+                state = %run.state,
+                event_type,
+                "skipping background parent tape append while parent run is active"
+            );
+            return Ok(());
+        }
         let seq = i64::try_from(run.tape_events).unwrap_or(i64::MAX);
         match runtime
             .append_orchestrator_tape_event(OrchestratorTapeAppendRequest {
@@ -2793,6 +2802,10 @@ async fn append_parent_tape_event(
         }
     }
     Err(Status::aborted(format!("failed to append parent tape event '{event_type}' after retries")))
+}
+
+fn parent_tape_accepts_background_event(parent_run_state: &str) -> bool {
+    is_terminal_run_state(parent_run_state)
 }
 
 fn value_excerpt(value: &Value) -> String {
@@ -2935,7 +2948,8 @@ mod tests {
         build_background_task_running_update, build_optional_delegated_run_context,
         build_parameter_delta_bytes, categorize_child_failure, child_merge_lifecycle_details,
         delegated_child_timeout_message, evaluate_delegation_scheduler_limits,
-        inject_background_metadata, parent_merge_event_payload, replace_background_task_snapshot,
+        inject_background_metadata, parent_merge_event_payload,
+        parent_tape_accepts_background_event, replace_background_task_snapshot,
         running_delegated_children_for_parent, running_task_should_wait_for_in_flight_work,
         should_emit_child_stream_progress, task_has_in_flight_work_without_target,
         ChildLifecycleTapeBudget, ChildLifecycleTapeDecision, ChildStreamProgress,
@@ -3059,6 +3073,22 @@ mod tests {
             should_emit_child_stream_progress(&completed, 1_001, 1_000),
             "terminal child lifecycle events must not be throttled"
         );
+    }
+
+    #[test]
+    fn background_parent_tape_events_wait_for_terminal_parent_run() {
+        for state in ["accepted", "in_progress"] {
+            assert!(
+                !parent_tape_accepts_background_event(state),
+                "background lifecycle events must not race an active parent tape state={state}"
+            );
+        }
+        for state in ["done", "failed", "cancelled"] {
+            assert!(
+                parent_tape_accepts_background_event(state),
+                "terminal parent runs can accept post-run background lifecycle events state={state}"
+            );
+        }
     }
 
     #[test]
