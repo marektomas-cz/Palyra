@@ -2562,25 +2562,10 @@ fn build_effective_cron_execution_request(
         .model_profile_override
         .clone()
         .or_else(|| execution.and_then(|config| config.provider_profile_id.clone()));
-    let parameter_delta_json = options.parameter_delta_json.clone().or_else(|| {
-        routine.as_ref().map(|record| {
-            json!({
-                "routine": {
-                    "routine_id": record.routine_id,
-                    "workdir": job.workdir,
-                    "run_mode": record.execution.run_mode.as_str(),
-                    "execution_posture": record.execution.execution_posture.as_str(),
-                    "procedure_profile_id": record.execution.procedure_profile_id,
-                    "skill_profile_id": record.execution.skill_profile_id,
-                    "provider_profile_id": record.execution.provider_profile_id,
-                    "silent_policy": record.delivery.silent_policy.as_str(),
-                    "delivery_mode": record.delivery.mode.as_str(),
-                    "failure_delivery_mode": record.delivery.failure_mode.unwrap_or(record.delivery.mode).as_str(),
-                }
-            })
-            .to_string()
-        })
-    });
+    let parameter_delta_json = options
+        .parameter_delta_json
+        .clone()
+        .or_else(|| routine.as_ref().map(|record| routine_parameter_delta_json(record, job)));
     let session_key = effective_cron_session_key(job, run_id, run_mode);
     let session_label = effective_cron_session_label(job, options, run_mode);
     Ok(EffectiveCronExecutionRequest {
@@ -2591,6 +2576,33 @@ fn build_effective_cron_execution_request(
         parameter_delta_json,
         origin_kind: options.origin_kind.clone().unwrap_or_else(|| "cron".to_owned()),
     })
+}
+
+fn routine_parameter_delta_json(record: &RoutineMetadataRecord, job: &CronJobRecord) -> String {
+    let mut parameter_delta = json!({
+        "routine": {
+            "routine_id": record.routine_id,
+            "job_id": job.job_id,
+            "workdir": job.workdir,
+            "run_mode": record.execution.run_mode.as_str(),
+            "execution_posture": record.execution.execution_posture.as_str(),
+            "procedure_profile_id": record.execution.procedure_profile_id,
+            "skill_profile_id": record.execution.skill_profile_id,
+            "provider_profile_id": record.execution.provider_profile_id,
+            "silent_policy": record.delivery.silent_policy.as_str(),
+            "delivery_mode": record.delivery.mode.as_str(),
+            "failure_delivery_mode": record.delivery.failure_mode.unwrap_or(record.delivery.mode).as_str(),
+        }
+    });
+    if let Some(workdir) =
+        job.workdir.as_deref().map(str::trim).filter(|workdir| !workdir.is_empty())
+    {
+        parameter_delta["cli_context"] = json!({
+            "launch_cwd": workdir,
+            "workspace_roots": [workdir],
+        });
+    }
+    parameter_delta.to_string()
 }
 
 fn effective_cron_session_key(
@@ -2930,13 +2942,17 @@ fn build_cron_prompt(
     format!(
         "[cron job {name}]\n\
          Scheduled trigger metadata:\n\
+         - routine_id: {routine_id}\n\
+         - job_id: {job_id}\n\
          - triggered_at_utc: {triggered_at_utc}\n\
          - triggered_at_unix_ms: {triggered_at_unix_ms}\n\n\
          {workdir_metadata}\
          {trigger_payload_metadata}\
-         Use the trigger metadata as the current time for this scheduled run when the routine asks for dates or timestamps. If workdir is present, treat it as the project root for relative outputs and pass it as cwd to process tools. For file_watch triggers, inspect the changed path from trigger_payload before deciding what to do.\n\n\
+         Use the trigger metadata as the current time for this scheduled run when the routine asks for dates or timestamps. If workdir is present, treat it as the project root for relative outputs and pass it as cwd to process tools. If the routine reaches a stop condition, use routine_id with palyra.routines.control to pause or update this routine. For file_watch triggers, inspect the changed path from trigger_payload before deciding what to do.\n\n\
          {prompt}",
         name = job.name,
+        routine_id = job.job_id,
+        job_id = job.job_id,
         prompt = job.prompt,
     )
 }
@@ -3150,9 +3166,10 @@ mod tests {
         cron_terminal_status_from_stream, decide_concurrency_policy, effective_cron_session_key,
         effective_cron_session_label, load_periodic_reaudit_skills_index, max_runs_for_job,
         normalize_schedule, now_unix_ms_or_fallback, parse_skill_reaudit_interval,
-        periodic_reaudit_targets, routine_approval_subject_id, routines_automation_enabled,
-        scheduled_routine_requires_first_run_approval, scheduled_routine_run_metadata_upsert,
-        scheduler_attempt_failure, should_disable_exhausted_scheduled_one_shot,
+        periodic_reaudit_targets, routine_approval_subject_id, routine_parameter_delta_json,
+        routines_automation_enabled, scheduled_routine_requires_first_run_approval,
+        scheduled_routine_run_metadata_upsert, scheduler_attempt_failure,
+        should_disable_exhausted_scheduled_one_shot,
         should_pause_recurring_cron_after_policy_denied, should_repair_stale_cron_run,
         visible_cron_job_enabled, ConcurrencyDecision, CronMatcher, CronMisfireRecoveryAction,
         CronTimezoneMode, InstalledSkillRecord, InstalledSkillsIndex, SchedulerHealthInput,
@@ -3454,9 +3471,41 @@ mod tests {
         let prompt = build_cron_prompt(&job, triggered_at_unix_ms, &TriggerJobOptions::default());
 
         assert!(prompt.contains("[cron job health-check]"));
+        assert!(prompt.contains("routine_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV"));
+        assert!(prompt.contains("job_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV"));
         assert!(prompt.contains("triggered_at_utc: 2026-05-15T10:30:45.123Z"));
         assert!(prompt.contains(format!("triggered_at_unix_ms: {triggered_at_unix_ms}").as_str()));
+        assert!(prompt.contains("palyra.routines.control"));
         assert!(prompt.ends_with("test"));
+    }
+
+    #[test]
+    fn routine_parameter_delta_binds_workdir_as_launch_workspace() {
+        let mut job =
+            sample_every_job("01ARZ3NDEKTSV4RRFFQ69G5FAV", Some(1_000), CronMisfirePolicy::Skip);
+        job.workdir = Some("C:/workspaces/routine-workspace".to_owned());
+        let routine = sample_routine_metadata(job.job_id.as_str());
+
+        let value: serde_json::Value =
+            serde_json::from_str(routine_parameter_delta_json(&routine, &job).as_str())
+                .expect("routine parameter delta should be JSON");
+
+        assert_eq!(
+            value.pointer("/routine/routine_id").and_then(serde_json::Value::as_str),
+            Some("01ARZ3NDEKTSV4RRFFQ69G5FAV")
+        );
+        assert_eq!(
+            value.pointer("/routine/job_id").and_then(serde_json::Value::as_str),
+            Some("01ARZ3NDEKTSV4RRFFQ69G5FAV")
+        );
+        assert_eq!(
+            value.pointer("/cli_context/launch_cwd").and_then(serde_json::Value::as_str),
+            Some("C:/workspaces/routine-workspace")
+        );
+        assert_eq!(
+            value.pointer("/cli_context/workspace_roots/0").and_then(serde_json::Value::as_str),
+            Some("C:/workspaces/routine-workspace")
+        );
     }
 
     #[test]

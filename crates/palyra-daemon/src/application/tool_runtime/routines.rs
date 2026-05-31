@@ -1463,6 +1463,7 @@ fn resolve_routine_schedule(
 ) -> Result<ScheduleResolution, String> {
     let schedule_timezone =
         parse_routine_timezone(optional_string_field(payload, "timezone"), timezone_mode)?;
+    let max_runs = optional_u32_field(payload, "max_runs")?;
     if trigger_kind == RoutineTriggerKind::FileWatch {
         let config = normalize_file_watch_trigger_payload(payload.get("trigger_payload"))
             .map_err(map_registry_error)?;
@@ -1503,7 +1504,10 @@ fn resolve_routine_schedule(
         .map_err(map_registry_error)?;
         return Ok(ScheduleResolution {
             schedule_type: parse_schedule_type(preview.schedule_type.as_str())?,
-            schedule_payload_json: preview.schedule_payload_json,
+            schedule_payload_json: schedule_payload_with_max_runs(
+                preview.schedule_payload_json,
+                max_runs,
+            )?,
             next_run_at_unix_ms: preview.next_run_at_unix_ms,
             trigger_payload_json_override: None,
         });
@@ -1514,10 +1518,33 @@ fn resolve_routine_schedule(
             .map_err(sanitize_status_message)?;
     Ok(ScheduleResolution {
         schedule_type: normalized.schedule_type,
-        schedule_payload_json: normalized.schedule_payload_json,
+        schedule_payload_json: schedule_payload_with_max_runs(
+            normalized.schedule_payload_json,
+            max_runs,
+        )?,
         next_run_at_unix_ms: normalized.next_run_at_unix_ms,
         trigger_payload_json_override: None,
     })
+}
+
+fn schedule_payload_with_max_runs(
+    schedule_payload_json: String,
+    max_runs: Option<u32>,
+) -> Result<String, String> {
+    let Some(max_runs) = max_runs else {
+        return Ok(schedule_payload_json);
+    };
+    if max_runs == 0 {
+        return Err("max_runs must be greater than zero".to_owned());
+    }
+    let mut payload = serde_json::from_str::<Value>(schedule_payload_json.as_str())
+        .map_err(|error| format!("schedule payload must be valid JSON: {error}"))?;
+    let Some(object) = payload.as_object_mut() else {
+        return Err("schedule payload must be a JSON object".to_owned());
+    };
+    object.insert("max_runs".to_owned(), Value::from(max_runs));
+    serde_json::to_string(&payload)
+        .map_err(|error| format!("failed to encode schedule payload: {error}"))
 }
 
 fn parse_routine_timezone(
@@ -2154,6 +2181,31 @@ mod tests {
 
         super::build_schedule(&payload)
             .expect("minimum routines.control interval should be accepted");
+    }
+
+    #[test]
+    fn resolve_routine_schedule_persists_explicit_run_cap() {
+        let payload = json!({
+            "schedule_type": "every",
+            "every_interval_ms": 30_000,
+            "max_runs": 2,
+        })
+        .as_object()
+        .expect("payload should be an object")
+        .clone();
+
+        let schedule = super::resolve_routine_schedule(
+            &payload,
+            RoutineTriggerKind::Schedule,
+            crate::cron::CronTimezoneMode::Utc,
+        )
+        .expect("schedule with max_runs should resolve");
+        let schedule_payload: serde_json::Value =
+            serde_json::from_str(schedule.schedule_payload_json.as_str())
+                .expect("schedule payload should parse");
+
+        assert_eq!(schedule_payload["interval_ms"], 30_000);
+        assert_eq!(schedule_payload["max_runs"], 2);
     }
 
     #[test]

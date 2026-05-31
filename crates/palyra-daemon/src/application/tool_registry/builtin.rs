@@ -318,7 +318,7 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
         ),
         entry(
             "palyra.routines.control",
-            "Create, update, pause, resume, or manually dispatch routines through the approval-aware runtime. For new reminders and monitors, omit routine_id and use operation=upsert with trigger_kind=schedule, name, prompt, and structured schedule fields (schedule_type plus every_interval_ms, cron_expression, or at_timestamp_rfc3339) when the requested timing is clear. Pass timezone=local, utc, or an IANA timezone such as Europe/Prague when the user gives local wall-clock timing. natural_language_schedule accepts a small English convenience grammar such as 'every 30 minutes' or 'every 40 seconds'. For standing orders tied to an absolute user-owned OS file path, use trigger_kind=file_watch with trigger_payload.path and optional trigger_payload.poll_interval_ms. Use workdir for a scheduled project root that future runs should treat as their cwd and output base. Scheduled routines default to execution_posture=standard. File-watch routines default to fresh sessions and sensitive-tools posture because follow-up work often needs audited OS file tools. Set approval_mode=before_enable or before_first_run only when the user wants an approval gate.",
+            "Create, update, pause, resume, or manually dispatch routines through the approval-aware runtime. For new reminders and monitors, omit routine_id and use operation=upsert with trigger_kind=schedule, name, prompt, and structured schedule fields (schedule_type plus every_interval_ms, cron_expression, or at_timestamp_rfc3339) when the requested timing is clear. Pass timezone=local, utc, or an IANA timezone such as Europe/Prague when the user gives local wall-clock timing. natural_language_schedule accepts a small English convenience grammar such as 'every 30 minutes' or 'every 40 seconds'. Set max_runs when the user asks for an explicit run cap. For standing orders tied to an absolute user-owned OS file path, use trigger_kind=file_watch with trigger_payload.path and optional trigger_payload.poll_interval_ms. Use workdir for a scheduled project root that future runs should treat as their cwd and output base. Scheduled routines with workdir default to sensitive-tools posture for unattended file/process work. File-watch routines default to fresh sessions and sensitive-tools posture because follow-up work often needs audited OS file tools. Set approval_mode=before_enable or before_first_run only when the user wants an approval gate.",
             object_schema(
                 &["operation"],
                 vec![
@@ -349,6 +349,10 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
                     (
                         "every_interval_ms",
                         json!({"type":"integer","minimum":30000,"description":"Minimum 30000 ms for durable routines; use palyra.sleep for shorter bounded in-session polling."}),
+                    ),
+                    (
+                        "max_runs",
+                        json!({"type":"integer","minimum":1,"description":"Optional maximum number of scheduled runs before the scheduler stops dispatching this routine."}),
                     ),
                     ("cron_expression", json!({"type":"string"})),
                     (
@@ -1216,6 +1220,19 @@ mod tests {
         assert!(query_description.contains("filename/path/content"));
         assert!(entry.input_schema.pointer("/properties/max_entries").is_some());
         assert!(entry.input_schema.pointer("/properties/max_matches").is_some());
+    }
+
+    #[test]
+    fn routines_control_registry_exposes_run_cap() {
+        let entry =
+            registry_entry("palyra.routines.control").expect("routines control entry exists");
+        let description = entry.description.as_str();
+        assert!(description.contains("Set max_runs"));
+        let max_runs = entry
+            .input_schema
+            .pointer("/properties/max_runs")
+            .expect("max_runs should be visible to models");
+        assert_eq!(max_runs.pointer("/minimum").and_then(serde_json::Value::as_i64), Some(1));
     }
 
     #[test]
