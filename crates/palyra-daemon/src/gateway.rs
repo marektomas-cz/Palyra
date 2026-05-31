@@ -617,9 +617,7 @@ pub(crate) async fn execute_tool_with_runtime_dispatch(
     } else if tool_name == MEMORY_SEARCH_TOOL_NAME {
         crate::application::tool_runtime::memory::execute_memory_search_tool(
             runtime_state,
-            context.principal,
-            context.channel,
-            context.session_id,
+            context,
             proposal_id,
             input_json,
         )

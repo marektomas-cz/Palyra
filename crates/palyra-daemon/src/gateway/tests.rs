@@ -4637,15 +4637,17 @@ async fn diagnostics_run_id_resolver_accepts_linked_cron_run_id() {
 async fn memory_search_tool_channel_scope_requires_authenticated_channel_context() {
     let state = build_test_runtime_state(false);
     let input_json = br#"{"query":"incident summary","scope":"channel"}"#;
-    let outcome = execute_memory_search_tool(
-        &state,
-        "user:ops",
-        None,
-        "01ARZ3NDEKTSV4RRFFQ69G5FAW",
-        "01ARZ3NDEKTSV4RRFFQ69G5FB0",
-        input_json,
-    )
-    .await;
+    let context = super::ToolRuntimeExecutionContext {
+        principal: "user:ops",
+        device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        channel: None,
+        session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAW",
+        run_id: "01ARZ3NDEKTSV4RRFFQ69G5FAX",
+        execution_backend: ExecutionBackendPreference::LocalSandbox,
+        backend_reason_code: "backend.default.local_sandbox",
+    };
+    let outcome =
+        execute_memory_search_tool(&state, context, "01ARZ3NDEKTSV4RRFFQ69G5FB0", input_json).await;
     assert!(!outcome.success, "tool call should fail closed without channel context");
     assert!(
         outcome.error.contains("scope=channel requires authenticated channel context"),
@@ -4849,9 +4851,7 @@ async fn memory_search_tool_defaults_to_current_session_scope() {
 
     let outcome = execute_memory_search_tool(
         &state,
-        context.principal,
-        context.channel,
-        context.session_id,
+        context,
         "01ARZ3NDEKTSV4RRFFQ69G5FD5",
         br#"{"query":"PALYRA_E2E_CURRENT_SESSION_ONLY","top_k":4,"min_score":0.0}"#,
     )
@@ -4915,9 +4915,11 @@ async fn memory_search_tool_principal_scope_returns_principal_global_memory_only
 
     let outcome = execute_memory_search_tool(
         &state,
-        context.principal,
-        context.channel,
-        "01ARZ3NDEKTSV4RRFFQ69G5FD4",
+        super::ToolRuntimeExecutionContext {
+            session_id: "01ARZ3NDEKTSV4RRFFQ69G5FD4",
+            run_id: "01ARZ3NDEKTSV4RRFFQ69G5FD5",
+            ..context
+        },
         "01ARZ3NDEKTSV4RRFFQ69G5FD5",
         br#"{"query":"PALYRA_E2E_BETA","scope":"principal","top_k":4,"min_score":0.0}"#,
     )
@@ -4989,9 +4991,7 @@ async fn memory_search_tool_workspace_scope_returns_project_prefix_hits() {
 
     let outcome = execute_memory_search_tool(
         &state,
-        context.principal,
-        context.channel,
-        context.session_id,
+        context,
         "01ARZ3NDEKTSV4RRFFQ69G5FD8",
         br#"{"query":"PALYRA_E2E_PROJECT_MEMORY_PREFIX","scope":"workspace","workspace_prefix":"projects/e2e","top_k":4,"min_score":0.0}"#,
     )
@@ -5016,6 +5016,104 @@ async fn memory_search_tool_workspace_scope_returns_project_prefix_hits() {
                 != Some("projects/other/project-memory.md")
         }),
         "workspace-scope search must honor project prefix boundaries: {payload}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn project_memory_defaults_to_launch_workspace_prefix() {
+    let state = build_test_runtime_state(false);
+    let context = routines_tool_test_context();
+    ensure_tool_context_session(&state, &context);
+
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let project_root = tempdir.path().join("client-portal");
+    fs::create_dir_all(project_root.as_path()).expect("project root should be created");
+    let project_root_text = project_root.to_string_lossy().into_owned();
+    state
+        .start_orchestrator_run(OrchestratorRunStartRequest {
+            run_id: context.run_id.to_owned(),
+            session_id: context.session_id.to_owned(),
+            origin_kind: "tool_runtime_test".to_owned(),
+            origin_run_id: None,
+            triggered_by_principal: Some(context.principal.to_owned()),
+            parameter_delta_json: Some(
+                json!({
+                    "cli_context": {
+                        "launch_cwd": project_root_text,
+                        "workspace_roots": [project_root_text],
+                    }
+                })
+                .to_string(),
+            ),
+        })
+        .await
+        .expect("orchestrator run should start with launch workspace metadata");
+
+    let retain = execute_memory_retain_tool(
+        &state,
+        context,
+        "01ARZ3NDEKTSV4RRFFQ69G5FE3",
+        br#"{"content_text":"Build target for this project is alpha.","scope":"project","source":"manual","confidence":0.95}"#,
+    )
+    .await;
+    assert!(retain.success, "retain should succeed: {}", retain.error);
+    let retain_payload = parse_tool_output_json(&retain);
+    let document_path = retain_payload
+        .pointer("/document/path")
+        .and_then(Value::as_str)
+        .expect("project retain output should include document path");
+    assert!(
+        document_path.starts_with("projects/project-client-portal-"),
+        "project memory should bind to launch workspace identity: {retain_payload}"
+    );
+    assert!(document_path.ends_with("/MEMORY.md"), "{document_path}");
+
+    state
+        .upsert_workspace_document(WorkspaceDocumentWriteRequest {
+            document_id: None,
+            principal: context.principal.to_owned(),
+            channel: context.channel.map(str::to_owned),
+            agent_id: None,
+            session_id: Some(context.session_id.to_owned()),
+            path: "projects/default/MEMORY.md".to_owned(),
+            title: Some("Project Memory".to_owned()),
+            content_text: "Default project memory also mentions alpha.".to_owned(),
+            template_id: None,
+            template_version: None,
+            template_content_hash: None,
+            source_memory_id: None,
+            manual_override: false,
+        })
+        .await
+        .expect("default project noise document should be indexed");
+
+    let search = execute_memory_search_tool(
+        &state,
+        context,
+        "01ARZ3NDEKTSV4RRFFQ69G5FE4",
+        br#"{"query":"alpha","scope":"project","top_k":4,"min_score":0.0}"#,
+    )
+    .await;
+    assert!(search.success, "project search should succeed: {}", search.error);
+    let search_payload = parse_tool_output_json(&search);
+    assert_eq!(
+        search_payload.get("workspace_prefix").and_then(Value::as_str),
+        Some(document_path.trim_end_matches("/MEMORY.md"))
+    );
+    let hits =
+        search_payload.get("hits").and_then(Value::as_array).expect("search should include hits");
+    assert!(
+        hits.iter().any(|hit| {
+            hit.pointer("/document/path").and_then(Value::as_str) == Some(document_path)
+        }),
+        "project search should surface launch-bound project memory: {search_payload}"
+    );
+    assert!(
+        hits.iter().all(|hit| {
+            hit.pointer("/document/path").and_then(Value::as_str)
+                != Some("projects/default/MEMORY.md")
+        }),
+        "project search must not fall back to default project memory when launch scope exists: {search_payload}"
     );
 }
 

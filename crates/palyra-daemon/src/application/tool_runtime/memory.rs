@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::{
+    path::{Component, Path, PathBuf},
+    sync::Arc,
+};
 
 use palyra_common::validate_canonical_id;
 use serde_json::{json, Map, Value};
@@ -6,6 +9,7 @@ use sha2::{Digest, Sha256};
 use ulid::Ulid;
 
 use crate::{
+    agents::AgentResolveRequest,
     application::{
         memory::{
             enforce_memory_item_scope, normalize_lifecycle_content, redact_memory_text_for_output,
@@ -18,8 +22,9 @@ use crate::{
         recall::{preview_recall, RecallPreviewEnvelope, RecallRequest},
         service_authorization::authorize_memory_action,
         session_compaction::truncate_console_text,
+        tool_runtime::workspace_scope::workspace_roots_with_run_launch_context,
     },
-    domain::workspace::normalize_workspace_path,
+    domain::workspace::{normalize_workspace_path, normalize_workspace_prefix},
     gateway::{
         current_unix_ms, GatewayRuntimeState, ToolRuntimeExecutionContext, MAX_MEMORY_SEARCH_TOP_K,
         MAX_MEMORY_TOOL_QUERY_BYTES, MAX_MEMORY_TOOL_TAGS,
@@ -476,7 +481,12 @@ async fn execute_workspace_memory_retain_tool(
             "palyra.memory.retain memory content is empty after normalization".to_owned(),
         );
     }
-    let path = match workspace_memory_retain_path(parsed, scope) {
+    let inferred_project_path = if scope == WorkspaceMemoryRetainScope::Project {
+        infer_project_memory_document_path(runtime_state, context).await
+    } else {
+        None
+    };
+    let path = match workspace_memory_retain_path(parsed, scope, inferred_project_path.as_deref()) {
         Ok(path) => path,
         Err(error) => {
             return memory_tool_execution_outcome(
@@ -1032,12 +1042,13 @@ pub(crate) async fn execute_memory_reflect_tool(
 
 pub(crate) async fn execute_memory_search_tool(
     runtime_state: &Arc<GatewayRuntimeState>,
-    principal: &str,
-    channel: Option<&str>,
-    session_id: &str,
+    context: ToolRuntimeExecutionContext<'_>,
     proposal_id: &str,
     input_json: &[u8],
 ) -> ToolExecutionOutcome {
+    let principal = context.principal;
+    let channel = context.channel;
+    let session_id = context.session_id;
     let attestation_namespace = b"palyra.memory.search.attestation.v1";
     let parsed = match serde_json::from_slice::<Value>(input_json) {
         Ok(Value::Object(map)) => map,
@@ -1123,8 +1134,30 @@ pub(crate) async fn execute_memory_search_tool(
                 format!("memory policy denied tool workspace search request: {}", error.message()),
             );
         }
-        let workspace_prefix = optional_trimmed_string(parsed.get("workspace_prefix"))
+        let explicit_workspace_prefix = optional_trimmed_string(parsed.get("workspace_prefix"))
             .or_else(|| optional_trimmed_string(parsed.get("prefix")));
+        let inferred_project_prefix = if scope == "project" && explicit_workspace_prefix.is_none() {
+            infer_project_memory_prefix(runtime_state, context).await
+        } else {
+            None
+        };
+        let workspace_prefix = match workspace_memory_search_prefix(
+            explicit_workspace_prefix.as_deref(),
+            scope.as_str(),
+            inferred_project_prefix.as_deref(),
+        ) {
+            Ok(prefix) => prefix,
+            Err(error) => {
+                return memory_tool_execution_outcome(
+                    attestation_namespace,
+                    proposal_id,
+                    input_json,
+                    false,
+                    b"{}".to_vec(),
+                    format!("palyra.memory.search {error}"),
+                );
+            }
+        };
         let search_hits = match runtime_state
             .search_workspace_documents(WorkspaceSearchRequest {
                 principal: principal.to_owned(),
@@ -1536,6 +1569,22 @@ pub(crate) async fn execute_memory_recall_tool(
         device_id: context.device_id.to_owned(),
         channel: context.channel.map(str::to_owned),
     };
+    let raw_workspace_prefix = optional_trimmed_string(parsed.get("workspace_prefix"));
+    let workspace_prefix =
+        match workspace_memory_search_prefix(raw_workspace_prefix.as_deref(), "workspace", None) {
+            Ok(prefix) => prefix,
+            Err(error) => {
+                return memory_tool_execution_outcome(
+                    b"palyra.memory.recall.attestation.v1",
+                    proposal_id,
+                    input_json,
+                    false,
+                    b"{}".to_vec(),
+                    format!("palyra.memory.recall {error}"),
+                );
+            }
+        };
+
     let request = RecallRequest {
         query,
         channel: requested_channel.or_else(|| context.channel.map(str::to_owned)),
@@ -1545,7 +1594,7 @@ pub(crate) async fn execute_memory_recall_tool(
         memory_top_k,
         workspace_top_k,
         min_score,
-        workspace_prefix: optional_trimmed_string(parsed.get("workspace_prefix")),
+        workspace_prefix,
         include_workspace_historical: parsed
             .get("include_workspace_historical")
             .and_then(Value::as_bool)
@@ -1972,14 +2021,116 @@ fn retain_tool_provenance(context: ToolRuntimeExecutionContext<'_>, proposal_id:
     })
 }
 
+async fn infer_project_memory_document_path(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    context: ToolRuntimeExecutionContext<'_>,
+) -> Option<String> {
+    infer_project_memory_prefix(runtime_state, context)
+        .await
+        .map(|prefix| format!("{prefix}/MEMORY.md"))
+}
+
+async fn infer_project_memory_prefix(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    context: ToolRuntimeExecutionContext<'_>,
+) -> Option<String> {
+    let workspace_roots = resolve_memory_agent_workspace_roots(runtime_state, context).await;
+    workspace_roots
+        .first()
+        .and_then(|root| project_memory_prefix_from_workspace_root(root.as_path()))
+}
+
+async fn resolve_memory_agent_workspace_roots(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    context: ToolRuntimeExecutionContext<'_>,
+) -> Vec<PathBuf> {
+    let workspace_roots = match runtime_state
+        .resolve_agent_for_context(AgentResolveRequest {
+            principal: context.principal.to_owned(),
+            channel: context.channel.map(str::to_owned),
+            session_id: Some(context.session_id.to_owned()),
+            preferred_agent_id: None,
+            persist_session_binding: false,
+        })
+        .await
+    {
+        Ok(agent_outcome) => {
+            agent_outcome.agent.workspace_roots.iter().map(PathBuf::from).collect::<Vec<_>>()
+        }
+        Err(_) => Vec::new(),
+    };
+    workspace_roots_with_run_launch_context(runtime_state, context.run_id, &workspace_roots).await
+}
+
+fn project_memory_prefix_from_workspace_root(root: &Path) -> Option<String> {
+    let canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let name = last_normal_path_segment(canonical.as_path())?;
+    let slug = project_memory_slug(name.as_str());
+    let fingerprint = project_memory_root_fingerprint(canonical.as_path());
+    let digest = hex::encode(Sha256::digest(fingerprint.as_bytes()));
+    let hash = digest.get(..10)?;
+    let segment = format!("project-{slug}-{hash}");
+    let prefix = format!("projects/{segment}");
+    normalize_workspace_prefix(prefix.as_str()).ok()
+}
+
+fn last_normal_path_segment(path: &Path) -> Option<String> {
+    path.components().rev().find_map(|component| match component {
+        Component::Normal(value) => {
+            value.to_str().map(str::trim).filter(|value| !value.is_empty()).map(str::to_owned)
+        }
+        _ => None,
+    })
+}
+
+fn project_memory_slug(name: &str) -> String {
+    const MAX_SLUG_CHARS: usize = 80;
+
+    let mut slug = String::new();
+    let mut previous_separator = false;
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+            previous_separator = false;
+        } else if !previous_separator && !slug.is_empty() {
+            slug.push('-');
+            previous_separator = true;
+        }
+        if slug.chars().count() >= MAX_SLUG_CHARS {
+            break;
+        }
+    }
+    let slug = slug.trim_matches('-');
+    if slug.is_empty() {
+        "workspace".to_owned()
+    } else {
+        slug.to_owned()
+    }
+}
+
+fn project_memory_root_fingerprint(root: &Path) -> String {
+    let normalized = root.to_string_lossy().replace('\\', "/").trim_end_matches('/').to_owned();
+    #[cfg(windows)]
+    {
+        normalized.to_ascii_lowercase()
+    }
+    #[cfg(not(windows))]
+    {
+        normalized
+    }
+}
+
 fn workspace_memory_retain_path(
     parsed: &Map<String, Value>,
     scope: WorkspaceMemoryRetainScope,
+    inferred_project_path: Option<&str>,
 ) -> Result<String, String> {
     let explicit_raw_path = optional_trimmed_string(parsed.get("workspace_path"))
         .or_else(|| optional_trimmed_string(parsed.get("workspace_prefix")))
         .or_else(|| optional_trimmed_string(parsed.get("prefix")));
-    let raw_path = explicit_raw_path.clone().unwrap_or_else(|| scope.default_path().to_owned());
+    let raw_path = explicit_raw_path.clone().unwrap_or_else(|| {
+        inferred_project_path.map(str::to_owned).unwrap_or_else(|| scope.default_path().to_owned())
+    });
     let candidate = workspace_memory_document_candidate(raw_path.as_str());
     let normalized = match normalize_workspace_path(candidate.as_str()) {
         Ok(path_info) => path_info.normalized_path,
@@ -2013,6 +2164,47 @@ fn workspace_memory_retain_path(
     Ok(normalized)
 }
 
+fn workspace_memory_search_prefix(
+    explicit_prefix: Option<&str>,
+    scope: &str,
+    inferred_project_prefix: Option<&str>,
+) -> Result<Option<String>, String> {
+    let Some(raw_prefix) = explicit_prefix else {
+        if scope == "project" {
+            return Ok(Some(
+                inferred_project_prefix
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| "projects/default".to_owned()),
+            ));
+        }
+        return Ok(None);
+    };
+
+    let normalized = match normalize_workspace_prefix(raw_prefix) {
+        Ok(prefix) => prefix,
+        Err(error) => {
+            let Some(project_prefix) = workspace_memory_project_prefix_candidate(raw_prefix) else {
+                return Err(format!(
+                    "workspace_prefix is not an allowed workspace document prefix: {error}"
+                ));
+            };
+            normalize_workspace_prefix(project_prefix.as_str()).map_err(|fallback_error| {
+                format!(
+                    "workspace_prefix is not an allowed workspace document prefix: {error}; \
+                     project/workspace prefix mapping failed: {fallback_error}"
+                )
+            })?
+        }
+    };
+    if scope == "project" && !normalized.starts_with("projects/") {
+        return Err(
+            "scope=project requires workspace_prefix under projects/ or an active project root"
+                .to_owned(),
+        );
+    }
+    Ok(Some(normalized))
+}
+
 fn workspace_memory_document_candidate(raw_path: &str) -> String {
     if workspace_memory_path_has_allowed_extension(raw_path) {
         raw_path.to_owned()
@@ -2030,6 +2222,11 @@ fn workspace_memory_project_document_candidate(raw_path: &str) -> Option<String>
         format!("{}/MEMORY.md", project_target.trim_end_matches('/'))
     };
     Some(candidate)
+}
+
+fn workspace_memory_project_prefix_candidate(raw_path: &str) -> Option<String> {
+    let target = workspace_memory_project_target(raw_path)?;
+    Some(format!("projects/{}", target.trim_end_matches('/')))
 }
 
 fn workspace_memory_project_target(raw_path: &str) -> Option<String> {
@@ -2688,12 +2885,12 @@ mod tests {
     fn workspace_memory_retain_path_defaults_and_validates_project_scope() {
         let parsed = Map::new();
         assert_eq!(
-            workspace_memory_retain_path(&parsed, WorkspaceMemoryRetainScope::Workspace)
+            workspace_memory_retain_path(&parsed, WorkspaceMemoryRetainScope::Workspace, None)
                 .expect("workspace default should be valid"),
             "MEMORY.md"
         );
         assert_eq!(
-            workspace_memory_retain_path(&parsed, WorkspaceMemoryRetainScope::Project)
+            workspace_memory_retain_path(&parsed, WorkspaceMemoryRetainScope::Project, None)
                 .expect("project default should be valid"),
             "projects/default/MEMORY.md"
         );
@@ -2701,17 +2898,69 @@ mod tests {
         let mut with_prefix = Map::new();
         with_prefix.insert("workspace_prefix".to_owned(), json!("projects/palyra"));
         assert_eq!(
-            workspace_memory_retain_path(&with_prefix, WorkspaceMemoryRetainScope::Project)
+            workspace_memory_retain_path(&with_prefix, WorkspaceMemoryRetainScope::Project, None)
                 .expect("project prefix should write to nested MEMORY.md"),
             "projects/palyra/MEMORY.md"
         );
 
         let mut outside_project = Map::new();
         outside_project.insert("workspace_path".to_owned(), json!("MEMORY.md"));
-        let error =
-            workspace_memory_retain_path(&outside_project, WorkspaceMemoryRetainScope::Project)
-                .expect_err("project scope must stay under projects/");
+        let error = workspace_memory_retain_path(
+            &outside_project,
+            WorkspaceMemoryRetainScope::Project,
+            None,
+        )
+        .expect_err("project scope must stay under projects/");
         assert!(error.contains("scope=project"), "{error}");
+    }
+
+    #[test]
+    fn workspace_memory_retain_path_uses_inferred_project_default() {
+        let parsed = Map::new();
+        assert_eq!(
+            workspace_memory_retain_path(
+                &parsed,
+                WorkspaceMemoryRetainScope::Project,
+                Some("projects/project-client-portal-deadbeef00/MEMORY.md"),
+            )
+            .expect("inferred project path should be valid"),
+            "projects/project-client-portal-deadbeef00/MEMORY.md"
+        );
+    }
+
+    #[test]
+    fn project_memory_prefix_uses_workspace_root_identity() {
+        let prefix = project_memory_prefix_from_workspace_root(Path::new("/tmp/client-portal"))
+            .expect("workspace root should produce a project prefix");
+        assert!(prefix.starts_with("projects/project-client-portal-"), "{prefix}");
+        assert!(normalize_workspace_prefix(prefix.as_str()).is_ok());
+    }
+
+    #[test]
+    fn workspace_memory_search_prefix_maps_project_inputs() {
+        assert_eq!(
+            workspace_memory_search_prefix(
+                None,
+                "project",
+                Some("projects/project-client-portal-deadbeef00"),
+            )
+            .expect("inferred project prefix should be accepted"),
+            Some("projects/project-client-portal-deadbeef00".to_owned())
+        );
+        assert_eq!(
+            workspace_memory_search_prefix(Some("client-portal"), "project", None)
+                .expect("bare project prefix should map under projects"),
+            Some("projects/client-portal".to_owned())
+        );
+        assert_eq!(
+            workspace_memory_search_prefix(Some("projects/client-portal"), "project", None)
+                .expect("project prefix should remain scoped"),
+            Some("projects/client-portal".to_owned())
+        );
+        assert!(
+            workspace_memory_search_prefix(Some("MEMORY.md"), "project", None).is_err(),
+            "project search must not widen to root workspace memory"
+        );
     }
 
     #[test]
@@ -2719,8 +2968,12 @@ mod tests {
         let mut with_project_prefix = Map::new();
         with_project_prefix.insert("workspace_prefix".to_owned(), json!("client-audit-20260527"));
         assert_eq!(
-            workspace_memory_retain_path(&with_project_prefix, WorkspaceMemoryRetainScope::Project)
-                .expect("bare project prefix should map under projects"),
+            workspace_memory_retain_path(
+                &with_project_prefix,
+                WorkspaceMemoryRetainScope::Project,
+                None,
+            )
+            .expect("bare project prefix should map under projects"),
             "projects/client-audit-20260527/MEMORY.md"
         );
 
@@ -2730,7 +2983,8 @@ mod tests {
         assert_eq!(
             workspace_memory_retain_path(
                 &with_nested_workspace_file,
-                WorkspaceMemoryRetainScope::Workspace
+                WorkspaceMemoryRetainScope::Workspace,
+                None,
             )
             .expect("bare workspace document path should map under projects"),
             "projects/project-notes/notes.md"
@@ -2747,7 +3001,7 @@ mod tests {
             parsed.insert("workspace_path".to_owned(), json!(raw_path));
 
             assert_eq!(
-                workspace_memory_retain_path(&parsed, WorkspaceMemoryRetainScope::Project)
+                workspace_memory_retain_path(&parsed, WorkspaceMemoryRetainScope::Project, None)
                     .expect("absolute workspace roots should map to logical project memory"),
                 "projects/client-audit-20260527/MEMORY.md"
             );
