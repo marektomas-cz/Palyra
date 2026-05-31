@@ -5448,10 +5448,10 @@ async fn memory_retain_tool_does_not_overwrite_untyped_status_note_with_loose_pr
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn memory_retain_tool_principal_scope_requires_review_for_user_preferences() {
+async fn memory_retain_tool_principal_scope_writes_user_preferences() {
     let state = build_test_runtime_state(false);
     let input_json =
-        br#"{"content_text":"User prefers Vitest for frontend tests","category":"preference","scope":"principal","confidence":0.9}"#;
+        br#"{"content_text":"User prefers concise status summaries","category":"preference","scope":"principal","confidence":0.9}"#;
     let outcome = execute_memory_retain_tool(
         &state,
         routines_tool_test_context(),
@@ -5459,35 +5459,24 @@ async fn memory_retain_tool_principal_scope_requires_review_for_user_preferences
         input_json,
     )
     .await;
-    assert!(!outcome.success, "normal user principal preference retain should require review");
+    assert!(outcome.success, "normal user principal preference retain should write");
     let payload = parse_tool_output_json(&outcome);
-    assert_eq!(payload.get("status").and_then(Value::as_str), Some("needs_review"));
-    assert_eq!(payload.get("durable_memory_write").and_then(Value::as_bool), Some(false));
-    assert_eq!(
-        payload.get("review_state").and_then(Value::as_str),
-        Some("not_written_requires_review")
-    );
-    assert_eq!(payload.get("approval_required").and_then(Value::as_bool), Some(true));
+    assert_eq!(payload.get("status").and_then(Value::as_str), Some("retained"));
+    assert_eq!(payload.get("durable_memory_write").and_then(Value::as_bool), Some(true));
+    assert_eq!(payload.get("review_state").and_then(Value::as_str), Some("written"));
+    assert_eq!(payload.get("approval_required").and_then(Value::as_bool), Some(false));
     assert_eq!(
         payload.pointer("/write_classification/category").and_then(Value::as_str),
         Some("preference")
     );
-    assert!(
-        payload
-            .pointer("/write_classification/reason_codes")
-            .and_then(Value::as_array)
-            .is_some_and(|reasons| reasons.iter().any(|reason| {
-                reason.as_str() == Some("policy:operator_review_for_principal_scope")
-            })),
-        "principal-scope review reason should be present: {payload}"
-    );
+    assert_eq!(payload.pointer("/visibility/cross_session").and_then(Value::as_bool), Some(true));
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn memory_retain_tool_principal_scope_writes_admin_preferences() {
     let state = build_test_runtime_state(false);
     let input_json =
-        br#"{"content_text":"User prefers Vitest for frontend tests","category":"preference","scope":"principal","confidence":0.9}"#;
+        br#"{"content_text":"User prefers concise status summaries","category":"preference","scope":"principal","confidence":0.9}"#;
     let outcome = execute_memory_retain_tool(
         &state,
         admin_routines_tool_test_context(),

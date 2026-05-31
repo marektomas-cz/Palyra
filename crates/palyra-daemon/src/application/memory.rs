@@ -958,10 +958,6 @@ pub(crate) fn classify_memory_write(
         MemoryWriteSensitivity::Sensitive => reason_codes.push("sensitivity:sensitive".to_owned()),
         MemoryWriteSensitivity::HighRisk => reason_codes.push("sensitivity:high_risk".to_owned()),
     }
-    let requires_principal_scope_review = principal_scope_requires_operator_review(&input);
-    if requires_principal_scope_review {
-        reason_codes.push("policy:operator_review_for_principal_scope".to_owned());
-    }
     let requires_operator_review =
         persistent_runtime_rule_requires_operator_review(&input, category);
     if requires_operator_review {
@@ -969,7 +965,6 @@ pub(crate) fn classify_memory_write(
     }
     let approval_state = if input.confidence < MEMORY_RETAIN_LOW_CONFIDENCE_THRESHOLD
         || sensitivity != MemoryWriteSensitivity::Normal
-        || requires_principal_scope_review
         || requires_operator_review
     {
         MemoryWriteApprovalState::Required
@@ -1010,14 +1005,6 @@ fn persistent_runtime_rule_requires_operator_review(
 ) -> bool {
     matches!(input.scope, MemoryLifecycleScope::Channel | MemoryLifecycleScope::Principal)
         && matches!(category, MemoryWriteCategory::Procedure | MemoryWriteCategory::Constraint)
-        && !principal_has_sensitive_service_role(
-            input.principal.as_str(),
-            SensitiveServiceRole::AdminOrSystem,
-        )
-}
-
-fn principal_scope_requires_operator_review(input: &MemoryWriteClassificationInput) -> bool {
-    input.scope == MemoryLifecycleScope::Principal
         && !principal_has_sensitive_service_role(
             input.principal.as_str(),
             SensitiveServiceRole::AdminOrSystem,
@@ -1532,8 +1519,8 @@ mod tests {
     }
 
     #[test]
-    fn write_classifier_requires_review_for_non_admin_principal_scope() {
-        let mut input = classification_input("User prefers Vitest for frontend tests.");
+    fn write_classifier_allows_safe_principal_preferences() {
+        let mut input = classification_input("User prefers concise status summaries.");
         input.scope = MemoryLifecycleScope::Principal;
         input.category_hint = Some(MemoryWriteCategory::Preference);
 
@@ -1541,11 +1528,11 @@ mod tests {
 
         assert_eq!(classification.sensitivity, MemoryWriteSensitivity::Normal);
         assert_eq!(classification.category, MemoryWriteCategory::Preference);
-        assert_eq!(classification.approval_state, MemoryWriteApprovalState::Required);
-        assert!(classification
+        assert_eq!(classification.approval_state, MemoryWriteApprovalState::NotRequired);
+        assert!(!classification
             .reason_codes
             .iter()
-            .any(|reason| { reason == "policy:operator_review_for_principal_scope" }));
+            .any(|reason| { reason.starts_with("policy:operator_review") }));
     }
 
     #[test]
@@ -1563,10 +1550,6 @@ mod tests {
             .reason_codes
             .iter()
             .any(|reason| reason == "policy:operator_review_for_runtime_rule"));
-        assert!(!classification
-            .reason_codes
-            .iter()
-            .any(|reason| reason == "policy:operator_review_for_principal_scope"));
     }
 
     #[test]
@@ -1586,10 +1569,6 @@ mod tests {
             .reason_codes
             .iter()
             .any(|reason| reason == "policy:operator_review_for_runtime_rule"));
-        assert!(!classification
-            .reason_codes
-            .iter()
-            .any(|reason| reason == "policy:operator_review_for_principal_scope"));
     }
 
     #[test]

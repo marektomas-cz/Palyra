@@ -425,22 +425,37 @@ fn memory_session_search_schema_targets_prior_transcripts() {
 }
 
 #[test]
+fn memory_search_schema_defaults_to_principal_scope() {
+    let entry = registry_entry("palyra.memory.search").expect("memory search tool entry");
+
+    assert_eq!(
+        entry.input_schema["properties"]["scope"]["enum"],
+        serde_json::json!(["principal", "session", "channel", "workspace", "project"])
+    );
+    assert!(entry.input_schema["properties"]["scope"]["description"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("Defaults to principal"));
+}
+
+#[test]
 fn memory_retain_schema_explains_principal_scope_for_corrections() {
     let entry = registry_entry("palyra.memory.retain").expect("retain tool entry");
     let alias = registry_entry("palyra.retain").expect("retain alias tool entry");
 
     assert!(entry.description.contains("scope=principal"));
+    assert!(entry.description.contains("Defaults to scope=principal"));
     assert!(entry.description.contains("scope=workspace"));
     assert!(alias.description.contains("Compatibility alias"));
     assert_eq!(alias.input_schema["required"][0], "content_text");
     assert_eq!(
         entry.input_schema["properties"]["scope"]["enum"],
-        serde_json::json!(["session", "channel", "principal", "workspace", "project"])
+        serde_json::json!(["principal", "session", "channel", "workspace", "project"])
     );
     assert!(entry.input_schema["properties"]["scope"]["description"]
         .as_str()
         .unwrap_or_default()
-        .contains("future sessions"));
+        .contains("Defaults to principal"));
     assert!(entry.input_schema["properties"]["workspace_prefix"]["description"]
         .as_str()
         .unwrap_or_default()

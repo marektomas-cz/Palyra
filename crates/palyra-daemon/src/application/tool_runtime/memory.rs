@@ -48,6 +48,8 @@ const MEMORY_SOURCE_VALUES: &[&str] =
 const MEMORY_HITS_PRESENT_CLAIM_BOUNDARY: &str = "memory hits are retrieved evidence; do not claim no stored preference or prior fact exists unless the hits are irrelevant to the user's question";
 const MEMORY_HITS_ABSENT_CLAIM_BOUNDARY: &str =
     "no memory hits were returned; do not invent stored preferences or prior facts";
+const DEFAULT_MEMORY_RETAIN_SCOPE: &str = "principal";
+const DEFAULT_MEMORY_SEARCH_SCOPE: &str = "principal";
 const SESSION_SEARCH_HITS_PRESENT_CLAIM_BOUNDARY: &str = "session transcript hits are retrieved evidence from prior conversations; cite them as session recall, not durable memory";
 const SESSION_SEARCH_HITS_ABSENT_CLAIM_BOUNDARY: &str =
     "no session transcript hits were returned; do not substitute unrelated durable memory or workspace artifacts for prior-session evidence";
@@ -1125,13 +1127,7 @@ pub(crate) async fn execute_memory_search_tool(
         .map(|value| (value as usize).clamp(1, MAX_MEMORY_SEARCH_TOP_K))
         .unwrap_or(8);
 
-    let scope = parsed
-        .get("scope")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_ascii_lowercase)
-        .unwrap_or_else(|| "session".to_owned());
+    let scope = memory_search_scope_text(&parsed);
     if matches!(scope.as_str(), "workspace" | "project") {
         if let Err(error) = authorize_memory_action(principal, "memory.search", "memory:workspace")
         {
@@ -2827,13 +2823,21 @@ fn optional_trimmed_string(value: Option<&Value>) -> Option<String> {
 }
 
 fn memory_retain_scope_text(parsed: &Map<String, Value>) -> String {
+    memory_scope_text(parsed, DEFAULT_MEMORY_RETAIN_SCOPE)
+}
+
+fn memory_search_scope_text(parsed: &Map<String, Value>) -> String {
+    memory_scope_text(parsed, DEFAULT_MEMORY_SEARCH_SCOPE)
+}
+
+fn memory_scope_text(parsed: &Map<String, Value>, default_scope: &str) -> String {
     parsed
         .get("scope")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_ascii_lowercase)
-        .unwrap_or_else(|| "session".to_owned())
+        .unwrap_or_else(|| default_scope.to_owned())
 }
 
 #[cfg(test)]
@@ -2996,6 +3000,20 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .contains("future sessions"));
+    }
+
+    #[test]
+    fn memory_tool_scopes_default_to_principal_memory() {
+        let parsed = Map::new();
+
+        assert_eq!(memory_retain_scope_text(&parsed), "principal");
+        assert_eq!(memory_search_scope_text(&parsed), "principal");
+
+        let mut explicit = Map::new();
+        explicit.insert("scope".to_owned(), serde_json::json!("session"));
+
+        assert_eq!(memory_retain_scope_text(&explicit), "session");
+        assert_eq!(memory_search_scope_text(&explicit), "session");
     }
 
     #[test]

@@ -42,7 +42,7 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
                     ("query", json!({"type":"string","maxLength":8192})),
                     (
                         "scope",
-                        json!({"type":"string","enum":["principal","session","channel","workspace","project"],"description":"Defaults to session. Use principal for cross-session recall, session only for the current session, channel for authenticated channel memory, and workspace/project for indexed project documents."}),
+                        json!({"type":"string","enum":["principal","session","channel","workspace","project"],"description":"Defaults to principal for durable remembered preferences, facts, and corrections. Use session only for the current session, channel for authenticated channel memory, and workspace/project for indexed project documents."}),
                     ),
                     ("top_k", json!({"type":"integer","minimum":1,"maximum":20})),
                     ("min_score", json!({"type":"number","minimum":0.0,"maximum":1.0})),
@@ -147,7 +147,7 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
         ),
         entry(
             "palyra.memory.retain",
-            "Write a reviewable scoped memory item or workspace/project memory document with provenance. Use scope=principal for preferences or corrections that must affect future sessions, and scope=workspace or scope=project for durable project context.",
+            "Write a reviewable scoped memory item or workspace/project memory document with provenance. Defaults to scope=principal for preferences, facts, or corrections that must affect future sessions; use scope=workspace or scope=project for durable project context.",
             object_schema(
                 &["content_text"],
                 vec![
@@ -160,7 +160,7 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
                         "replaces_terms",
                         json!({"type":"array","items":{"type":"string"},"maxItems":32,"description":"For category=correction, language-neutral obsolete values and context terms that identify the existing memory to replace."}),
                     ),
-                    ("scope", json!({"type":"string","enum":["session","channel","principal","workspace","project"],"description":"Defaults to session. Use principal for remembered preferences, corrections, and facts that should be available in future sessions. Use workspace or project to write indexed workspace/project memory documents."})),
+                    ("scope", json!({"type":"string","enum":["principal","session","channel","workspace","project"],"description":"Defaults to principal. Use session only for current-session scratch memory, channel for authenticated channel memory, and workspace or project to write indexed workspace/project memory documents."})),
                     (
                         "workspace_path",
                         json!({"type":"string","description":"Exact workspace document path for scope=workspace or scope=project. Defaults to MEMORY.md for workspace and to the active launch workspace's project memory for project scope, with projects/default/MEMORY.md as a fallback. Bare project/workspace names and absolute workspace roots map to projects/<name>/MEMORY.md."}),
@@ -206,7 +206,7 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
                         "replaces_terms",
                         json!({"type":"array","items":{"type":"string"},"maxItems":32,"description":"For category=correction, language-neutral obsolete values and context terms that identify the existing memory to replace."}),
                     ),
-                    ("scope", json!({"type":"string","enum":["session","channel","principal","workspace","project"],"description":"Defaults to session. Use principal for remembered preferences, corrections, and facts that should be available in future sessions. Use workspace or project to write indexed workspace/project memory documents."})),
+                    ("scope", json!({"type":"string","enum":["principal","session","channel","workspace","project"],"description":"Defaults to principal. Use session only for current-session scratch memory, channel for authenticated channel memory, and workspace or project to write indexed workspace/project memory documents."})),
                     (
                         "workspace_path",
                         json!({"type":"string","description":"Exact workspace document path for scope=workspace or scope=project. Defaults to MEMORY.md for workspace and to the active launch workspace's project memory for project scope, with projects/default/MEMORY.md as a fallback. Bare project/workspace names and absolute workspace roots map to projects/<name>/MEMORY.md."}),
