@@ -17,6 +17,8 @@ use crate::cli::{BackupCommand, BackupComponentArg};
 use crate::*;
 
 const BACKUP_MANIFEST_PATH: &str = "manifest.json";
+const VAULT_METADATA_LOCK_FILE: &str = "metadata.lock";
+const VAULT_METADATA_TEMP_PREFIX: &str = "metadata.tmp.";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct BackupManifest {
@@ -386,6 +388,9 @@ fn add_directory_to_zip(
             if path == output_path {
                 continue;
             }
+            if should_skip_state_backup_entry(path.as_path(), archive_prefix) {
+                continue;
+            }
             let file_type = child
                 .file_type()
                 .with_context(|| format!("failed to inspect backup entry {}", path.display()))?;
@@ -423,6 +428,16 @@ fn add_directory_to_zip(
         }
     }
     Ok(())
+}
+
+fn should_skip_state_backup_entry(path: &Path, archive_prefix: &str) -> bool {
+    if archive_prefix != "state" {
+        return false;
+    }
+    let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
+        return false;
+    };
+    file_name == VAULT_METADATA_LOCK_FILE || file_name.starts_with(VAULT_METADATA_TEMP_PREFIX)
 }
 
 fn add_file_to_zip(
@@ -652,6 +667,36 @@ mod tests {
             error.to_string().contains("escapes the allowed root"),
             "unexpected error: {error}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn add_directory_to_zip_skips_transient_vault_metadata_files() -> Result<()> {
+        let temp = tempdir()?;
+        let source_root = temp.path().join("state");
+        let vault_root = source_root.join("vault");
+        fs::create_dir_all(vault_root.as_path())?;
+        fs::write(source_root.join("runtime.json").as_path(), b"stable")?;
+        fs::write(vault_root.join(VAULT_METADATA_LOCK_FILE).as_path(), b"pid=1")?;
+        fs::write(vault_root.join("metadata.tmp.01ABC").as_path(), b"temporary")?;
+
+        let archive_path = temp.path().join("backup.zip");
+        let file = fs::File::create(archive_path.as_path())?;
+        let mut writer = ZipWriter::new(file);
+        let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+        let mut entries = Vec::new();
+
+        add_directory_to_zip(
+            &mut writer,
+            options,
+            source_root.as_path(),
+            "state",
+            archive_path.as_path(),
+            &mut entries,
+        )?;
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].archive_path, "state/runtime.json");
         Ok(())
     }
 
