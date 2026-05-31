@@ -49,6 +49,10 @@ const BROWSER_WAIT_FOR_INPUT_RECOVERY_HINT: &str =
     "wait_for_input_required: pass either selector or text; when unsure, call palyra.browser.observe first and wait for a visible text snippet or observed selector";
 const BROWSER_WAIT_FOR_TIMEOUT_RECOVERY_HINT: &str =
     "wait_for_timeout: call palyra.browser.observe to inspect the current step/state before retrying with a grounded selector or visible text";
+const BROWSER_RUNTIME_RECOVERY_HINT: &str =
+    "browser_runtime_unavailable: inspect `palyra browser status`; if browserd was restarted, recreate the browser session and retry the browser operation";
+const BROWSER_TOOL_INPUT_RECOVERY_HINT: &str =
+    "browser_tool_input_error: inspect the error field, fix the browser tool input or session state, and retry";
 const BROWSER_UPLOAD_MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 const BROWSER_DOWNLOAD_TOOL_DEFAULT_MAX_BYTES: u64 = 256 * 1024;
 const BROWSER_DOWNLOAD_TOOL_MAX_BYTES: u64 = 512 * 1024;
@@ -3615,7 +3619,11 @@ fn attach_browser_caller_principal_metadata<T>(
 }
 
 fn sanitize_status_message(status: &Status) -> String {
-    truncate_with_ellipsis(status.message().to_owned(), 512)
+    let message = status.message().trim();
+    if message.is_empty() {
+        return truncate_with_ellipsis(status.to_string(), 512);
+    }
+    truncate_with_ellipsis(message.to_owned(), 512)
 }
 
 fn browser_action_log_to_json(entry: browser_v1::BrowserActionLogEntry) -> Value {
@@ -3911,6 +3919,9 @@ fn normalize_browser_press_key_input(raw: &str) -> String {
 
 fn browser_recovery_hint(error: &str) -> Option<&'static str> {
     let normalized = error.to_ascii_lowercase();
+    if browser_runtime_unavailable_error(&normalized) {
+        return Some(BROWSER_RUNTIME_RECOVERY_HINT);
+    }
     if normalized.contains("selector") && normalized.contains("not found") {
         return Some(BROWSER_SELECTOR_RECOVERY_HINT);
     }
@@ -3925,6 +3936,68 @@ fn browser_recovery_hint(error: &str) -> Option<&'static str> {
     None
 }
 
+fn browser_runtime_unavailable_error(normalized_error: &str) -> bool {
+    let browser_service_transport_error = normalized_error.contains("browser service")
+        && (normalized_error.contains("connection refused")
+            || normalized_error.contains("connection reset")
+            || normalized_error.contains("connection closed")
+            || normalized_error.contains("transport error")
+            || normalized_error.contains("h2 protocol error")
+            || normalized_error.contains("tcp connect error")
+            || normalized_error.contains("deadline has elapsed")
+            || normalized_error.contains("timed out"));
+    let browser_tool_transport_error = normalized_error.contains("palyra.browser.")
+        && (normalized_error.contains("connection reset")
+            || normalized_error.contains("connection refused")
+            || normalized_error.contains("connection closed")
+            || normalized_error.contains("transport error")
+            || normalized_error.contains("h2 protocol error")
+            || normalized_error.contains("broken pipe"));
+
+    normalized_error.contains("failed to connect to browser service")
+        || browser_service_transport_error
+        || browser_tool_transport_error
+}
+
+fn browser_error_category(error: &str) -> &'static str {
+    let normalized = error.to_ascii_lowercase();
+    if browser_runtime_unavailable_error(&normalized) {
+        "browser_runtime_unavailable"
+    } else if normalized.contains("selector") && normalized.contains("not found") {
+        "selector_not_found"
+    } else if normalized.contains("wait_for requires non-empty selector")
+        || normalized.contains("wait_for requires non-empty selector or non-empty text")
+    {
+        "wait_for_input_required"
+    } else if normalized.contains("wait_for condition was not satisfied") {
+        "wait_for_timeout"
+    } else {
+        "browser_tool_error"
+    }
+}
+
+fn browser_tool_label_from_error(error: &str) -> &str {
+    error
+        .split_whitespace()
+        .next()
+        .map(|value| value.trim_end_matches(':'))
+        .filter(|value| value.starts_with("palyra.browser."))
+        .unwrap_or("palyra.browser.*")
+}
+
+fn browser_failure_diagnostic_output(error: &str, hint: &str) -> Vec<u8> {
+    serde_json::to_vec(&json!({
+        "success": false,
+        "tool": browser_tool_label_from_error(error),
+        "error": error,
+        "error_category": browser_error_category(error),
+        "recovery_hint": hint,
+        "executor": "browser_broker",
+        "sandbox_enforcement": "browser_service",
+    }))
+    .unwrap_or_else(|_| br#"{"success":false,"error":"browser tool failed"}"#.to_vec())
+}
+
 fn browser_error_with_recovery_hint(error: String) -> String {
     let Some(hint) = browser_recovery_hint(error.as_str()) else {
         return error;
@@ -3936,14 +4009,19 @@ fn browser_error_with_recovery_hint(error: String) -> String {
 }
 
 fn browser_output_with_recovery_hint(output_json: Vec<u8>, error: &str) -> Vec<u8> {
-    let Some(hint) = browser_recovery_hint(error) else {
-        return output_json;
-    };
+    let hint = browser_recovery_hint(error).unwrap_or(BROWSER_TOOL_INPUT_RECOVERY_HINT);
     let mut output = serde_json::from_slice::<Value>(output_json.as_slice())
         .unwrap_or_else(|_| json!({ "success": false, "error": error }));
     if let Some(object) = output.as_object_mut() {
+        if object.is_empty() {
+            return browser_failure_diagnostic_output(error, hint);
+        }
         object.entry("success").or_insert(Value::Bool(false));
         object.entry("error").or_insert(Value::String(error.to_owned()));
+        object.insert(
+            "error_category".to_owned(),
+            Value::String(browser_error_category(error).to_owned()),
+        );
         object.insert("recovery_hint".to_owned(), Value::String(hint.to_owned()));
     }
     serde_json::to_vec(&output).unwrap_or(output_json)
@@ -4084,6 +4162,30 @@ mod tests {
             .as_str()
             .is_some_and(|hint| hint.contains("pass either selector or text")));
         assert!(outcome.error.contains("recovery_hint=wait_for_input_required"));
+    }
+
+    #[test]
+    fn failed_browser_runtime_transport_output_includes_diagnostics() {
+        let outcome = browser_tool_execution_outcome(
+            "proposal-1",
+            br#"{"session_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV"}"#,
+            false,
+            b"{}".to_vec(),
+            "palyra.browser.observe failed: h2 protocol error: error reading a body from connection: connection reset"
+                .to_owned(),
+        );
+        let output: serde_json::Value =
+            serde_json::from_slice(outcome.output_json.as_slice()).expect("output should parse");
+
+        assert_eq!(output["success"], false);
+        assert_eq!(output["tool"], "palyra.browser.observe");
+        assert_eq!(output["error_category"], "browser_runtime_unavailable");
+        assert_eq!(output["executor"], "browser_broker");
+        assert_eq!(output["sandbox_enforcement"], "browser_service");
+        assert!(output["recovery_hint"]
+            .as_str()
+            .is_some_and(|hint| hint.contains("palyra browser status")));
+        assert!(outcome.error.contains("recovery_hint=browser_runtime_unavailable"));
     }
 
     #[test]
