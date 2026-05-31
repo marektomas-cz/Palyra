@@ -30,6 +30,7 @@ const MAX_OS_FILE_SEARCH_FILES: usize = 1_000;
 const MAX_OS_FILE_SEARCH_DEPTH: usize = 8;
 const MAX_OS_FILE_SEARCH_FILE_BYTES: u64 = 128 * 1024;
 const MAX_OS_FILE_SEARCH_EXCERPT_CHARS: usize = 240;
+const PALYRA_OS_FILE_ROOTS_ENV: &str = "PALYRA_OS_FILE_ROOTS";
 
 #[derive(Debug, Deserialize)]
 struct OsFileInput {
@@ -913,9 +914,15 @@ fn ensure_os_path_allowed(policy: &OsFilePolicy, path: &ResolvedOsPath) -> Resul
 
 fn user_owned_os_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
-    for key in ["USERPROFILE", "HOME"] {
-        if let Some(value) = std::env::var_os(key) {
-            push_canonical_root(&mut roots, PathBuf::from(value));
+    if let Some(configured_roots) = configured_user_os_roots() {
+        for root in configured_roots {
+            push_canonical_root(&mut roots, root);
+        }
+    } else {
+        for key in ["USERPROFILE", "HOME"] {
+            if let Some(value) = std::env::var_os(key) {
+                push_canonical_root(&mut roots, PathBuf::from(value));
+            }
         }
     }
     push_canonical_root(&mut roots, std::env::temp_dir());
@@ -926,6 +933,18 @@ fn user_owned_os_roots() -> Vec<PathBuf> {
         push_canonical_root(&mut roots, PathBuf::from("/var/tmp"));
     }
     roots
+}
+
+fn configured_user_os_roots() -> Option<Vec<PathBuf>> {
+    let value = std::env::var_os(PALYRA_OS_FILE_ROOTS_ENV)?;
+    let roots = std::env::split_paths(&value)
+        .filter(|path| !path.as_os_str().is_empty())
+        .collect::<Vec<_>>();
+    if roots.is_empty() {
+        None
+    } else {
+        Some(roots)
+    }
 }
 
 #[cfg(windows)]
@@ -1065,6 +1084,31 @@ fn os_file_outcome(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    static OS_FILE_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    struct ScopedEnvVar {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl ScopedEnvVar {
+        fn set(key: &'static str, value: &Path) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for ScopedEnvVar {
+        fn drop(&mut self) {
+            match self.previous.as_ref() {
+                Some(previous) => std::env::set_var(self.key, previous),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 
     fn test_policy(root: &Path) -> OsFilePolicy {
         OsFilePolicy {
@@ -1203,6 +1247,32 @@ mod tests {
         .expect_err("outside path should require an approved root");
 
         assert!(error.contains("approved user-owned OS roots"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn os_file_configured_roots_replace_implicit_user_profile_root() {
+        let _guard =
+            OS_FILE_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().expect("env lock poisoned");
+        let configured_root = tempfile::tempdir().expect("configured root should be created");
+        let real_home_root = tempfile::tempdir().expect("real home root should be created");
+        let _configured = ScopedEnvVar::set(PALYRA_OS_FILE_ROOTS_ENV, configured_root.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", real_home_root.path());
+        let _home = ScopedEnvVar::set("HOME", real_home_root.path());
+
+        let roots = user_owned_os_roots();
+        let configured_root =
+            fs::canonicalize(configured_root.path()).expect("configured root should canonicalize");
+        let real_home_root =
+            fs::canonicalize(real_home_root.path()).expect("real home should canonicalize");
+
+        assert!(
+            roots.iter().any(|root| same_path(root.as_path(), configured_root.as_path())),
+            "configured OS file root should be allowed: {roots:?}"
+        );
+        assert!(
+            !roots.iter().any(|root| same_path(root.as_path(), real_home_root.as_path())),
+            "implicit user profile roots must be suppressed when PALYRA_OS_FILE_ROOTS is set: {roots:?}"
+        );
     }
 
     #[test]

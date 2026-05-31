@@ -468,7 +468,7 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
         ),
         entry(
             "palyra.fs.os_file",
-            "Perform an audited file operation on an absolute user-owned OS path. Use this for requested files outside the workspace, such as Downloads, user config files, local test harness OS roots, or user-cache cleanup. Protected system paths are denied, and paths are limited to workspace roots plus user-owned OS roots.",
+            "Perform an audited file operation on an absolute user-owned OS path. Use this for requested files outside the workspace, such as Downloads, user config files, configured local test harness OS roots, or user-cache cleanup. Protected system paths are denied, and paths are limited to workspace roots plus the runtime-approved OS roots.",
             object_schema(
                 &["operation", "path"],
                 vec![

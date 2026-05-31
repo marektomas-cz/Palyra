@@ -67,6 +67,7 @@ $desktopPackageOutput = Join-Path $artifactsRoot "desktop"
 $cargoTargetRoot = Join-Path $artifactsRoot "cargo-target"
 $installRoot = Join-Path $workspaceRoot "install"
 $stateRoot = Join-Path $workspaceRoot "state"
+$osFileRoot = Join-Path $workspaceRoot "home"
 $cliCommandRoot = Join-Path $workspaceRoot "cli-bin"
 $desktopExecutable = Resolve-ExecutableName -BaseName "palyra-desktop-control-center"
 $daemonExecutable = Resolve-ExecutableName -BaseName "palyrad"
@@ -74,6 +75,7 @@ $browserExecutable = Resolve-ExecutableName -BaseName "palyra-browserd"
 $cliExecutable = Resolve-ExecutableName -BaseName "palyra"
 
 New-Item -ItemType Directory -Path $workspaceRoot -Force | Out-Null
+New-Item -ItemType Directory -Path $osFileRoot -Force | Out-Null
 
 if (-not $SkipBuild) {
     Push-Location $repoRoot
@@ -274,9 +276,11 @@ Set-StrictMode -Version Latest
 `$stateRoot = "$stateRoot"
 `$configPath = "$configPath"
 New-Item -ItemType Directory -Path `$stateRoot -Force | Out-Null
+New-Item -ItemType Directory -Path "$osFileRoot" -Force | Out-Null
 
 `$env:PALYRA_STATE_ROOT = `$stateRoot
 `$env:PALYRA_CONFIG = `$configPath
+`$env:PALYRA_OS_FILE_ROOTS = "$osFileRoot"
 `$env:PALYRA_DESKTOP_PALYRAD_BIN = Join-Path `$installRoot "$daemonExecutable"
 `$env:PALYRA_DESKTOP_BROWSERD_BIN = Join-Path `$installRoot "$browserExecutable"
 `$env:PALYRA_DESKTOP_PALYRA_BIN = Join-Path `$installRoot "$cliExecutable"
@@ -298,6 +302,7 @@ if (`$Wait) {
 } else {
     $shStateRoot = ConvertTo-PosixSingleQuotedLiteral -Value $stateRoot
     $shConfigPath = ConvertTo-PosixSingleQuotedLiteral -Value $configPath
+    $shOsFileRoot = ConvertTo-PosixSingleQuotedLiteral -Value $osFileRoot
     $launcherBody =
 @'
 #!/usr/bin/env bash
@@ -306,10 +311,13 @@ set -euo pipefail
 install_root="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 state_root=__PALYRA_STATE_ROOT__
 config_path=__PALYRA_CONFIG_PATH__
+os_file_root=__PALYRA_OS_FILE_ROOT__
 mkdir -p "$state_root"
+mkdir -p "$os_file_root"
 
 export PALYRA_STATE_ROOT="$state_root"
 export PALYRA_CONFIG="$config_path"
+export PALYRA_OS_FILE_ROOTS="$os_file_root"
 export PALYRA_DESKTOP_PALYRAD_BIN="$install_root/__PALYRA_DAEMON_EXECUTABLE__"
 export PALYRA_DESKTOP_BROWSERD_BIN="$install_root/__PALYRA_BROWSER_EXECUTABLE__"
 export PALYRA_DESKTOP_PALYRA_BIN="$install_root/__PALYRA_CLI_EXECUTABLE__"
@@ -336,6 +344,7 @@ echo "Palyra desktop launched with pid=$desktop_pid"
 '@
     $launcherBody = $launcherBody.Replace("__PALYRA_STATE_ROOT__", $shStateRoot)
     $launcherBody = $launcherBody.Replace("__PALYRA_CONFIG_PATH__", $shConfigPath)
+    $launcherBody = $launcherBody.Replace("__PALYRA_OS_FILE_ROOT__", $shOsFileRoot)
     $launcherBody = $launcherBody.Replace("__PALYRA_DAEMON_EXECUTABLE__", $daemonExecutable)
     $launcherBody = $launcherBody.Replace("__PALYRA_BROWSER_EXECUTABLE__", $browserExecutable)
     $launcherBody = $launcherBody.Replace("__PALYRA_CLI_EXECUTABLE__", $cliExecutable)
@@ -356,6 +365,7 @@ $installSummary = [ordered]@{
     install_root = $resolvedInstallRoot
     config_path = $configPath
     state_root = $stateRoot
+    os_file_root = $osFileRoot
     cli_command_root = $resolvedCliCommandRoot
     cli_command_path = $resolvedCliCommandPath
     cli_persistence_strategy = $cliPersistenceStrategy
@@ -385,6 +395,7 @@ Write-Output "archive_path=$archivePath"
 Write-Output "install_root=$resolvedInstallRoot"
 Write-Output "config_path=$configPath"
 Write-Output "state_root=$stateRoot"
+Write-Output "os_file_root=$osFileRoot"
 Write-Output "cli_command_root=$resolvedCliCommandRoot"
 Write-Output "cli_command_path=$resolvedCliCommandPath"
 Write-Output "cli_persistence_strategy=$cliPersistenceStrategy"
