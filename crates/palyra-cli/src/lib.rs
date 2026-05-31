@@ -118,6 +118,7 @@ use palyra_common::{
         replay_contract_snapshot, ReplayArtifactRef, ReplayBundle, ReplayBundleBuildInput,
         ReplayCaptureMetadata, ReplayRunSnapshot, ReplaySource, ReplayTapeEvent,
     },
+    runtime_contracts::RunLifecyclePhase,
     validate_canonical_id,
     workspace_patch::{
         apply_workspace_patch, compute_patch_sha256, redact_patch_preview, WorkspacePatchLimits,
@@ -4665,7 +4666,41 @@ async fn prepare_agent_run_input(
         })
         .await?;
     let session = response.session.context("ResolveSession returned empty session payload")?;
+    reject_active_session_follow_up(&session)?;
     Ok(ResolvedAgentRunInput { session, request: input })
+}
+
+fn reject_active_session_follow_up(session: &gateway_v1::SessionSummary) -> Result<()> {
+    let state = session.last_run_state.trim();
+    let Some(phase) = RunLifecyclePhase::parse(state) else {
+        return Ok(());
+    };
+    if phase.is_terminal() {
+        return Ok(());
+    }
+
+    let abort_hint = session
+        .last_run_id
+        .as_ref()
+        .map(|run_id| {
+            let run_id = run_id.ulid.trim();
+            if run_id.is_empty() {
+                "run `palyra sessions list --json` to find the active run id, then run `palyra sessions abort <run-id>` and start a new `palyra agent run`"
+                    .to_owned()
+            } else {
+                format!(
+                    "run `palyra sessions abort {run_id}` and start a new `palyra agent run`"
+                )
+            }
+        })
+        .unwrap_or_else(|| {
+            "run `palyra sessions list --json` to find the active run id, then run `palyra sessions abort <run-id>` and start a new `palyra agent run`"
+                .to_owned()
+        });
+
+    anyhow::bail!(
+        "same-session `palyra agent run` cannot live-redirect a selected session while its previous run is {state}; Palyra will not queue this follow-up behind the active run. To redirect the task, {abort_hint}. For live steering, use `palyra agent interactive` and interrupt the active run."
+    )
 }
 
 fn normalize_optional_owned_text(value: Option<String>) -> Option<String> {
@@ -5670,6 +5705,41 @@ mod agent_stream_output_tests {
         let error =
             outcome.ensure_success().expect_err("unterminated run stream must fail the command");
         assert!(error.to_string().contains("terminal status"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn same_session_follow_up_rejects_active_run_with_abort_hint() {
+        let session = gateway_v1::SessionSummary {
+            last_run_state: "in_progress".to_owned(),
+            last_run_id: Some(common_v1::CanonicalId {
+                ulid: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+            }),
+            ..Default::default()
+        };
+
+        let error = reject_active_session_follow_up(&session)
+            .expect_err("active same-session follow-up should be rejected");
+        let message = error.to_string();
+
+        assert!(message.contains("same-session `palyra agent run`"), "{message}");
+        assert!(message.contains("cannot live-redirect"), "{message}");
+        assert!(message.contains("will not queue this follow-up"), "{message}");
+        assert!(message.contains("palyra sessions abort 01ARZ3NDEKTSV4RRFFQ69G5FAV"), "{message}");
+        assert!(message.contains("palyra agent interactive"), "{message}");
+    }
+
+    #[test]
+    fn same_session_follow_up_allows_terminal_last_run() {
+        let session = gateway_v1::SessionSummary {
+            last_run_state: "done".to_owned(),
+            last_run_id: Some(common_v1::CanonicalId {
+                ulid: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+            }),
+            ..Default::default()
+        };
+
+        reject_active_session_follow_up(&session)
+            .expect("terminal same-session follow-up should start a new run");
     }
 
     #[test]
