@@ -624,6 +624,7 @@ async fn run_allowlisted_tool(
         | "palyra.browser.screenshot"
         | "palyra.browser.pdf"
         | "palyra.browser.observe"
+        | "palyra.browser.storage"
         | "palyra.browser.network_log"
         | "palyra.browser.console_log"
         | "palyra.browser.reset_state"
@@ -699,6 +700,7 @@ fn is_runtime_supported_tool(tool_name: &str) -> bool {
             | "palyra.browser.screenshot"
             | "palyra.browser.pdf"
             | "palyra.browser.observe"
+            | "palyra.browser.storage"
             | "palyra.browser.network_log"
             | "palyra.browser.console_log"
             | "palyra.browser.reset_state"
@@ -800,6 +802,7 @@ fn tool_input_limit_bytes(tool_name: &str) -> usize {
         | "palyra.browser.screenshot"
         | "palyra.browser.pdf"
         | "palyra.browser.observe"
+        | "palyra.browser.storage"
         | "palyra.browser.network_log"
         | "palyra.browser.console_log"
         | "palyra.browser.reset_state"
@@ -1492,6 +1495,7 @@ mod tests {
         assert!(tool_requires_approval("palyra.browser.screenshot"));
         assert!(tool_requires_approval("palyra.browser.pdf"));
         assert!(tool_requires_approval("palyra.browser.observe"));
+        assert!(tool_requires_approval("palyra.browser.storage"));
         assert!(tool_requires_approval("palyra.browser.network_log"));
         assert!(tool_requires_approval("palyra.browser.console_log"));
         assert!(tool_requires_approval("palyra.browser.reset_state"));

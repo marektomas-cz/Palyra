@@ -864,6 +864,7 @@ fn browser_tool_names() -> &'static [&'static str] {
         "palyra.browser.screenshot",
         "palyra.browser.pdf",
         "palyra.browser.observe",
+        "palyra.browser.storage",
         "palyra.browser.network_log",
         "palyra.browser.console_log",
         "palyra.browser.reset_state",
@@ -904,6 +905,7 @@ fn browser_tool_description(tool_name: &str) -> &'static str {
         "palyra.browser.observe" => {
             "Observe visible browser state, bounded DOM/accessibility visible text evidence, and safe current form/storage state for page-content claims."
         }
+        "palyra.browser.storage" => "Inspect bounded visible cookies and localStorage for diagnostics.",
         "palyra.browser.network_log" => "Read bounded browser network logs.",
         "palyra.browser.console_log" => "Read bounded browser console logs.",
         "palyra.browser.reset_state" => "Reset browser session state.",
@@ -1113,6 +1115,10 @@ fn browser_tool_schema(tool_name: &str) -> Value {
                 "output_path",
                 json!({"type":"string","description":"Optional workspace-relative path, or approved user-owned absolute OS path, where the daemon should write the artifact bytes. Use this as the safe artifact-to-file transfer path instead of reading base64 and patching binary files."}),
             ));
+        }
+        "palyra.browser.storage" => {
+            properties.push(("max_cookie_bytes", json!({"type":"integer","minimum":1})));
+            properties.push(("max_storage_bytes", json!({"type":"integer","minimum":1})));
         }
         "palyra.browser.observe" => {
             properties.push((
@@ -1333,6 +1339,14 @@ mod tests {
             observe.input_schema.pointer("/required/0").and_then(serde_json::Value::as_str),
             Some("session_id")
         );
+        let storage = registry_entry("palyra.browser.storage").expect("storage entry exists");
+        assert!(storage.description.contains("cookies"));
+        assert_eq!(
+            storage.input_schema.pointer("/required/0").and_then(serde_json::Value::as_str),
+            Some("session_id")
+        );
+        assert!(storage.input_schema.pointer("/properties/max_cookie_bytes").is_some());
+        assert!(storage.input_schema.pointer("/properties/max_storage_bytes").is_some());
 
         let navigate = registry_entry("palyra.browser.navigate").expect("navigate entry exists");
         let required = navigate

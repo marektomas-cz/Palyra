@@ -877,6 +877,15 @@ pub const TOOL_CATALOG: &[ToolCatalogEntry] = &[
         recommend_always_allow: true,
     },
     ToolCatalogEntry {
+        tool_name: "palyra.browser.storage",
+        title: "Browser storage",
+        description:
+            "Reads bounded visible cookies and localStorage from the active browser session.",
+        category: "browser",
+        risk_level: ApprovalRiskLevel::Medium,
+        recommend_always_allow: true,
+    },
+    ToolCatalogEntry {
         tool_name: "palyra.browser.network_log",
         title: "Browser network log",
         description: "Reads captured browser network activity.",

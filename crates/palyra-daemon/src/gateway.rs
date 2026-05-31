@@ -218,6 +218,7 @@ pub(crate) const BROWSER_TITLE_TOOL_NAME: &str = "palyra.browser.title";
 pub(crate) const BROWSER_SCREENSHOT_TOOL_NAME: &str = "palyra.browser.screenshot";
 pub(crate) const BROWSER_PDF_TOOL_NAME: &str = "palyra.browser.pdf";
 pub(crate) const BROWSER_OBSERVE_TOOL_NAME: &str = "palyra.browser.observe";
+pub(crate) const BROWSER_STORAGE_TOOL_NAME: &str = "palyra.browser.storage";
 pub(crate) const BROWSER_NETWORK_LOG_TOOL_NAME: &str = "palyra.browser.network_log";
 pub(crate) const BROWSER_CONSOLE_LOG_TOOL_NAME: &str = "palyra.browser.console_log";
 pub(crate) const BROWSER_RESET_STATE_TOOL_NAME: &str = "palyra.browser.reset_state";

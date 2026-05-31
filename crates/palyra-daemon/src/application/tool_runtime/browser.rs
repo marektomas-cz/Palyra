@@ -33,7 +33,7 @@ use crate::{
         BROWSER_PERMISSIONS_SET_TOOL_NAME, BROWSER_PRESS_TOOL_NAME, BROWSER_RELOAD_TOOL_NAME,
         BROWSER_RESET_STATE_TOOL_NAME, BROWSER_SCREENSHOT_TOOL_NAME, BROWSER_SCROLL_TOOL_NAME,
         BROWSER_SELECT_TOOL_NAME, BROWSER_SESSION_CLOSE_TOOL_NAME,
-        BROWSER_SESSION_CREATE_TOOL_NAME, BROWSER_TABS_CLOSE_TOOL_NAME,
+        BROWSER_SESSION_CREATE_TOOL_NAME, BROWSER_STORAGE_TOOL_NAME, BROWSER_TABS_CLOSE_TOOL_NAME,
         BROWSER_TABS_LIST_TOOL_NAME, BROWSER_TABS_OPEN_TOOL_NAME, BROWSER_TABS_SWITCH_TOOL_NAME,
         BROWSER_TITLE_TOOL_NAME, BROWSER_TYPE_TOOL_NAME, BROWSER_UPLOAD_TOOL_NAME,
         BROWSER_VIEWPORT_TOOL_NAME, BROWSER_WAIT_FOR_TOOL_NAME, MAX_BROWSER_TOOL_INPUT_BYTES,
@@ -80,6 +80,7 @@ fn browser_tool_requires_open_session(tool_name: &str) -> bool {
             | BROWSER_SCREENSHOT_TOOL_NAME
             | BROWSER_PDF_TOOL_NAME
             | BROWSER_OBSERVE_TOOL_NAME
+            | BROWSER_STORAGE_TOOL_NAME
             | BROWSER_NETWORK_LOG_TOOL_NAME
             | BROWSER_CONSOLE_LOG_TOOL_NAME
             | BROWSER_RESET_STATE_TOOL_NAME
@@ -2344,6 +2345,125 @@ pub(crate) async fn execute_browser_tool(
                 ),
             }
         }
+        BROWSER_STORAGE_TOOL_NAME => {
+            let session_id = match parse_browser_tool_session_id(&payload) {
+                Ok(value) => value,
+                Err(error) => {
+                    return browser_tool_execution_outcome(
+                        proposal_id,
+                        input_json,
+                        false,
+                        b"{}".to_vec(),
+                        error,
+                    );
+                }
+            };
+            let mut request = Request::new(browser_v1::InspectSessionRequest {
+                v: CANONICAL_PROTOCOL_MAJOR,
+                session_id: Some(common_v1::CanonicalId { ulid: session_id }),
+                include_cookies: true,
+                include_storage: true,
+                include_action_log: false,
+                include_network_log: false,
+                include_page_snapshot: false,
+                max_cookie_bytes: payload
+                    .get("max_cookie_bytes")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+                max_storage_bytes: payload
+                    .get("max_storage_bytes")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+                max_action_log_entries: 0,
+                max_network_log_entries: 0,
+                max_network_log_bytes: 0,
+                max_dom_snapshot_bytes: 0,
+                max_visible_text_bytes: 0,
+                include_console_log: false,
+                include_page_diagnostics: false,
+                max_console_log_entries: 0,
+                max_console_log_bytes: 0,
+            });
+            if let Err(error) = attach_browser_auth_metadata(
+                &mut request,
+                runtime_state.config.browser_service.auth_token.as_deref(),
+            ) {
+                return browser_tool_execution_outcome(
+                    proposal_id,
+                    input_json,
+                    false,
+                    b"{}".to_vec(),
+                    error,
+                );
+            }
+            if let Err(error) = attach_browser_caller_principal_metadata(&mut request, principal) {
+                return browser_tool_execution_outcome(
+                    proposal_id,
+                    input_json,
+                    false,
+                    b"{}".to_vec(),
+                    error,
+                );
+            }
+            match client.inspect_session(request).await {
+                Ok(response) => {
+                    let response = response.into_inner();
+                    let exported_cookies = response
+                        .cookies
+                        .into_iter()
+                        .map(browser_cookie_domain_to_json)
+                        .collect::<Vec<_>>();
+                    let exported_storage = response
+                        .storage
+                        .into_iter()
+                        .map(browser_storage_origin_to_json)
+                        .collect::<Vec<_>>();
+                    let mut exported_values = Vec::with_capacity(
+                        exported_cookies.len().saturating_add(exported_storage.len()),
+                    );
+                    exported_values.extend(exported_cookies.iter().map(|entry| {
+                        BrowserValueExport {
+                            value: entry.value.clone(),
+                            scan: entry.scan.clone(),
+                            redacted: entry.redacted,
+                        }
+                    }));
+                    exported_values.extend(exported_storage.iter().map(|entry| {
+                        BrowserValueExport {
+                            value: entry.value.clone(),
+                            scan: entry.scan.clone(),
+                            redacted: entry.redacted,
+                        }
+                    }));
+                    let storage_scan = merge_browser_value_scans(
+                        SafetyContentKind::BrowserObservation,
+                        exported_values.as_slice(),
+                    );
+                    let output = json!({
+                        "success": response.success,
+                        "cookies": exported_cookies.iter().map(|entry| entry.value.clone()).collect::<Vec<_>>(),
+                        "storage": exported_storage.iter().map(|entry| entry.value.clone()).collect::<Vec<_>>(),
+                        "cookies_truncated": response.cookies_truncated,
+                        "storage_truncated": response.storage_truncated,
+                        "safety": browser_safety_json(
+                            &storage_scan,
+                            exported_values.iter().any(|entry| entry.redacted),
+                        ),
+                        "error": response.error,
+                    });
+                    (
+                        response.success,
+                        serde_json::to_vec(&output).unwrap_or_else(|_| b"{}".to_vec()),
+                        if response.success { String::new() } else { response.error },
+                    )
+                }
+                Err(error) => (
+                    false,
+                    b"{}".to_vec(),
+                    format!("palyra.browser.storage failed: {}", sanitize_status_message(&error)),
+                ),
+            }
+        }
         BROWSER_NETWORK_LOG_TOOL_NAME => {
             let session_id = match parse_browser_tool_session_id(&payload) {
                 Ok(value) => value,
@@ -3577,6 +3697,70 @@ fn merge_browser_value_scans(
         content_kind,
         scans.as_slice(),
     )
+}
+
+fn browser_cookie_domain_to_json(domain: browser_v1::SessionCookieDomain) -> BrowserValueExport {
+    let mut redacted = false;
+    let mut scan_input = format!("domain={}", domain.domain);
+    let cookies = domain
+        .cookies
+        .into_iter()
+        .map(|cookie| {
+            let value_export =
+                export_browser_text(cookie.value.as_str(), SafetyContentKind::BrowserObservation);
+            scan_input.push('\n');
+            scan_input.push_str(cookie.name.as_str());
+            scan_input.push('=');
+            scan_input.push_str(cookie.value.as_str());
+            redacted |= value_export.redacted;
+            json!({
+                "name": cookie.name,
+                "value": value_export.redacted_text,
+            })
+        })
+        .collect::<Vec<_>>();
+    let scan = export_browser_text(scan_input.as_str(), SafetyContentKind::BrowserObservation);
+    BrowserValueExport {
+        value: json!({
+            "domain": domain.domain,
+            "cookies": cookies,
+            "safety": browser_safety_json(&scan.scan, scan.redacted || redacted),
+        }),
+        scan: scan.scan,
+        redacted: scan.redacted || redacted,
+    }
+}
+
+fn browser_storage_origin_to_json(origin: browser_v1::SessionStorageOrigin) -> BrowserValueExport {
+    let mut redacted = false;
+    let mut scan_input = format!("origin={}", origin.origin);
+    let entries = origin
+        .entries
+        .into_iter()
+        .map(|entry| {
+            let value_export =
+                export_browser_text(entry.value.as_str(), SafetyContentKind::BrowserObservation);
+            scan_input.push('\n');
+            scan_input.push_str(entry.key.as_str());
+            scan_input.push('=');
+            scan_input.push_str(entry.value.as_str());
+            redacted |= value_export.redacted;
+            json!({
+                "key": entry.key,
+                "value": value_export.redacted_text,
+            })
+        })
+        .collect::<Vec<_>>();
+    let scan = export_browser_text(scan_input.as_str(), SafetyContentKind::BrowserObservation);
+    BrowserValueExport {
+        value: json!({
+            "origin": origin.origin,
+            "entries": entries,
+            "safety": browser_safety_json(&scan.scan, scan.redacted || redacted),
+        }),
+        scan: scan.scan,
+        redacted: scan.redacted || redacted,
+    }
 }
 
 fn browser_console_entry_to_json(entry: browser_v1::BrowserConsoleEntry) -> BrowserValueExport {

@@ -694,6 +694,7 @@ const LOCAL_DESKTOP_DEFAULT_ALLOWED_TOOLS: &[&str] = &[
     "palyra.browser.screenshot",
     "palyra.browser.pdf",
     "palyra.browser.observe",
+    "palyra.browser.storage",
     "palyra.browser.network_log",
     "palyra.browser.console_log",
     "palyra.browser.reset_state",
@@ -12028,6 +12029,10 @@ mod init_command_tests {
         assert!(
             allowed_tools.iter().any(|tool| tool == "palyra.browser.screenshot"),
             "local init should allow gateway-mediated browser inspection when the service is enabled"
+        );
+        assert!(
+            allowed_tools.iter().any(|tool| tool == "palyra.browser.storage"),
+            "local init should allow gateway-mediated browser cookie and storage inspection when the service is enabled"
         );
         assert!(
             allowed_tools.iter().any(|tool| tool == "palyra.browser.downloads.get"),

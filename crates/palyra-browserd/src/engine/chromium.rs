@@ -600,6 +600,7 @@ const MAX_CHROMIUM_CONSOLE_JSON_BYTES: usize = (DEFAULT_MAX_CONSOLE_LOG_BYTES as
 const MAX_CHROMIUM_NETWORK_JSON_BYTES: usize = (DEFAULT_MAX_NETWORK_LOG_BYTES as usize) * 4;
 const MAX_CHROMIUM_CLIENT_DOWNLOAD_JSON_BYTES: usize =
     (DOWNLOAD_MAX_FILE_BYTES as usize * 2) + 16 * 1024;
+const MAX_CHROMIUM_DOCUMENT_COOKIE_JSON_BYTES: usize = (MAX_COOKIES_PER_DOMAIN * 1536) + 4096;
 const MAX_CHROMIUM_LOCAL_STORAGE_JSON_BYTES: usize =
     (MAX_STORAGE_ENTRY_VALUE_BYTES * MAX_STORAGE_ENTRIES_PER_ORIGIN * 2) + 4096;
 const MAX_CHROMIUM_OBSERVE_FORM_CONTROLS: usize = 128;
@@ -2051,6 +2052,27 @@ async fn chromium_read_local_storage(
     parse_chromium_local_storage_snapshot(value)
 }
 
+async fn chromium_read_document_cookies(
+    runtime: &BrowserRuntimeState,
+    session_id: &str,
+    tab_id: &str,
+) -> Result<Vec<CookieUpdate>, String> {
+    enforce_chromium_remote_ip_guard(runtime, session_id).await?;
+    let tab = chromium_tab_for_session(runtime, session_id, tab_id).await?;
+    let script = chromium_read_document_cookies_script();
+    let value = run_chromium_blocking("chromium read document.cookie", move || {
+        let value = tab
+            .evaluate(script.as_str(), false)
+            .map_err(|error| format!("failed to read Chromium document.cookie: {error}"))?
+            .value
+            .unwrap_or_else(|| serde_json::Value::String("{}".to_owned()));
+        Ok(decode_chromium_json_script_value(value))
+    })
+    .await?;
+    enforce_chromium_remote_ip_guard(runtime, session_id).await?;
+    parse_chromium_document_cookie_snapshot(value)
+}
+
 async fn chromium_drain_page_network_log(
     runtime: &BrowserRuntimeState,
     session_id: &str,
@@ -2197,6 +2219,33 @@ fn chromium_read_local_storage_script() -> String {
     )
 }
 
+fn chromium_read_document_cookies_script() -> String {
+    format!(
+        r#"
+(() => {{
+  const MAX_COOKIE_CHARS = {max_cookie_chars};
+  try {{
+    const location = window.location || {{}};
+    const domain = String(location.hostname || "").trim().toLowerCase();
+    const rawCookie = String(document.cookie || "");
+    const cookie = rawCookie.length > MAX_COOKIE_CHARS
+      ? rawCookie.slice(0, MAX_COOKIE_CHARS)
+      : rawCookie;
+    return JSON.stringify({{ ok: true, domain, cookie }});
+  }} catch (error) {{
+    return JSON.stringify({{
+      ok: false,
+      domain: "",
+      cookie: "",
+      error: String((error && (error.message || error)) || "")
+    }});
+  }}
+}})()
+"#,
+        max_cookie_chars = MAX_CHROMIUM_DOCUMENT_COOKIE_JSON_BYTES
+    )
+}
+
 fn chromium_restore_local_storage_script(
     entries: &HashMap<String, String>,
 ) -> Result<String, String> {
@@ -2261,6 +2310,55 @@ fn parse_chromium_local_storage_snapshot(
         }
     }
     Ok(Some((origin, entries)))
+}
+
+fn parse_chromium_document_cookie_snapshot(
+    value: serde_json::Value,
+) -> Result<Vec<CookieUpdate>, String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| "document.cookie read returned non-object payload".to_owned())?;
+    if !object.get("ok").and_then(serde_json::Value::as_bool).unwrap_or(false) {
+        let error = object
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown document.cookie read failure");
+        return Err(format!("document.cookie read failed: {error}"));
+    }
+    let domain = object
+        .get("domain")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .trim_matches('.')
+        .to_ascii_lowercase();
+    if domain.is_empty() {
+        return Ok(Vec::new());
+    }
+    let cookie = object.get("cookie").and_then(serde_json::Value::as_str).unwrap_or_default();
+    let mut updates = Vec::new();
+    for pair in cookie.split(';').take(MAX_COOKIES_PER_DOMAIN * 4) {
+        let Some((name, value)) = pair.trim().split_once('=') else {
+            continue;
+        };
+        let name = name.trim().to_ascii_lowercase();
+        let value = value.trim();
+        if name.is_empty() || value.is_empty() {
+            continue;
+        }
+        if updates.iter().any(|update: &CookieUpdate| update.name == name) {
+            continue;
+        }
+        updates.push(CookieUpdate {
+            domain: domain.clone(),
+            name,
+            value: truncate_utf8_bytes(value, 1024),
+        });
+        if updates.len() >= MAX_COOKIES_PER_DOMAIN {
+            break;
+        }
+    }
+    Ok(updates)
 }
 
 fn parse_chromium_local_storage_restore_status(value: serde_json::Value) -> Result<(), String> {
@@ -2551,6 +2649,19 @@ pub(crate) async fn chromium_refresh_tab_snapshot(
             None
         }
     };
+    let document_cookie_updates =
+        match chromium_read_document_cookies(runtime, session_id, tab_id).await {
+            Ok(value) => value,
+            Err(error) => {
+                warn!(
+                    session_id,
+                    tab_id,
+                    error = error.as_str(),
+                    "failed to refresh Chromium document.cookie snapshot"
+                );
+                Vec::new()
+            }
+        };
     let mut network_log =
         chromium_drain_pending_network_log(runtime, session_id, tab_id).await.unwrap_or_default();
     network_log.extend(
@@ -2566,6 +2677,7 @@ pub(crate) async fn chromium_refresh_tab_snapshot(
     if let Some((origin, entries)) = storage_snapshot {
         replace_storage_entries_for_origin(session, origin.as_str(), entries);
     }
+    apply_cookie_updates(session, document_cookie_updates.as_slice());
     let Some(tab) = session.tabs.get_mut(tab_id) else {
         return Err("tab_not_found".to_owned());
     };
@@ -3787,19 +3899,21 @@ pub(crate) async fn set_viewport_with_chromium(
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{
-        chromium_network_log_headers, chromium_read_local_storage_script,
-        chromium_restore_local_storage_script, chromium_touch_emulation_max_touch_points,
-        chromium_transport_idle_timeout, chromium_upload_staging_path, clamp_chromium_snapshot,
+        chromium_network_log_headers, chromium_read_document_cookies_script,
+        chromium_read_local_storage_script, chromium_restore_local_storage_script,
+        chromium_touch_emulation_max_touch_points, chromium_transport_idle_timeout,
+        chromium_upload_staging_path, clamp_chromium_snapshot,
         decode_chromium_console_entries_value, decode_chromium_json_script_value,
         decode_chromium_network_entries_value, decode_chromium_observe_state_value,
         page_body_with_chromium_observe_state, parse_chromium_client_download_entries,
-        parse_chromium_console_entries, parse_chromium_layout_metrics,
-        parse_chromium_local_storage_restore_status, parse_chromium_local_storage_snapshot,
-        parse_chromium_page_network_entries, parse_chromium_viewport_metrics, parse_key_press_spec,
-        ChromiumLayoutMetrics, ChromiumObserveSnapshot, CHROMIUM_DRAIN_NETWORK_LOG_SCRIPT,
+        parse_chromium_console_entries, parse_chromium_document_cookie_snapshot,
+        parse_chromium_layout_metrics, parse_chromium_local_storage_restore_status,
+        parse_chromium_local_storage_snapshot, parse_chromium_page_network_entries,
+        parse_chromium_viewport_metrics, parse_key_press_spec, ChromiumLayoutMetrics,
+        ChromiumObserveSnapshot, CHROMIUM_DRAIN_NETWORK_LOG_SCRIPT,
         CHROMIUM_PAGE_DIAGNOSTICS_SCRIPT, CHROMIUM_READ_CONSOLE_LOG_SCRIPT,
-        MAX_CHROMIUM_CONSOLE_JSON_BYTES, MAX_CHROMIUM_LOCAL_STORAGE_JSON_BYTES,
-        MAX_CHROMIUM_NETWORK_JSON_BYTES,
+        MAX_CHROMIUM_CONSOLE_JSON_BYTES, MAX_CHROMIUM_DOCUMENT_COOKIE_JSON_BYTES,
+        MAX_CHROMIUM_LOCAL_STORAGE_JSON_BYTES, MAX_CHROMIUM_NETWORK_JSON_BYTES,
     };
     use crate::{
         DEFAULT_SESSION_IDLE_TTL_MS, MAX_CONSOLE_MESSAGE_BYTES, MAX_CONSOLE_SOURCE_BYTES,
@@ -4062,6 +4176,37 @@ mod tests {
         assert_eq!(origin, "http://127.0.0.1:49152");
         assert_eq!(entries.get("cart").map(String::as_str), Some("1"));
         assert_eq!(entries.get("theme").map(String::as_str), Some("dark"));
+    }
+
+    #[test]
+    fn parse_chromium_document_cookie_snapshot_accepts_visible_cookies() {
+        let raw = serde_json::Value::String(
+            r#"{"ok":true,"domain":"LOCALHOST","cookie":"qaCookie=visible; theme=dark"}"#
+                .to_owned(),
+        );
+
+        let updates =
+            parse_chromium_document_cookie_snapshot(decode_chromium_json_script_value(raw))
+                .expect("document.cookie payload should parse");
+
+        assert_eq!(updates.len(), 2);
+        assert_eq!(updates[0].domain, "localhost");
+        assert_eq!(updates[0].name, "qacookie");
+        assert_eq!(updates[0].value, "visible");
+        assert_eq!(updates[1].name, "theme");
+        assert_eq!(updates[1].value, "dark");
+    }
+
+    #[test]
+    fn chromium_document_cookie_script_bounds_page_controlled_payload() {
+        let read_script = chromium_read_document_cookies_script();
+
+        assert!(read_script.contains("MAX_COOKIE_CHARS"));
+        assert!(read_script.contains(MAX_CHROMIUM_DOCUMENT_COOKIE_JSON_BYTES.to_string().as_str()));
+        assert!(
+            read_script.contains("JSON.stringify"),
+            "document.cookie reads should return a machine-readable bounded payload"
+        );
     }
 
     #[test]

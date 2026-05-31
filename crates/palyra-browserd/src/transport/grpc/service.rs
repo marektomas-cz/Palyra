@@ -624,7 +624,11 @@ impl browser_v1::browser_service_server::BrowserService for BrowserServiceImpl {
         let include_console_log = payload.include_console_log || default_include;
         let include_page_diagnostics = payload.include_page_diagnostics || default_include;
 
-        if (include_page_snapshot || include_console_log || include_page_diagnostics)
+        if (include_cookies
+            || include_storage
+            || include_page_snapshot
+            || include_console_log
+            || include_page_diagnostics)
             && self.runtime.engine_mode == BrowserEngineMode::Chromium
         {
             let active_tab_id = {
