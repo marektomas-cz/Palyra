@@ -1036,8 +1036,6 @@ fn collect_open_action_items(
 }
 
 fn extract_open_action_items(raw: &str) -> Vec<String> {
-    let lower_text = raw.to_ascii_lowercase();
-    let record_mentions_action_items = mentions_action_item_context(lower_text.as_str());
     let mut items = Vec::new();
     let mut in_action_item_section = false;
     for line in raw.lines() {
@@ -1061,13 +1059,6 @@ fn extract_open_action_items(raw: &str) -> Vec<String> {
         if let Some(item) = extract_explicit_action_item(trimmed) {
             items.push(item);
             continue;
-        }
-
-        if record_mentions_action_items {
-            if let Some(item) = extract_labeled_open_action_item(trimmed) {
-                items.push(item);
-                continue;
-            }
         }
 
         if in_action_item_section {
@@ -1104,10 +1095,23 @@ fn mentions_action_item_context(lower: &str) -> bool {
 
 fn opens_action_item_section(lower: &str) -> bool {
     mentions_action_item_context(lower)
-        && (lower.ends_with(':')
-            || lower.contains("following")
-            || lower.contains("these")
-            || is_action_item_heading(lower))
+        && !mentions_negative_action_item_context(lower)
+        && (lower.ends_with(':') || lower.contains("following") || is_action_item_heading(lower))
+}
+
+fn mentions_negative_action_item_context(lower: &str) -> bool {
+    mentions_action_item_context(lower)
+        && contains_any(
+            lower,
+            &[
+                "not action item",
+                "not an action item",
+                "not meeting action item",
+                "not become action item",
+                "must not become",
+                "noise",
+            ],
+        )
 }
 
 fn is_action_item_heading(lower: &str) -> bool {
@@ -1158,24 +1162,6 @@ fn extract_explicit_action_item(line: &str) -> Option<String> {
         return normalize_open_action_item(rest);
     }
     None
-}
-
-fn extract_labeled_open_action_item(line: &str) -> Option<String> {
-    let line = strip_list_marker(line).unwrap_or(line);
-    let line = strip_checkbox_marker(line);
-    let (label, rest) = line.split_once(':')?;
-    if rest.trim().is_empty() || !looks_like_task_label(label) {
-        return None;
-    }
-    normalize_open_action_item(line)
-}
-
-fn looks_like_task_label(label: &str) -> bool {
-    let label = label.trim();
-    let label_len = label.chars().count();
-    (3..=48).contains(&label_len)
-        && label.chars().any(|ch| ch.is_ascii_digit())
-        && label.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
 }
 
 fn normalize_open_action_item(raw: &str) -> Option<String> {
@@ -1407,6 +1393,9 @@ fn build_continuity_candidates(
         if candidates.len() >= SESSION_COMPACTION_MAX_CANDIDATES {
             break;
         }
+        if !record_can_seed_continuity_candidate(record) {
+            continue;
+        }
         let Some(seed) = classify_candidate_seed(record) else {
             continue;
         };
@@ -1438,6 +1427,10 @@ fn build_continuity_candidates(
         }
     }
     candidates
+}
+
+fn record_can_seed_continuity_candidate(record: &SessionCompactionRecordSnapshot) -> bool {
+    record.event_type != "tool_result"
 }
 
 fn build_initial_write_previews(
@@ -2660,6 +2653,96 @@ TASK-103: Casey confirms the support rotation handoff.
                 .pointer("/active_task_summary/open_action_items/0")
                 .and_then(serde_json::Value::as_str),
             Some("TASK-101: Morgan publishes the deployment checklist by Tuesday.")
+        );
+    }
+
+    #[test]
+    fn active_task_summary_rejects_helper_doc_noise_from_action_items_and_decisions() {
+        let meeting_notes = "\
+# Launch Meeting
+
+Action Items
+- Alice: Prepare the release checklist by Monday 09:00 Prague time.
+- Bruno: Verify the billing retry alert and attach evidence to the QA report.
+- Clara: Confirm the support handoff owner before the launch window.
+";
+        let helper_notes = "\
+# Helper Notes
+
+These Idea rows are archival helper noise, not meeting action items, and must not become continuity decisions.
+Idea 1-A: review historic dashboard screenshots.
+Idea 1-B: archive old experiment notes.
+Idea 1-C: compare stale prototypes.
+";
+        let meeting_payload = serde_json::json!({
+            "proposal_id": "proposal-meeting",
+            "success": true,
+            "output_json": {
+                "path": "tasks/meeting-notes.md",
+                "content": meeting_notes,
+            },
+            "error": "",
+        })
+        .to_string();
+        let helper_payload = serde_json::json!({
+            "proposal_id": "proposal-helper",
+            "success": true,
+            "output_json": {
+                "path": "docs/helper-01.md",
+                "content": helper_notes,
+            },
+            "error": "",
+        })
+        .to_string();
+        let reply_payload = serde_json::json!({
+            "reply_text": "Open action items:\n1. Alice: Prepare the release checklist by Monday 09:00 Prague time.\n2. Bruno: Verify the billing retry alert and attach evidence to the QA report.\n3. Clara: Confirm the support handoff owner before the launch window."
+        })
+        .to_string();
+        let mut transcript = vec![
+            transcript_record(
+                0,
+                "message.received",
+                r#"{"text":"Extract the launch meeting action items."}"#,
+            ),
+            transcript_record(1, "tool_result", meeting_payload.as_str()),
+            transcript_record(2, "tool_result", helper_payload.as_str()),
+            transcript_record(3, "message.replied", reply_payload.as_str()),
+        ];
+        transcript.extend((4..14).map(|seq| {
+            let payload = format!(r#"{{"text":"Filler context {seq} for compaction."}}"#);
+            transcript_record(seq, "message.received", payload.as_str())
+        }));
+
+        let plan = build_session_compaction_plan(
+            &session_record(),
+            transcript.as_slice(),
+            &[],
+            &[],
+            Some("test_compaction"),
+            Some("test_policy"),
+        );
+
+        assert!(plan.eligible);
+        assert_eq!(
+            plan.active_task_summary.open_action_items,
+            vec![
+                "Alice: Prepare the release checklist by Monday 09:00 Prague time.",
+                "Bruno: Verify the billing retry alert and attach evidence to the QA report.",
+                "Clara: Confirm the support handoff owner before the launch window.",
+            ]
+        );
+        assert!(
+            plan.active_task_summary.open_action_items.iter().all(|item| !item.contains("Idea")),
+            "helper ideas must not become action items: {:?}",
+            plan.active_task_summary.open_action_items
+        );
+        assert!(
+            plan.active_task_summary
+                .open_decisions
+                .iter()
+                .all(|decision| !decision.contains("helper") && !decision.contains("Idea")),
+            "helper docs must not become open decisions: {:?}",
+            plan.active_task_summary.open_decisions
         );
     }
 
