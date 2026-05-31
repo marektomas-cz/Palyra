@@ -185,9 +185,17 @@ $resolvedCliNewShellCommand = $installMetadata["cli_new_shell_command"]
 if ([string]::IsNullOrWhiteSpace($resolvedCliNewShellCommand)) {
     $resolvedCliNewShellCommand = "palyra"
 }
+$resolvedCliParentShellCommand = $installMetadata["cli_parent_shell_command"]
+if ([string]::IsNullOrWhiteSpace($resolvedCliParentShellCommand)) {
+    $resolvedCliParentShellCommand = $resolvedCliCommandPath
+}
+$resolvedCliParentShellPathRestartRequired = $installMetadata["cli_parent_shell_path_restart_required"]
+if ([string]::IsNullOrWhiteSpace($resolvedCliParentShellPathRestartRequired)) {
+    $resolvedCliParentShellPathRestartRequired = "true"
+}
 $resolvedCliParentShellNote = $installMetadata["cli_parent_shell_note"]
 if ([string]::IsNullOrWhiteSpace($resolvedCliParentShellNote)) {
-    $resolvedCliParentShellNote = "The installer cannot update PATH in the parent shell that launched it. Use cli_command_path in the current parent shell, or open a new terminal before running 'palyra'."
+    $resolvedCliParentShellNote = "Already-open parent terminals cannot inherit PATH changes made by this installer. In the parent terminal that launched the installer, run cli_parent_shell_command or cli_command_path directly; after PATH persistence, restart the terminal before running 'palyra'."
 }
 $cliSessionPathUpdated = $installMetadata["cli_session_path_updated"]
 if ([string]::IsNullOrWhiteSpace($cliSessionPathUpdated)) {
@@ -207,6 +215,7 @@ if ($IsWindows) {
     $resolvedCliCommandRoot = $windowsCliExposure.command_root
     $resolvedCliCommandPath = $windowsCliExposure.command_path
     $resolvedCliCurrentShellCommand = $resolvedCliCommandPath
+    $resolvedCliParentShellCommand = $resolvedCliCommandPath
 
     if (Add-CurrentSessionPathEntry -Entry $resolvedCliCommandRoot) {
         $cliSessionPathUpdated = "true"
@@ -354,6 +363,8 @@ $installSummary = [ordered]@{
     cli_user_path_updated = $cliUserPathUpdated
     cli_current_shell_command = $resolvedCliCurrentShellCommand
     cli_new_shell_command = $resolvedCliNewShellCommand
+    cli_parent_shell_command = $resolvedCliParentShellCommand
+    cli_parent_shell_path_restart_required = $resolvedCliParentShellPathRestartRequired
     cli_parent_shell_note = $resolvedCliParentShellNote
     cli_path_preflight_source = $cliPathPreflightSource
     cli_path_preflight_matches_command_root = $cliPathPreflightMatchesCommandRoot
@@ -381,6 +392,8 @@ Write-Output "cli_session_path_updated=$cliSessionPathUpdated"
 Write-Output "cli_user_path_updated=$cliUserPathUpdated"
 Write-Output "cli_current_shell_command=$resolvedCliCurrentShellCommand"
 Write-Output "cli_new_shell_command=$resolvedCliNewShellCommand"
+Write-Output "cli_parent_shell_command=$resolvedCliParentShellCommand"
+Write-Output "cli_parent_shell_path_restart_required=$resolvedCliParentShellPathRestartRequired"
 Write-Output "cli_parent_shell_note=$resolvedCliParentShellNote"
 Write-Output "cli_path_preflight_source=$cliPathPreflightSource"
 Write-Output "cli_path_preflight_matches_command_root=$cliPathPreflightMatchesCommandRoot"

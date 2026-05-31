@@ -116,6 +116,23 @@ try {
         -CommandRoot $commandRoot `
         -PersistPath:$false
 
+    Assert-Equal `
+        -Actual $cliExposure.parent_shell_command `
+        -Expected $cliExposure.command_path `
+        -Message "Parent-shell command metadata must point to the direct shim path."
+    Assert-Equal `
+        -Actual $cliExposure.parent_shell_path_restart_required `
+        -Expected "false" `
+        -Message "Session-only CLI exposure must not claim a restart will refresh PATH."
+    Assert-Contains `
+        -Haystack $cliExposure.parent_shell_path_note `
+        -Needle "Already-open parent terminals cannot inherit PATH changes" `
+        -Message "Parent-shell note must explain why the launching terminal cannot see PATH updates."
+    Assert-Contains `
+        -Haystack $cliExposure.parent_shell_path_note `
+        -Needle "restart the terminal before running 'palyra'" `
+        -Message "Parent-shell note must tell users to restart before relying on PATH."
+
     if ($IsWindows) {
         Assert-Equal `
             -Actual (Test-PathEntryPresent -Entry $legacyAliasRoot -PathValue ([Environment]::GetEnvironmentVariable("Path", "User"))) `
