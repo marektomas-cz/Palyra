@@ -8093,6 +8093,32 @@ impl GatewayRuntimeState {
     }
 
     #[allow(clippy::result_large_err)]
+    pub async fn workspace_document_by_id(
+        self: &Arc<Self>,
+        principal: String,
+        channel: Option<String>,
+        agent_id: Option<String>,
+        document_id: String,
+        include_deleted: bool,
+    ) -> Result<Option<WorkspaceDocumentRecord>, Status> {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            state
+                .journal_store
+                .workspace_document_by_id(
+                    principal.as_str(),
+                    channel.as_deref(),
+                    agent_id.as_deref(),
+                    document_id.as_str(),
+                    include_deleted,
+                )
+                .map_err(|error| map_memory_store_error("load workspace document", error))
+        })
+        .await
+        .map_err(|_| Status::internal("workspace document worker panicked"))?
+    }
+
+    #[allow(clippy::result_large_err)]
     pub async fn list_workspace_documents(
         self: &Arc<Self>,
         filter: WorkspaceDocumentListFilter,

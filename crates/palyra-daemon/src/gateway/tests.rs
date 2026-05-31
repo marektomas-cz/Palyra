@@ -86,8 +86,9 @@ use crate::application::{
             validate_resolved_fetch_addresses, HttpFetchCachePolicy,
         },
         memory::{
-            execute_memory_recall_tool, execute_memory_reflect_tool, execute_memory_retain_tool,
-            execute_memory_search_tool, memory_search_tool_output_payload,
+            execute_memory_delete_tool, execute_memory_recall_tool, execute_memory_reflect_tool,
+            execute_memory_retain_tool, execute_memory_search_tool,
+            memory_search_tool_output_payload,
         },
         routines::execute_routines_tool,
         workspace_patch::{
@@ -5193,6 +5194,95 @@ async fn memory_search_tool_workspace_scope_returns_project_prefix_hits() {
         }),
         "workspace-scope search must honor project prefix boundaries: {payload}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn memory_delete_tool_deletes_workspace_document_id_from_search() {
+    let state = build_test_runtime_state(false);
+    let context = routines_tool_test_context();
+    let marker = "PALYRA_E2E_WORKSPACE_DELETE_BY_DOCUMENT_ID";
+    state
+        .upsert_workspace_document(WorkspaceDocumentWriteRequest {
+            document_id: None,
+            principal: context.principal.to_owned(),
+            channel: context.channel.map(str::to_owned),
+            agent_id: None,
+            session_id: Some(context.session_id.to_owned()),
+            path: "projects/e2e/delete-me.md".to_owned(),
+            title: Some("Workspace Memory To Delete".to_owned()),
+            content_text: format!("Obsolete workspace fact: {marker}"),
+            template_id: None,
+            template_version: None,
+            template_content_hash: None,
+            source_memory_id: None,
+            manual_override: false,
+        })
+        .await
+        .expect("workspace document should be indexed");
+
+    let search = execute_memory_search_tool(
+        &state,
+        context,
+        "01ARZ3NDEKTSV4RRFFQ69G5FE6",
+        br#"{"query":"PALYRA_E2E_WORKSPACE_DELETE_BY_DOCUMENT_ID","scope":"workspace","workspace_prefix":"projects/e2e","top_k":4,"min_score":0.0}"#,
+    )
+    .await;
+    assert!(search.success, "workspace search tool should succeed: {}", search.error);
+    let search_payload = parse_tool_output_json(&search);
+    let document_id = search_payload
+        .pointer("/hits/0/document/document_id")
+        .and_then(Value::as_str)
+        .expect("workspace search should expose document_id")
+        .to_owned();
+
+    let input_json = serde_json::to_vec(&json!({ "memory_id": document_id }))
+        .expect("delete input should serialize");
+    let delete = execute_memory_delete_tool(
+        &state,
+        context,
+        "01ARZ3NDEKTSV4RRFFQ69G5FE7",
+        input_json.as_slice(),
+    )
+    .await;
+    assert!(delete.success, "workspace document delete should succeed: {}", delete.error);
+    let delete_payload = parse_tool_output_json(&delete);
+    assert_eq!(delete_payload.get("deleted").and_then(Value::as_bool), Some(true));
+    assert_eq!(
+        delete_payload.get("status").and_then(Value::as_str),
+        Some("workspace_document_deleted")
+    );
+    assert_eq!(
+        delete_payload.get("workspace_document_id").and_then(Value::as_str),
+        Some(document_id.as_str())
+    );
+
+    let deleted_document = state
+        .workspace_document_by_path(
+            context.principal.to_owned(),
+            context.channel.map(str::to_owned),
+            None,
+            "projects/e2e/delete-me.md".to_owned(),
+            true,
+        )
+        .await
+        .expect("workspace document lookup should succeed")
+        .expect("deleted workspace document should remain auditable");
+    assert_eq!(deleted_document.state, "soft_deleted");
+
+    let search_after_delete = execute_memory_search_tool(
+        &state,
+        context,
+        "01ARZ3NDEKTSV4RRFFQ69G5FE8",
+        br#"{"query":"PALYRA_E2E_WORKSPACE_DELETE_BY_DOCUMENT_ID","scope":"workspace","workspace_prefix":"projects/e2e","top_k":4,"min_score":0.0}"#,
+    )
+    .await;
+    assert!(
+        search_after_delete.success,
+        "workspace search after delete should succeed: {}",
+        search_after_delete.error
+    );
+    let after_payload = parse_tool_output_json(&search_after_delete);
+    assert_eq!(after_payload.get("hit_count").and_then(Value::as_u64), Some(0));
 }
 
 #[tokio::test(flavor = "multi_thread")]

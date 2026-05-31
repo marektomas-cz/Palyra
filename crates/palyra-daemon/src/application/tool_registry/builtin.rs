@@ -239,12 +239,12 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
         ),
         entry(
             "palyra.memory.delete",
-            "Delete a scoped memory item by memory_id after the user asks to forget or remove it.",
+            "Delete a scoped memory item or workspace memory document by the id returned from memory search after the user asks to forget or remove it.",
             object_schema(
                 &["memory_id"],
                 vec![(
                     "memory_id",
-                    json!({"type":"string","description":"Canonical memory_id returned by palyra.memory.search or palyra.memory.recall."}),
+                    json!({"type":"string","description":"Canonical memory_id or workspace document_id returned by palyra.memory.search or palyra.memory.recall."}),
                 )],
                 false,
             ),

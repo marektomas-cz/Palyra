@@ -31,8 +31,9 @@ use crate::{
     },
     journal::{
         MemoryItemLifecycleUpdateRequest, MemoryItemRecord, MemorySearchHit, MemorySearchRequest,
-        MemorySource, SessionSearchOutcome, SessionSearchRequest, WorkspaceDocumentRecord,
-        WorkspaceDocumentWriteRequest, WorkspaceSearchHit, WorkspaceSearchRequest,
+        MemorySource, SessionSearchOutcome, SessionSearchRequest, WorkspaceDocumentDeleteRequest,
+        WorkspaceDocumentRecord, WorkspaceDocumentWriteRequest, WorkspaceSearchHit,
+        WorkspaceSearchRequest,
     },
     tool_protocol::{ToolAttestation, ToolExecutionOutcome},
     transport::grpc::auth::RequestContext,
@@ -679,8 +680,10 @@ pub(crate) async fn execute_memory_delete_tool(
             format!("palyra.memory.delete {}", error.message()),
         );
     }
+    let mut memory_item_exists = false;
     match runtime_state.memory_item(memory_id.clone()).await {
         Ok(Some(item)) => {
+            memory_item_exists = true;
             if let Err(error) = enforce_memory_item_scope(&item, context.principal, context.channel)
             {
                 return memory_tool_execution_outcome(
@@ -703,6 +706,20 @@ pub(crate) async fn execute_memory_delete_tool(
                 b"{}".to_vec(),
                 format!("palyra.memory.delete failed: {}", error.message()),
             );
+        }
+    }
+    if !memory_item_exists {
+        if let Some(outcome) = maybe_delete_workspace_document_by_id(
+            runtime_state,
+            context,
+            namespace,
+            proposal_id,
+            input_json,
+            memory_id.as_str(),
+        )
+        .await
+        {
+            return outcome;
         }
     }
     let deleted = match runtime_state
@@ -753,6 +770,107 @@ pub(crate) async fn execute_memory_delete_tool(
             format!("palyra.memory.delete failed to serialize output: {error}"),
         ),
     }
+}
+
+async fn maybe_delete_workspace_document_by_id(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    context: ToolRuntimeExecutionContext<'_>,
+    namespace: &'static [u8],
+    proposal_id: &str,
+    input_json: &[u8],
+    document_id: &str,
+) -> Option<ToolExecutionOutcome> {
+    let document = match runtime_state
+        .workspace_document_by_id(
+            context.principal.to_owned(),
+            context.channel.map(str::to_owned),
+            None,
+            document_id.to_owned(),
+            false,
+        )
+        .await
+    {
+        Ok(Some(document)) => document,
+        Ok(None) => return None,
+        Err(error) => {
+            return Some(memory_tool_execution_outcome(
+                namespace,
+                proposal_id,
+                input_json,
+                false,
+                b"{}".to_vec(),
+                format!(
+                    "palyra.memory.delete failed to inspect workspace document: {}",
+                    error.message()
+                ),
+            ));
+        }
+    };
+    if let Err(error) = authorize_memory_action(
+        context.principal,
+        "memory.delete",
+        format!("memory:workspace_document:{}", document.document_id).as_str(),
+    ) {
+        return Some(memory_tool_execution_outcome(
+            namespace,
+            proposal_id,
+            input_json,
+            false,
+            b"{}".to_vec(),
+            format!("palyra.memory.delete {}", error.message()),
+        ));
+    }
+    let deleted_document = match runtime_state
+        .soft_delete_workspace_document(WorkspaceDocumentDeleteRequest {
+            principal: document.principal.clone(),
+            channel: document.channel.clone(),
+            agent_id: document.agent_id.clone(),
+            session_id: Some(context.session_id.to_owned()),
+            path: document.path.clone(),
+        })
+        .await
+    {
+        Ok(document) => document,
+        Err(error) => {
+            return Some(memory_tool_execution_outcome(
+                namespace,
+                proposal_id,
+                input_json,
+                false,
+                b"{}".to_vec(),
+                format!(
+                    "palyra.memory.delete failed to delete workspace document: {}",
+                    error.message()
+                ),
+            ));
+        }
+    };
+    let payload = json!({
+        "memory_id": document_id,
+        "workspace_document_id": deleted_document.document_id.as_str(),
+        "deleted": true,
+        "status": "workspace_document_deleted",
+        "document": workspace_document_output_payload(&deleted_document),
+        "claim_boundary": "workspace memory document was soft-deleted and should not be claimed as retained",
+    });
+    Some(match serde_json::to_vec(&payload) {
+        Ok(output_json) => memory_tool_execution_outcome(
+            namespace,
+            proposal_id,
+            input_json,
+            true,
+            output_json,
+            String::new(),
+        ),
+        Err(error) => memory_tool_execution_outcome(
+            namespace,
+            proposal_id,
+            input_json,
+            false,
+            b"{}".to_vec(),
+            format!("palyra.memory.delete failed to serialize workspace output: {error}"),
+        ),
+    })
 }
 
 pub(crate) async fn execute_memory_replace_tool(

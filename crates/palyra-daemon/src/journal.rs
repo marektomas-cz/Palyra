@@ -14325,6 +14325,33 @@ impl JournalStore {
         )
     }
 
+    pub fn workspace_document_by_id(
+        &self,
+        principal: &str,
+        channel: Option<&str>,
+        agent_id: Option<&str>,
+        document_id: &str,
+        include_deleted: bool,
+    ) -> Result<Option<WorkspaceDocumentRecord>, JournalError> {
+        let guard = self.connection.lock().map_err(|_| JournalError::LockPoisoned)?;
+        let Some(document) = load_workspace_document_by_id(&guard, document_id)? else {
+            return Ok(None);
+        };
+        if document.principal != principal {
+            return Ok(None);
+        }
+        if channel.is_some() && document.channel.as_deref() != channel {
+            return Ok(None);
+        }
+        if agent_id.is_some() && document.agent_id.as_deref() != agent_id {
+            return Ok(None);
+        }
+        if !include_deleted && document.state != WorkspaceDocumentState::Active.as_str() {
+            return Ok(None);
+        }
+        Ok(Some(document))
+    }
+
     pub fn list_workspace_documents(
         &self,
         filter: &WorkspaceDocumentListFilter,
