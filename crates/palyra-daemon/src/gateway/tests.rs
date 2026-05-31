@@ -3627,6 +3627,10 @@ async fn successful_run_finalization_cleans_run_owned_resource_tracking() {
         state.take_run_cleanup_resources(run_id.as_str()).is_empty(),
         "successful terminal path must drain per-run cleanup tracking"
     );
+    let tape = state.journal_store.orchestrator_tape(run_id.as_str()).expect("tape should load");
+    let sequence =
+        tape.iter().map(|event| (event.seq, event.event_type.as_str())).collect::<Vec<_>>();
+    assert_eq!(sequence, vec![(0, "status"), (1, "run.cleanup")]);
 }
 
 #[test]

@@ -373,8 +373,6 @@ pub(crate) async fn finalize_run_stream_after_provider_response(
             runtime_state.clear_self_healing_heartbeat(WorkHeartbeatKind::Run, run_id);
             return Ok(RunStreamPostProviderOutcome::Cancelled);
         }
-        cleanup_run_resources(runtime_state, run_id, "completed").await;
-        runtime_state.clear_self_healing_heartbeat(WorkHeartbeatKind::Run, run_id);
         send_status_with_tape(
             sender,
             runtime_state,
@@ -384,6 +382,8 @@ pub(crate) async fn finalize_run_stream_after_provider_response(
             "completed",
         )
         .await?;
+        cleanup_run_resources(runtime_state, run_id, "completed").await;
+        runtime_state.clear_self_healing_heartbeat(WorkHeartbeatKind::Run, run_id);
     }
 
     Ok(RunStreamPostProviderOutcome::Completed)
