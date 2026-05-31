@@ -27,7 +27,10 @@ use crate::{
         MAX_PATCH_TOOL_PATTERN_BYTES, MAX_PATCH_TOOL_REDACTION_PATTERNS,
         MAX_PATCH_TOOL_SECRET_FILE_MARKERS, MAX_WORKSPACE_PATCH_TOOL_INPUT_BYTES,
     },
-    tool_protocol::{ToolAttestation, ToolExecutionOutcome},
+    tool_protocol::{
+        failed_tool_output_json, tool_output_json_is_empty_object, ToolAttestation,
+        ToolExecutionOutcome,
+    },
 };
 
 use checkpoint_flow::WorkspacePatchMutationRequest;
@@ -807,6 +810,17 @@ fn workspace_patch_tool_execution_outcome(
     error: String,
 ) -> ToolExecutionOutcome {
     let executed_at_unix_ms = current_unix_ms();
+    let output_json = if !success && tool_output_json_is_empty_object(output_json.as_slice()) {
+        failed_tool_output_json(
+            "palyra.fs.apply_patch",
+            error.as_str(),
+            false,
+            "workspace_patch",
+            "workspace_roots",
+        )
+    } else {
+        output_json
+    };
     let mut hasher = Sha256::new();
     hasher.update(b"palyra.fs.apply_patch.attestation.v1");
     hasher.update((proposal_id.len() as u64).to_be_bytes());
@@ -840,7 +854,8 @@ fn workspace_patch_tool_execution_outcome(
 mod tests {
     use super::{
         patch_operation_paths, patch_should_use_active_root, resolve_workspace_root_override,
-        workspace_patch_error_outcome, workspace_patch_recovery_hint, WORKSPACE_PATCH_GRAMMAR_HINT,
+        workspace_patch_error_outcome, workspace_patch_recovery_hint,
+        workspace_patch_tool_execution_outcome, WORKSPACE_PATCH_GRAMMAR_HINT,
     };
     use crate::application::tool_runtime::workspace_scope::ActiveWorkspaceRoot;
     use palyra_common::workspace_patch::{
@@ -848,6 +863,39 @@ mod tests {
         WorkspacePatchError, WorkspacePatchLimits, WorkspacePatchRequest,
     };
     use serde_json::Value;
+
+    #[test]
+    fn workspace_patch_validation_failures_return_diagnostic_payload() {
+        let outcome = workspace_patch_tool_execution_outcome(
+            "01ARZ3NDEKTSV4RRFFQ69G5FA1",
+            br#"{"patch":""}"#,
+            false,
+            b"{}".to_vec(),
+            "palyra.fs.apply_patch requires non-empty string field 'patch'".to_owned(),
+        );
+
+        assert!(!outcome.success);
+        let output =
+            serde_json::from_slice::<Value>(outcome.output_json.as_slice()).expect("output JSON");
+        assert_eq!(output.get("success").and_then(Value::as_bool), Some(false));
+        assert_eq!(output.get("tool").and_then(Value::as_str), Some("palyra.fs.apply_patch"));
+        assert!(
+            output
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .contains("requires non-empty string field 'patch'"),
+            "error should be surfaced in output JSON: {output}"
+        );
+        assert!(
+            output.get("recovery_hint").and_then(Value::as_str).is_some(),
+            "diagnostic payload should include a recovery hint: {output}"
+        );
+        assert!(
+            output.get("grammar_hint").and_then(Value::as_str).is_some(),
+            "apply_patch diagnostics should include grammar guidance: {output}"
+        );
+    }
 
     #[test]
     fn workspace_root_override_targets_existing_subdirectory() {

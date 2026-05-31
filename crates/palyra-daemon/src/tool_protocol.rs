@@ -405,12 +405,13 @@ fn build_execution_outcome(
     raw: ToolExecutionRawResult,
 ) -> ToolExecutionOutcome {
     let executed_at_unix_ms = current_unix_ms();
+    let output_json = normalize_failure_output_json(tool_name, &raw);
     let execution_sha256 = compute_execution_hash(
         proposal_id,
         tool_name,
         input_json,
         raw.success,
-        raw.output_json.as_slice(),
+        output_json.as_slice(),
         raw.error.as_str(),
         raw.timed_out,
         raw.executor.as_str(),
@@ -419,7 +420,7 @@ fn build_execution_outcome(
     );
     ToolExecutionOutcome {
         success: raw.success,
-        output_json: raw.output_json,
+        output_json,
         error: raw.error,
         attestation: ToolAttestation {
             attestation_id: Ulid::new().to_string(),
@@ -429,6 +430,79 @@ fn build_execution_outcome(
             executor: raw.executor,
             sandbox_enforcement: raw.sandbox_enforcement,
         },
+    }
+}
+
+fn normalize_failure_output_json(tool_name: &str, raw: &ToolExecutionRawResult) -> Vec<u8> {
+    if raw.success || !tool_output_json_is_empty_object(raw.output_json.as_slice()) {
+        return raw.output_json.clone();
+    }
+    failed_tool_output_json(
+        tool_name,
+        raw.error.as_str(),
+        raw.timed_out,
+        raw.executor.as_str(),
+        raw.sandbox_enforcement.as_str(),
+    )
+}
+
+pub(crate) fn tool_output_json_is_empty_object(output_json: &[u8]) -> bool {
+    std::str::from_utf8(output_json).map(|raw| raw.trim() == "{}").unwrap_or(false)
+}
+
+pub(crate) fn failed_tool_output_json(
+    tool_name: &str,
+    error: &str,
+    timed_out: bool,
+    executor: &str,
+    sandbox_enforcement: &str,
+) -> Vec<u8> {
+    let mut payload = json!({
+        "success": false,
+        "tool": tool_name,
+        "error": error,
+        "recovery_hint": tool_failure_recovery_hint(tool_name, error, timed_out),
+        "timed_out": timed_out,
+        "executor": executor,
+        "sandbox_enforcement": sandbox_enforcement,
+    });
+    if tool_name == "palyra.fs.apply_patch" {
+        if let Some(object) = payload.as_object_mut() {
+            object.insert(
+                "grammar_hint".to_owned(),
+                json!("Retry with one complete Palyra patch document starting with '*** Begin Patch' and ending with exactly one '*** End Patch'."),
+            );
+        }
+    }
+    serde_json::to_vec(&payload)
+        .unwrap_or_else(|_| br#"{"success":false,"error":"tool failed"}"#.to_vec())
+}
+
+fn tool_failure_recovery_hint(tool_name: &str, error: &str, timed_out: bool) -> String {
+    if timed_out {
+        return "Retry with a smaller operation, narrower scope, or a larger configured tool timeout."
+            .to_owned();
+    }
+    if error.contains(TOOL_INPUT_TOO_LARGE_ERROR_CODE) {
+        return "Reduce the tool input size and retry with smaller chunks.".to_owned();
+    }
+    if error.contains("requires gateway") {
+        return "Retry through the normal gateway runtime path for this tool; the generic executor lacks the required runtime context.".to_owned();
+    }
+    if error.contains("disabled by runtime policy") {
+        return "Enable the relevant runtime policy or choose a tool that is available under the current policy.".to_owned();
+    }
+    match tool_name {
+        "palyra.fs.apply_patch" => {
+            "Inspect the patch error, read the current file when context is stale, and retry with a smaller complete patch.".to_owned()
+        }
+        "palyra.process.run" | "palyra.process.stop" | "palyra.process.status" | "palyra.process.list" => {
+            "Inspect command, args, cwd, allowlist, and resource limits; retry with a portable workspace-scoped process request.".to_owned()
+        }
+        "palyra.plugin.run" => {
+            "Inspect the plugin error and retry with a smaller module or allowed capability set.".to_owned()
+        }
+        _ => "Inspect the error field, adjust the request or policy, and retry.".to_owned(),
     }
 }
 
@@ -2153,6 +2227,50 @@ mod tests {
         );
         assert_eq!(outcome.attestation.executor, "sandbox_tier_b");
         assert_eq!(outcome.attestation.sandbox_enforcement, "strict");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn execute_tool_call_failed_process_runner_returns_diagnostic_payload() {
+        let config = ToolCallConfig {
+            allowed_tools: vec!["palyra.process.run".to_owned()],
+            max_calls_per_run: 1,
+            execution_timeout_ms: 250,
+            process_runner: default_process_runner_policy(),
+            wasm_runtime: default_wasm_runtime_policy(),
+        };
+
+        let outcome = execute_tool_call(
+            &config,
+            "01ARZ3NDEKTSV4RRFFQ69G5FA3",
+            "palyra.process.run",
+            br#"{"command":"node","args":["--version"]}"#,
+        )
+        .await;
+
+        assert!(!outcome.success, "disabled process runner should fail");
+        let output: serde_json::Value =
+            serde_json::from_slice(outcome.output_json.as_slice()).expect("output should parse");
+        assert_eq!(output.get("success").and_then(serde_json::Value::as_bool), Some(false));
+        assert_eq!(
+            output.get("tool").and_then(serde_json::Value::as_str),
+            Some("palyra.process.run")
+        );
+        assert!(
+            output
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .contains("disabled by runtime policy"),
+            "error should be surfaced in output JSON: {output}"
+        );
+        assert!(
+            output
+                .get("recovery_hint")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .contains("Enable"),
+            "recovery hint should guide the operator: {output}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
