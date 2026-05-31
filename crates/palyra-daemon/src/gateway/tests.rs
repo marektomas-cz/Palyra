@@ -4816,33 +4816,33 @@ async fn memory_recall_tool_defaults_to_current_session_scope() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn memory_search_tool_defaults_to_current_session_scope() {
+async fn memory_search_tool_defaults_to_principal_scope() {
     let state = build_test_runtime_state(false);
     let context = routines_tool_test_context();
-    let marker = "PALYRA_E2E_CURRENT_SESSION_ONLY";
+    let marker = "PALYRA_DEFAULT_PRINCIPAL_MEMORY_MARKER";
     state
         .ingest_memory_item(MemoryItemCreateRequest {
             memory_id: "01ARZ3NDEKTSV4RRFFQ69G5FD3".to_owned(),
             principal: context.principal.to_owned(),
-            channel: context.channel.map(str::to_owned),
-            session_id: Some(context.session_id.to_owned()),
+            channel: None,
+            session_id: None,
             source: MemorySource::Manual,
-            content_text: format!("Current session feature flag was {marker}"),
-            tags: vec!["e2e".to_owned()],
+            content_text: format!("Principal feature flag was {marker}"),
+            tags: vec!["memory-search".to_owned()],
             confidence: Some(0.95),
             ttl_unix_ms: None,
         })
         .await
-        .expect("manual memory ingest should seed current-session search");
+        .expect("manual memory ingest should seed principal search");
     state
         .ingest_memory_item(MemoryItemCreateRequest {
             memory_id: "01ARZ3NDEKTSV4RRFFQ69G5FD4".to_owned(),
             principal: context.principal.to_owned(),
             channel: Some("slack:ops".to_owned()),
-            session_id: Some(context.session_id.to_owned()),
+            session_id: None,
             source: MemorySource::Manual,
             content_text: format!("Cross-channel feature flag was {marker}"),
-            tags: vec!["e2e".to_owned()],
+            tags: vec!["memory-search".to_owned()],
             confidence: Some(0.95),
             ttl_unix_ms: None,
         })
@@ -4853,7 +4853,7 @@ async fn memory_search_tool_defaults_to_current_session_scope() {
         &state,
         context,
         "01ARZ3NDEKTSV4RRFFQ69G5FD5",
-        br#"{"query":"PALYRA_E2E_CURRENT_SESSION_ONLY","top_k":4,"min_score":0.0}"#,
+        br#"{"query":"PALYRA_DEFAULT_PRINCIPAL_MEMORY_MARKER","top_k":4,"min_score":0.0}"#,
     )
     .await;
 
@@ -4865,9 +4865,9 @@ async fn memory_search_tool_defaults_to_current_session_scope() {
         hits.iter().any(|hit| {
             hit.get("content_text")
                 .and_then(Value::as_str)
-                .is_some_and(|content| content.contains("Current session feature flag"))
+                .is_some_and(|content| content.contains("Principal feature flag"))
         }),
-        "default search should surface current-session memory: {payload}"
+        "default search should surface principal memory: {payload}"
     );
     assert!(
         hits.iter().all(|hit| {
@@ -4875,7 +4875,7 @@ async fn memory_search_tool_defaults_to_current_session_scope() {
                 .and_then(Value::as_str)
                 .is_none_or(|content| !content.contains("Cross-channel feature flag"))
         }),
-        "default search must not surface same-principal memory from another channel: {payload}"
+        "default search must not surface channel-scoped memory from another channel: {payload}"
     );
 }
 
@@ -5203,8 +5203,8 @@ async fn memory_retain_tool_updates_exact_duplicate_instead_of_writing_twice() {
             None,
             Some(10),
             context.principal.to_owned(),
-            context.channel.map(str::to_owned),
-            Some(context.session_id.to_owned()),
+            None,
+            None,
             Vec::new(),
             Vec::new(),
         )
