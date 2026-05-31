@@ -5150,13 +5150,18 @@ fn coerce_raw_tool_call_markup(text: &str) -> Result<Option<RawToolCallMarkupExt
             .map(|offset| block.start + offset)
             .ok_or_else(|| "raw tool-call opening tag is missing '>'".to_owned())?;
         let content_start = tag_end.saturating_add(1);
-        let close_start = lower[content_start..]
-            .find(block.close_tag)
-            .map(|offset| content_start + offset)
-            .ok_or_else(|| "raw tool-call block is missing a closing tag".to_owned())?;
-        let block_content = &text[content_start..close_start];
-        let block_end = close_start + block.close_tag.len();
+        let close_start =
+            lower[content_start..].find(block.close_tag).map(|offset| content_start + offset);
+        let (block_content, block_end, missing_outer_close) = if let Some(close_start) = close_start
+        {
+            (&text[content_start..close_start], close_start + block.close_tag.len(), false)
+        } else {
+            (&text[content_start..], text.len(), true)
+        };
         let mut parsed_events = parse_raw_tool_call_invocations(block_content)?;
+        if missing_outer_close && parsed_events.is_empty() {
+            return Err("raw tool-call block is missing a closing tag".to_owned());
+        }
         tool_events.append(&mut parsed_events);
         cursor = block_end;
     }
@@ -6528,16 +6533,27 @@ mod tests {
     }
 
     #[test]
-    fn raw_tool_call_markup_rejects_complete_invoke_without_outer_close() {
+    fn raw_tool_call_markup_accepts_complete_invoke_without_outer_close() {
         let raw = r#"<tool_call>
 <invoke name="palyra.fs.read_file">
 {"path":"app.js"}
 </invoke>"#;
 
-        let error =
-            super::coerce_raw_tool_call_markup(raw).expect_err("outer close must be required");
+        let extraction = super::coerce_raw_tool_call_markup(raw)
+            .expect("complete invoke should be recoverable without outer close")
+            .expect("raw markup should be detected");
 
-        assert!(error.contains("missing a closing tag"), "{error}");
+        assert!(extraction.cleaned_text.is_empty());
+        assert_eq!(extraction.tool_events.len(), 1);
+        match &extraction.tool_events[0] {
+            ProviderEvent::ToolProposal { tool_name, input_json, .. } => {
+                assert_eq!(tool_name, "palyra.fs.read_file");
+                let input: serde_json::Value =
+                    serde_json::from_slice(input_json).expect("tool input should stay valid JSON");
+                assert_eq!(input["path"], "app.js");
+            }
+            other => panic!("expected tool proposal, got {other:?}"),
+        }
     }
 
     #[test]
