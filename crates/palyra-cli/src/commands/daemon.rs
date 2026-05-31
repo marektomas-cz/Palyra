@@ -49,6 +49,7 @@ mod tests {
         enrich_gateway_service_action_error, gateway_runtime_root_selection,
         gateway_status_state_root_scope_note, is_desktop_runtime_state_root,
         journal_event_actor_label, journal_event_kind_label, read_remote_dashboard_assist_payload,
+        request_desktop_managed_gateway_restart,
     };
     use crate::common_v1;
     use serde_json::json;
@@ -125,6 +126,48 @@ mod tests {
         assert!(message.contains("desktop-control-center runtime state root"), "{message}");
         assert!(message.contains("gateway restart"), "{message}");
         assert!(message.contains("--state-root"), "{message}");
+    }
+
+    #[test]
+    fn desktop_managed_gateway_restart_touches_config() {
+        let temp = tempdir().expect("tempdir should be created");
+        let state_root = temp.path().join("state");
+        let desktop_runtime = state_root.join("desktop-control-center").join("runtime");
+        let config_dir = state_root.join("config");
+        let config_path = config_dir.join("palyra.toml");
+        fs::create_dir_all(desktop_runtime.as_path())
+            .expect("desktop runtime directory should be created");
+        fs::create_dir_all(config_dir.as_path()).expect("config directory should be created");
+        fs::write(config_path.as_path(), "version = 1\n").expect("config should be written");
+        let before = fs::metadata(config_path.as_path())
+            .expect("config metadata before restart")
+            .modified()
+            .expect("config mtime before restart");
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let status = request_desktop_managed_gateway_restart(
+            state_root.as_path(),
+            Some(config_path.as_path()),
+        )
+        .expect("desktop restart request should succeed")
+        .expect("desktop runtime should be restartable");
+
+        assert_eq!(status.manager, "desktop-control-center");
+        assert_eq!(status.service_name, "desktop-managed-palyrad");
+        assert!(status.installed);
+        assert!(
+            status.detail.as_deref().is_some_and(|detail| detail.contains("restart requested")),
+            "status should explain the restart request: {status:?}"
+        );
+        let after = fs::metadata(config_path.as_path())
+            .expect("config metadata after restart")
+            .modified()
+            .expect("config mtime after restart");
+        assert!(after >= before, "touch should not move config mtime backwards");
+        assert_eq!(
+            fs::read_to_string(config_path.as_path()).expect("config should remain readable"),
+            "version = 1\n"
+        );
     }
 
     #[test]
@@ -804,6 +847,13 @@ fn run_gateway_install(
 
 fn run_gateway_service_action(action: &str) -> Result<()> {
     let context = root_context()?;
+    if action == "restart" {
+        if let Some(status) =
+            request_desktop_managed_gateway_restart(context.state_root(), context.config_path())?
+        {
+            return emit_gateway_service_status(format!("gateway.{action}").as_str(), &status);
+        }
+    }
     let status = match action {
         "start" => support::service::start_gateway_service(context.state_root()),
         "stop" => support::service::stop_gateway_service(context.state_root()),
@@ -813,6 +863,52 @@ fn run_gateway_service_action(action: &str) -> Result<()> {
     }
     .map_err(|error| enrich_gateway_service_action_error(context.state_root(), action, error))?;
     emit_gateway_service_status(format!("gateway.{action}").as_str(), &status)
+}
+
+fn request_desktop_managed_gateway_restart(
+    requested_state_root: &Path,
+    config_path: Option<&Path>,
+) -> Result<Option<support::service::GatewayServiceStatus>> {
+    if !desktop_runtime_state_root(requested_state_root).is_dir()
+        || support::service::load_service_metadata(requested_state_root)?.is_some()
+    {
+        return Ok(None);
+    }
+
+    let config_path = config_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| app::state_root_config_path(requested_state_root));
+    if !config_path.is_file() {
+        return Ok(None);
+    }
+    touch_file(config_path.as_path()).with_context(|| {
+        format!(
+            "failed to request desktop-managed gateway restart through config {}",
+            config_path.display()
+        )
+    })?;
+
+    Ok(Some(support::service::GatewayServiceStatus {
+        installed: true,
+        running: true,
+        enabled: true,
+        manager: "desktop-control-center".to_owned(),
+        service_name: "desktop-managed-palyrad".to_owned(),
+        definition_path: None,
+        stdout_log_path: None,
+        stderr_log_path: None,
+        detail: Some(format!(
+            "desktop-managed gateway restart requested by updating {}; the desktop supervisor will reload the runtime",
+            config_path.display()
+        )),
+    }))
+}
+
+fn touch_file(path: &Path) -> Result<()> {
+    let contents = fs::read(path)
+        .with_context(|| format!("failed to read file before touching {}", path.display()))?;
+    fs::write(path, contents.as_slice())
+        .with_context(|| format!("failed to touch file {}", path.display()))
 }
 
 fn emit_gateway_service_status(
