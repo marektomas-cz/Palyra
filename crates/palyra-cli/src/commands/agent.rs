@@ -319,7 +319,7 @@ fn cli_launch_parameter_delta_json_for_cwd(
     cwd: &std::path::Path,
     prompt: &str,
 ) -> Result<Option<String>> {
-    let workspace_roots = prompt_absolute_workspace_roots(prompt);
+    let workspace_roots = prompt_absolute_workspace_roots(cwd, prompt);
     let parameter_delta = serde_json::json!({
         "cli_context": {
             "launch_cwd": cwd.to_string_lossy(),
@@ -331,7 +331,10 @@ fn cli_launch_parameter_delta_json_for_cwd(
         .context("failed to serialize CLI launch context")
 }
 
-fn prompt_absolute_workspace_roots(prompt: &str) -> Vec<String> {
+fn prompt_absolute_workspace_roots(cwd: &std::path::Path, prompt: &str) -> Vec<String> {
+    let Some(canonical_cwd) = std::fs::canonicalize(cwd).ok().filter(|path| path.is_dir()) else {
+        return Vec::new();
+    };
     let mut roots = Vec::<std::path::PathBuf>::new();
     for token in prompt.split_whitespace() {
         let Some(candidate) = prompt_path_candidate(token) else {
@@ -340,6 +343,9 @@ fn prompt_absolute_workspace_roots(prompt: &str) -> Vec<String> {
         let Some(root) = prompt_workspace_root_from_candidate(candidate) else {
             continue;
         };
+        if !cli_path_starts_with(root.as_path(), canonical_cwd.as_path()) {
+            continue;
+        }
         if roots.iter().any(|existing| same_cli_path(existing.as_path(), root.as_path())) {
             continue;
         }
@@ -919,7 +925,7 @@ mod tests {
             nested.join("missing.js").display()
         );
 
-        let roots = prompt_absolute_workspace_roots(prompt.as_str());
+        let roots = prompt_absolute_workspace_roots(tempdir.path(), prompt.as_str());
         let expected_project = fs::canonicalize(project.as_path())
             .expect("project should canonicalize")
             .to_string_lossy()
@@ -927,5 +933,33 @@ mod tests {
 
         assert_eq!(roots.first().map(String::as_str), Some(expected_project.as_str()));
         assert_eq!(roots.len(), 2);
+    }
+
+    #[test]
+    fn prompt_absolute_workspace_roots_excludes_sibling_os_paths() {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let workspace = tempdir.path().join("workspace");
+        let project = workspace.join("scenario");
+        let os_root = tempdir.path().join("os-root");
+        fs::create_dir_all(project.as_path()).expect("project directory should exist");
+        fs::create_dir_all(os_root.as_path()).expect("os fixture directory should exist");
+        let prompt = format!(
+            "Write workspace report in `{}` and approved OS file in `{}`.",
+            project.display(),
+            os_root.display()
+        );
+
+        let roots = prompt_absolute_workspace_roots(workspace.as_path(), prompt.as_str());
+        let expected_project = fs::canonicalize(project.as_path())
+            .expect("project should canonicalize")
+            .to_string_lossy()
+            .into_owned();
+        let excluded_os_root = fs::canonicalize(os_root.as_path())
+            .expect("os root should canonicalize")
+            .to_string_lossy()
+            .into_owned();
+
+        assert!(roots.iter().any(|root| root == &expected_project), "{roots:?}");
+        assert!(!roots.iter().any(|root| root == &excluded_os_root), "{roots:?}");
     }
 }
