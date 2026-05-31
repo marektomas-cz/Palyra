@@ -50,7 +50,7 @@ pub(crate) fn run_agent(command: AgentCommand) -> Result<()> {
             approval_mode,
             ndjson,
         } => {
-            ensure_agent_run_approval_flags(allow_sensitive_tools, approval_mode)?;
+            ensure_agent_run_approval_flags(allow_sensitive_tools, approval_mode, prompt_stdin)?;
             let input_prompt = resolve_prompt_input(prompt, prompt_stdin)?;
             let parameter_delta_json = cli_launch_parameter_delta_json(input_prompt.as_str())?;
             let connection = root_context.resolve_grpc_connection(
@@ -139,10 +139,16 @@ pub(crate) fn run_agent(command: AgentCommand) -> Result<()> {
 fn ensure_agent_run_approval_flags(
     allow_sensitive_tools: bool,
     approval_mode: AgentApprovalModeArg,
+    prompt_stdin: bool,
 ) -> Result<()> {
     if allow_sensitive_tools && approval_mode == AgentApprovalModeArg::Deny {
         anyhow::bail!(
             "--allow-sensitive-tools cannot be combined with --approval-mode deny; remove --allow-sensitive-tools to deny sensitive tool requests, or use --approval-mode allow-once after reviewing the requested tool risk"
+        );
+    }
+    if prompt_stdin && approval_mode == AgentApprovalModeArg::Prompt {
+        anyhow::bail!(
+            "--approval-mode prompt cannot be combined with --prompt-stdin because stdin is consumed by the task prompt and cannot also receive tool approval decisions; use --approval-mode allow-once for unattended CLI runs, pass the task with --prompt from an interactive terminal, or use `palyra agent interactive`"
         );
     }
     Ok(())
@@ -851,7 +857,7 @@ mod tests {
 
     #[test]
     fn allow_sensitive_tools_conflicts_with_approval_deny() {
-        let error = ensure_agent_run_approval_flags(true, AgentApprovalModeArg::Deny)
+        let error = ensure_agent_run_approval_flags(true, AgentApprovalModeArg::Deny, false)
             .expect_err("contradictory approval flags should fail before a run starts");
 
         assert!(error.to_string().contains("--allow-sensitive-tools"), "{error}");
@@ -860,10 +866,20 @@ mod tests {
 
     #[test]
     fn allow_sensitive_tools_can_pair_with_prompt_or_allow_once() {
-        ensure_agent_run_approval_flags(true, AgentApprovalModeArg::Prompt)
+        ensure_agent_run_approval_flags(true, AgentApprovalModeArg::Prompt, false)
             .expect("prompt mode remains valid with explicit sensitive-tool opt-in");
-        ensure_agent_run_approval_flags(true, AgentApprovalModeArg::AllowOnce)
+        ensure_agent_run_approval_flags(true, AgentApprovalModeArg::AllowOnce, false)
             .expect("allow-once remains valid with explicit sensitive-tool opt-in");
+    }
+
+    #[test]
+    fn prompt_approval_mode_rejects_prompt_stdin() {
+        let error = ensure_agent_run_approval_flags(false, AgentApprovalModeArg::Prompt, true)
+            .expect_err("prompt approval mode needs stdin for approval decisions");
+
+        assert!(error.to_string().contains("--approval-mode prompt"), "{error}");
+        assert!(error.to_string().contains("--prompt-stdin"), "{error}");
+        assert!(error.to_string().contains("palyra agent interactive"), "{error}");
     }
 
     #[test]
