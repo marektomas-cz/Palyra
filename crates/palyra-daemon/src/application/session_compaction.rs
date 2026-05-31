@@ -41,6 +41,9 @@ const SESSION_COMPACTION_PREVIEW_LEN: usize = 220;
 const SESSION_COMPACTION_MAX_CANDIDATES: usize = 18;
 const SESSION_COMPACTION_MAX_ACTION_ITEMS: usize = 8;
 const SESSION_COMPACTION_ACTION_ITEM_MAX_CHARS: usize = 280;
+const SESSION_COMPACTION_TOOL_RESULT_MAX_CHARS: usize = 3_000;
+const SESSION_COMPACTION_TOOL_RESULT_FIELD_MAX_CHARS: usize = 1_200;
+const SESSION_COMPACTION_TOOL_RESULT_MAX_DEPTH: usize = 6;
 const SESSION_COMPACTION_DEFAULT_COOLDOWN_MS: i64 = 5 * 60 * 1_000;
 const AUTO_WRITE_CONFIDENCE_THRESHOLD: f64 = 0.82;
 const CURATED_WORKSPACE_DOC_LIMIT: usize = 64;
@@ -1060,23 +1063,23 @@ fn extract_open_action_items(raw: &str) -> Vec<String> {
             continue;
         }
 
+        if record_mentions_action_items {
+            if let Some(item) = extract_labeled_open_action_item(trimmed) {
+                items.push(item);
+                continue;
+            }
+        }
+
         if in_action_item_section {
+            if looks_like_section_break(trimmed) {
+                in_action_item_section = false;
+                continue;
+            }
             if let Some(item) = normalize_open_action_item(trimmed) {
                 items.push(item);
                 continue;
             }
-            if looks_like_section_break(trimmed) {
-                in_action_item_section = false;
-            }
             continue;
-        }
-
-        if record_mentions_action_items {
-            if let Some(item_text) = strip_list_marker(trimmed) {
-                if let Some(item) = normalize_open_action_item(item_text) {
-                    items.push(item);
-                }
-            }
         }
     }
     items
@@ -1085,17 +1088,58 @@ fn extract_open_action_items(raw: &str) -> Vec<String> {
 fn mentions_action_item_context(lower: &str) -> bool {
     contains_any(
         lower,
-        &["action item", "action-item", "todo", "follow up", "follow-up", "open item", "open task"],
+        &[
+            "action item",
+            "action-item",
+            "todo",
+            "follow up",
+            "follow-up",
+            "next action",
+            "next step",
+            "open item",
+            "open task",
+        ],
     )
 }
 
 fn opens_action_item_section(lower: &str) -> bool {
     mentions_action_item_context(lower)
-        && (lower.ends_with(':') || lower.contains("following") || lower.contains("these"))
+        && (lower.ends_with(':')
+            || lower.contains("following")
+            || lower.contains("these")
+            || is_action_item_heading(lower))
+}
+
+fn is_action_item_heading(lower: &str) -> bool {
+    let heading = lower.trim().trim_start_matches('#').trim().trim_end_matches(':').trim();
+    matches!(
+        heading,
+        "action item"
+            | "action items"
+            | "action-item"
+            | "action-items"
+            | "todo"
+            | "todos"
+            | "follow up"
+            | "follow ups"
+            | "follow-up"
+            | "follow-ups"
+            | "next action"
+            | "next actions"
+            | "next step"
+            | "next steps"
+            | "open item"
+            | "open items"
+            | "open task"
+            | "open tasks"
+    )
 }
 
 fn looks_like_section_break(line: &str) -> bool {
-    line.ends_with(':') && strip_list_marker(line).is_none()
+    let trimmed = line.trim();
+    (trimmed.trim_start().starts_with('#') || trimmed.ends_with(':'))
+        && strip_list_marker(trimmed).is_none()
+        && !mentions_action_item_context(trimmed.to_ascii_lowercase().as_str())
 }
 
 fn extract_explicit_action_item(line: &str) -> Option<String> {
@@ -1114,6 +1158,24 @@ fn extract_explicit_action_item(line: &str) -> Option<String> {
         return normalize_open_action_item(rest);
     }
     None
+}
+
+fn extract_labeled_open_action_item(line: &str) -> Option<String> {
+    let line = strip_list_marker(line).unwrap_or(line);
+    let line = strip_checkbox_marker(line);
+    let (label, rest) = line.split_once(':')?;
+    if rest.trim().is_empty() || !looks_like_task_label(label) {
+        return None;
+    }
+    normalize_open_action_item(line)
+}
+
+fn looks_like_task_label(label: &str) -> bool {
+    let label = label.trim();
+    let label_len = label.chars().count();
+    (3..=48).contains(&label_len)
+        && label.chars().any(|ch| ch.is_ascii_digit())
+        && label.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
 }
 
 fn normalize_open_action_item(raw: &str) -> Option<String> {
@@ -1475,7 +1537,8 @@ fn require_review_for_unreviewed_durable_write_candidates(
 }
 
 fn build_compaction_summary_json(input: CompactionSummaryJsonInput<'_>) -> String {
-    let quality_gates = build_quality_gate_metrics(input.candidates, input.writes);
+    let quality_gates =
+        build_quality_gate_metrics(input.active_task_summary, input.candidates, input.writes);
     json!({
         "session_id": input.session.session_id,
         "branch_state": input.session.branch_state,
@@ -1503,6 +1566,7 @@ fn build_compaction_summary_json(input: CompactionSummaryJsonInput<'_>) -> Strin
 }
 
 fn build_quality_gate_metrics(
+    active_task_summary: &SessionActiveTaskSummary,
     candidates: &[SessionCompactionCandidate],
     writes: &[SessionCompactionWritePreview],
 ) -> SessionCompactionQualityGateMetrics {
@@ -1514,7 +1578,8 @@ fn build_quality_gate_metrics(
         next_action_count: candidates
             .iter()
             .filter(|candidate| candidate.category == "next_action")
-            .count(),
+            .count()
+            .max(active_task_summary.open_action_items.len()),
         durable_fact_count: candidates
             .iter()
             .filter(|candidate| candidate.category == "durable_fact")
@@ -1774,7 +1839,18 @@ fn classify_candidate_seed(record: &SessionCompactionRecordSnapshot) -> Option<C
     };
     if contains_any(
         lower.as_str(),
-        &["next action", "follow up", "follow-up", "need to", "todo", "continue"],
+        &[
+            "next action",
+            "action item",
+            "action-item",
+            "follow up",
+            "follow-up",
+            "need to",
+            "todo",
+            "open task",
+            "next step",
+            "continue",
+        ],
     ) {
         return Some(CandidateSeed {
             category: "next_action",
@@ -2061,6 +2137,7 @@ fn compaction_event_label(event_type: &str) -> &'static str {
     match event_type {
         "message.received" | "queued.input" => "User",
         "message.replied" => "Assistant",
+        "tool_result" => "Tool result",
         "rollback.marker" => "Lineage",
         "checkpoint.restore" => "Checkpoint restore",
         _ => "Event",
@@ -2073,6 +2150,7 @@ pub(crate) fn extract_transcript_search_text(
     match record.event_type.as_str() {
         "message.received" | "queued.input" => extract_transcript_text(record, "text"),
         "message.replied" => extract_transcript_text(record, "reply_text"),
+        "tool_result" => extract_tool_result_transcript_text(record),
         "rollback.marker" => {
             serde_json::from_str::<Value>(record.payload_json.as_str()).ok().and_then(|payload| {
                 payload.get("event").and_then(Value::as_str).map(ToOwned::to_owned)
@@ -2091,6 +2169,110 @@ fn extract_transcript_text(
         .get(key)
         .and_then(Value::as_str)
         .map(ToOwned::to_owned)
+}
+
+fn extract_tool_result_transcript_text(
+    record: &OrchestratorSessionTranscriptRecord,
+) -> Option<String> {
+    let payload = serde_json::from_str::<Value>(record.payload_json.as_str()).ok()?;
+    let mut fields = Vec::new();
+    let mut remaining_chars = SESSION_COMPACTION_TOOL_RESULT_MAX_CHARS;
+    if let Some(output) = payload.get("output_json") {
+        collect_tool_result_text_fields(output, 0, &mut remaining_chars, &mut fields);
+    }
+    if let Some(error) = payload
+        .get("error")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && remaining_chars > 0)
+    {
+        let error_text = format!("error: {error}");
+        push_tool_result_text_field(error_text.as_str(), &mut remaining_chars, &mut fields);
+    }
+    if fields.is_empty() {
+        return None;
+    }
+
+    let status = match payload.get("success").and_then(Value::as_bool) {
+        Some(true) => "succeeded",
+        Some(false) => "failed",
+        None => "completed",
+    };
+    Some(format!("Tool result {status}\n{}", fields.join("\n")))
+}
+
+fn collect_tool_result_text_fields(
+    value: &Value,
+    depth: usize,
+    remaining_chars: &mut usize,
+    fields: &mut Vec<String>,
+) {
+    if *remaining_chars == 0 || depth > SESSION_COMPACTION_TOOL_RESULT_MAX_DEPTH {
+        return;
+    }
+    match value {
+        Value::String(text) => push_tool_result_text_field(text, remaining_chars, fields),
+        Value::Array(items) => {
+            for item in items {
+                collect_tool_result_text_fields(item, depth + 1, remaining_chars, fields);
+                if *remaining_chars == 0 {
+                    break;
+                }
+            }
+        }
+        Value::Object(map) => {
+            for (key, value) in map {
+                if tool_result_json_key_is_noise(key.as_str()) {
+                    continue;
+                }
+                collect_tool_result_text_fields(value, depth + 1, remaining_chars, fields);
+                if *remaining_chars == 0 {
+                    break;
+                }
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+}
+
+fn push_tool_result_text_field(raw: &str, remaining_chars: &mut usize, fields: &mut Vec<String>) {
+    let trimmed = raw.trim();
+    if trimmed.is_empty()
+        || trimmed.chars().filter(|ch| ch.is_alphabetic()).count() < 3
+        || *remaining_chars == 0
+    {
+        return;
+    }
+
+    let limit = (*remaining_chars).min(SESSION_COMPACTION_TOOL_RESULT_FIELD_MAX_CHARS);
+    let field = truncate_preserving_newlines(trimmed, limit);
+    *remaining_chars = (*remaining_chars).saturating_sub(field.chars().count());
+    fields.push(field);
+}
+
+fn truncate_preserving_newlines(raw: &str, max_chars: usize) -> String {
+    if raw.chars().count() <= max_chars {
+        return raw.to_owned();
+    }
+    let mut output = raw.chars().take(max_chars).collect::<String>();
+    output.push_str("...");
+    output
+}
+
+fn tool_result_json_key_is_noise(key: &str) -> bool {
+    matches!(
+        key,
+        "artifact"
+            | "artifact_id"
+            | "checksum"
+            | "content_hash"
+            | "digest"
+            | "execution_sha256"
+            | "expires_at_unix_ms"
+            | "id"
+            | "sha"
+            | "sha256"
+    )
 }
 
 pub(crate) fn truncate_console_text(raw: &str, max_chars: usize) -> String {
@@ -2396,6 +2578,88 @@ mod tests {
                 .pointer("/active_task_summary/open_action_items/2")
                 .and_then(serde_json::Value::as_str),
             Some("Clara verifies the Prague weekly digest timezone setting.")
+        );
+    }
+
+    #[test]
+    fn active_task_summary_preserves_open_tasks_from_tool_output() {
+        let notes = "\
+# Team Sync
+
+Action Items
+TASK-101: Morgan publishes the deployment checklist by Tuesday.
+TASK-102: Riley verifies the release notes owner map.
+TASK-103: Casey confirms the support rotation handoff.
+
+## Decisions
+- Keep the support rotation in the weekly notes.
+";
+        let tool_result_payload = serde_json::json!({
+            "proposal_id": "proposal-1",
+            "success": true,
+            "output_json": {
+                "path": "notes/team-sync.md",
+                "content": notes,
+            },
+            "error": "",
+        })
+        .to_string();
+        let mut transcript = vec![
+            transcript_record(
+                0,
+                "message.received",
+                r#"{"text":"Read the team sync notes and continue the planning task."}"#,
+            ),
+            transcript_record(1, "tool_result", tool_result_payload.as_str()),
+        ];
+        transcript.extend((2..14).map(|seq| {
+            let payload = format!(r#"{{"text":"Filler context {seq} for compaction."}}"#);
+            transcript_record(seq, "message.received", payload.as_str())
+        }));
+
+        let plan = build_session_compaction_plan(
+            &session_record(),
+            transcript.as_slice(),
+            &[],
+            &[],
+            Some("test_compaction"),
+            Some("test_policy"),
+        );
+        let summary = serde_json::from_str::<serde_json::Value>(plan.summary_json.as_str())
+            .expect("summary JSON should decode");
+
+        assert!(plan.eligible);
+        assert_eq!(
+            plan.active_task_summary.open_action_items,
+            vec![
+                "TASK-101: Morgan publishes the deployment checklist by Tuesday.",
+                "TASK-102: Riley verifies the release notes owner map.",
+                "TASK-103: Casey confirms the support rotation handoff.",
+            ]
+        );
+        assert!(
+            !plan
+                .active_task_summary
+                .open_action_items
+                .iter()
+                .any(|item| item.contains("Decisions")),
+            "the next section heading should not be captured as an action item: {:?}",
+            plan.active_task_summary.open_action_items
+        );
+        assert!(
+            summary
+                .pointer("/quality_gates/next_action_count")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or_default()
+                >= 3,
+            "quality gates should count open action items from the active task summary: {}",
+            plan.summary_json
+        );
+        assert_eq!(
+            summary
+                .pointer("/active_task_summary/open_action_items/0")
+                .and_then(serde_json::Value::as_str),
+            Some("TASK-101: Morgan publishes the deployment checklist by Tuesday.")
         );
     }
 
