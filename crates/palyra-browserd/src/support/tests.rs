@@ -2183,6 +2183,21 @@ async fn browser_service_chromium_network_log_includes_same_origin_fetch_failure
         .into_inner();
     assert!(navigate.success, "chromium navigate should succeed: {}", navigate.error);
 
+    let click = service
+        .click(Request::new(browser_v1::ClickRequest {
+            v: 1,
+            session_id: Some(session_id.clone()),
+            selector: "#loadProfile".to_owned(),
+            max_retries: 1,
+            timeout_ms: 3_000,
+            capture_failure_screenshot: true,
+            max_failure_screenshot_bytes: 16 * 1024,
+        }))
+        .await
+        .expect("click should execute")
+        .into_inner();
+    assert!(click.success, "chromium click should succeed: {}", click.error);
+
     let waited = service
         .wait_for(Request::new(browser_v1::WaitForRequest {
             v: 1,
@@ -6123,7 +6138,7 @@ fn spawn_fetch_failure_http_server() -> (String, thread::JoinHandle<()>) {
                         continue;
                     }
                     root_requests = root_requests.saturating_add(1);
-                    let body = "<html><head><title>Fetch Failure</title></head><body><div id='status'>loading</div><script>fetch('/api/profile').then((response) => { document.getElementById('status').textContent = response.ok ? 'profile ok' : 'profile failed'; }).catch(() => { document.getElementById('status').textContent = 'profile failed'; });</script></body></html>";
+                    let body = "<html><head><title>Fetch Failure</title></head><body><button id='loadProfile'>Load profile</button><div id='status'>idle</div><script>document.getElementById('loadProfile').addEventListener('click', () => { document.getElementById('status').textContent = 'loading'; fetch('/api/profile').then((response) => { document.getElementById('status').textContent = response.ok ? 'profile ok' : 'profile failed'; }).catch(() => { document.getElementById('status').textContent = 'profile failed'; }); });</script></body></html>";
                     let response = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                         body.len()
