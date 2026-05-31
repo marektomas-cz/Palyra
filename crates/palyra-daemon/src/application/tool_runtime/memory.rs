@@ -2068,6 +2068,22 @@ async fn resolve_memory_agent_workspace_roots(
     workspace_roots_with_run_launch_context(runtime_state, context.run_id, &workspace_roots).await
 }
 
+pub(crate) fn project_memory_prefix_candidates_from_workspace_root(root: &Path) -> Vec<String> {
+    let mut prefixes = Vec::new();
+    if let Some(identity_prefix) = project_memory_prefix_from_workspace_root(root) {
+        prefixes.push(identity_prefix);
+    }
+    if let Some(name) = last_normal_path_segment(root) {
+        let basename_prefix = format!("projects/{name}");
+        if let Ok(prefix) = normalize_workspace_prefix(basename_prefix.as_str()) {
+            if !prefixes.iter().any(|existing| existing == &prefix) {
+                prefixes.push(prefix);
+            }
+        }
+    }
+    prefixes
+}
+
 fn project_memory_prefix_from_workspace_root(root: &Path) -> Option<String> {
     let canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     let name = last_normal_path_segment(canonical.as_path())?;
@@ -3069,6 +3085,18 @@ mod tests {
             .expect("workspace root should produce a project prefix");
         assert!(prefix.starts_with("projects/project-client-portal-"), "{prefix}");
         assert!(normalize_workspace_prefix(prefix.as_str()).is_ok());
+    }
+
+    #[test]
+    fn project_memory_prefix_candidates_include_explicit_basename_prefix() {
+        let prefixes =
+            project_memory_prefix_candidates_from_workspace_root(Path::new("/tmp/S079-project-A"));
+
+        assert!(
+            prefixes.iter().any(|prefix| prefix.starts_with("projects/project-s079-project-a-")),
+            "{prefixes:?}"
+        );
+        assert!(prefixes.iter().any(|prefix| prefix == "projects/S079-project-A"), "{prefixes:?}");
     }
 
     #[test]

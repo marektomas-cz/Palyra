@@ -2203,6 +2203,119 @@ async fn default_memory_auto_inject_adds_manual_preference_to_fresh_session_prom
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn memory_auto_inject_adds_active_project_workspace_memory_to_fresh_session_prompt() {
+    let state = build_test_runtime_state(false);
+    let context = RequestContext {
+        principal: "user:ops".to_owned(),
+        device_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+        channel: Some("cli".to_owned()),
+    };
+    let session_id = "01ARZ3NDEKTSV4RRFFQ69G5FE6";
+    let run_id = "01ARZ3NDEKTSV4RRFFQ69G5FE7";
+    upsert_test_orchestrator_session(&state, &context, session_id);
+
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let project_root = tempdir.path().join("S079-project-A");
+    fs::create_dir_all(project_root.as_path()).expect("project root should be created");
+    let project_root_text = project_root.to_string_lossy().into_owned();
+    state
+        .start_orchestrator_run(OrchestratorRunStartRequest {
+            run_id: run_id.to_owned(),
+            session_id: session_id.to_owned(),
+            origin_kind: "memory_auto_inject_project_workspace_test".to_owned(),
+            origin_run_id: None,
+            triggered_by_principal: Some(context.principal.clone()),
+            parameter_delta_json: Some(
+                json!({
+                    "cli_context": {
+                        "launch_cwd": project_root_text,
+                        "workspace_roots": [project_root_text],
+                    }
+                })
+                .to_string(),
+            ),
+        })
+        .await
+        .expect("orchestrator run should start with launch workspace metadata");
+
+    state
+        .upsert_workspace_document(WorkspaceDocumentWriteRequest {
+            document_id: None,
+            principal: context.principal.clone(),
+            channel: context.channel.clone(),
+            agent_id: None,
+            session_id: Some(session_id.to_owned()),
+            path: "projects/S079-project-A/MEMORY.md".to_owned(),
+            title: Some("Project Memory".to_owned()),
+            content_text: "Project A durable memory: release codename alpha.".to_owned(),
+            template_id: None,
+            template_version: None,
+            template_content_hash: None,
+            source_memory_id: None,
+            manual_override: false,
+        })
+        .await
+        .expect("project A memory document should be indexed");
+    state
+        .upsert_workspace_document(WorkspaceDocumentWriteRequest {
+            document_id: None,
+            principal: context.principal.clone(),
+            channel: context.channel.clone(),
+            agent_id: None,
+            session_id: Some(session_id.to_owned()),
+            path: "projects/S079-project-B/MEMORY.md".to_owned(),
+            title: Some("Other Project Memory".to_owned()),
+            content_text: "Project B durable memory: release codename beta.".to_owned(),
+            template_id: None,
+            template_version: None,
+            template_content_hash: None,
+            source_memory_id: None,
+            manual_override: false,
+        })
+        .await
+        .expect("project B noise document should be indexed");
+
+    let mut tape_seq = 1_i64;
+    let prompt = build_memory_augmented_prompt(
+        &state,
+        &context,
+        run_id,
+        &mut tape_seq,
+        session_id,
+        "Which release codename should this project use?",
+        "Answer with the release codename only.",
+    )
+    .await
+    .expect("project workspace memory auto-inject should succeed");
+
+    assert!(
+        prompt.contains("<workspace_memory_context"),
+        "fresh-session prompt should include project workspace memory: {prompt}"
+    );
+    assert!(
+        prompt.contains("release codename alpha"),
+        "active project memory should be injected: {prompt}"
+    );
+    assert!(
+        !prompt.contains("release codename beta"),
+        "inactive project memory must not leak into the prompt: {prompt}"
+    );
+
+    let tape = state.journal_store.orchestrator_tape(run_id).expect("test tape should load");
+    let event = tape
+        .iter()
+        .find(|event| event.event_type == "memory_auto_inject")
+        .expect("workspace memory auto-inject should append tape event");
+    let payload: Value =
+        serde_json::from_str(event.payload_json.as_str()).expect("event payload should decode");
+    assert_eq!(payload.get("workspace_injected_count").and_then(Value::as_u64), Some(1));
+    assert_eq!(
+        payload.pointer("/workspace_hits/0/path").and_then(Value::as_str),
+        Some("projects/S079-project-A/MEMORY.md")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn memory_auto_inject_excludes_transient_tape_memory_sources() {
     let state = build_test_runtime_state(false);
     let mut memory_config = state.memory_config_snapshot();
