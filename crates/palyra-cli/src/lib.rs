@@ -6947,34 +6947,38 @@ fn resolve_daemon_journal_db_path(db_path_override: Option<String>) -> Result<Pa
 
     if let Some(config_path) = effective_config_path() {
         let config_path = PathBuf::from(config_path);
-        let (document, _) =
-            load_document_from_existing_path(config_path.as_path()).with_context(|| {
-                format!(
-                    "failed to parse {} while resolving journal database path",
-                    config_path.display()
-                )
-            })?;
-        let content =
-            toml::to_string(&document).context("failed to serialize daemon config document")?;
-        let parsed: RootFileConfig = toml::from_str(content.as_str())
-            .context("invalid daemon config schema while resolving journal database path")?;
-        if let Some(journal_db_path) = parsed
-            .storage
-            .and_then(|storage| storage.journal_db_path)
-            .map(|value| value.trim().to_owned())
-        {
-            if !journal_db_path.is_empty() {
-                let resolved =
-                    resolve_config_relative_path(config_path.as_path(), journal_db_path.as_str());
-                if resolved.is_file() {
+        if config_path.is_file() {
+            let (document, _) = load_document_from_existing_path(config_path.as_path())
+                .with_context(|| {
+                    format!(
+                        "failed to parse {} while resolving journal database path",
+                        config_path.display()
+                    )
+                })?;
+            let content =
+                toml::to_string(&document).context("failed to serialize daemon config document")?;
+            let parsed: RootFileConfig = toml::from_str(content.as_str())
+                .context("invalid daemon config schema while resolving journal database path")?;
+            if let Some(journal_db_path) = parsed
+                .storage
+                .and_then(|storage| storage.journal_db_path)
+                .map(|value| value.trim().to_owned())
+            {
+                if !journal_db_path.is_empty() {
+                    let resolved = resolve_config_relative_path(
+                        config_path.as_path(),
+                        journal_db_path.as_str(),
+                    );
+                    if resolved.is_file() {
+                        return Ok(resolved);
+                    }
+                    if let Some(runtime_journal) =
+                        discover_desktop_runtime_journal_db_path(config_path.as_path())
+                    {
+                        return Ok(runtime_journal);
+                    }
                     return Ok(resolved);
                 }
-                if let Some(runtime_journal) =
-                    discover_desktop_runtime_journal_db_path(config_path.as_path())
-                {
-                    return Ok(runtime_journal);
-                }
-                return Ok(resolved);
             }
         }
     }
