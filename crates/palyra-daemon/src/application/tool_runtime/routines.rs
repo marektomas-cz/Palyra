@@ -1,4 +1,8 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::{Component, Path, PathBuf},
+    sync::Arc,
+};
 
 use chrono::{TimeZone, Timelike};
 use palyra_common::validate_canonical_id;
@@ -8,6 +12,7 @@ use tonic::Status;
 use ulid::Ulid;
 
 use crate::{
+    application::tool_runtime::workspace_scope::workspace_roots_with_run_launch_context,
     cron::{self, CronTimezoneMode},
     gateway::{
         current_unix_ms, GatewayRuntimeState, ToolRuntimeExecutionContext,
@@ -426,11 +431,21 @@ async fn upsert_routine(
     }
 
     let schedule = resolve_routine_schedule(payload, trigger_kind, runtime.timezone_mode)?;
-    let workdir = if payload.contains_key("workdir") {
+    let workdir_was_requested = payload.contains_key("workdir");
+    let requested_workdir = if workdir_was_requested {
         normalize_optional_workdir(optional_string_field(payload, "workdir"))?
     } else {
-        existing_job.as_ref().and_then(|job| job.workdir.clone())
+        None
     };
+    let launch_workspace_roots =
+        workspace_roots_with_run_launch_context(runtime_state, context.run_id.as_str(), &[]).await;
+    let workdir = resolve_routine_workdir_from_launch_context(
+        trigger_kind,
+        existing_job.as_ref().and_then(|job| job.workdir.clone()),
+        requested_workdir,
+        workdir_was_requested,
+        launch_workspace_roots.as_slice(),
+    )?;
     let name = required_string_field(payload, "name")?;
     let prompt = required_string_field(payload, "prompt")?;
     let requested_execution_posture = optional_string_field(payload, "execution_posture");
@@ -1970,6 +1985,133 @@ fn normalize_optional_workdir(value: Option<String>) -> Result<Option<String>, S
     Ok(Some(workdir))
 }
 
+fn resolve_routine_workdir_from_launch_context(
+    trigger_kind: RoutineTriggerKind,
+    existing_workdir: Option<String>,
+    requested_workdir: Option<String>,
+    workdir_was_requested: bool,
+    launch_workspace_roots: &[PathBuf],
+) -> Result<Option<String>, String> {
+    if workdir_was_requested {
+        return match requested_workdir {
+            Some(workdir) => {
+                resolve_requested_routine_workdir(workdir, launch_workspace_roots).map(Some)
+            }
+            None => Ok(None),
+        };
+    }
+
+    if let Some(workdir) = existing_workdir {
+        return Ok(Some(workdir));
+    }
+
+    if matches!(trigger_kind, RoutineTriggerKind::Schedule | RoutineTriggerKind::FileWatch) {
+        if let Some(root) = launch_workspace_roots.first() {
+            return Ok(Some(root.to_string_lossy().into_owned()));
+        }
+    }
+
+    Ok(None)
+}
+
+fn resolve_requested_routine_workdir(
+    workdir: String,
+    launch_workspace_roots: &[PathBuf],
+) -> Result<String, String> {
+    if let Some(relative) = workspace_alias_relative_suffix(workdir.as_str()) {
+        let launch_root = launch_workspace_roots.first().ok_or_else(|| {
+            "workdir uses /workspace but this run has no resolved launch workspace".to_owned()
+        })?;
+        return resolve_workdir_under_launch_root(launch_root, relative.as_deref());
+    }
+
+    if should_resolve_relative_workdir_against_launch_root(workdir.as_str()) {
+        if let Some(launch_root) = launch_workspace_roots.first() {
+            return resolve_workdir_under_launch_root(launch_root, Some(workdir.as_str()));
+        }
+    }
+
+    Ok(workdir)
+}
+
+fn workspace_alias_relative_suffix(workdir: &str) -> Option<Option<String>> {
+    let normalized = workdir.trim().replace('\\', "/");
+    let trimmed = normalized.trim_end_matches('/');
+    if matches!(trimmed, "." | "workspace" | "/workspace") {
+        return Some(None);
+    }
+    trimmed
+        .strip_prefix("/workspace/")
+        .or_else(|| trimmed.strip_prefix("workspace/"))
+        .map(|suffix| Some(suffix.trim_matches('/').to_owned()))
+}
+
+fn should_resolve_relative_workdir_against_launch_root(workdir: &str) -> bool {
+    if looks_like_windows_absolute_path(workdir) {
+        return false;
+    }
+    let path = Path::new(workdir);
+    if path.is_absolute() {
+        return false;
+    }
+    path.components().all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
+}
+
+fn looks_like_windows_absolute_path(workdir: &str) -> bool {
+    let trimmed = workdir.trim();
+    let bytes = trimmed.as_bytes();
+    if bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/')
+    {
+        return true;
+    }
+    trimmed.starts_with("\\\\") || trimmed.starts_with("//")
+}
+
+fn resolve_workdir_under_launch_root(
+    launch_root: &Path,
+    relative: Option<&str>,
+) -> Result<String, String> {
+    let target = relative
+        .filter(|value| !value.is_empty())
+        .map_or_else(|| launch_root.to_path_buf(), |relative| launch_root.join(relative));
+    let canonical = std::fs::canonicalize(target.as_path()).map_err(|error| {
+        format!(
+            "workdir {} does not resolve inside the launch workspace: {error}",
+            target.display()
+        )
+    })?;
+    if !canonical.is_dir() {
+        return Err(format!("workdir must resolve to a directory: {}", canonical.display()));
+    }
+    if !routine_path_starts_with(&canonical, launch_root) {
+        return Err(format!(
+            "workdir {} escapes the launch workspace {}",
+            canonical.display(),
+            launch_root.display()
+        ));
+    }
+    Ok(canonical.to_string_lossy().into_owned())
+}
+
+fn routine_path_starts_with(path: &Path, root: &Path) -> bool {
+    if path.starts_with(root) {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        let path = path.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+        let root = root.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+        path == root || path.starts_with(format!("{root}/").as_str())
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
 fn ensure_job_owner(job: &CronJobRecord, principal: &str) -> Result<(), String> {
     if job.owner_principal != principal {
         return Err("routine owner mismatch for authenticated principal".to_owned());
@@ -2533,5 +2675,98 @@ mod tests {
             .expect("valid workdir should normalize");
 
         assert_eq!(normalized, Some("/workspace/project".to_owned()));
+    }
+
+    #[test]
+    fn schedule_workdir_defaults_to_launch_workspace_for_new_agent_routine() {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let launch_root = std::fs::canonicalize(tempdir.path()).expect("launch root should exist");
+
+        let workdir = super::resolve_routine_workdir_from_launch_context(
+            RoutineTriggerKind::Schedule,
+            None,
+            None,
+            false,
+            std::slice::from_ref(&launch_root),
+        )
+        .expect("launch workspace should resolve as default workdir");
+
+        assert_eq!(workdir, Some(launch_root.to_string_lossy().into_owned()));
+    }
+
+    #[test]
+    fn schedule_workdir_preserves_existing_job_when_omitted() {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let launch_root = std::fs::canonicalize(tempdir.path()).expect("launch root should exist");
+
+        let workdir = super::resolve_routine_workdir_from_launch_context(
+            RoutineTriggerKind::Schedule,
+            Some("C:/existing/workspace".to_owned()),
+            None,
+            false,
+            &[launch_root],
+        )
+        .expect("existing workdir should be preserved");
+
+        assert_eq!(workdir, Some("C:/existing/workspace".to_owned()));
+    }
+
+    #[test]
+    fn explicit_workspace_alias_workdir_maps_to_launch_workspace() {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let launch_root = std::fs::canonicalize(tempdir.path()).expect("launch root should exist");
+
+        let workdir = super::resolve_routine_workdir_from_launch_context(
+            RoutineTriggerKind::Schedule,
+            None,
+            Some("/workspace".to_owned()),
+            true,
+            std::slice::from_ref(&launch_root),
+        )
+        .expect("/workspace should map to launch root");
+
+        assert_eq!(workdir, Some(launch_root.to_string_lossy().into_owned()));
+    }
+
+    #[test]
+    fn explicit_workspace_child_workdir_maps_existing_subdirectory() {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let reports = tempdir.path().join("reports");
+        std::fs::create_dir_all(reports.as_path()).expect("reports directory should exist");
+        let launch_root = std::fs::canonicalize(tempdir.path()).expect("launch root should exist");
+        let expected =
+            std::fs::canonicalize(reports.as_path()).expect("reports should canonicalize");
+
+        let workdir = super::resolve_routine_workdir_from_launch_context(
+            RoutineTriggerKind::Schedule,
+            None,
+            Some("/workspace/reports".to_owned()),
+            true,
+            &[launch_root],
+        )
+        .expect("/workspace child should map to an existing launch-root child");
+
+        assert_eq!(workdir, Some(expected.to_string_lossy().into_owned()));
+    }
+
+    #[test]
+    fn explicit_relative_workdir_maps_existing_launch_subdirectory() {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let project = tempdir.path().join("project");
+        std::fs::create_dir_all(project.as_path()).expect("project directory should exist");
+        let launch_root = std::fs::canonicalize(tempdir.path()).expect("launch root should exist");
+        let expected =
+            std::fs::canonicalize(project.as_path()).expect("project should canonicalize");
+
+        let workdir = super::resolve_routine_workdir_from_launch_context(
+            RoutineTriggerKind::Schedule,
+            None,
+            Some("project".to_owned()),
+            true,
+            &[launch_root],
+        )
+        .expect("relative workdir should resolve under launch root");
+
+        assert_eq!(workdir, Some(expected.to_string_lossy().into_owned()));
     }
 }
