@@ -70,6 +70,9 @@ pub(crate) fn build_app_state(
         auth_runtime: context.auth_runtime,
         auth: context.auth,
         admin_rate_limit: Arc::new(Mutex::new(HashMap::<IpAddr, AdminRateLimitEntry>::new())),
+        admin_auth_failure_rate_limit: Arc::new(Mutex::new(
+            HashMap::<IpAddr, AdminRateLimitEntry>::new(),
+        )),
         canvas_rate_limit: Arc::new(Mutex::new(HashMap::<IpAddr, CanvasRateLimitEntry>::new())),
         compat_api_rate_limit: Arc::new(Mutex::new(
             HashMap::<String, CompatApiRateLimitEntry>::new(),

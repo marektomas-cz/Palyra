@@ -217,7 +217,7 @@ allowed_tools = ["palyra.fs.apply_patch"]
 
 #[test]
 fn admin_status_bruteforce_attempts_are_rate_limited() -> Result<()> {
-    const LOOPBACK_BRUTE_FORCE_ATTEMPT_LIMIT: usize = 1_050;
+    const INVALID_AUTH_ATTEMPT_LIMIT: usize = 64;
 
     let (child, admin_port) = spawn_palyrad_with_dynamic_ports()?;
     let mut daemon = ChildGuard::new(child);
@@ -230,7 +230,7 @@ fn admin_status_bruteforce_attempts_are_rate_limited() -> Result<()> {
     let url = format!("http://127.0.0.1:{admin_port}/admin/v1/status");
 
     let mut rate_limited_response = None;
-    for attempt in 0..LOOPBACK_BRUTE_FORCE_ATTEMPT_LIMIT {
+    for attempt in 0..INVALID_AUTH_ATTEMPT_LIMIT {
         let response = client
             .get(&url)
             .header("Authorization", "Bearer invalid-admin-token")
@@ -246,13 +246,13 @@ fn admin_status_bruteforce_attempts_are_rate_limited() -> Result<()> {
         assert_eq!(
             response.status().as_u16(),
             401,
-            "invalid token should return unauthorized until rate-limit threshold is reached"
+            "invalid token should return unauthorized until auth failure rate-limit threshold is reached"
         );
     }
 
     let rate_limited_response = rate_limited_response.ok_or_else(|| {
         anyhow::anyhow!(
-            "expected repeated invalid-token attempts to trigger HTTP 429 rate limiting within {LOOPBACK_BRUTE_FORCE_ATTEMPT_LIMIT} loopback attempts"
+            "expected repeated invalid-token attempts to trigger HTTP 429 rate limiting within {INVALID_AUTH_ATTEMPT_LIMIT} attempts"
         )
     })?;
     assert_admin_console_security_headers(rate_limited_response.headers())?;

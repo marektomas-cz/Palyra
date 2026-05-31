@@ -233,6 +233,7 @@ pub(crate) async fn console_diagnostics_handler(
             "admin_api_window_ms": ADMIN_RATE_LIMIT_WINDOW_MS,
             "admin_api_max_requests_per_window": ADMIN_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW,
             "admin_api_loopback_max_requests_per_window": ADMIN_RATE_LIMIT_LOOPBACK_MAX_REQUESTS_PER_WINDOW,
+            "admin_auth_failure_max_requests_per_window": ADMIN_AUTH_FAILURE_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW,
             "canvas_api_window_ms": CANVAS_RATE_LIMIT_WINDOW_MS,
             "canvas_api_max_requests_per_window": CANVAS_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW,
             "denied_requests_total": status_snapshot.counters.denied_requests,

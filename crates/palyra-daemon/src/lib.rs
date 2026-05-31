@@ -243,7 +243,8 @@ pub(crate) use crate::transport::http::handlers::console::cron::{
 pub(crate) use crate::transport::http::handlers::console::diagnostics::*;
 #[cfg(test)]
 pub(crate) use crate::transport::http::middleware::{
-    consume_admin_rate_limit_with_now, consume_canvas_rate_limit_with_now,
+    consume_admin_auth_failure_rate_limit_with_now, consume_admin_rate_limit_with_now,
+    consume_canvas_rate_limit_with_now,
 };
 
 const DANGEROUS_REMOTE_BIND_ACK_ENV: &str = "PALYRA_GATEWAY_DANGEROUS_REMOTE_BIND_ACK";
@@ -255,6 +256,7 @@ const GRPC_MAX_ENCODING_MESSAGE_SIZE_BYTES: usize = 4 * 1024 * 1024;
 pub(crate) const ADMIN_RATE_LIMIT_WINDOW_MS: u64 = 1_000;
 pub(crate) const ADMIN_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW: u32 = 30;
 pub(crate) const ADMIN_RATE_LIMIT_LOOPBACK_MAX_REQUESTS_PER_WINDOW: u32 = 1_000;
+pub(crate) const ADMIN_AUTH_FAILURE_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW: u32 = 30;
 pub(crate) const ADMIN_RATE_LIMIT_MAX_IP_BUCKETS: usize = 4_096;
 pub(crate) const CANVAS_RATE_LIMIT_WINDOW_MS: u64 = 1_000;
 pub(crate) const CANVAS_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW: u32 = 90;
@@ -3941,19 +3943,20 @@ mod tests {
         build_discord_inbound_monitor_warnings, build_discord_onboarding_plan,
         build_discord_onboarding_security_defaults, build_memory_embedding_runtime_selection,
         clamp_console_relay_token_ttl_ms, connector_db_path_from_journal_path,
-        constant_time_eq_bytes, consume_admin_rate_limit_with_now,
-        consume_canvas_rate_limit_with_now, enforce_remote_bind_guard,
-        finalize_discord_onboarding_plan, find_hashed_secret_map_key, load_installed_skills_index,
-        loopback_grpc_url, mint_console_relay_token, mint_console_secret_token,
-        normalize_discord_token, parse_offline_env_flag, prune_console_relay_tokens,
-        redact_console_diagnostics_value, resolve_discord_intents_from_flags,
-        resolve_model_provider_secret, resolve_runtime_state_root_with_override,
-        runtime_status_response, sanitize_http_error_message, sha256_hex,
-        summarize_discord_inbound_monitor, validate_admin_auth_config,
-        validate_canvas_http_canvas_id, validate_canvas_http_token_query,
-        validate_process_runner_backend_policy, ConsoleRelayToken, DiscordBotIdentitySummary,
-        DiscordOnboardingRequest, DiscordOnboardingScope, DiscordPrivilegedIntentStatus,
-        RemoteBindEndpoints, RemoteBindGuardConfig,
+        constant_time_eq_bytes, consume_admin_auth_failure_rate_limit_with_now,
+        consume_admin_rate_limit_with_now, consume_canvas_rate_limit_with_now,
+        enforce_remote_bind_guard, finalize_discord_onboarding_plan, find_hashed_secret_map_key,
+        load_installed_skills_index, loopback_grpc_url, mint_console_relay_token,
+        mint_console_secret_token, normalize_discord_token, parse_offline_env_flag,
+        prune_console_relay_tokens, redact_console_diagnostics_value,
+        resolve_discord_intents_from_flags, resolve_model_provider_secret,
+        resolve_runtime_state_root_with_override, runtime_status_response,
+        sanitize_http_error_message, sha256_hex, summarize_discord_inbound_monitor,
+        validate_admin_auth_config, validate_canvas_http_canvas_id,
+        validate_canvas_http_token_query, validate_process_runner_backend_policy,
+        ConsoleRelayToken, DiscordBotIdentitySummary, DiscordOnboardingRequest,
+        DiscordOnboardingScope, DiscordPrivilegedIntentStatus, RemoteBindEndpoints,
+        RemoteBindGuardConfig, ADMIN_AUTH_FAILURE_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW,
         ADMIN_RATE_LIMIT_LOOPBACK_MAX_REQUESTS_PER_WINDOW, ADMIN_RATE_LIMIT_MAX_IP_BUCKETS,
         ADMIN_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW, CANVAS_HTTP_MAX_TOKEN_BYTES,
         CANVAS_RATE_LIMIT_MAX_IP_BUCKETS, CANVAS_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW,
@@ -5284,6 +5287,21 @@ mod tests {
         assert!(
             !consume_admin_rate_limit_with_now(&buckets, ip, now),
             "request after budget exhaustion should be rejected"
+        );
+    }
+
+    #[test]
+    fn admin_auth_failure_rate_limit_rejects_after_failure_budget_is_exhausted() {
+        let buckets = Mutex::new(HashMap::new());
+        let ip = IpAddr::from_str("127.0.0.1").expect("IP literal should parse");
+        let now = Instant::now();
+        for attempt in 0..ADMIN_AUTH_FAILURE_RATE_LIMIT_MAX_REQUESTS_PER_WINDOW {
+            let allowed = consume_admin_auth_failure_rate_limit_with_now(&buckets, ip, now);
+            assert!(allowed, "failed auth attempt {attempt} should remain within the budget");
+        }
+        assert!(
+            !consume_admin_auth_failure_rate_limit_with_now(&buckets, ip, now),
+            "failed auth request after budget exhaustion should be rejected"
         );
     }
 

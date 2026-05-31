@@ -49,6 +49,7 @@ pub(crate) struct AppState {
     pub(crate) auth_runtime: Arc<gateway::AuthRuntimeState>,
     pub(crate) auth: GatewayAuthConfig,
     pub(crate) admin_rate_limit: Arc<Mutex<HashMap<IpAddr, AdminRateLimitEntry>>>,
+    pub(crate) admin_auth_failure_rate_limit: Arc<Mutex<HashMap<IpAddr, AdminRateLimitEntry>>>,
     pub(crate) canvas_rate_limit: Arc<Mutex<HashMap<IpAddr, CanvasRateLimitEntry>>>,
     pub(crate) compat_api_rate_limit: Arc<Mutex<HashMap<String, CompatApiRateLimitEntry>>>,
     pub(crate) cron_timezone_mode: CronTimezoneMode,
