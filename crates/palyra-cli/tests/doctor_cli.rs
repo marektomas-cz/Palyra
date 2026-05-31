@@ -31,6 +31,14 @@ fn run_cli(workdir: &TempDir, args: &[&str]) -> Result<Output> {
     command.output().with_context(|| format!("failed to execute palyra {}", args.join(" ")))
 }
 
+fn unused_loopback_port_pair() -> Result<(u16, u16)> {
+    let first = TcpListener::bind("127.0.0.1:0").context("failed to bind first test port")?;
+    let second = TcpListener::bind("127.0.0.1:0").context("failed to bind second test port")?;
+    let first_port = first.local_addr().context("failed to read first test port")?.port();
+    let second_port = second.local_addr().context("failed to read second test port")?.port();
+    Ok((first_port, second_port))
+}
+
 fn spawn_doctor_http_server(admin_token: &str) -> Result<(String, thread::JoinHandle<Result<()>>)> {
     let listener = TcpListener::bind("127.0.0.1:0").context("failed to bind doctor test server")?;
     let address = listener.local_addr().context("failed to read doctor test server address")?;
@@ -183,14 +191,25 @@ anthropic_api_key_vault_ref = "global/minimax_api_key"
 fn doctor_text_surfaces_gateway_runtime_connectivity_as_blocking() -> Result<()> {
     let workdir = TempDir::new().context("failed to create temporary workdir")?;
     let config_path = workdir.path().join("local-palyra.toml");
+    let (daemon_port, grpc_port) = unused_loopback_port_pair()?;
     fs::write(
         config_path.as_path(),
-        r#"
+        format!(
+            r#"
 version = 1
+
+[daemon]
+bind_addr = "127.0.0.1"
+port = {daemon_port}
+
+[gateway]
+grpc_bind_addr = "127.0.0.1"
+grpc_port = {grpc_port}
 
 [admin]
 require_auth = false
-"#,
+"#
+        ),
     )
     .with_context(|| format!("failed to write {}", config_path.display()))?;
 
