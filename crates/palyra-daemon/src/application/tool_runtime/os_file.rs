@@ -940,7 +940,7 @@ fn push_windows_drive_temp_roots(roots: &mut Vec<PathBuf>) {
 
 #[cfg(windows)]
 fn windows_drive_temp_root_candidates(system_drive: &str) -> Vec<PathBuf> {
-    let drive = system_drive.trim().trim_end_matches(|ch| ch == '\\' || ch == '/');
+    let drive = system_drive.trim().trim_end_matches(['\\', '/']);
     let bytes = drive.as_bytes();
     if bytes.len() != 2 || bytes[1] != b':' || !bytes[0].is_ascii_alphabetic() {
         return Vec::new();
