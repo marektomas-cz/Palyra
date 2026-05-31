@@ -366,6 +366,8 @@ pub(crate) async fn execute_memory_retain_tool(
             scope,
             content_text,
             source,
+            category_hint,
+            replaces_terms,
             tags,
             confidence,
             ttl_unix_ms,
@@ -463,6 +465,8 @@ async fn execute_workspace_memory_retain_tool(
     scope: WorkspaceMemoryRetainScope,
     content_text: String,
     source: MemorySource,
+    category_hint: Option<MemoryWriteCategory>,
+    replaces_terms: Vec<String>,
     tags: Vec<String>,
     confidence: Option<f64>,
     ttl_unix_ms: Option<i64>,
@@ -536,8 +540,13 @@ async fn execute_workspace_memory_retain_tool(
         }
     };
     let now_unix_ms = current_unix_ms();
-    let (content_text_next, appended) = workspace_memory_document_content(
+    let (existing_content, replaced_entries) = workspace_memory_document_base_content(
         existing.as_ref().map(|document| document.content_text.as_str()),
+        category_hint,
+        replaces_terms.as_slice(),
+    );
+    let (content_text_next, appended) = workspace_memory_document_content(
+        existing_content.as_deref(),
         scope.default_title(),
         content_text.as_str(),
         source,
@@ -550,7 +559,7 @@ async fn execute_workspace_memory_retain_tool(
         .as_ref()
         .map(|document| document.title.clone())
         .unwrap_or_else(|| scope.default_title().to_owned());
-    let document = if appended {
+    let document = if appended || replaced_entries > 0 {
         match runtime_state
             .upsert_workspace_document(WorkspaceDocumentWriteRequest {
                 document_id: existing.as_ref().map(|document| document.document_id.clone()),
@@ -607,6 +616,7 @@ async fn execute_workspace_memory_retain_tool(
         appended,
         provenance,
         source_normalization,
+        replaced_entries,
     })
 }
 
@@ -2256,6 +2266,103 @@ fn workspace_memory_path_has_allowed_extension(path: &str) -> bool {
         .any(|extension| lower.ends_with(format!(".{extension}").as_str()))
 }
 
+fn workspace_memory_document_base_content(
+    existing_content: Option<&str>,
+    category_hint: Option<MemoryWriteCategory>,
+    replaces_terms: &[String],
+) -> (Option<String>, usize) {
+    let Some(existing_content) = existing_content else {
+        return (None, 0);
+    };
+    if category_hint != Some(MemoryWriteCategory::Correction) || replaces_terms.is_empty() {
+        return (Some(existing_content.to_owned()), 0);
+    }
+    let (content, replaced_entries) =
+        workspace_memory_remove_replaced_entries(existing_content, replaces_terms);
+    (Some(content), replaced_entries)
+}
+
+fn workspace_memory_remove_replaced_entries(
+    existing_content: &str,
+    replaces_terms: &[String],
+) -> (String, usize) {
+    let mut output = String::new();
+    let mut current_entry = Vec::<String>::new();
+    let mut in_entry = false;
+    let mut removed_entries = 0usize;
+
+    for line in existing_content.lines() {
+        if line.starts_with("- remembered_at_unix_ms=") {
+            if !current_entry.is_empty() {
+                removed_entries +=
+                    flush_workspace_memory_entry(&mut output, &mut current_entry, replaces_terms);
+            }
+            in_entry = true;
+            current_entry.push(line.to_owned());
+        } else if in_entry {
+            current_entry.push(line.to_owned());
+        } else {
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+    if !current_entry.is_empty() {
+        removed_entries +=
+            flush_workspace_memory_entry(&mut output, &mut current_entry, replaces_terms);
+    }
+
+    (output.trim_end().to_owned(), removed_entries)
+}
+
+fn flush_workspace_memory_entry(
+    output: &mut String,
+    current_entry: &mut Vec<String>,
+    replaces_terms: &[String],
+) -> usize {
+    let entry = current_entry.join("\n");
+    current_entry.clear();
+    if workspace_memory_entry_matches_replacement(entry.as_str(), replaces_terms) {
+        return 1;
+    }
+    if !output.trim_end().is_empty() {
+        output.push_str("\n\n");
+    }
+    output.push_str(entry.trim_end());
+    output.push('\n');
+    0
+}
+
+fn workspace_memory_entry_matches_replacement(entry: &str, replaces_terms: &[String]) -> bool {
+    let entry_tokens = workspace_memory_replacement_tokens(entry);
+    if entry_tokens.is_empty() {
+        return false;
+    }
+    replaces_terms.iter().any(|term| {
+        workspace_memory_replacement_tokens(term)
+            .into_iter()
+            .filter(|token| {
+                token.chars().count() >= 5 || token.chars().any(|ch| ch.is_ascii_digit())
+            })
+            .any(|token| entry_tokens.iter().any(|entry_token| entry_token == &token))
+    })
+}
+
+fn workspace_memory_replacement_tokens(input: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    for ch in input.chars() {
+        if ch.is_alphanumeric() || ch == '_' {
+            current.extend(ch.to_lowercase());
+        } else if !current.is_empty() {
+            tokens.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
+
 #[allow(clippy::too_many_arguments)]
 fn workspace_memory_document_content(
     existing_content: Option<&str>,
@@ -2386,14 +2493,23 @@ struct WorkspaceMemoryRetainSerialization<'a> {
     appended: bool,
     provenance: Value,
     source_normalization: Option<Value>,
+    replaced_entries: usize,
 }
 
 fn serialize_workspace_memory_retain_outcome(
     input: WorkspaceMemoryRetainSerialization<'_>,
 ) -> ToolExecutionOutcome {
     let mut payload = json!({
-        "status": if input.appended { "retained" } else { "updated_existing" },
-        "reason": if input.appended {
+        "status": if input.replaced_entries > 0 {
+            "merged"
+        } else if input.appended {
+            "retained"
+        } else {
+            "updated_existing"
+        },
+        "reason": if input.replaced_entries > 0 {
+            "workspace memory correction replaced obsolete entries"
+        } else if input.appended {
             "memory retained in workspace document"
         } else {
             "workspace document already contained this memory content"
@@ -2404,6 +2520,7 @@ fn serialize_workspace_memory_retain_outcome(
         "trust_label": "workspace_memory",
         "durable_memory_write": true,
         "content_appended": input.appended,
+        "replaced_entries": input.replaced_entries,
         "workspace_prefix": input.document.parent_path.as_deref(),
         "visibility": {
             "scope": input.scope.as_str(),
@@ -3052,6 +3169,36 @@ mod tests {
         );
         assert!(updated_appended);
         assert!(updated.contains("Run MiniMax smoke"));
+    }
+
+    #[test]
+    fn workspace_memory_document_base_content_removes_corrected_entries() {
+        let existing = "# Project Memory\n\n- remembered_at_unix_ms=1 source=manual\n  Use Mocha for browser checks.\n\n- remembered_at_unix_ms=2 source=manual\n  Keep reports concise.\n";
+        let replaces_terms = vec!["Mocha".to_owned()];
+        let (base, replaced_entries) = workspace_memory_document_base_content(
+            Some(existing),
+            Some(MemoryWriteCategory::Correction),
+            replaces_terms.as_slice(),
+        );
+        let base = base.expect("existing content should remain present");
+
+        assert_eq!(replaced_entries, 1);
+        assert!(!base.contains("Mocha"), "{base}");
+        assert!(base.contains("Keep reports concise."), "{base}");
+
+        let (updated, appended) = workspace_memory_document_content(
+            Some(base.as_str()),
+            "Project Memory",
+            "Use Playwright for browser checks.",
+            MemorySource::Manual,
+            &[],
+            Some(0.9),
+            None,
+            3,
+        );
+        assert!(appended);
+        assert!(updated.contains("Use Playwright for browser checks."));
+        assert!(!updated.contains("Use Mocha for browser checks."));
     }
 
     fn workspace_document_record(content_text: &str) -> WorkspaceDocumentRecord {

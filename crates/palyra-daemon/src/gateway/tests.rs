@@ -5115,6 +5115,39 @@ async fn project_memory_defaults_to_launch_workspace_prefix() {
         }),
         "project search must not fall back to default project memory when launch scope exists: {search_payload}"
     );
+
+    let correction = execute_memory_retain_tool(
+        &state,
+        context,
+        "01ARZ3NDEKTSV4RRFFQ69G5FE5",
+        br#"{"content_text":"Build target for this project is beta.","scope":"project","category":"correction","replaces_terms":["alpha"],"source":"manual","confidence":0.95}"#,
+    )
+    .await;
+    assert!(correction.success, "correction should succeed: {}", correction.error);
+    let correction_payload = parse_tool_output_json(&correction);
+    assert_eq!(correction_payload.get("replaced_entries").and_then(Value::as_u64), Some(1));
+
+    let corrected_document = state
+        .workspace_document_by_path(
+            context.principal.to_owned(),
+            context.channel.map(str::to_owned),
+            None,
+            document_path.to_owned(),
+            false,
+        )
+        .await
+        .expect("workspace document lookup should succeed")
+        .expect("project memory document should exist");
+    assert!(
+        corrected_document.content_text.contains("Build target for this project is beta."),
+        "{}",
+        corrected_document.content_text
+    );
+    assert!(
+        !corrected_document.content_text.contains("Build target for this project is alpha."),
+        "{}",
+        corrected_document.content_text
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
