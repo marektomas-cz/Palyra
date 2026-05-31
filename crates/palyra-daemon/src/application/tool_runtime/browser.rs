@@ -23,6 +23,7 @@ use ulid::Ulid;
 
 use crate::{
     agents::AgentResolveRequest,
+    application::tool_runtime::workspace_scope::workspace_roots_with_run_launch_context,
     gateway::{
         current_unix_ms, truncate_with_ellipsis, BrowserServiceRuntimeConfig, GatewayRuntimeState,
         ToolRuntimeExecutionContext, BROWSER_CLICK_TOOL_NAME, BROWSER_CONSOLE_LOG_TOOL_NAME,
@@ -207,24 +208,9 @@ async fn validate_browser_file_url_workspace_scope(
         return Err("palyra.browser.navigate file URL target is not a regular file".to_owned());
     }
 
-    let agent_outcome = runtime_state
-        .resolve_agent_for_context(AgentResolveRequest {
-            principal: context.principal.to_owned(),
-            channel: context.channel.map(str::to_owned),
-            session_id: Some(context.session_id.to_owned()),
-            preferred_agent_id: None,
-            persist_session_binding: false,
-        })
-        .await
-        .map_err(|error| {
-            format!(
-                "palyra.browser.navigate failed to resolve agent workspace for file URL: {}",
-                error.message()
-            )
-        })?;
-
     let canonical_roots =
-        canonicalize_browser_workspace_roots(agent_outcome.agent.workspace_roots.as_slice())?;
+        resolve_browser_agent_workspace_roots(runtime_state, context, BROWSER_NAVIGATE_TOOL_NAME)
+            .await?;
     if canonical_file_path_is_inside_workspace_roots(canonical_target.as_path(), &canonical_roots) {
         return Ok(());
     }
@@ -287,7 +273,14 @@ async fn resolve_browser_agent_workspace_roots(
         .map_err(|error| {
             format!("{tool_name} failed to resolve agent workspace: {}", error.message())
         })?;
-    canonicalize_browser_workspace_roots(agent_outcome.agent.workspace_roots.as_slice())
+    let workspace_roots =
+        agent_outcome.agent.workspace_roots.iter().map(PathBuf::from).collect::<Vec<_>>();
+    let workspace_roots =
+        workspace_roots_with_run_launch_context(runtime_state, context.run_id, &workspace_roots)
+            .await;
+    let workspace_roots =
+        workspace_roots.iter().map(|root| root.to_string_lossy().to_string()).collect::<Vec<_>>();
+    canonicalize_browser_workspace_roots(workspace_roots.as_slice())
 }
 
 fn browser_upload_path_from_payload(
@@ -4081,6 +4074,31 @@ mod tests {
             output.parent().is_some_and(|parent| parent.is_dir()),
             "output parent should be created"
         );
+    }
+
+    #[test]
+    fn browser_output_path_prefers_launch_workspace_root_order() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let launch_workspace = temp.path().join("launch-workspace");
+        let default_workspace = temp.path().join("default-workspace");
+        std::fs::create_dir_all(launch_workspace.as_path())
+            .expect("launch workspace should be created");
+        std::fs::create_dir_all(default_workspace.as_path())
+            .expect("default workspace should be created");
+        let canonical_launch =
+            launch_workspace.canonicalize().expect("launch workspace should canonicalize");
+        let canonical_default =
+            default_workspace.canonicalize().expect("default workspace should canonicalize");
+
+        let output = resolve_browser_output_path(
+            "palyra.browser.screenshot",
+            "reports/visual-smoke.png",
+            &[canonical_launch.clone(), canonical_default],
+            &[],
+        )
+        .expect("relative browser output path should resolve");
+
+        assert!(output.starts_with(canonical_launch.as_path()));
     }
 
     #[test]
