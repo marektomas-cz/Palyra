@@ -92,8 +92,8 @@ use crate::{
     },
     orchestrator::{RunLifecycleState, RunStateMachine, RunTransition},
     tool_protocol::{
-        execute_tool_call, tool_policy_snapshot, ToolCallConfig, ToolCallPolicySnapshot,
-        ToolExecutionOutcome,
+        build_tool_execution_outcome, execute_tool_call, tool_policy_snapshot, ToolCallConfig,
+        ToolCallPolicySnapshot, ToolExecutionOutcome,
     },
 };
 
@@ -198,6 +198,9 @@ pub(crate) const WORKSPACE_SEARCH_TOOL_NAME: &str = "palyra.fs.search";
 pub(crate) const WORKSPACE_PATCH_TOOL_NAME: &str = "palyra.fs.apply_patch";
 pub(crate) const OS_FILE_TOOL_NAME: &str = "palyra.fs.os_file";
 pub(crate) const PROCESS_RUNNER_TOOL_NAME: &str = "palyra.process.run";
+pub(crate) const PROCESS_STOP_TOOL_NAME: &str = "palyra.process.stop";
+pub(crate) const PROCESS_STATUS_TOOL_NAME: &str = "palyra.process.status";
+pub(crate) const PROCESS_LIST_TOOL_NAME: &str = "palyra.process.list";
 pub(crate) const HTTP_FETCH_TOOL_NAME: &str = "palyra.http.fetch";
 pub(crate) const TOOL_PROGRAM_RUN_TOOL_NAME: &str = "palyra.tool_program.run";
 pub(crate) const BROWSER_SESSION_CREATE_TOOL_NAME: &str = "palyra.browser.session.create";
@@ -777,6 +780,18 @@ pub(crate) async fn execute_tool_with_runtime_dispatch(
             &outcome,
         );
         outcome
+    } else if matches!(tool_name, PROCESS_STOP_TOOL_NAME | PROCESS_STATUS_TOOL_NAME) {
+        let config =
+            process_runner_tool_config_for_session(runtime_state, context, input_json).await;
+        let outcome = execute_tool_call(&config, proposal_id, tool_name, input_json).await;
+        if tool_name == PROCESS_STOP_TOOL_NAME && outcome.success {
+            if let Some(pid) = process_lifecycle_pid_from_tool_input(input_json) {
+                runtime_state.forget_run_background_process(context.run_id, pid);
+            }
+        }
+        outcome
+    } else if tool_name == PROCESS_LIST_TOOL_NAME {
+        execute_process_list_tool(runtime_state, context, proposal_id, input_json)
     } else {
         execute_tool_call(&runtime_state.config.tool_call, proposal_id, tool_name, input_json).await
     }
@@ -827,6 +842,93 @@ fn background_process_pid_from_tool_output(output_json: &[u8]) -> Option<u32> {
         .pointer("/process_handle/direct_process_pid")
         .and_then(Value::as_u64)
         .or_else(|| payload.get("pid").and_then(Value::as_u64))?;
+    u32::try_from(pid).ok().filter(|pid| *pid > 0)
+}
+
+fn execute_process_list_tool(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    context: ToolRuntimeExecutionContext<'_>,
+    proposal_id: &str,
+    input_json: &[u8],
+) -> ToolExecutionOutcome {
+    if !runtime_state.config.tool_call.process_runner.enabled {
+        return build_tool_execution_outcome(
+            proposal_id,
+            PROCESS_LIST_TOOL_NAME,
+            input_json,
+            false,
+            b"{}".to_vec(),
+            "sandbox process runner is disabled by runtime policy".to_owned(),
+            false,
+            crate::sandbox_runner::process_runner_executor_name(
+                &runtime_state.config.tool_call.process_runner,
+            ),
+            "none".to_owned(),
+        );
+    }
+    let pids = runtime_state.list_run_background_processes(context.run_id);
+    let processes = pids
+        .into_iter()
+        .map(|pid| {
+            let status = crate::sandbox_runner::background_process_is_alive(pid);
+            let (alive, status_error) = match status {
+                Ok(alive) => (Some(alive), None),
+                Err(error) => (None, Some(error.to_string())),
+            };
+            json!({
+                "pid": pid,
+                "alive": alive,
+                "status_error": status_error,
+                "portable_stop_command": {
+                    "tool": PROCESS_STOP_TOOL_NAME,
+                    "pid": pid,
+                },
+                "portable_status_command": {
+                    "tool": PROCESS_STATUS_TOOL_NAME,
+                    "pid": pid,
+                },
+            })
+        })
+        .collect::<Vec<_>>();
+    let process_count = processes.len();
+    let output = json!({
+        "success": true,
+        "run_id": context.run_id,
+        "processes": processes,
+        "count": process_count,
+    });
+    build_tool_execution_outcome(
+        proposal_id,
+        PROCESS_LIST_TOOL_NAME,
+        input_json,
+        true,
+        serde_json::to_vec(&output).unwrap_or_else(|_| b"{}".to_vec()),
+        String::new(),
+        false,
+        crate::sandbox_runner::process_runner_executor_name(
+            &runtime_state.config.tool_call.process_runner,
+        ),
+        if crate::sandbox_runner::process_runner_allows_host_access(
+            &runtime_state.config.tool_call.process_runner,
+        ) {
+            "host_access".to_owned()
+        } else {
+            runtime_state
+                .config
+                .tool_call
+                .process_runner
+                .egress_enforcement_mode
+                .as_str()
+                .to_owned()
+        },
+    )
+}
+
+fn process_lifecycle_pid_from_tool_input(input_json: &[u8]) -> Option<u32> {
+    let payload = serde_json::from_slice::<Value>(input_json).ok()?;
+    let pid = payload
+        .get("pid")
+        .and_then(|value| value.as_u64().or_else(|| value.as_str()?.trim().parse::<u64>().ok()))?;
     u32::try_from(pid).ok().filter(|pid| *pid > 0)
 }
 

@@ -1641,6 +1641,54 @@ impl GatewayRuntimeState {
         }
     }
 
+    pub(crate) fn forget_run_background_process(&self, run_id: &str, pid: u32) {
+        let run_id = run_id.trim();
+        if run_id.is_empty() || pid == 0 {
+            return;
+        }
+
+        match self.run_cleanup_resources.lock() {
+            Ok(mut resources_by_run) => {
+                if let Some(resources) = resources_by_run.get_mut(run_id) {
+                    resources.background_process_pids.retain(|existing| *existing != pid);
+                    if resources.is_empty() {
+                        resources_by_run.remove(run_id);
+                    }
+                }
+            }
+            Err(error) => {
+                warn!(
+                    run_id,
+                    pid,
+                    error = %error,
+                    "failed to forget background process for run cleanup"
+                );
+            }
+        }
+    }
+
+    pub(crate) fn list_run_background_processes(&self, run_id: &str) -> Vec<u32> {
+        let run_id = run_id.trim();
+        if run_id.is_empty() {
+            return Vec::new();
+        }
+
+        match self.run_cleanup_resources.lock() {
+            Ok(resources_by_run) => resources_by_run
+                .get(run_id)
+                .map(|resources| resources.background_process_pids.clone())
+                .unwrap_or_default(),
+            Err(error) => {
+                warn!(
+                    run_id,
+                    error = %error,
+                    "failed to list background processes for run cleanup"
+                );
+                Vec::new()
+            }
+        }
+    }
+
     pub(crate) fn take_run_cleanup_resources(&self, run_id: &str) -> RunCleanupResources {
         let run_id = run_id.trim();
         if run_id.is_empty() {

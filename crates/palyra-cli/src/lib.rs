@@ -707,6 +707,9 @@ const LOCAL_DESKTOP_DEFAULT_ALLOWED_TOOLS: &[&str] = &[
     "palyra.browser.downloads.list",
     "palyra.browser.downloads.get",
     "palyra.process.run",
+    "palyra.process.stop",
+    "palyra.process.status",
+    "palyra.process.list",
 ];
 const LOCAL_DESKTOP_DEFAULT_PROCESS_EXECUTABLES: &[&str] = &["*"];
 
@@ -11993,6 +11996,18 @@ mod init_command_tests {
         assert!(
             allowed_tools.iter().any(|tool| tool == "palyra.process.run"),
             "local init should expose process runner to local sandbox agents"
+        );
+        assert!(
+            allowed_tools.iter().any(|tool| tool == "palyra.process.stop"),
+            "local init should expose active background process stop controls"
+        );
+        assert!(
+            allowed_tools.iter().any(|tool| tool == "palyra.process.status"),
+            "local init should expose active background process status controls"
+        );
+        assert!(
+            allowed_tools.iter().any(|tool| tool == "palyra.process.list"),
+            "local init should expose active background process list controls"
         );
         assert!(
             allowed_tools.iter().any(|tool| tool == "palyra.routines.control"),

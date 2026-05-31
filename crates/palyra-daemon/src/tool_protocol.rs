@@ -18,8 +18,9 @@ use tracing::warn;
 use ulid::Ulid;
 
 use crate::sandbox_runner::{
-    process_runner_executor_name, run_constrained_process, EgressEnforcementMode,
-    SandboxProcessRunErrorKind, SandboxProcessRunnerPolicy,
+    background_process_status_by_pid, process_runner_executor_name, run_constrained_process,
+    stop_background_process_by_pid, EgressEnforcementMode, SandboxProcessRunErrorKind,
+    SandboxProcessRunnerPolicy,
 };
 use crate::wasm_plugin_runner::{run_wasm_plugin, WasmPluginRunErrorKind, WasmPluginRunnerPolicy};
 
@@ -281,6 +282,11 @@ fn allowlisted_tools_with_compat_aliases(allowed_tools: &[String]) -> Vec<String
             "palyra.memory.retain" | "palyra.retain" => {
                 names.insert("palyra.memory.retain".to_owned());
                 names.insert("palyra.retain".to_owned());
+            }
+            "palyra.process.run" => {
+                names.insert("palyra.process.stop".to_owned());
+                names.insert("palyra.process.status".to_owned());
+                names.insert("palyra.process.list".to_owned());
             }
             _ => {}
         }
@@ -557,6 +563,17 @@ async fn run_allowlisted_tool(
             sandbox_enforcement: "ssrf_guard".to_owned(),
         },
         "palyra.process.run" => execute_process_runner_tool(config, input_json).await,
+        "palyra.process.stop" | "palyra.process.status" => {
+            execute_process_lifecycle_tool(config, tool_name, input_json).await
+        }
+        "palyra.process.list" => ToolExecutionRawResult {
+            success: false,
+            output_json: b"{}".to_vec(),
+            error: "palyra.process.list requires gateway process runtime context".to_owned(),
+            timed_out: false,
+            executor: process_runner_executor_name(&config.process_runner),
+            sandbox_enforcement: sandbox_enforcement_for_tool(config, tool_name),
+        },
         "palyra.tool_program.run" => ToolExecutionRawResult {
             success: false,
             output_json: b"{}".to_vec(),
@@ -676,6 +693,9 @@ fn is_runtime_supported_tool(tool_name: &str) -> bool {
             | "palyra.artifact.read"
             | "palyra.http.fetch"
             | "palyra.process.run"
+            | "palyra.process.stop"
+            | "palyra.process.status"
+            | "palyra.process.list"
             | "palyra.tool_program.run"
             | "palyra.fs.read_file"
             | "palyra.fs.list_dir"
@@ -717,7 +737,13 @@ fn is_runtime_supported_tool(tool_name: &str) -> bool {
 }
 
 fn tool_executor_name(config: &ToolCallConfig, tool_name: &str) -> String {
-    if tool_name == "palyra.process.run" {
+    if matches!(
+        tool_name,
+        "palyra.process.run"
+            | "palyra.process.stop"
+            | "palyra.process.status"
+            | "palyra.process.list"
+    ) {
         process_runner_executor_name(&config.process_runner)
     } else if tool_name == "palyra.tool_program.run" {
         "tool_program_runtime".to_owned()
@@ -777,7 +803,10 @@ fn tool_input_limit_bytes(tool_name: &str) -> usize {
         "palyra.delegation.control" => MAX_DELEGATION_CONTROL_TOOL_INPUT_BYTES,
         "palyra.artifact.read" => MAX_ARTIFACT_READ_TOOL_INPUT_BYTES,
         "palyra.http.fetch" => MAX_HTTP_FETCH_TOOL_INPUT_BYTES,
-        "palyra.process.run" => MAX_PROCESS_RUNNER_TOOL_INPUT_BYTES,
+        "palyra.process.run"
+        | "palyra.process.stop"
+        | "palyra.process.status"
+        | "palyra.process.list" => MAX_PROCESS_RUNNER_TOOL_INPUT_BYTES,
         "palyra.tool_program.run" => MAX_TOOL_PROGRAM_RUN_TOOL_INPUT_BYTES,
         "palyra.fs.read_file" => MAX_WORKSPACE_READ_FILE_TOOL_INPUT_BYTES,
         "palyra.fs.list_dir" => MAX_WORKSPACE_LIST_DIR_TOOL_INPUT_BYTES,
@@ -820,7 +849,13 @@ fn tool_input_limit_bytes(tool_name: &str) -> usize {
 }
 
 fn sandbox_enforcement_for_tool(config: &ToolCallConfig, tool_name: &str) -> String {
-    if tool_name == "palyra.process.run" {
+    if matches!(
+        tool_name,
+        "palyra.process.run"
+            | "palyra.process.stop"
+            | "palyra.process.status"
+            | "palyra.process.list"
+    ) {
         if crate::sandbox_runner::process_runner_allows_host_access(&config.process_runner) {
             "host_access".to_owned()
         } else {
@@ -928,6 +963,88 @@ async fn execute_process_runner_tool(
             sandbox_enforcement,
         },
     }
+}
+
+async fn execute_process_lifecycle_tool(
+    config: &ToolCallConfig,
+    tool_name: &str,
+    input_json: &[u8],
+) -> ToolExecutionRawResult {
+    let policy = config.process_runner.clone();
+    let executor = process_runner_executor_name(&policy);
+    let sandbox_enforcement = sandbox_enforcement_for_tool(config, tool_name);
+    if !policy.enabled {
+        return ToolExecutionRawResult {
+            success: false,
+            output_json: b"{}".to_vec(),
+            error: "sandbox process runner is disabled by runtime policy".to_owned(),
+            timed_out: false,
+            executor,
+            sandbox_enforcement,
+        };
+    }
+    let pid = match process_lifecycle_pid_from_input(input_json, tool_name) {
+        Ok(pid) => pid,
+        Err(error) => {
+            return ToolExecutionRawResult {
+                success: false,
+                output_json: b"{}".to_vec(),
+                error,
+                timed_out: false,
+                executor,
+                sandbox_enforcement,
+            };
+        }
+    };
+    let lifecycle_tool = tool_name.to_owned();
+    match tokio::task::spawn_blocking(move || match lifecycle_tool.as_str() {
+        "palyra.process.stop" => stop_background_process_by_pid(pid),
+        "palyra.process.status" => background_process_status_by_pid(pid),
+        _ => unreachable!("validated process lifecycle tool"),
+    })
+    .await
+    {
+        Ok(Ok(success)) => ToolExecutionRawResult {
+            success: true,
+            output_json: success.output_json,
+            error: String::new(),
+            timed_out: false,
+            executor,
+            sandbox_enforcement,
+        },
+        Ok(Err(error)) => ToolExecutionRawResult {
+            success: false,
+            output_json: b"{}".to_vec(),
+            error: error.message,
+            timed_out: false,
+            executor,
+            sandbox_enforcement,
+        },
+        Err(join_error) => ToolExecutionRawResult {
+            success: false,
+            output_json: b"{}".to_vec(),
+            error: format!("sandbox process lifecycle worker failed: {join_error}"),
+            timed_out: false,
+            executor,
+            sandbox_enforcement,
+        },
+    }
+}
+
+fn process_lifecycle_pid_from_input(input_json: &[u8], tool_name: &str) -> Result<u32, String> {
+    let payload = serde_json::from_slice::<Value>(input_json)
+        .map_err(|error| format!("{tool_name} input must be valid JSON: {error}"))?;
+    let Some(pid) = payload
+        .get("pid")
+        .and_then(|value| value.as_u64().or_else(|| value.as_str()?.trim().parse::<u64>().ok()))
+    else {
+        return Err(format!("{tool_name} requires numeric field 'pid'"));
+    };
+    let pid = u32::try_from(pid).map_err(|_| format!("{tool_name} field 'pid' is too large"))?;
+    if pid == 0 {
+        return Err(format!("{tool_name} field 'pid' must be positive"));
+    }
+    Ok(pid)
 }
 
 async fn execute_wasm_plugin_tool(
@@ -1279,6 +1396,30 @@ mod tests {
     }
 
     #[test]
+    fn process_run_allowlist_exposes_lifecycle_controls() {
+        for tool_name in ["palyra.process.stop", "palyra.process.status", "palyra.process.list"] {
+            let config = ToolCallConfig {
+                allowed_tools: vec!["palyra.process.run".to_owned()],
+                max_calls_per_run: 1,
+                execution_timeout_ms: 250,
+                process_runner: default_process_runner_policy(),
+                wasm_runtime: default_wasm_runtime_policy(),
+            };
+            let request_context = tool_request_context("user:ops");
+            let mut budget = 1;
+
+            let denied = decide_tool_call(&config, &mut budget, &request_context, tool_name, false);
+            assert!(!denied.allowed, "{tool_name} should still require approval");
+            assert!(denied.approval_required, "{tool_name} should preserve process approval");
+
+            let approved =
+                decide_tool_call(&config, &mut budget, &request_context, tool_name, true);
+            assert!(approved.allowed, "approved {tool_name} should be executable");
+            assert_eq!(budget, 0, "approved lifecycle tool should consume budget");
+        }
+    }
+
+    #[test]
     fn decide_tool_call_workspace_read_tools_require_approval_when_allowlisted() {
         for tool_name in ["palyra.fs.read_file", "palyra.fs.list_dir", "palyra.fs.search"] {
             let config = ToolCallConfig {
@@ -1475,6 +1616,9 @@ mod tests {
         assert!(tool_requires_approval("palyra.routines.control"));
         assert!(tool_requires_approval("palyra.http.fetch"));
         assert!(tool_requires_approval("palyra.process.run"));
+        assert!(tool_requires_approval("palyra.process.stop"));
+        assert!(tool_requires_approval("palyra.process.status"));
+        assert!(tool_requires_approval("palyra.process.list"));
         assert!(tool_requires_approval("palyra.fs.apply_patch"));
         assert!(tool_requires_approval("palyra.fs.os_file"));
         assert!(tool_requires_approval("palyra.tool_program.run"));

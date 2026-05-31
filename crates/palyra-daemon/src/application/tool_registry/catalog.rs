@@ -205,18 +205,30 @@ fn runtime_available(
     tool_name: &str,
 ) -> bool {
     match tool_name {
-        "palyra.process.run" => config.process_runner.enabled,
+        "palyra.process.run"
+        | "palyra.process.stop"
+        | "palyra.process.status"
+        | "palyra.process.list" => config.process_runner.enabled,
         tool if tool.starts_with("palyra.browser.") => browser_service_enabled,
         _ => true,
     }
 }
 
 fn normalized_allowlist(allowed_tools: &[String]) -> BTreeSet<String> {
-    allowed_tools
-        .iter()
-        .map(|tool| tool.trim().to_ascii_lowercase())
-        .filter(|tool| !tool.is_empty())
-        .collect()
+    let mut tools = BTreeSet::new();
+    for tool in allowed_tools {
+        let tool = tool.trim().to_ascii_lowercase();
+        if tool.is_empty() {
+            continue;
+        }
+        tools.insert(tool.clone());
+        if tool == "palyra.process.run" {
+            tools.insert("palyra.process.stop".to_owned());
+            tools.insert("palyra.process.status".to_owned());
+            tools.insert("palyra.process.list".to_owned());
+        }
+    }
+    tools
 }
 
 fn all_registry_and_allowlist_names<'a>(

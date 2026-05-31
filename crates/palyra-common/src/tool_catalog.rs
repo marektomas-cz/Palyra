@@ -94,7 +94,10 @@ pub fn tool_metadata(tool_name: &str) -> Option<ToolMetadata> {
             capabilities: HTTP_FETCH_TOOL_CAPABILITIES,
             default_sensitive: true,
         }),
-        "palyra.process.run" => Some(ToolMetadata {
+        "palyra.process.run"
+        | "palyra.process.stop"
+        | "palyra.process.status"
+        | "palyra.process.list" => Some(ToolMetadata {
             capabilities: PROCESS_RUNNER_CAPABILITIES,
             default_sensitive: true,
         }),

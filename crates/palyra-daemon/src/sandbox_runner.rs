@@ -757,6 +757,24 @@ fn builtin_process_status_success(
     Ok(SandboxProcessRunSuccess { output_json })
 }
 
+pub(crate) fn stop_background_process_by_pid(
+    pid: u32,
+) -> Result<SandboxProcessRunSuccess, SandboxProcessRunError> {
+    let args = [pid.to_string()];
+    builtin_stop_process_success("palyra.process.stop", &args)
+}
+
+pub(crate) fn background_process_status_by_pid(
+    pid: u32,
+) -> Result<SandboxProcessRunSuccess, SandboxProcessRunError> {
+    let args = [pid.to_string()];
+    builtin_process_status_success("palyra.process.status", &args)
+}
+
+pub(crate) fn background_process_is_alive(pid: u32) -> io::Result<bool> {
+    process_id_is_alive(pid)
+}
+
 fn wait_for_process_not_alive(pid: u32, max_wait: Duration) -> bool {
     let started_at = Instant::now();
     loop {

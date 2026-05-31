@@ -100,6 +100,28 @@ fn provider_payload_projects_native_openai_tools() {
 }
 
 #[test]
+fn process_run_allowlist_exposes_lifecycle_controls() {
+    let mut config = config(&["palyra.process.run"]);
+    config.process_runner.enabled = true;
+    let snapshot = build_model_visible_tool_catalog_snapshot(ToolCatalogBuildRequest {
+        config: &config,
+        browser_service_enabled: false,
+        request_context: &request_context(),
+        provider_kind: "openai_compatible",
+        provider_model_id: None,
+        surface: ToolExposureSurface::RunStream,
+        remaining_tool_budget: 4,
+        created_at_unix_ms: 42,
+    });
+    let tool_names = snapshot.tools.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>();
+
+    assert!(tool_names.contains(&"palyra.process.run"));
+    assert!(tool_names.contains(&"palyra.process.stop"));
+    assert!(tool_names.contains(&"palyra.process.status"));
+    assert!(tool_names.contains(&"palyra.process.list"));
+}
+
+#[test]
 fn anthropic_catalog_exposes_http_fetch_with_boolean_additional_properties() {
     let config = config(&["palyra.http.fetch"]);
     let snapshot = build_model_visible_tool_catalog_snapshot(ToolCatalogBuildRequest {

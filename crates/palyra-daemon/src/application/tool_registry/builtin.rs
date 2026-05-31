@@ -689,6 +689,41 @@ pub(crate) fn registry_entries() -> Vec<ToolRegistryEntry> {
             ToolResultProjectionPolicy::RedactedPreviewAndArtifact,
         ),
         entry(
+            "palyra.process.stop",
+            "Stop a run-owned background process by PID returned from palyra.process.run.",
+            object_schema(
+                &["pid"],
+                vec![(
+                    "pid",
+                    json!({"type":"integer","minimum":1,"description":"PID returned by a background palyra.process.run result for this run."}),
+                )],
+                false,
+            ),
+            ToolParallelismPolicy::Exclusive,
+            ToolResultProjectionPolicy::InlineUnlessLarge,
+        ),
+        entry(
+            "palyra.process.status",
+            "Check whether a background process PID returned from palyra.process.run is still alive.",
+            object_schema(
+                &["pid"],
+                vec![(
+                    "pid",
+                    json!({"type":"integer","minimum":1,"description":"PID returned by a background palyra.process.run result for this run."}),
+                )],
+                false,
+            ),
+            ToolParallelismPolicy::ReadOnly,
+            ToolResultProjectionPolicy::InlineUnlessLarge,
+        ),
+        entry(
+            "palyra.process.list",
+            "List background process PIDs currently tracked for cleanup in this run.",
+            object_schema(&[], Vec::new(), false),
+            ToolParallelismPolicy::ReadOnly,
+            ToolResultProjectionPolicy::InlineUnlessLarge,
+        ),
+        entry(
             "palyra.tool_program.run",
             "Execute a bounded ToolProgram DAG through nested tool policy gates.",
             object_schema(
@@ -1184,6 +1219,19 @@ mod tests {
         assert!(background_description.contains("startup stdout/stderr snapshots"));
         assert!(background_description.contains("selected dynamic port"));
         assert!(background_description.contains("operator-configured tool execution timeout"));
+
+        let stop = registry_entry("palyra.process.stop").expect("process stop entry exists");
+        assert_eq!(
+            stop.input_schema.pointer("/required/0").and_then(serde_json::Value::as_str),
+            Some("pid")
+        );
+        let status = registry_entry("palyra.process.status").expect("process status entry exists");
+        assert_eq!(
+            status.input_schema.pointer("/required/0").and_then(serde_json::Value::as_str),
+            Some("pid")
+        );
+        let list = registry_entry("palyra.process.list").expect("process list entry exists");
+        assert!(list.description.contains("tracked for cleanup"));
     }
 
     #[test]
