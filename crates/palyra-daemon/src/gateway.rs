@@ -1332,6 +1332,8 @@ pub(crate) async fn cleanup_run_resources(
 
     let browser_session_count = resources.browser_session_ids.len();
     let background_process_count = resources.background_process_pids.len();
+    let mut browser_outcomes = Vec::new();
+    let mut background_process_outcomes = Vec::new();
     for session_id in resources.browser_session_ids {
         match crate::application::tool_runtime::browser::close_browser_session_for_run_cleanup(
             runtime_state,
@@ -1341,12 +1343,22 @@ pub(crate) async fn cleanup_run_resources(
         {
             Ok(true) => {
                 runtime_state.record_closed_browser_session(session_id.as_str());
+                browser_outcomes.push(BrowserCleanupOutcome {
+                    session_id,
+                    closed: true,
+                    error: None,
+                });
             }
             Ok(false) => {
                 warn!(
                     run_id,
                     session_id, reason, "browser session cleanup reported no session closed"
                 );
+                browser_outcomes.push(BrowserCleanupOutcome {
+                    session_id,
+                    closed: false,
+                    error: Some("browser session cleanup reported no session closed".to_owned()),
+                });
             }
             Err(error) => {
                 warn!(
@@ -1356,21 +1368,55 @@ pub(crate) async fn cleanup_run_resources(
                     error = %error,
                     "failed to clean up browser session for terminal run"
                 );
+                browser_outcomes.push(BrowserCleanupOutcome {
+                    session_id,
+                    closed: false,
+                    error: Some(error.to_string()),
+                });
             }
         }
     }
 
     for pid in resources.background_process_pids {
-        if let Err(error) = terminate_run_background_process(pid).await {
-            warn!(
-                run_id,
-                pid,
-                reason,
-                error = %error,
-                "failed to clean up background process for terminal run"
-            );
+        match terminate_run_background_process(pid).await {
+            Ok(()) => {
+                let alive_after = crate::sandbox_runner::background_process_is_alive(pid).ok();
+                background_process_outcomes.push(BackgroundProcessCleanupOutcome {
+                    pid,
+                    termination_attempted: true,
+                    alive_after,
+                    error: None,
+                });
+            }
+            Err(error) => {
+                warn!(
+                    run_id,
+                    pid,
+                    reason,
+                    error = %error,
+                    "failed to clean up background process for terminal run"
+                );
+                let alive_after = crate::sandbox_runner::background_process_is_alive(pid).ok();
+                background_process_outcomes.push(BackgroundProcessCleanupOutcome {
+                    pid,
+                    termination_attempted: true,
+                    alive_after,
+                    error: Some(error),
+                });
+            }
         }
     }
+
+    append_run_cleanup_tape_event(
+        runtime_state,
+        run_id,
+        reason,
+        browser_session_count,
+        background_process_count,
+        browser_outcomes.as_slice(),
+        background_process_outcomes.as_slice(),
+    )
+    .await;
 
     info!(
         run_id,
@@ -1379,6 +1425,107 @@ pub(crate) async fn cleanup_run_resources(
         background_process_count,
         "cleaned up run-owned resources after terminal run"
     );
+}
+
+#[derive(Debug, Clone)]
+struct BrowserCleanupOutcome {
+    session_id: String,
+    closed: bool,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct BackgroundProcessCleanupOutcome {
+    pid: u32,
+    termination_attempted: bool,
+    alive_after: Option<bool>,
+    error: Option<String>,
+}
+
+async fn append_run_cleanup_tape_event(
+    runtime_state: &Arc<GatewayRuntimeState>,
+    run_id: &str,
+    reason: &str,
+    browser_session_count: usize,
+    background_process_count: usize,
+    browser_outcomes: &[BrowserCleanupOutcome],
+    background_process_outcomes: &[BackgroundProcessCleanupOutcome],
+) {
+    let tape = match runtime_state.journal_store.orchestrator_tape(run_id) {
+        Ok(tape) => tape,
+        Err(error) => {
+            warn!(
+                run_id,
+                reason,
+                error = %error,
+                "failed to load run tape before recording cleanup event"
+            );
+            return;
+        }
+    };
+    let next_seq = tape.iter().map(|event| event.seq).max().unwrap_or(-1).saturating_add(1);
+    let payload_json = run_cleanup_tape_payload(
+        run_id,
+        reason,
+        browser_session_count,
+        background_process_count,
+        browser_outcomes,
+        background_process_outcomes,
+    );
+    if let Err(error) = runtime_state
+        .append_orchestrator_tape_event(OrchestratorTapeAppendRequest {
+            run_id: run_id.to_owned(),
+            seq: next_seq,
+            event_type: "run.cleanup".to_owned(),
+            payload_json,
+        })
+        .await
+    {
+        warn!(
+            run_id,
+            reason,
+            error = %error,
+            "failed to record run cleanup tape event"
+        );
+    }
+}
+
+fn run_cleanup_tape_payload(
+    run_id: &str,
+    reason: &str,
+    browser_session_count: usize,
+    background_process_count: usize,
+    browser_outcomes: &[BrowserCleanupOutcome],
+    background_process_outcomes: &[BackgroundProcessCleanupOutcome],
+) -> String {
+    json!({
+        "event": "run.cleanup",
+        "run_id": run_id,
+        "reason": reason,
+        "browser_sessions": {
+            "requested_count": browser_session_count,
+            "outcomes": browser_outcomes.iter().map(|outcome| {
+                json!({
+                    "session_id": outcome.session_id,
+                    "closed": outcome.closed,
+                    "error": outcome.error,
+                })
+            }).collect::<Vec<_>>(),
+        },
+        "background_processes": {
+            "requested_count": background_process_count,
+            "outcomes": background_process_outcomes.iter().map(|outcome| {
+                json!({
+                    "pid": outcome.pid,
+                    "termination_attempted": outcome.termination_attempted,
+                    "alive_after": outcome.alive_after,
+                    "error": outcome.error,
+                    "process_artifact_note": "Palyra stops run-owned process trees but does not remove files created by those processes, such as PID files, logs, or other workspace/OS artifacts.",
+                })
+            }).collect::<Vec<_>>(),
+        },
+    })
+    .to_string()
 }
 
 async fn terminate_run_background_process(pid: u32) -> Result<(), String> {

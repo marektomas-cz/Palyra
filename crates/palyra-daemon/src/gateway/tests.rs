@@ -3517,6 +3517,65 @@ fn cleanup_resource_registry_deduplicates_and_drains_by_run() {
     assert!(state.take_run_cleanup_resources(run_id.as_str()).is_empty());
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn run_cleanup_tape_event_records_background_process_outcomes() {
+    let state = build_test_runtime_state(false);
+    let session_id = Ulid::new().to_string();
+    let run_id = Ulid::new().to_string();
+    start_tool_program_test_run(&state, session_id.as_str(), run_id.as_str()).await;
+    state
+        .append_orchestrator_tape_event(OrchestratorTapeAppendRequest {
+            run_id: run_id.clone(),
+            seq: 0,
+            event_type: "status".to_owned(),
+            payload_json: json!({"status":"failed"}).to_string(),
+        })
+        .await
+        .expect("seed tape event should append");
+
+    super::append_run_cleanup_tape_event(
+        &state,
+        run_id.as_str(),
+        "cancelled by request",
+        0,
+        1,
+        &[],
+        &[super::BackgroundProcessCleanupOutcome {
+            pid: 4242,
+            termination_attempted: true,
+            alive_after: Some(false),
+            error: None,
+        }],
+    )
+    .await;
+
+    let tape = state.journal_store.orchestrator_tape(run_id.as_str()).expect("tape should load");
+    let cleanup = tape.last().expect("cleanup event should be appended after seed event");
+    assert_eq!(cleanup.seq, 1);
+    assert_eq!(cleanup.event_type, "run.cleanup");
+    let payload: Value =
+        serde_json::from_str(cleanup.payload_json.as_str()).expect("cleanup payload should decode");
+    assert_eq!(
+        payload.pointer("/background_processes/requested_count").and_then(Value::as_u64),
+        Some(1)
+    );
+    assert_eq!(
+        payload.pointer("/background_processes/outcomes/0/pid").and_then(Value::as_u64),
+        Some(4242)
+    );
+    assert_eq!(
+        payload.pointer("/background_processes/outcomes/0/alive_after").and_then(Value::as_bool),
+        Some(false)
+    );
+    assert!(
+        payload
+            .pointer("/background_processes/outcomes/0/process_artifact_note")
+            .and_then(Value::as_str)
+            .is_some_and(|note| note.contains("PID files")),
+        "cleanup event should explain process-owned artifacts may remain: {payload}"
+    );
+}
+
 #[test]
 fn closed_browser_session_registry_marks_and_clears_handles() {
     let state = build_test_runtime_state(false);
